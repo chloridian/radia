@@ -30,6 +30,9 @@ pub(super) fn bench(c: &mut Criterion) {
                 let order = count as u64 + index as u64 + 1;
                 let verified = verification.observe_object(root_observation(root, order)).expect("root arrival");
                 let Introduced(entity) = verified.outcome else { panic!("expected root introduction") };
+                while verification.has_pending_relationships() {
+                    let _ = verification.resolve_relationships(64).expect("resolve waiting children");
+                }
                 assert_eq!(verification.children(entity).count(), root.child_count);
             }
 
@@ -41,6 +44,9 @@ pub(super) fn bench(c: &mut Criterion) {
                         let applied = world.observe_object(root_observation(root, order)).expect("root arrival");
                         let Introduced(_) = applied.outcome else { panic!("expected root introduction") };
                         let _ = black_box(applied);
+                        while world.has_pending_relationships() {
+                            let _ = black_box(world.resolve_relationships(64).expect("resolve waiting children"));
+                        }
                     }
                 },
                 BatchSize::LargeInput,
@@ -48,11 +54,14 @@ pub(super) fn bench(c: &mut Criterion) {
         });
     }
     let count = 65_536;
-    group.throughput(Throughput::Elements((count - 1) as u64));
+    group.throughput(Throughput::Elements(1));
     group.bench_function("single_region_parent/65k", |b| {
         let (mut verification, roots) = child_first_scene(count, count);
         let applied = verification.observe_object(root_observation(roots[0], count as u64 + 1)).expect("root arrival");
         let Introduced(entity) = applied.outcome else { panic!("expected root introduction") };
+        while verification.has_pending_relationships() {
+            let _ = verification.resolve_relationships(64).expect("resolve waiting children");
+        }
         assert_eq!(verification.children(entity).count(), count - 1);
         b.iter_batched(
             || child_first_scene(count, count),
@@ -61,6 +70,35 @@ pub(super) fn bench(c: &mut Criterion) {
                 let applied = world.observe_object(root_observation(root, count as u64 + 1)).expect("root arrival");
                 let Introduced(_) = applied.outcome else { panic!("expected root introduction") };
                 let _ = black_box(applied);
+                world
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    group.throughput(Throughput::Elements(64));
+    group.bench_function("single_region_resolution_batch/65k", |b| {
+        b.iter_batched(
+            || {
+                let (mut world, roots) = child_first_scene(count, count);
+                let _ = world.observe_object(root_observation(roots[0], count as u64 + 1)).expect("root arrival");
+                world
+            },
+            |mut world| {
+                let _ = black_box(world.resolve_relationships(64).expect("resolve waiting children"));
+                world
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    group.throughput(Throughput::Elements((count - 1) as u64));
+    group.bench_function("single_region_resolution_total/65k", |b| {
+        b.iter_batched(
+            || child_first_scene(count, count),
+            |(mut world, roots)| {
+                let _ = black_box(world.observe_object(root_observation(roots[0], count as u64 + 1)).expect("root arrival"));
+                while world.has_pending_relationships() {
+                    let _ = black_box(world.resolve_relationships(64).expect("resolve waiting children"));
+                }
                 world
             },
             BatchSize::LargeInput,

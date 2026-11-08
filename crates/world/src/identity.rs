@@ -36,7 +36,7 @@ impl Region {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LocalAddress {
     pub(super) region: Region,
     pub(super) local_id: NonZeroU32,

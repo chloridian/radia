@@ -93,6 +93,7 @@ impl World {
             Some(displaced) => self.pend_cascaded_parent(displaced, parent, parent_update, address.region, origin),
             None => parent,
         };
+        self.ensure_relationship_capacity(address, id)?;
         self.ensure_revision_available()?;
 
         let state = ObjectState::new(Binding::new(address, 0, origin.stamp, address_was_reused.then_some(origin.stamp)));
@@ -204,6 +205,9 @@ impl World {
         let change_classes = draft.change_classes(&before, if parent_applied { parent } else { draft.state.parent });
         let waiting_children_change =
             (parent_applied || binding_changed) && self.waiting_children_will_change(address, entity, id, draft.state.binding);
+        if parent_applied || binding_changed {
+            self.ensure_relationship_capacity(address, id)?;
+        }
         if binding_changed || displaced.is_some() || !change_classes.is_empty() || waiting_children_change {
             self.ensure_revision_available()?;
         }

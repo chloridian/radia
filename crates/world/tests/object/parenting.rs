@@ -5,6 +5,203 @@ use super::support::{
     object, source, untracked, uuid, with_region,
 };
 
+fn child_first_world() -> (World, Region, world::Entity) {
+    let region = Region::new(91);
+    let mut bounds = limits();
+    bounds.max_entities = 256;
+    bounds.max_entities_per_region = 256;
+    let mut world = World::new(bounds);
+    let _ = world.adopt_region(region).unwrap();
+    for child in 1..=200 {
+        let _ =
+            world.observe_object(object(source(region, child), u128::from(child), child as u32 + 1, Object, Local(local_id(1)))).unwrap();
+    }
+    let Introduced(parent) = world.observe_object(object(source(region, 201), 1000, 1, Object, Root)).unwrap().outcome else {
+        panic!("parent must be introduced");
+    };
+    (world, region, parent)
+}
+
+#[test]
+fn parent_resolution_respects_batch_size() {
+    let (mut world, _, parent) = child_first_world();
+    let mut resolved = world.children(parent).count();
+    assert!(resolved > 0 && resolved < 200);
+    let revision = world.revision();
+    assert_eq!(world.resolve_relationships(0).unwrap().revision, None);
+    assert_eq!(world.revision(), revision);
+    while world.has_pending_relationships() {
+        let applied = world.resolve_relationships(7).unwrap();
+        let next = world.children(parent).count();
+        assert!(next > resolved && next - resolved <= 7);
+        assert_eq!(applied.recovery_cancellations.len(), next - resolved);
+        assert!(applied.recovery.requests.is_empty());
+        assert_eq!(applied.revision, Some(world.revision()));
+        resolved = next;
+    }
+    assert_eq!(resolved, 200);
+    assert_eq!(world.resolve_relationships(7).unwrap().revision, None);
+}
+
+#[test]
+fn pending_children_follow_parent_removal() {
+    for retire in [false, true] {
+        let (mut world, region, _) = child_first_world();
+        assert!(world.has_pending_relationships());
+        if retire {
+            let _ = world.retire_region(region).unwrap();
+        } else {
+            let _ = world.remove_object(source(region, 300), local_id(1)).unwrap();
+        }
+        assert_eq!(world.object_count(), 0);
+        assert!(!world.has_pending_relationships());
+        assert_eq!(world.resolve_relationships(7).unwrap().revision, None);
+    }
+}
+
+#[test]
+fn transfer_preserves_pending_children() {
+    let (mut world, region, parent) = child_first_world();
+    let destination = Region::new(92);
+    let _ = world.adopt_region(destination).unwrap();
+    let _ = world.observe_object(object(source(destination, 300), 1000, 1, Object, Root)).unwrap();
+    assert_eq!(world.object(parent).unwrap().address(), address(destination, 1));
+    assert!(!world.has_pending_relationships());
+    for child in 1..=200 {
+        let entity = world.entity(uuid(child)).unwrap();
+        assert_eq!(world.object(entity).unwrap().parent(), Pending { address: address(region, 1), expected_uuid: Some(uuid(1000)) });
+    }
+    assert_eq!(world.resolve_relationships(7).unwrap().revision, None);
+}
+
+#[test]
+fn queued_resolution_respects_newer_updates() {
+    let (mut world, region, parent) = child_first_world();
+    let detached = world.entity(uuid(200)).unwrap();
+    let _ = world.observe_object(object(source(region, 300), 200, 201, Object, Root)).unwrap();
+    while world.has_pending_relationships() {
+        let _ = world.resolve_relationships(7).unwrap();
+    }
+    assert_eq!(world.object(detached).unwrap().parent(), Parent::Root);
+    assert_eq!(world.children(parent).count(), 199);
+
+    let (mut world, region, parent) = child_first_world();
+    let Introduced(replacement) = world.observe_object(object(source(region, 300), 1001, 1, Object, Root)).unwrap().outcome else {
+        panic!("replacement must be introduced");
+    };
+    assert!(world.object(parent).is_none());
+    assert_eq!(world.object_count(), 1);
+    assert_eq!(world.entity_at(address(region, 1)), Some(replacement));
+    assert!(!world.has_pending_relationships());
+    assert_eq!(world.resolve_relationships(7).unwrap().revision, None);
+}
+
+#[test]
+fn rebinding_keeps_original_dependents() {
+    for drain in [false, true] {
+        let (mut world, region, parent) = child_first_world();
+        let _ = world.observe_object(object(source(region, 300), 1000, 250, Object, Root)).unwrap();
+        let Introduced(later_child) =
+            world.observe_object(object(source(region, 301), 2000, 251, Object, Local(local_id(1)))).unwrap().outcome
+        else {
+            panic!("later child must be introduced");
+        };
+        if drain {
+            while world.has_pending_relationships() {
+                let _ = world.resolve_relationships(7).unwrap();
+            }
+            assert_eq!(world.children(parent).count(), 200);
+        }
+        let _ = world.remove_object(source(region, 400), local_id(250)).unwrap();
+        assert_eq!(world.object_count(), 1);
+        assert!(world.object(parent).is_none());
+        assert_eq!(world.object(later_child).unwrap().parent(), Pending { address: address(region, 1), expected_uuid: None });
+        assert!(!world.has_pending_relationships());
+    }
+}
+
+#[test]
+fn vacated_address_keeps_distinct_work() {
+    for return_before_drain in [false, true] {
+        let (mut world, region, parent) = child_first_world();
+        let _ = world.observe_object(object(source(region, 300), 1000, 250, Object, Root)).unwrap();
+        let Introduced(other) = world.observe_object(object(source(region, 400), 1001, 1, Object, Root)).unwrap().outcome else {
+            panic!("other parent must be introduced");
+        };
+        let Introduced(later_child) =
+            world.observe_object(object(source(region, 401), 2000, 251, Object, Local(local_id(1)))).unwrap().outcome
+        else {
+            panic!("later child must be introduced");
+        };
+        if return_before_drain {
+            let _ = world.observe_object(object(source(region, 500), 1000, 1, Object, Root)).unwrap();
+            assert!(world.object(other).is_none());
+            assert!(world.object(later_child).is_none());
+        }
+        while world.has_pending_relationships() {
+            let _ = world.resolve_relationships(7).unwrap();
+        }
+        assert_eq!(world.children(parent).count(), 200);
+        if !return_before_drain {
+            assert_eq!(world.object(later_child).unwrap().parent(), Resolved(other));
+            assert_eq!(world.children(other).count(), 1);
+        }
+    }
+}
+
+#[test]
+fn queued_work_backpressures_atomically() {
+    let region = Region::new(93);
+    let mut bounds = limits();
+    bounds.max_entities = 512;
+    bounds.max_entities_per_region = 512;
+    let mut world = World::new(bounds);
+    let _ = world.adopt_region(region).unwrap();
+    for parent in 1..=3 {
+        let _ = world.observe_object(object(source(region, u64::from(parent)), u128::from(parent), parent, Object, Root)).unwrap();
+        let _ = world.remove_object(source(region, 10), local_id(parent)).unwrap();
+    }
+    for child in 0..195 {
+        let _ = world
+            .observe_object(object(
+                source(region, u64::from(child) + 20),
+                u128::from(child) + 100,
+                child + 10,
+                Object,
+                Local(local_id(child / 65 + 1)),
+            ))
+            .unwrap();
+    }
+    let mut blocked = None;
+    'parents: for parent in 0..200 {
+        for (step, destination) in [1, 2, 3, parent + 300].into_iter().enumerate() {
+            let observation =
+                object(source(region, 1000 + u64::from(parent) * 4 + step as u64), 10_000 + u128::from(parent), destination, Object, Root);
+            let revision = world.revision();
+            let objects = world.object_count();
+            let entity = world.entity(observation.id);
+            let prior_address = entity.map(|entity| world.object(entity).unwrap().address());
+            match world.observe_object(observation.clone()) {
+                Ok(_) => {}
+                Err(error) => {
+                    assert_eq!(error, world::ApplyError::RelationshipBudgetExhausted);
+                    assert_eq!(world.revision(), revision);
+                    assert_eq!(world.object_count(), objects);
+                    assert_eq!(world.entity(observation.id), entity);
+                    assert_eq!(entity.map(|entity| world.object(entity).unwrap().address()), prior_address);
+                    blocked = Some(observation);
+                    break 'parents;
+                }
+            }
+        }
+    }
+    let blocked = blocked.expect("reused addresses saturate pending work before the entity limit");
+    while world.has_pending_relationships() {
+        let _ = world.resolve_relationships(512).unwrap();
+    }
+    let _ = world.observe_object(blocked).expect("draining restores admission");
+}
+
 #[test]
 fn self_parented_introduction_is_atomic() {
     let region = Region::new(42);
