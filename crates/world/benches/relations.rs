@@ -25,7 +25,7 @@ pub(super) fn bench(c: &mut Criterion) {
         let region_count = count.div_ceil(PER_REGION);
         group.throughput(Throughput::Elements((count - region_count) as u64));
         group.bench_with_input(BenchmarkId::new("parent_resolution", size_name(count)), &count, |b, &count| {
-            let (mut verification, roots) = child_first_scene(count);
+            let (mut verification, roots) = child_first_scene(count, PER_REGION);
             for (index, root) in roots.iter().copied().enumerate() {
                 let order = count as u64 + index as u64 + 1;
                 let verified = verification.observe_object(root_observation(root, order)).expect("root arrival");
@@ -34,7 +34,7 @@ pub(super) fn bench(c: &mut Criterion) {
             }
 
             b.iter_batched(
-                || child_first_scene(count),
+                || child_first_scene(count, PER_REGION),
                 |(mut world, roots)| {
                     for (index, root) in roots.into_iter().enumerate() {
                         let order = count as u64 + index as u64 + 1;
@@ -47,20 +47,41 @@ pub(super) fn bench(c: &mut Criterion) {
             );
         });
     }
+    let count = 65_536;
+    group.throughput(Throughput::Elements((count - 1) as u64));
+    group.bench_function("single_region_parent/65k", |b| {
+        let (mut verification, roots) = child_first_scene(count, count);
+        let applied = verification.observe_object(root_observation(roots[0], count as u64 + 1)).expect("root arrival");
+        let Introduced(entity) = applied.outcome else { panic!("expected root introduction") };
+        assert_eq!(verification.children(entity).count(), count - 1);
+        b.iter_batched(
+            || child_first_scene(count, count),
+            |(mut world, roots)| {
+                let root = roots[0];
+                let applied = world.observe_object(root_observation(root, count as u64 + 1)).expect("root arrival");
+                let Introduced(_) = applied.outcome else { panic!("expected root introduction") };
+                let _ = black_box(applied);
+                world
+            },
+            BatchSize::LargeInput,
+        );
+    });
     bench_deep_reparent(&mut group);
     group.finish();
 }
 
-fn child_first_scene(count: usize) -> (World, Vec<RootCase>) {
-    let mut roots = Vec::with_capacity(count.div_ceil(PER_REGION));
-    let mut world = World::new(limits());
+fn child_first_scene(count: usize, per_region: usize) -> (World, Vec<RootCase>) {
+    let mut roots = Vec::with_capacity(count.div_ceil(per_region));
+    let mut bounds = limits();
+    bounds.max_entities_per_region = per_region;
+    let mut world = World::new(bounds);
     let mut first_child_id = 1_u128;
     let mut remaining = count;
 
-    for region_index in 0..count.div_ceil(PER_REGION) {
+    for region_index in 0..count.div_ceil(per_region) {
         let region = Region::new(region_index as u64 + 1);
         assert!(matches!(world.adopt_region(region).expect("region adoption").outcome, world::RegionOutcome::Adopted { .. }));
-        let entity_count = remaining.min(PER_REGION);
+        let entity_count = remaining.min(per_region);
         let child_count = entity_count - 1;
         for local_index in 0..child_count {
             let local_id = NonZeroU32::new(local_index as u32 + 2).expect("child local ID is nonzero");
