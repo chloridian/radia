@@ -6,12 +6,11 @@ use super::support::{
 };
 
 fn child_first_world() -> (World, Region, world::Entity) {
-    let region = Region::new(91);
     let mut bounds = limits();
     bounds.max_entities = 256;
     bounds.max_entities_per_region = 256;
     let mut world = World::new(bounds);
-    let _ = world.adopt_region(region).unwrap();
+    let region = world.register_region().unwrap();
     for child in 1..=200 {
         let _ =
             world.observe_object(object(source(region, child), u128::from(child), child as u32 + 1, Object, Local(local_id(1)))).unwrap();
@@ -20,6 +19,78 @@ fn child_first_world() -> (World, Region, world::Entity) {
         panic!("parent must be introduced");
     };
     (world, region, parent)
+}
+
+#[test]
+fn late_pending_child_gets_recovery() {
+    let mut bounds = limits();
+    bounds.max_entities = 256;
+    bounds.max_entities_per_region = 256;
+    bounds.max_recovery_targets = 256;
+    let mut world = World::new(bounds);
+    let region = world.register_region().unwrap();
+    let _ = world.observe_object(object(source(region, 1), 1000, 1, Object, Root)).unwrap();
+    let _ = world.remove_object(source(region, 2), local_id(1)).unwrap();
+    for child in 2..=201 {
+        let _ = world
+            .observe_object(object(source(region, u64::from(child) + 10), u128::from(child) + 100, child, Object, Local(local_id(1))))
+            .unwrap();
+    }
+    let _ = world.observe_object(object(source(region, 300), 1000, 1, Object, Root)).unwrap();
+    let _ = world.resolve_relationships(7).unwrap();
+    let late = world.observe_object(object(source(region, 3), 1, 250, Object, Local(local_id(1)))).unwrap();
+    let Introduced(late_child) = late.outcome else { panic!("late child must be introduced") };
+    let late_address = address(region, 250);
+    let mut recovery = world.observe_object(object(source(region, 400), 1000, 1, Object, Root)).unwrap().recovery.requests;
+    for _ in 0..200 {
+        if !world.has_pending_relationships() {
+            break;
+        }
+        recovery.extend(world.resolve_relationships(7).unwrap().recovery.requests);
+    }
+    assert!(!world.has_pending_relationships());
+    assert!(recovery.contains(&late_address));
+    assert_eq!(world.object(late_child).unwrap().parent(), Pending { address: address(region, 1), expected_uuid: None });
+}
+
+#[test]
+fn recovery_limits_preserve_queued_targets() {
+    for recovery_limit in [0, 1, 2, 64] {
+        let mut bounds = limits();
+        bounds.max_entities = 131;
+        bounds.max_entities_per_region = 131;
+        bounds.max_recovery_targets = recovery_limit;
+        let mut world = World::new(bounds);
+        let region = world.register_region().unwrap();
+        let _ = world.observe_object(object(source(region, 1), 1000, 1, Object, Root)).unwrap();
+        let _ = world.remove_object(source(region, 2), local_id(1)).unwrap();
+        let mut expected = HashSet::new();
+        for child in 2..=131 {
+            let _ = world
+                .observe_object(object(source(region, u64::from(child) + 10), u128::from(child), child, Object, Local(local_id(1))))
+                .unwrap();
+            expected.insert(address(region, child));
+        }
+        let first = world.observe_object(object(source(region, 200), 1000, 1, Object, Root)).unwrap();
+        assert!(first.recovery.requests.len() <= recovery_limit);
+        let mut recovery = first.recovery.requests.into_iter().collect::<HashSet<_>>();
+        for _ in 0..130 {
+            if !world.has_pending_relationships() {
+                break;
+            }
+            let batch = world.resolve_relationships(64).unwrap();
+            assert!(batch.recovery.requests.len() <= recovery_limit);
+            for target in batch.recovery.requests {
+                assert!(recovery.insert(target), "reported targets must not be replayed");
+            }
+        }
+        assert!(!world.has_pending_relationships());
+        if recovery_limit == 0 {
+            assert!(recovery.is_empty());
+        } else {
+            assert_eq!(recovery, expected, "recovery capacity {recovery_limit}");
+        }
+    }
 }
 
 #[test]
@@ -44,6 +115,117 @@ fn parent_resolution_respects_batch_size() {
 }
 
 #[test]
+fn queued_parent_jobs_rotate_fairly() {
+    let mut bounds = limits();
+    bounds.max_entities = 270;
+    bounds.max_entities_per_region = 270;
+    let mut world = World::new(bounds);
+    let region = world.register_region().unwrap();
+    for child in 0..130 {
+        let _ = world
+            .observe_object(object(source(region, u64::from(child) + 1), u128::from(child + 3), child + 3, Object, Local(local_id(1))))
+            .unwrap();
+        let _ = world
+            .observe_object(object(
+                source(region, u64::from(child) + 300),
+                u128::from(child + 140),
+                child + 140,
+                Object,
+                Local(local_id(2)),
+            ))
+            .unwrap();
+    }
+    let Introduced(first) = world.observe_object(object(source(region, 1000), 1000, 1, Object, Root)).unwrap().outcome else {
+        panic!("first parent must be introduced");
+    };
+    let Introduced(second) = world.observe_object(object(source(region, 1001), 1001, 2, Object, Root)).unwrap().outcome else {
+        panic!("second parent must be introduced");
+    };
+    let first_count = world.children(first).count();
+    let second_count = world.children(second).count();
+    assert_eq!(first_count, 64);
+    assert_eq!(second_count, 64);
+
+    let _ = world.resolve_relationships(64).unwrap();
+    assert_eq!(world.children(first).count(), first_count + 64);
+    assert_eq!(world.children(second).count(), second_count);
+    let _ = world.resolve_relationships(64).unwrap();
+    assert_eq!(world.children(first).count(), first_count + 64);
+    assert_eq!(world.children(second).count(), second_count + 64);
+}
+
+#[test]
+fn queued_resolution_advances_after_updates() {
+    let mut bounds = limits();
+    bounds.max_entities = 220;
+    bounds.max_entities_per_region = 220;
+    let mut world = World::new(bounds);
+    let region = world.register_region().unwrap();
+    for child in 1..=204 {
+        let order = match child {
+            1..=64 => u64::from(child),
+            65..=194 => u64::from(child) + 36,
+            _ => u64::from(child) - 130,
+        };
+        let _ = world.observe_object(object(source(region, order), u128::from(child), child + 1, Object, Local(local_id(1)))).unwrap();
+    }
+    let Introduced(parent) = world.observe_object(object(source(region, 100), 1000, 1, Object, Root)).unwrap().outcome else {
+        panic!("parent must be introduced");
+    };
+    assert_eq!(world.children(parent).count(), 64);
+    let moved = world.observe_object(object(source(region, 300), 1000, 250, Object, Root)).unwrap();
+    assert_eq!(moved.outcome, Updated(parent));
+
+    for order in 301..=504 {
+        let _ = world.resolve_relationships(7).unwrap();
+        let applied = world.observe_object(object(source(region, order), 1000, 1, Object, Root)).unwrap();
+        assert!(matches!(applied.outcome, Updated(_) | Unchanged));
+        if world.children(parent).count() == 74 {
+            break;
+        }
+    }
+
+    for child_id in 195_u32..=204 {
+        let child = world.entity(uuid(u128::from(child_id))).expect("valid tail child remains live");
+        assert_eq!(world.object(child).unwrap().parent(), Resolved(parent));
+    }
+    assert_eq!(world.children(parent).count(), 74);
+}
+
+#[test]
+fn queued_cycle_stays_pending() {
+    for rebind in [false, true] {
+        let (mut world, region, parent) = child_first_world();
+        let child = world.entity(uuid(200)).expect("last child remains pending");
+        let parent_local = if rebind { 250 } else { 1 };
+        let patch_order = if rebind {
+            let moved = world.observe_object(object(source(region, 300), 1000, parent_local, Object, Root)).unwrap();
+            assert_eq!(moved.outcome, Updated(parent));
+            301
+        } else {
+            300
+        };
+        let mut patch = ObjectPatch::new(source(region, patch_order), local_id(parent_local));
+        patch.parent = Some(Local(local_id(201)));
+        assert_eq!(world.patch_object(patch).unwrap().outcome, Updated(parent));
+        assert_eq!(world.object(parent).unwrap().parent(), Resolved(child));
+
+        let child_address = address(region, 201);
+        let mut cycle_recovery = None;
+        while world.has_pending_relationships() {
+            let applied = world.resolve_relationships(7).unwrap();
+            if applied.recovery.requests.contains(&child_address) {
+                cycle_recovery = Some(applied.recovery.requests);
+            }
+        }
+
+        assert_eq!(cycle_recovery, Some(vec![child_address]));
+        assert_eq!(world.object(parent).unwrap().parent(), Resolved(child));
+        assert_eq!(world.object(child).unwrap().parent(), Pending { address: address(region, 1), expected_uuid: Some(uuid(1000)) });
+    }
+}
+
+#[test]
 fn pending_children_follow_parent_removal() {
     for retire in [false, true] {
         let (mut world, region, _) = child_first_world();
@@ -62,8 +244,7 @@ fn pending_children_follow_parent_removal() {
 #[test]
 fn transfer_preserves_pending_children() {
     let (mut world, region, parent) = child_first_world();
-    let destination = Region::new(92);
-    let _ = world.adopt_region(destination).unwrap();
+    let destination = world.register_region().unwrap();
     let _ = world.observe_object(object(source(destination, 300), 1000, 1, Object, Root)).unwrap();
     assert_eq!(world.object(parent).unwrap().address(), address(destination, 1));
     assert!(!world.has_pending_relationships());
@@ -151,12 +332,11 @@ fn vacated_address_keeps_distinct_work() {
 
 #[test]
 fn queued_work_backpressures_atomically() {
-    let region = Region::new(93);
     let mut bounds = limits();
     bounds.max_entities = 512;
     bounds.max_entities_per_region = 512;
     let mut world = World::new(bounds);
-    let _ = world.adopt_region(region).unwrap();
+    let region = world.register_region().unwrap();
     for parent in 1..=3 {
         let _ = world.observe_object(object(source(region, u64::from(parent)), u128::from(parent), parent, Object, Root)).unwrap();
         let _ = world.remove_object(source(region, 10), local_id(parent)).unwrap();
@@ -182,9 +362,9 @@ fn queued_work_backpressures_atomically() {
             let entity = world.entity(observation.id);
             let prior_address = entity.map(|entity| world.object(entity).unwrap().address());
             match world.observe_object(observation.clone()) {
-                Ok(_) => {}
-                Err(error) => {
-                    assert_eq!(error, world::ApplyError::RelationshipBudgetExhausted);
+                Ok(applied) if applied.outcome == Deferred(world::DeferredReason::RelationshipCapacity) => {
+                    assert_eq!(applied.revision, None);
+                    assert_eq!(applied.recovery.requests, [address(region, destination)]);
                     assert_eq!(world.revision(), revision);
                     assert_eq!(world.object_count(), objects);
                     assert_eq!(world.entity(observation.id), entity);
@@ -192,6 +372,8 @@ fn queued_work_backpressures_atomically() {
                     blocked = Some(observation);
                     break 'parents;
                 }
+                Ok(_) => {}
+                Err(error) => panic!("unexpected relationship admission error: {error:?}"),
             }
         }
     }
@@ -199,13 +381,13 @@ fn queued_work_backpressures_atomically() {
     while world.has_pending_relationships() {
         let _ = world.resolve_relationships(512).unwrap();
     }
-    let _ = world.observe_object(blocked).expect("draining restores admission");
+    let applied = world.observe_object(blocked).expect("draining restores admission");
+    assert_ne!(applied.outcome, Deferred(world::DeferredReason::RelationshipCapacity));
 }
 
 #[test]
 fn self_parented_introduction_is_atomic() {
-    let region = Region::new(42);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let revision = world.revision();
     let id = uuid(420);
     let addr = address(region, 1);
@@ -221,8 +403,7 @@ fn self_parented_introduction_is_atomic() {
 
 #[test]
 fn sit_target_clear_respects_freshness() {
-    let region = Region::new(47);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let entity = match world.observe_object(object(source(region, 1), 470, 1, Object, Root)).unwrap().outcome {
         Introduced(entity) => entity,
         other => panic!("expected object introduction, got {other:?}"),
@@ -243,8 +424,7 @@ fn sit_target_clear_respects_freshness() {
 
 #[test]
 fn sit_target_respects_tracked_authority() {
-    let region = Region::new(48);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let entity = match world.observe_object(object(source(region, 1), 480, 1, Object, Root)).unwrap().outcome {
         Introduced(entity) => entity,
         other => panic!("expected object introduction, got {other:?}"),
@@ -265,8 +445,7 @@ fn sit_target_respects_tracked_authority() {
 
 #[test]
 fn sit_target_defers_unknown_and_unordered() {
-    let region = Region::new(49);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let target = SitTarget { position: Vec3::X, rotation: Quat::IDENTITY };
 
     let unknown = world.patch_sit_target(source(region, 1), uuid(490), Some(target)).unwrap();
@@ -288,8 +467,7 @@ fn sit_target_defers_unknown_and_unordered() {
 #[test]
 fn cyclic_parent_rejects_pose_but_preserves_siblings_and_blocks_older_declarations() {
     for use_observation in [false, true] {
-        let region = Region::new(29);
-        let mut world = with_region(region);
+        let (mut world, region) = with_region();
         let mut first = object(source(region, 1), 290, 1, Object, Root);
         first.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
         let introduced = world.observe_object(first).unwrap();
@@ -341,11 +519,9 @@ fn cyclic_parent_rejects_pose_but_preserves_siblings_and_blocks_older_declaratio
 
 #[test]
 fn transfer_pends_old_region_children() {
-    let source_region = Region::new(33);
-    let destination = Region::new(34);
     let mut world = World::new(limits());
-    assert!(matches!(world.adopt_region(source_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(destination).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let source_region = world.register_region().unwrap();
+    let destination = world.register_region().unwrap();
     let parent_address = address(source_region, 10);
     let child_address = address(source_region, 11);
     let parent = world.observe_object(object(source(source_region, 1), 330, 10, Object, Root)).unwrap();
@@ -367,8 +543,7 @@ fn transfer_pends_old_region_children() {
 #[test]
 fn rebind_preserves_an_unrelated_parent() {
     for parent_present in [false, true] {
-        let region = Region::new(36);
-        let mut world = with_region(region);
+        let (mut world, region) = with_region();
         let _ = world.observe_object(object(source(region, 1), 360, 1, Object, Root)).unwrap();
         if parent_present {
             let _ = world.observe_object(object(source(region, 2), 362, 3, Object, Root)).unwrap();
@@ -392,8 +567,7 @@ fn rebind_preserves_an_unrelated_parent() {
 
 #[test]
 fn rebind_survives_replacing_its_parent() {
-    let region = Region::new(36);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let parent = world.observe_object(object(source(region, 1), 360, 1, Object, Root)).unwrap();
     let Introduced(parent_entity) = parent.outcome else { panic!("expected parent introduction") };
     let child = world.observe_object(object(source(region, 2), 361, 2, Object, Local(local_id(1)))).unwrap();
@@ -411,8 +585,7 @@ fn rebind_survives_replacing_its_parent() {
 
 #[test]
 fn parent_cascade_respects_child_order() {
-    let region = Region::new(3);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let parent_address = address(region, 1);
     let parent_id = uuid(30);
     let child_id = uuid(31);
@@ -459,8 +632,7 @@ fn parent_cascade_respects_child_order() {
 
 #[test]
 fn pending_cycle_pins_parent_identity() {
-    let region = Region::new(37);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let first = world.observe_object(object(source(region, 1), 370, 1, Object, Local(local_id(2)))).unwrap();
     let Introduced(first) = first.outcome else { panic!("expected first object introduction") };
     let waiting = world.observe_object(object(source(region, 2), 371, 3, Object, Local(local_id(2)))).unwrap();
@@ -486,8 +658,7 @@ fn pending_cycle_pins_parent_identity() {
 
 #[test]
 fn invalid_sit_target_keeps_freshness() {
-    let region = Region::new(40);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let object_id = uuid(400);
     let added = world.observe_object(object(source(region, 1), 400, 1, Object, Root)).unwrap();
     let Introduced(entity) = added.outcome else { panic!("expected object introduction") };
@@ -513,8 +684,7 @@ fn invalid_sit_target_keeps_freshness() {
 
 #[test]
 fn fresh_declaration_rebinds_pending_parent() {
-    let region = Region::new(14);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let parent_address = address(region, 1);
     let parent_id = uuid(140);
     let parent = world.observe_object(object(source(region, 10), 140, 1, Object, Root)).unwrap();
@@ -551,8 +721,7 @@ fn fresh_declaration_rebinds_pending_parent() {
 
 #[test]
 fn delayed_declaration_keeps_pending_parent() {
-    let region = Region::new(17);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let parent_address = address(region, 1);
     let parent_id = uuid(170);
 
@@ -577,8 +746,7 @@ fn delayed_declaration_keeps_pending_parent() {
 
 #[test]
 fn parent_address_reuse_needs_declaration() {
-    let region = Region::new(19);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let parent_address = address(region, 1);
 
     let parent = world.observe_object(object(source(region, 10), 190, 1, Object, Root)).unwrap();
@@ -602,8 +770,7 @@ fn parent_address_reuse_needs_declaration() {
 
 #[test]
 fn parent_resolution_keeps_parent_fence() {
-    let region = Region::new(16);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let child = world.observe_object(object(source(region, 10), 160, 2, Object, Local(local_id(1)))).unwrap();
     let Introduced(child_entity) = child.outcome else { panic!("expected child introduction") };
     let other_parent = world.observe_object(object(source(region, 14), 163, 3, Object, Root)).unwrap();
@@ -621,8 +788,7 @@ fn parent_resolution_keeps_parent_fence() {
 
 #[test]
 fn parent_removal_keeps_seated_avatar_pending() {
-    let region = Region::new(15);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let parent = world.observe_object(object(source(region, 10), 150, 1, Object, Root)).unwrap();
     let Introduced(parent_entity) = parent.outcome else { panic!("expected parent introduction") };
     let avatar = world.observe_object(object(source(region, 11), 151, 2, Avatar, Local(local_id(1)))).unwrap();

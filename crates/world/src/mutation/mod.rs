@@ -113,10 +113,10 @@ mod tests {
         Region, UpdateSource, WorldLimits,
     };
 
-    pub(super) fn test_world(regions: &[Region]) -> World {
+    pub(super) fn test_world(region_count: usize) -> (World, Vec<Region>) {
         let tombstones = 8;
         let mut world = World::new(WorldLimits {
-            max_region_registrations: regions.len(),
+            max_regions: region_count,
             max_entities: 8,
             max_entities_per_region: 8,
             max_tombstones_per_region: tombstones,
@@ -128,16 +128,14 @@ mod tests {
             max_region_name_bytes: 32,
             max_recovery_targets: 4,
         });
-        for region in regions {
-            assert!(matches!(world.adopt_region(*region).unwrap().outcome, crate::RegionOutcome::Adopted { .. }));
-        }
-        world
+        let regions = (0..region_count).map(|_| world.register_region().unwrap()).collect();
+        (world, regions)
     }
 
     #[test]
     fn floor_defers_unknown_updates() {
-        let region = Region::new(24);
-        let mut world = test_world(&[region]);
+        let (mut world, regions) = test_world(1);
+        let region = regions[0];
         let address = LocalAddress::new(region, NonZeroU32::new(1).unwrap());
         world.floors.insert(region, Stamp { order: 200, block_ordinal: 0 });
         let stale = UpdateSource::new(region, 150, Ordered(150), 0);
@@ -166,9 +164,8 @@ mod tests {
 
     #[test]
     fn tombstone_takes_precedence_over_floor() {
-        let region = Region::new(20);
         let mut world = World::new(WorldLimits {
-            max_region_registrations: 1,
+            max_regions: 1,
             max_entities: 1,
             max_entities_per_region: 1,
             max_tombstones_per_region: 1,
@@ -180,7 +177,7 @@ mod tests {
             max_region_name_bytes: 8,
             max_recovery_targets: 1,
         });
-        assert!(matches!(world.adopt_region(region).unwrap().outcome, crate::RegionOutcome::Adopted { .. }));
+        let region = world.register_region().unwrap();
 
         let address = LocalAddress::new(region, NonZeroU32::new(1).unwrap());
         world.tombstones.insert(address, Stamp { order: 100, block_ordinal: 0 });
@@ -203,9 +200,8 @@ mod tests {
 
     #[test]
     fn newer_than_tombstone_bypasses_floor() {
-        let region = Region::new(22);
         let mut world = World::new(WorldLimits {
-            max_region_registrations: 1,
+            max_regions: 1,
             max_entities: 1,
             max_entities_per_region: 1,
             max_tombstones_per_region: 2,
@@ -217,7 +213,7 @@ mod tests {
             max_region_name_bytes: 8,
             max_recovery_targets: 1,
         });
-        assert!(matches!(world.adopt_region(region).unwrap().outcome, crate::RegionOutcome::Adopted { .. }));
+        let region = world.register_region().unwrap();
 
         let killed_address = LocalAddress::new(region, NonZeroU32::new(1).unwrap());
         let patched_address = LocalAddress::new(region, NonZeroU32::new(2).unwrap());

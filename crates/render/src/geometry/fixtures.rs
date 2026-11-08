@@ -4,7 +4,7 @@ use std::{num::NonZeroU32, time::Instant};
 use math::{DVec3, Quat, Vec3};
 use uuid::Uuid;
 use world::{
-    Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, Pose, PrimShape, Region, Shape,
+    Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, Pose, PrimShape, Shape,
     SurfaceAppearance, UpdateSource, World, WorldLimits,
 };
 
@@ -46,7 +46,7 @@ fn scene_with_world_with_agent(
     with_water: bool,
 ) -> (World, Reconciler, SceneView, Camera) {
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 1,
+        max_regions: 1,
         max_entities: 2,
         max_entities_per_region: 2,
         max_tombstones_per_region: 1,
@@ -58,8 +58,7 @@ fn scene_with_world_with_agent(
         max_region_name_bytes: 64,
         max_recovery_targets: 4,
     });
-    let region = Region::new(1);
-    assert_matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. });
+    let region = world.register_region().unwrap();
     let _ = world.patch_region(region, world::RegionInfo { origin: Some(DVec3::ZERO), ..Default::default() }).unwrap();
     for ((id, y, mut color, shape), scale) in [
         (1, -2.0, [255, 0, 0, 255], PrimShape::default()),

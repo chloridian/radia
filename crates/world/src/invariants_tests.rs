@@ -17,7 +17,7 @@ use crate::{
 
 fn limits() -> WorldLimits {
     WorldLimits {
-        max_region_registrations: 2,
+        max_regions: 2,
         max_entities: 2,
         max_entities_per_region: 2,
         max_tombstones_per_region: 4,
@@ -55,12 +55,12 @@ proptest::proptest! {
     fn queued_relationships_preserve_indexes(
         operations in proptest::collection::vec((0_u8..6, 2_u32..130, 0_usize..9), 1..80)
     ) {
-        let region = Region::new(750);
+
         let mut bounds = limits();
         bounds.max_entities = 256;
         bounds.max_entities_per_region = 256;
         let mut world = World::new(bounds);
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         for child in 2..130 {
             let _ = world.observe_object(object(source(region, u64::from(child)), u128::from(child), child, Local(local_id(1)))).unwrap();
         }
@@ -96,9 +96,8 @@ proptest::proptest! {
     fn mutation_sequences_preserve_world_indexes(
         operations in proptest::collection::vec((0_u8..5, 0_u8..3, 0_u8..16, 0_u8..8, 1_u8..32, 0_u8..9, 0_u8..32), 1..128)
     ) {
-        let regions = [Region::new(700), Region::new(701), Region::new(702)];
         let mut world_limits = limits();
-        world_limits.max_region_registrations = regions.len();
+        world_limits.max_regions = 3;
         world_limits.max_entities = 16;
         world_limits.max_entities_per_region = 16;
         world_limits.max_tombstones_per_region = 64;
@@ -109,11 +108,9 @@ proptest::proptest! {
         world_limits.max_journal_changes = 512;
         world_limits.max_recovery_targets = 16;
         let mut world = World::new(world_limits);
+        let regions = [world.register_region().unwrap(), world.register_region().unwrap(), world.register_region().unwrap()];
 
-        for region in regions {
-            let _ = world.adopt_region(region).expect("adopt generated region");
-            proptest::prop_assert_eq!(world.check_invariants(), Ok(()));
-        }
+        proptest::prop_assert_eq!(world.check_invariants(), Ok(()));
 
         for (ordinal, (operation, region_index, identity, slot, source_order, parent_slot, value)) in operations.into_iter().enumerate() {
             let region = regions[usize::from(region_index)];
@@ -181,12 +178,11 @@ proptest::proptest! {
 #[test]
 fn cycle_checks_follow_parents_beyond_the_pose_limit() {
     for use_observation in [false, true] {
-        let region = Region::new(200);
         let mut world_limits = limits();
         world_limits.max_entities = 34;
         world_limits.max_entities_per_region = 34;
         let mut world = World::new(world_limits);
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         let mut entities = Vec::new();
         for local in 1..=34 {
             let parent = if local == 1 { Root } else { Local(local_id(local - 1)) };
@@ -229,7 +225,6 @@ proptest::proptest! {
         operations in proptest::collection::vec((0_u8..5, 0_u8..2, 0_u8..8, 0_u8..8, 1_u8..32, 0_u8..4), 1..128)
     ) {
         let mut world_limits = limits();
-        world_limits.max_region_registrations = 256;
         world_limits.max_entities = 16;
         world_limits.max_entities_per_region = 16;
         world_limits.max_tombstones_per_region = 4;
@@ -240,11 +235,7 @@ proptest::proptest! {
         world_limits.max_journal_changes = 512;
         world_limits.max_recovery_targets = 16;
         let mut world = World::new(world_limits);
-        let mut regions = [Region::new(900), Region::new(901)];
-        let mut next_region = 902;
-        for region in regions {
-            let _ = world.adopt_region(region).expect("adopt generated region");
-        }
+        let mut regions = [world.register_region().expect("register generated region"), world.register_region().expect("register generated region")];
 
         for (ordinal, (operation, region_index, slot, identity, source_order, value)) in operations.into_iter().enumerate() {
             let region = regions[usize::from(region_index)];
@@ -273,10 +264,7 @@ proptest::proptest! {
                 }
                 3 => {
                     let _ = world.retire_region(region).expect("retire generated region");
-                    let replacement = Region::new(next_region);
-                    next_region += 1;
-                    let _ = world.adopt_region(replacement).expect("adopt replacement region");
-                    regions[usize::from(region_index)] = replacement;
+                    regions[usize::from(region_index)] = world.register_region().expect("register replacement region");
                 }
                 4 => {
                     let expected_id = uuid(1_000 + u128::from(identity));

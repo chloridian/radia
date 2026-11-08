@@ -2,27 +2,22 @@ use test_support::texture::GRAY_4096_J2C;
 
 use super::support::{
     AssetChange, AssetId, BTreeSet, Budget, Duration, EnvironmentAssignment, EnvironmentChoice, EnvironmentProperty, EnvironmentPush,
-    EnvironmentScope, EnvironmentSource, ExperienceId, Instant, LocalChoice, Priority, ReconcileStep, Reconciler, Region, RegionInfo,
-    Request, Uuid, prepared_asset, settle_materials, source, world,
+    EnvironmentScope, EnvironmentSource, ExperienceId, Instant, LocalChoice, Priority, ReconcileStep, Reconciler, Request, Uuid,
+    prepared_asset, settle_materials, source, world, world_region, world_with_region_count,
 };
 
 #[test]
 fn environment_keyframes_demand_unique_texture_ids_with_per_environment_and_global_caps() {
-    let mut world = world();
-    for region in 2..=5 {
-        let region = Region::new(region);
-        let _ = world.adopt_region(region).unwrap();
-        let _ = world.patch_region(region, RegionInfo::default()).unwrap();
-    }
+    let (mut world, regions) = world_with_region_count(5);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
-    let ids = [1, 2, 3, 4, 5].map(Region::new);
-    for region in ids {
+    let ids = regions;
+    for (index, region) in ids.iter().copied().enumerate() {
         let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
         let bytes = daycycle_textures(u128::from(region.get()) * 10_000);
         std::assert_matches!(assets::EnvironmentDescription::decode(bytes.as_bytes()), Ok(_));
         let assignment = assignment(EnvironmentSource::Inline(bytes.into_bytes().into()), 1);
-        let _ = world.observe_environment(target, source(region.get(), 1), assignment).unwrap();
+        let _ = world.observe_environment(target, source(&world, index, 1), assignment).unwrap();
     }
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
@@ -47,13 +42,13 @@ fn environment_keyframes_demand_unique_texture_ids_with_per_environment_and_glob
 #[test]
 fn replacement_and_region_retirement_retain_environment_texture_tickets_until_close() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = world_region(&world, 0);
     let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     let first_id = AssetId::new(Uuid::from_u128(201));
     let first = assignment(EnvironmentSource::Inline(sky_with_sun(first_id).into_bytes().into()), 1);
-    let _ = world.observe_environment(target, source(1, 1), first).unwrap();
+    let _ = world.observe_environment(target, source(&world, 0, 1), first).unwrap();
     scene.notify_world_change();
     let initial = settle_materials(&mut scene, &mut view, &world, &mut now);
     let first_request = initial
@@ -69,7 +64,7 @@ fn replacement_and_region_retirement_retain_environment_texture_tickets_until_cl
 
     let second_id = AssetId::new(Uuid::from_u128(202));
     let second = assignment(EnvironmentSource::Inline(sky_with_sun(second_id).into_bytes().into()), 2);
-    let _ = world.observe_environment(target, source(1, 2), second).unwrap();
+    let _ = world.observe_environment(target, source(&world, 0, 2), second).unwrap();
     scene.notify_world_change();
     let replacement = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(!replacement.released.contains(&first_request.ticket));
@@ -106,11 +101,11 @@ fn replacement_and_region_retirement_retain_environment_texture_tickets_until_cl
 #[test]
 fn active_texture_priority_reuses_ticket() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = world_region(&world, 0);
     let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
     let id = AssetId::new(Uuid::from_u128(208));
     let _ = world
-        .observe_environment(target, source(1, 1), assignment(EnvironmentSource::Inline(sky_with_sun(id).into_bytes().into()), 1))
+        .observe_environment(target, source(&world, 0, 1), assignment(EnvironmentSource::Inline(sky_with_sun(id).into_bytes().into()), 1))
         .unwrap();
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
@@ -137,9 +132,9 @@ fn active_texture_priority_reuses_ticket() {
 
 #[test]
 fn local_texture_tracks_region() {
-    let world = world();
-    let first_region = Region::new(1);
-    let second_region = Region::new(2);
+    let (world, regions) = world_with_region_count(2);
+    let first_region = regions[0];
+    let second_region = regions[1];
     let texture = AssetId::new(Uuid::from_u128(209));
     let environment = AssetId::new(Uuid::from_u128(210));
     let choice = EnvironmentChoice::Local(LocalChoice::Inventory {
@@ -205,13 +200,13 @@ fn local_texture_tracks_region() {
 #[test]
 fn close_releases_environment_texture_tickets() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = world_region(&world, 0);
     let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     let id = AssetId::new(Uuid::from_u128(203));
     let assignment = assignment(EnvironmentSource::Inline(sky_with_sun(id).into_bytes().into()), 1);
-    let _ = world.observe_environment(target, source(1, 1), assignment).unwrap();
+    let _ = world.observe_environment(target, source(&world, 0, 1), assignment).unwrap();
     scene.notify_world_change();
     let pending = settle_materials(&mut scene, &mut view, &world, &mut now);
     let tickets: std::collections::HashSet<_> = pending.requested.iter().map(|request| request.ticket).collect();
@@ -233,7 +228,7 @@ fn close_releases_environment_texture_tickets() {
 #[test]
 fn experience_settings_and_overrides_share_texture_demands() {
     let world = world();
-    let region = Region::new(1);
+    let region = world_region(&world, 0);
     let experience = ExperienceId::new(Uuid::from_u128(204)).unwrap();
     let asset = AssetId::new(experience.uuid());
     let setting_texture = AssetId::new(Uuid::from_u128(205));

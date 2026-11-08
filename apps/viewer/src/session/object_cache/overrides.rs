@@ -130,7 +130,7 @@ mod tests {
         messages::{GenericStreamingMessage, ObjectUpdateCached, object::kill_object},
     };
     use uuid::Uuid;
-    use world::{OrderEvidence, PbrMaterialOverride, PbrMaterialOverrides};
+    use world::{OrderEvidence, PbrMaterialOverride, PbrMaterialOverrides, Region};
 
     use super::*;
     use crate::session::inbound::decode_object_message;
@@ -143,6 +143,7 @@ mod tests {
     struct Viewer {
         world: SessionWorld,
         cache: ObjectCacheSession,
+        region: Region,
         sequence: u32,
     }
 
@@ -151,8 +152,9 @@ mod tests {
             let mut cache = open_cache(path);
             load_region(&mut cache).await;
             let world = region_world();
+            let region = world.region_for(SIMULATOR).expect("synthetic simulator has a registered region");
             cache.persist_overrides(&world);
-            Self { world, cache, sequence: 0 }
+            Self { world, cache, region, sequence: 0 }
         }
 
         fn next_sequence(&mut self) -> u32 {
@@ -162,7 +164,7 @@ mod tests {
 
         async fn ingest(&mut self, message: Message) {
             let sequence = self.next_sequence();
-            let batch = decode_object_message(REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), &message)
+            let batch = decode_object_message(self.region, sequence, OrderEvidence::Ordered(u64::from(sequence)), &message)
                 .expect("message decodes into World operations");
             self.world.apply_object_batch(SIMULATOR, batch).expect("registered simulator applies the batch");
             self.cache.record_update(SIMULATOR, message);
@@ -171,13 +173,13 @@ mod tests {
 
         async fn replay(&mut self, update: &ObjectUpdateCached) {
             let sequence = self.next_sequence();
-            let batch = decoded_cached_batch(update, sequence);
+            let batch = decoded_cached_batch(self.region, update, sequence);
             let world = &self.world;
             let (batch, _, overrides) = self
                 .cache
                 .resolve_cached(
                     SIMULATOR,
-                    REGION,
+                    self.region,
                     sequence,
                     OrderEvidence::Ordered(u64::from(sequence)),
                     |address| {

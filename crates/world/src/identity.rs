@@ -11,7 +11,7 @@ static NEXT_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Entity(pub(super) hecs::Entity, pub(super) WorldId);
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(super) struct WorldId(u64);
 
 impl WorldId {
@@ -24,15 +24,26 @@ impl WorldId {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Region(u64);
+pub struct Region {
+    world: WorldId,
+    generation: u64,
+}
 
 impl Region {
-    pub const fn new(value: u64) -> Self {
-        Self(value)
+    pub(crate) const fn new(world: WorldId, generation: u64) -> Self {
+        Self { world, generation }
     }
 
     pub const fn get(self) -> u64 {
-        self.0
+        self.generation
+    }
+
+    pub(crate) const fn minimum() -> Self {
+        Self { world: WorldId(0), generation: 0 }
+    }
+
+    pub(crate) const fn belongs_to(self, world: WorldId) -> bool {
+        self.world.0 == world.0
     }
 }
 

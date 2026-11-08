@@ -325,7 +325,7 @@ mod tests {
 
     fn world() -> World {
         World::new(WorldLimits {
-            max_region_registrations: 8,
+            max_regions: 8,
             max_entities: 16,
             max_entities_per_region: 16,
             max_tombstones_per_region: 16,
@@ -365,8 +365,7 @@ mod tests {
     #[tokio::test]
     async fn environment_reads_fit_admission() {
         let mut world = world();
-        let region = Region::new(1);
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         let source = UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0);
         let parcel = ParcelLocalId::new(42).unwrap();
         let _ = world.observe_agent_parcel(source, Some(parcel)).unwrap();
@@ -398,8 +397,7 @@ mod tests {
     #[tokio::test]
     async fn pages_preserve_identity_and_cursors() {
         let mut world = world();
-        let region = Region::new(1);
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         let old = insert(&mut world, region, 20, 1, 1);
         insert(&mut world, region, 30, 2, 2);
         let mut service = WorldReadHost::new(&world, Handle::current());
@@ -536,8 +534,8 @@ mod tests {
         let mut world = world();
         let service = WorldReadHost::new(&world, Handle::current());
         let mut reader = service.reader();
-        for i in 1..=3 {
-            let _ = world.adopt_region(Region::new(i)).unwrap();
+        for _ in 1..=3 {
+            let _ = world.register_region().unwrap();
             service.publish(&world);
         }
         assert_eq!(reader.changed().await.unwrap(), world.revision());

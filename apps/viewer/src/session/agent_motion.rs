@@ -161,9 +161,7 @@ mod tests {
     use math::{DVec3, Quat, Vec3};
     use protocol::{lludp::Message, messages::AgentMovementComplete};
     use uuid::Uuid;
-    use world::{
-        Kind, LinearMotion, ObjectObservation, OrderEvidence::Ordered, ParentUpdate, Pose, Region, RegionInfo, UpdateSource, World,
-    };
+    use world::{Kind, LinearMotion, ObjectObservation, OrderEvidence::Ordered, ParentUpdate, Pose, RegionInfo, UpdateSource, World};
 
     use crate::session::world::viewer_world_limits;
 
@@ -178,6 +176,7 @@ mod tests {
 
     #[test]
     fn arrival_flattens_look_and_rejects_out_of_region_position() {
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let mut publisher = AgentMotionPublisher::new();
         let mut movement = arrival();
         movement.data.position = Vec3::new(10.0, 20.0, 30.0);
@@ -187,7 +186,7 @@ mod tests {
             movement.agent_data.agent_id,
             movement.agent_data.session_id,
             &movement,
-            Region::new(1),
+            region,
             DVec3::new(256.0, 512.0, 0.0),
             now,
             None,
@@ -204,7 +203,7 @@ mod tests {
             movement.agent_data.agent_id,
             movement.agent_data.session_id,
             &movement,
-            Region::new(1),
+            region,
             DVec3::ZERO,
             now + Duration::from_secs(1),
             None,
@@ -214,17 +213,18 @@ mod tests {
 
     #[test]
     fn arrival_does_not_replace_existing_motion() {
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let mut publisher = AgentMotionPublisher::new();
         let movement = arrival();
         let (agent_id, session_id) = (movement.agent_data.agent_id, movement.agent_data.session_id);
         let now = std::time::Instant::now();
-        assert!(publisher.publish_arrival(agent_id, session_id, &movement, Region::new(1), DVec3::ZERO, now, None));
+        assert!(publisher.publish_arrival(agent_id, session_id, &movement, region, DVec3::ZERO, now, None));
         let first = publisher.receiver().borrow().expect("arrival sample");
         assert!(!publisher.publish_arrival(
             agent_id,
             session_id,
             &movement,
-            Region::new(1),
+            region,
             DVec3::new(256.0, 0.0, 0.0),
             now + Duration::from_secs(1),
             None
@@ -235,8 +235,7 @@ mod tests {
     #[test]
     fn seated_agent_publishes_zero_motion() {
         let mut world = World::new(viewer_world_limits());
-        let region = Region::new(1);
-        let _ = world.adopt_region(region).expect("region");
+        let region = world.register_region().expect("region registers");
         let _ = world
             .patch_region(region, RegionInfo { origin: Some(DVec3::new(256.0, 0.0, 0.0)), ..RegionInfo::default() })
             .expect("region origin");
@@ -272,8 +271,7 @@ mod tests {
     #[test]
     fn root_agent_publishes_world_motion() {
         let mut world = World::new(viewer_world_limits());
-        let region = Region::new(1);
-        let _ = world.adopt_region(region).expect("region");
+        let region = world.register_region().expect("region registers");
         let _ = world
             .patch_region(region, RegionInfo { origin: Some(DVec3::new(256.0, 0.0, 0.0)), ..RegionInfo::default() })
             .expect("region origin");
@@ -308,8 +306,7 @@ mod tests {
     #[test]
     fn motion_beyond_protocol_range_is_discarded() {
         let mut world = World::new(viewer_world_limits());
-        let region = Region::new(1);
-        let _ = world.adopt_region(region).expect("region");
+        let region = world.register_region().expect("region registers");
         let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("region origin");
         let agent_id = Uuid::from_u128(1);
         world.set_self_agent(agent_id).expect("self agent");
@@ -334,8 +331,9 @@ mod tests {
 
     #[test]
     fn non_finite_sample_is_rejected() {
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let sample = AgentMotionSample {
-            region: Region::new(1),
+            region,
             position: DVec3::ZERO,
             scale: Vec3::ONE,
             velocity: Vec3::new(f32::INFINITY, 0.0, 0.0),

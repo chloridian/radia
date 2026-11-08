@@ -20,7 +20,6 @@ use crate::session::object_cache::storage::open_at;
 use crate::session::object_cache::{CacheScope, CacheWriteWorker, ObjectCacheEvent, ObjectCacheSession};
 use crate::session::world::{SessionWorld, viewer_world_limits};
 pub(super) const SIMULATOR: SimulatorId = SimulatorId::new(77);
-pub(super) const REGION: Region = Region::new(77);
 pub(super) const REGION_HANDLE: u64 = 0x2222_0000_0000_0002;
 pub(super) const REGION_ID: Uuid = Uuid::from_u128(0x1234);
 pub(super) const CACHE_ID: Uuid = Uuid::from_u128(0x5678);
@@ -101,15 +100,16 @@ pub(super) fn cached_message(
     ObjectUpdateCached { region_data, objects }
 }
 
-pub(super) fn decoded_cached_batch(update: &ObjectUpdateCached, sequence: u32) -> ObjectBatch {
+pub(super) fn decoded_cached_batch(region: Region, update: &ObjectUpdateCached, sequence: u32) -> ObjectBatch {
     let message = Message::ObjectUpdateCached(update.clone());
-    decode_object_message(REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), &message)
+    decode_object_message(region, sequence, OrderEvidence::Ordered(u64::from(sequence)), &message)
         .expect("cached update decodes into an object batch")
 }
 
 pub(super) async fn resolve(cache: &mut ObjectCacheSession, update: &ObjectUpdateCached, sequence: u32) -> ObjectBatch {
-    let batch = decoded_cached_batch(update, sequence);
-    cache.resolve_cached(SIMULATOR, REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), |_| None, update, batch).await.0
+    let (_region_world, region) = crate::test_helpers::registered_region();
+    let batch = decoded_cached_batch(region, update, sequence);
+    cache.resolve_cached(SIMULATOR, region, sequence, OrderEvidence::Ordered(u64::from(sequence)), |_| None, update, batch).await.0
 }
 
 pub(super) async fn flush(cache: &mut ObjectCacheSession) {
@@ -214,11 +214,12 @@ pub(super) fn region_world() -> SessionWorld {
 
 pub(super) async fn measure_full_update_intake(cache: &mut ObjectCacheSession, messages: Vec<Message>) -> (std::time::Duration, usize) {
     let mut world = region_world();
+    let region = world.region_for(SIMULATOR).expect("synthetic simulator has a registered region");
     let started = Instant::now();
     for (index, message) in messages.into_iter().enumerate() {
         let sequence = u32::try_from(index + 1).expect("synthetic packet sequence fits u32");
         let order = OrderEvidence::Ordered(u64::from(sequence));
-        let batch = decode_object_message(REGION, sequence, order, &message).expect("full update decodes into World operations");
+        let batch = decode_object_message(region, sequence, order, &message).expect("full update decodes into World operations");
         let summary = world.apply_object_batch_cooperatively(SIMULATOR, batch, |_, _, _| {}).await;
         assert!(summary.is_some(), "synthetic update applies to the registered region");
         cache.record_update(SIMULATOR, message);

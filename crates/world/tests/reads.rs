@@ -21,7 +21,7 @@ use world::{
 
 fn world_limits() -> WorldLimits {
     WorldLimits {
-        max_region_registrations: 2,
+        max_regions: 2,
         max_entities: 3,
         max_entities_per_region: 2,
         max_tombstones_per_region: 2,
@@ -62,11 +62,9 @@ fn apply_ok<T>(result: Result<T, world::ApplyError>) {
 
 #[test]
 fn borrowed_reads_expose_current_state() {
-    let first = Region::new(1);
-    let second = Region::new(2);
     let mut world = World::new(world_limits());
-    std::assert_matches!(world.adopt_region(first).unwrap().outcome, world::RegionOutcome::Adopted { .. });
-    std::assert_matches!(world.adopt_region(second).unwrap().outcome, world::RegionOutcome::Adopted { .. });
+    let first = world.register_region().unwrap();
+    let second = world.register_region().unwrap();
     let first_info = RegionInfo {
         region_id: Some(uuid(10)),
         handle: Some(RegionHandle::new((256_u64 << 32) | 512)),
@@ -76,7 +74,9 @@ fn borrowed_reads_expose_current_state() {
     std::assert_matches!(world.patch_region(first, first_info.clone()).unwrap().outcome, world::RegionOutcome::Patched { .. });
     assert_eq!(world.region(first), Some(&first_info));
     assert_eq!(first_info.handle.unwrap().origin(), DVec3::new(256.0, 512.0, 0.0));
-    assert_eq!(world.region(Region::new(99)), None);
+    let mut foreign_world = World::new(world_limits());
+    let foreign_region = foreign_world.register_region().unwrap();
+    assert_eq!(world.region(foreign_region), None);
 
     let mut root = object(first, 1, 20, 1, Object, Root);
     root.pose = Some(Pose { position: Some(Vec3::new(3.0, 4.0, 5.0)), rotation: Some(Quat::IDENTITY) });
@@ -129,9 +129,8 @@ fn borrowed_reads_expose_current_state() {
 
 #[test]
 fn objects_returns_live_entities() {
-    let region = Region::new(3);
     let mut world = World::new(world_limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
 
     let obj = entity(world.observe_object(object(region, 1, 40, 1, Object, Root)).unwrap());
     let avatar = entity(world.observe_object(object(region, 2, 41, 2, Avatar, Root)).unwrap());
@@ -151,12 +150,11 @@ fn objects_returns_live_entities() {
 
 #[test]
 fn insert_after_cursor_is_listed() {
-    let region = Region::new(5);
     let mut limits = world_limits();
     limits.max_entities = 4;
     limits.max_entities_per_region = 4;
     let mut world = World::new(limits);
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     entity(world.observe_object(object(region, 1, 10, 1, Object, Root)).unwrap());
     entity(world.observe_object(object(region, 2, 20, 2, Object, Root)).unwrap());
     let barrier = world.read_barrier();
@@ -182,9 +180,8 @@ fn insert_after_cursor_is_listed() {
 
 #[test]
 fn list_pages_return_identity() {
-    let region = Region::new(19);
     let mut world = World::new(world_limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let mut child = object(region, 1, 190, 1, Object, Local(local_id(9)));
     child.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
     let entity = entity(world.observe_object(child).unwrap());
@@ -198,9 +195,8 @@ fn list_pages_return_identity() {
 
 #[test]
 fn detail_rejects_a_reused_entity() {
-    let region = Region::new(6);
     let mut world = World::new(world_limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let original = entity(world.observe_object(object(region, 1, 60, 1, Object, Root)).unwrap());
     let barrier = world.read_barrier();
 
@@ -227,9 +223,8 @@ fn detail_rejects_a_reused_entity() {
 
 #[test]
 fn summary_tracks_parent_pose() {
-    let region = Region::new(17);
     let mut world = World::new(world_limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let parent = entity(world.observe_object(object(region, 1, 170, 1, Object, Root)).unwrap());
     let mut child = object(region, 2, 171, 2, Object, Local(local_id(1)));
     child.pose = Some(Pose { position: Some(Vec3::new(2.0, 3.0, 4.0)), rotation: None });
@@ -272,9 +267,8 @@ fn summary_tracks_parent_pose() {
 
 #[test]
 fn detail_batches_preserve_order() {
-    let region = Region::new(18);
     let mut world = World::new(world_limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let original = entity(world.observe_object(object(region, 1, 180, 1, Object, Root)).unwrap());
     let other = entity(world.observe_object(object(region, 2, 181, 2, Object, Root)).unwrap());
     assert_eq!(world.remove_object(source(region, 3), local_id(1)).unwrap().outcome, Removed(uuid(180)));
@@ -296,9 +290,8 @@ fn detail_batches_preserve_order() {
 
 #[test]
 fn detail_pose_matches_transform() {
-    let region = Region::new(19);
     let mut world = World::new(world_limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     assert!(matches!(
         world.patch_region(region, RegionInfo { origin: Some(DVec3::new(256.0, 512.0, 0.0)), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
@@ -317,9 +310,8 @@ fn detail_pose_matches_transform() {
 
 #[test]
 fn media_reads_leave_details_bounded() {
-    let region = Region::new(22);
     let mut world = World::new(world_limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let mut observation = object(region, 1, 220, 1, Object, Root);
     observation.appearance = FieldUpdate::Set(Appearance::Surface);
     let entity = entity(world.observe_object(observation).unwrap());
@@ -382,9 +374,8 @@ fn media_reads_leave_details_bounded() {
 
 #[test]
 fn change_pages_resume_mid_revision() {
-    let region = Region::new(7);
     let mut world = World::new(world_limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     entity(world.observe_object(object(region, 1, 70, 1, Object, Root)).unwrap());
     entity(world.observe_object(object(region, 2, 71, 2, Object, Root)).unwrap());
     let barrier = world.read_barrier();
@@ -397,7 +388,7 @@ fn change_pages_resume_mid_revision() {
     let first = world.change_page(barrier.changes, 1).unwrap();
     assert_eq!(first.observed_revision, revision);
     assert_eq!(first.completed_revision, barrier.revision);
-    assert!(matches!(world.adopt_region(Region::new(700)).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let _new_region = world.register_region().unwrap();
     let second = world.change_page(first.cursor, 1).unwrap();
     let third = world.change_page(second.cursor, 1).unwrap();
     let fourth = world.change_page(third.cursor, 1).unwrap();
@@ -421,32 +412,30 @@ fn change_pages_resume_mid_revision() {
 
 #[test]
 fn journal_eviction_requires_resync() {
-    let region = Region::new(8);
     let mut limits = world_limits();
     limits.max_journal_entries = 1;
     let mut world = World::new(limits);
-    let before_adoption = world.read_barrier();
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    let after_adoption = world.read_barrier();
+    let before_registration = world.read_barrier();
+    let region = world.register_region().unwrap();
+    let after_registration = world.read_barrier();
     assert!(matches!(
         world.patch_region(region, RegionInfo { name: Some("region".to_owned()), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
     ));
 
-    assert_eq!(world.change_page(before_adoption.changes, 8), Err(WorldReadError::ResyncRequired));
-    let changes = world.change_page(after_adoption.changes, 8).unwrap();
+    assert_eq!(world.change_page(before_registration.changes, 8), Err(WorldReadError::ResyncRequired));
+    let changes = world.change_page(after_registration.changes, 8).unwrap();
     assert!(matches!(changes.records.as_slice(), [record] if record.change == WorldChange::RegionUpdated(region)));
 }
 
 #[test]
 fn foreign_handles_or_zero_limits_fail() {
-    let region = Region::new(9);
     let mut first = World::new(world_limits());
     let mut second = World::new(world_limits());
-    assert!(matches!(first.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(second.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    let selected = entity(first.observe_object(object(region, 1, 90, 1, Object, Root)).unwrap());
-    entity(first.observe_object(object(region, 2, 91, 2, Object, Root)).unwrap());
+    let first_region = first.register_region().unwrap();
+    let _second_region = second.register_region().unwrap();
+    let selected = entity(first.observe_object(object(first_region, 1, 90, 1, Object, Root)).unwrap());
+    entity(first.observe_object(object(first_region, 2, 91, 2, Object, Root)).unwrap());
     let list_cursor = first.object_list_page(None, 1).unwrap().next.expect("second list item remains");
     let barrier = first.read_barrier();
 
@@ -463,11 +452,9 @@ fn foreign_handles_or_zero_limits_fail() {
 
 #[test]
 fn region_pages_follow_active_regions() {
-    let first = Region::new(10);
-    let second = Region::new(11);
     let mut world = World::new(world_limits());
-    assert!(matches!(world.adopt_region(first).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(second).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let first = world.register_region().unwrap();
+    let second = world.register_region().unwrap();
     assert_eq!(world.read_barrier().region_count, 2);
 
     let page = world.region_page(None, 1).unwrap();
@@ -482,11 +469,10 @@ fn region_pages_follow_active_regions() {
 
 #[test]
 fn large_region_name_is_rejected() {
-    let region = Region::new(12);
     let mut limits = world_limits();
     limits.max_region_name_bytes = MAX_REGION_PAGE_BYTES + 1;
     let mut world = World::new(limits);
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let name = "r".repeat(MAX_REGION_PAGE_BYTES);
     assert!(matches!(
         world.patch_region(region, RegionInfo { name: Some(name), ..RegionInfo::default() }).unwrap().outcome,
@@ -498,11 +484,10 @@ fn large_region_name_is_rejected() {
 
 #[test]
 fn oversized_revision_requires_resync() {
-    let region = Region::new(13);
     let mut limits = world_limits();
     limits.max_journal_changes = 1;
     let mut world = World::new(limits);
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     entity(world.observe_object(object(region, 1, 130, 1, Object, Root)).unwrap());
     let mut child = object(region, 2, 131, 2, Object, Local(local_id(1)));
     child.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: None });
@@ -517,13 +502,11 @@ fn oversized_revision_requires_resync() {
 
 #[test]
 fn evicted_partial_revision_requires_resync() {
-    let first = Region::new(14);
-    let second = Region::new(15);
     let mut limits = world_limits();
     limits.max_journal_entries = 1;
     let mut world = World::new(limits);
-    assert!(matches!(world.adopt_region(first).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(second).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let first = world.register_region().unwrap();
+    let second = world.register_region().unwrap();
     entity(world.observe_object(object(first, 1, 140, 1, Object, Root)).unwrap());
     entity(world.observe_object(object(first, 2, 141, 2, Object, Root)).unwrap());
     let barrier = world.read_barrier();

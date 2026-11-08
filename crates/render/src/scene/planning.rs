@@ -304,8 +304,8 @@ mod tests {
     use math::{DVec3, Quat, Vec3};
     use uuid::Uuid;
     use world::{
-        Appearance, ApplyOutcome, Entity, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, Pose, PrimShape, Region,
-        RegionInfo, RegionOutcome, Shape, UpdateSource, World, WorldLimits,
+        Appearance, ApplyOutcome, Entity, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, Pose, PrimShape, RegionInfo,
+        RegionOutcome, Shape, UpdateSource, World, WorldLimits,
     };
 
     use crate::scene::{
@@ -342,7 +342,7 @@ mod tests {
 
     fn fixture(objects: &[(u128, Vec3, Vec3)], budget: &Budget) -> (Mirror, BTreeMap<Uuid, Entity>) {
         let mut world = World::new(WorldLimits {
-            max_region_registrations: 1,
+            max_regions: 1,
             max_entities: 8,
             max_entities_per_region: 8,
             max_tombstones_per_region: 8,
@@ -354,8 +354,7 @@ mod tests {
             max_region_name_bytes: 256,
             max_recovery_targets: 8,
         });
-        let region = Region::new(1);
-        assert_matches!(world.adopt_region(region).expect("fixture region registers").outcome, RegionOutcome::Adopted { .. });
+        let region = world.register_region().expect("fixture region registers");
         assert_matches!(
             world
                 .patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() })

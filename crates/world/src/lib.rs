@@ -8,7 +8,7 @@ mod read;
 mod region;
 mod update;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use uuid::Uuid;
 
@@ -19,7 +19,7 @@ use crate::identity::WorldId;
 use crate::object::components::{
     Binding, Fences, ObjectOrdering, ObjectRecord, ObjectState, ParentRejectionBarrier, RegionalStamp, newer_field, newer_region_field,
 };
-use crate::object::relationships::PendingResolution;
+use crate::object::relationships::{PendingChildKey, PendingResolution};
 use crate::object::storage::ObjectStore;
 use crate::object::view::IndexedObjects;
 use crate::region::RegionState;
@@ -80,11 +80,12 @@ pub struct World {
     id: WorldId,
     store: ObjectStore,
     regions: BTreeMap<Region, RegionState>,
-    retired: HashSet<Region>,
+    last_region_generation: u64,
     self_agent: Option<Uuid>,
     children: HashMap<Entity, BTreeMap<Uuid, Entity>>,
-    pending_children: HashMap<LocalAddress, BTreeMap<Uuid, Entity>>,
+    pending_children: HashMap<LocalAddress, BTreeMap<PendingChildKey, Entity>>,
     relationship_work: BTreeMap<(Uuid, LocalAddress), PendingResolution>,
+    relationship_cursor: Option<(Uuid, LocalAddress)>,
     tombstones: Tombstones,
     retained: RetainedOverrides,
     floors: HashMap<Region, Stamp>,
@@ -103,11 +104,12 @@ impl World {
             id,
             store: ObjectStore::new(id),
             regions: BTreeMap::new(),
-            retired: HashSet::new(),
+            last_region_generation: 0,
             self_agent: None,
             children: HashMap::new(),
             pending_children: HashMap::new(),
             relationship_work: BTreeMap::new(),
+            relationship_cursor: None,
             tombstones: Tombstones::default(),
             retained: RetainedOverrides::default(),
             floors: HashMap::new(),
@@ -197,7 +199,14 @@ impl World {
     }
 
     fn require_active_region(&self, region: Region) -> Result<(), ApplyError> {
-        if self.regions.contains_key(&region) { Ok(()) } else { Err(ApplyError::StaleRegion) }
+        if !self.region_was_issued(region) {
+            return Err(ApplyError::StaleRegion);
+        }
+        if self.regions.contains_key(&region) { Ok(()) } else { Err(ApplyError::RegionRetired) }
+    }
+
+    fn region_was_issued(&self, region: Region) -> bool {
+        region.belongs_to(self.id) && region.get() <= self.last_region_generation
     }
 
     #[cfg(test)]

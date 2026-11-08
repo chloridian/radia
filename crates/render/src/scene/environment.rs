@@ -919,8 +919,8 @@ mod tests {
 
     #[test]
     fn changing_preset_releases_old_request() {
+        let (_region_world, region) = crate::test_support::registered_region();
         let mut manager = ViewerEnvironments::new(Budget::default());
-        let region = Region::new(1);
         manager.set_local(EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Midday)), region).unwrap();
         let first = requested(&mut manager, EnvironmentPreset::Midday);
         manager.set_local(EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Sunset)), region).unwrap();
@@ -931,12 +931,13 @@ mod tests {
 
     #[test]
     fn clear_duration_presence_tracks_snapshots() {
+        let (_region_world, regions) = crate::test_support::registered_regions(2);
         let mut manager = ViewerEnvironments::new(Budget::default());
-        let region = Region::new(1);
+        let region = regions[0];
         manager.push_at(region, EnvironmentPush::Clear { experience: None, transition: Duration::ZERO }, Instant::now()).unwrap();
         let cleared = manager.current().expect("clear snapshot");
         assert_eq!(cleared.clear_transition_for_region(region), Some(Duration::ZERO));
-        assert_eq!(cleared.clear_transition_for_region(Region::new(2)), None);
+        assert_eq!(cleared.clear_transition_for_region(regions[1]), None);
         let state = manager.state();
         manager.store(state).unwrap();
         assert_eq!(manager.current().expect("ordinary snapshot").clear_transition_for_region(region), None);

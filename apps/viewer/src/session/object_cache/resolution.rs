@@ -376,6 +376,7 @@ mod tests {
         let mut cache = open_cache(directory.path().join("objects.sqlite"));
         assert_eq!(load_region(&mut cache).await, 7);
         let object_id = Uuid::from_u128(0xabcde);
+        let (_region_world, region) = crate::test_helpers::registered_region();
 
         for (index, fixture) in [vectors::OBJECT_UPDATE, vectors::OBJECT_UPDATE_COMPRESSED_TYPED].into_iter().enumerate() {
             let mut full = fixture_message(fixture);
@@ -403,9 +404,9 @@ mod tests {
 
             let cached = cached_message(region_data, references);
             let sequence = 90 + u32::try_from(index).expect("two fixture indexes fit u32");
-            let batch = decoded_cached_batch(&cached, sequence);
+            let batch = decoded_cached_batch(region, &cached, sequence);
             let (resolved, requests, _) = cache
-                .resolve_cached(SIMULATOR, REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), |_| None, &cached, batch)
+                .resolve_cached(SIMULATOR, region, sequence, OrderEvidence::Ordered(u64::from(sequence)), |_| None, &cached, batch)
                 .await;
 
             assert_eq!(resolved.blocks.len(), 1);
@@ -434,9 +435,10 @@ mod tests {
         flush(&mut cache).await;
 
         let cached = cached_message(region_data, references);
-        let batch = decoded_cached_batch(&cached, 80);
-        let (batch, _, _) = cache.resolve_cached(SIMULATOR, REGION, 80, OrderEvidence::Ordered(80), |_| None, &cached, batch).await;
         let mut world = region_world();
+        let region = world.region_for(SIMULATOR).expect("cached simulator has a registered region");
+        let batch = decoded_cached_batch(region, &cached, 80);
+        let (batch, _, _) = cache.resolve_cached(SIMULATOR, region, 80, OrderEvidence::Ordered(80), |_| None, &cached, batch).await;
         let summary = world.apply_object_batch(SIMULATOR, batch).expect("registered simulator applies the cached hit");
         assert!(summary.blocks.iter().all(|block| block.applied().is_some()));
         let entity = world.world().entity(object_id).expect("cached object was restored");
@@ -638,6 +640,7 @@ mod tests {
         let warm_handshake_us = handshake_started.elapsed().as_micros();
 
         let mut warm_world = region_world();
+        let warm_region = warm_world.region_for(SIMULATOR).expect("warm simulator has a registered region");
         let mut decode_us = 0_u128;
         let mut resolve_us = 0_u128;
         let mut world_apply_us = 0_u128;
@@ -648,13 +651,13 @@ mod tests {
             let update = cached_message(region_data, chunk.to_vec());
             let message = Message::ObjectUpdateCached(update.clone());
             let started = Instant::now();
-            let batch = decode_object_message(REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), &message)
+            let batch = decode_object_message(warm_region, sequence, OrderEvidence::Ordered(u64::from(sequence)), &message)
                 .expect("cached update decodes into World operations");
             decode_us += started.elapsed().as_micros();
             let started = Instant::now();
             let (batch, _, _) = warm_cache.resolve_cached(
                 SIMULATOR,
-                REGION,
+                warm_region,
                 sequence,
                 OrderEvidence::Ordered(u64::from(sequence)),
                 |_| None,
@@ -673,11 +676,12 @@ mod tests {
         assert_eq!(warm_world.world().object_count(), 5_000);
 
         let mut full_world = region_world();
+        let full_region = full_world.region_for(SIMULATOR).expect("full simulator has a registered region");
         let mut full_world_apply_us = 0_u128;
         let mut full_recovery_targets = 0_usize;
         for (index, message) in updates.iter().enumerate() {
             let sequence = u32::try_from(index + 1).expect("synthetic packet sequence fits u32");
-            let batch = decode_object_message(REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), message)
+            let batch = decode_object_message(full_region, sequence, OrderEvidence::Ordered(u64::from(sequence)), message)
                 .expect("full update decodes into World operations");
             let started = Instant::now();
             let summary = full_world

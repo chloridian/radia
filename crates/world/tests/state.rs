@@ -2,7 +2,7 @@ use std::{collections::HashSet, num::NonZeroU32};
 
 use math::{DVec3, Quat, Vec3};
 use uuid::Uuid;
-use world::ApplyError::{EntityBudgetExhausted, InvalidValue, RegionRetired, RegistrationBudgetExhausted, StaleRegion};
+use world::ApplyError::{EntityBudgetExhausted, InvalidValue, RegionBudgetExhausted, RegionRetired, StaleRegion};
 use world::ApplyOutcome::{Deferred, IgnoredStale, Introduced, TombstoneRecorded, Updated};
 use world::DeferredReason::AmbiguousOrder;
 use world::Kind::Object;
@@ -14,7 +14,7 @@ use world::{
 };
 fn limits() -> WorldLimits {
     WorldLimits {
-        max_region_registrations: 2,
+        max_regions: 2,
         max_entities: 2,
         max_entities_per_region: 2,
         max_tombstones_per_region: 4,
@@ -46,15 +46,14 @@ fn observation(source: UpdateSource, id: u128, local_id: u32) -> ObjectObservati
 
 #[test]
 fn entity_handles_are_world_scoped() {
-    let region = Region::new(6);
     let mut first_world = World::new(limits());
     let mut second_world = World::new(limits());
-    assert!(matches!(first_world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(second_world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let first_region = first_world.register_region().unwrap();
+    let second_region = second_world.register_region().unwrap();
 
-    let first = first_world.observe_object(observation(source(region, 1), 60, 1)).unwrap();
+    let first = first_world.observe_object(observation(source(first_region, 1), 60, 1)).unwrap();
     let Introduced(first_entity) = first.outcome else { panic!("expected first world entity") };
-    let second = second_world.observe_object(observation(source(region, 1), 61, 1)).unwrap();
+    let second = second_world.observe_object(observation(source(second_region, 1), 61, 1)).unwrap();
     let Introduced(second_entity) = second.outcome else { panic!("expected second world entity") };
 
     assert_ne!(first_entity, second_entity);
@@ -69,10 +68,8 @@ fn object_views_support_shared_reads() {
     fn supports_shared_reads<T: Send + Sync>() {}
     supports_shared_reads::<World>();
     supports_shared_reads::<world::Object<'_>>();
-
-    let region = Region::new(6);
     let mut world = World::new(limits());
-    std::assert_matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. });
+    let region = world.register_region().unwrap();
     let Introduced(entity) = world.observe_object(observation(source(region, 1), 60, 1)).unwrap().outcome else {
         panic!("expected object introduction");
     };
@@ -99,8 +96,6 @@ fn object_views_support_shared_reads() {
 
 #[test]
 fn old_region_events_are_rejected_by_new_world() {
-    let old_region = Region::new(30);
-    let new_region = Region::new(31);
     let metadata = RegionInfo {
         region_id: Some(uuid(301)),
         handle: Some(RegionHandle::new((256_u64 << 32) | 512)),
@@ -109,13 +104,13 @@ fn old_region_events_are_rejected_by_new_world() {
     };
 
     let mut old_world = World::new(limits());
-    assert!(matches!(old_world.adopt_region(old_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let old_region = old_world.register_region().unwrap();
     assert!(matches!(old_world.patch_region(old_region, metadata.clone()).unwrap().outcome, world::RegionOutcome::Patched { .. }));
     let old_entity = old_world.observe_object(observation(source(old_region, 1), 302, 1)).unwrap();
     let Introduced(old_entity) = old_entity.outcome else { panic!("expected old-session object") };
 
     let mut new_world = World::new(limits());
-    assert!(matches!(new_world.adopt_region(new_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let new_region = new_world.register_region().unwrap();
     assert!(matches!(new_world.patch_region(new_region, metadata.clone()).unwrap().outcome, world::RegionOutcome::Patched { .. }));
     let new_entity = new_world.observe_object(observation(source(new_region, 1), 303, 1)).unwrap();
     let Introduced(new_entity) = new_entity.outcome else { panic!("expected new-session object") };
@@ -133,15 +128,10 @@ fn old_region_events_are_rejected_by_new_world() {
 
 #[test]
 fn region_metadata_merges_monotonically() {
-    let region = Region::new(7);
     let mut world = World::new(limits());
+    let region = world.register_region().unwrap();
 
-    let adopted = world.adopt_region(region).unwrap();
-    let adopted_revision = match adopted.outcome {
-        world::RegionOutcome::Adopted { revision } => revision,
-        outcome => panic!("expected region adoption, got {outcome:?}"),
-    };
-    assert_eq!(adopted_revision, world.revision());
+    assert_eq!(world.revision().get(), 1);
     assert_eq!(world.region(region), Some(&RegionInfo::default()));
 
     let info = RegionInfo {
@@ -163,23 +153,21 @@ fn region_metadata_merges_monotonically() {
     assert_eq!(repeated.outcome, world::RegionOutcome::Unchanged);
     assert_eq!(world.revision(), revision);
 
-    let unchanged = world.adopt_region(region).unwrap();
-    assert_eq!(unchanged.outcome, world::RegionOutcome::Unchanged);
-    assert_eq!(world.revision(), revision);
     assert_eq!(world.region(region), Some(&info));
 
-    assert_eq!(world.patch_region(Region::new(99), RegionInfo::default()), Err(StaleRegion));
+    let mut foreign_world = World::new(limits());
+    let foreign_region = foreign_world.register_region().unwrap();
+    assert_eq!(world.patch_region(foreign_region, RegionInfo::default()), Err(StaleRegion));
     assert_eq!(
-        world.patch_region(Region::new(99), RegionInfo { name: Some("too long for this region".to_owned()), ..RegionInfo::default() }),
+        world.patch_region(foreign_region, RegionInfo { name: Some("too long for this region".to_owned()), ..RegionInfo::default() }),
         Err(StaleRegion)
     );
 }
 
 #[test]
 fn region_metadata_conflicts_are_atomic() {
-    let region = Region::new(70);
     let mut world = World::new(limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let original = RegionInfo {
         region_id: Some(uuid(1)),
         handle: Some(RegionHandle::new((512_u64 << 32) | 768)),
@@ -203,9 +191,8 @@ fn region_metadata_conflicts_are_atomic() {
 
 #[test]
 fn region_names_follow_source_order_without_revising_duplicate_values() {
-    let region = Region::new(71);
     let mut world = World::new(limits());
-    let _ = world.adopt_region(region).unwrap();
+    let region = world.register_region().unwrap();
     for (source, name, expected, changed) in [
         (source(region, 10), "First", "First", true),
         (source(region, 20), "First", "First", false),
@@ -223,14 +210,13 @@ fn region_names_follow_source_order_without_revising_duplicate_values() {
         assert_eq!(world.revision() != revision, changed, "{source:?}");
     }
     let _ = world.retire_region(region).unwrap();
-    assert_eq!(world.observe_region_metadata(source(region, 40), RegionInfo::default()), Err(StaleRegion));
+    assert_eq!(world.observe_region_metadata(source(region, 40), RegionInfo::default()), Err(RegionRetired));
 }
 
 #[test]
 fn rejected_region_observations_preserve_metadata_and_name_ordering() {
-    let region = Region::new(72);
     let mut world = World::new(limits());
-    let _ = world.adopt_region(region).unwrap();
+    let region = world.register_region().unwrap();
     let original = RegionInfo { region_id: Some(uuid(1)), name: Some("First".into()), ..RegionInfo::default() };
     let _ = world.observe_region_metadata(source(region, 10), original.clone()).unwrap();
     let revision = world.revision();
@@ -248,7 +234,6 @@ fn rejected_region_observations_preserve_metadata_and_name_ordering() {
 
 #[test]
 fn region_origin_matches_handle() {
-    let region = Region::new(74);
     let handle = RegionHandle::new((512_u64 << 32) | 768);
     let wrong_origin = DVec3::new(512.0, 769.0, 0.0);
     let cases = [
@@ -265,7 +250,7 @@ fn region_origin_matches_handle() {
 
     for (initial, conflicting) in cases {
         let mut world = World::new(limits());
-        assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+        let region = world.register_region().unwrap();
         if let Some(initial) = initial {
             assert!(matches!(world.patch_region(region, initial).unwrap().outcome, world::RegionOutcome::Patched { .. }));
         }
@@ -280,9 +265,8 @@ fn region_origin_matches_handle() {
 
 #[test]
 fn invalid_region_metadata_is_atomic() {
-    let region = Region::new(71);
     let mut world = World::new(limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let revision = world.revision();
 
     for (info, error) in [
@@ -309,9 +293,8 @@ fn self_agent_cannot_be_reassigned() {
 
 #[test]
 fn local_transform_needs_all_components() {
-    let region = Region::new(72);
     let mut world = World::new(limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let position = Vec3::new(1.0, 2.0, 3.0);
     let rotation = Quat::IDENTITY;
     let scale = Vec3::new(4.0, 5.0, 6.0);
@@ -330,12 +313,9 @@ fn local_transform_needs_all_components() {
 
 #[test]
 fn region_index_tracks_transfer() {
-    let source_region = Region::new(75);
-    let destination_region = Region::new(76);
     let mut world = World::new(limits());
-    assert!(matches!(world.adopt_region(source_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(destination_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-
+    let source_region = world.register_region().unwrap();
+    let destination_region = world.register_region().unwrap();
     let introduced = world.observe_object(observation(source(source_region, 1), 75, 1)).unwrap();
     let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
     assert_eq!(world.objects_in_region(source_region).map(|object| object.entity()).collect::<HashSet<_>>(), [entity].into());
@@ -351,15 +331,13 @@ fn region_index_tracks_transfer() {
 
 #[test]
 fn retirement_clears_objects_and_blocks_reuse() {
-    let region = Region::new(8);
-    let other_region = Region::new(9);
     let mut world_limits = limits();
-    world_limits.max_region_registrations = 2;
+    world_limits.max_regions = 2;
     world_limits.max_entities = 3;
     world_limits.max_entities_per_region = 2;
     let mut world = World::new(world_limits);
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(other_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
+    let other_region = world.register_region().unwrap();
     let shared_metadata = RegionInfo {
         region_id: Some(uuid(81)),
         handle: Some(RegionHandle::new((256_u64 << 32) | 512)),
@@ -397,16 +375,14 @@ fn retirement_clears_objects_and_blocks_reuse() {
     assert_eq!(world.region(region), None);
     assert_eq!(world.region(other_region), Some(&shared_metadata));
     assert!(matches!(world.retire_region(region).unwrap().outcome, world::RegionOutcome::Unchanged));
-    assert_eq!(world.adopt_region(region), Err(RegionRetired));
-    assert_eq!(world.observe_object(observation(source(region, 2), 11, 4)), Err(StaleRegion));
+    assert_eq!(world.patch_region(region, RegionInfo::default()), Err(RegionRetired));
+    assert_eq!(world.observe_object(observation(source(region, 2), 11, 4)), Err(RegionRetired));
 }
 
 #[test]
 fn world_registration_limits_are_enforced() {
-    let region_a = Region::new(1);
-    let region_b = Region::new(2);
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 1,
+        max_regions: 1,
         max_entities: 1,
         max_entities_per_region: 1,
         max_tombstones_per_region: 1,
@@ -418,9 +394,10 @@ fn world_registration_limits_are_enforced() {
         max_region_name_bytes: 1,
         max_recovery_targets: 4,
     });
-
-    assert!(matches!(world.adopt_region(region_a).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert_eq!(world.adopt_region(region_b), Err(RegistrationBudgetExhausted));
+    let region_a = world.register_region().unwrap();
+    let revision = world.revision();
+    assert_eq!(world.register_region(), Err(RegionBudgetExhausted));
+    assert_eq!(world.revision(), revision);
     assert_eq!(
         world.patch_region(region_a, RegionInfo { name: Some("longer".to_owned()), ..RegionInfo::default() }),
         Err(InvalidValue { field: "region_name" })
@@ -432,17 +409,14 @@ fn world_registration_limits_are_enforced() {
 
 #[test]
 fn entity_budgets_are_independent() {
-    let first_region = Region::new(40);
-    let second_region = Region::new(41);
-    let third_region = Region::new(42);
     let mut world_limits = limits();
-    world_limits.max_region_registrations = 3;
+    world_limits.max_regions = 3;
     world_limits.max_entities = 2;
     world_limits.max_entities_per_region = 1;
     let mut world = World::new(world_limits);
-    for region in [first_region, second_region, third_region] {
-        assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    }
+    let first_region = world.register_region().unwrap();
+    let second_region = world.register_region().unwrap();
+    let third_region = world.register_region().unwrap();
 
     let first = world.observe_object(observation(source(first_region, 1), 401, 1)).unwrap();
     let Introduced(first) = first.outcome else { panic!("expected first object") };
@@ -469,9 +443,8 @@ fn entity_budgets_are_independent() {
 
 #[test]
 fn invalid_observation_rejects_pose() {
-    let region = Region::new(3);
     let mut world = World::new(limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let revision = world.revision();
 
     assert_eq!(world.observe_object(observation(source(region, 1), 0, 1)), Err(InvalidValue { field: "object_id" }));
@@ -491,9 +464,8 @@ fn invalid_observation_rejects_pose() {
 
 #[test]
 fn degraded_order_requests_recovery() {
-    let region = Region::new(73);
     let mut world = World::new(limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let revision = world.revision();
     let source = UpdateSource::new(region, 12, Degraded, 3);
     assert_eq!(source.region(), region);
@@ -515,13 +487,12 @@ fn tombstone_byte_charge_saturates() {
 
 #[test]
 fn zero_tombstone_budget_uses_region_floor() {
-    for (region_id, max_tombstones, max_per_region) in [(90, 0, 1), (91, 1, 0)] {
-        let region = Region::new(region_id);
+    for (region_id, max_tombstones, max_per_region) in [(90_u32, 0, 1), (91, 1, 0)] {
         let mut world_limits = limits();
         world_limits.max_tombstones = max_tombstones;
         world_limits.max_tombstones_per_region = max_per_region;
         let mut world = World::new(world_limits);
-        assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+        let region = world.register_region().unwrap();
         let killed_address = address(region, 1);
 
         assert_eq!(
@@ -540,9 +511,8 @@ fn zero_tombstone_budget_uses_region_floor() {
 
 #[test]
 fn tombstone_eviction_advances_region_floor() {
-    let region = Region::new(9);
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 1,
+        max_regions: 1,
         max_entities: 4,
         max_entities_per_region: 4,
         max_tombstones_per_region: 8,
@@ -554,15 +524,15 @@ fn tombstone_eviction_advances_region_floor() {
         max_region_name_bytes: 8,
         max_recovery_targets: 2,
     });
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    let adopted_revision = world.revision();
+    let region = world.register_region().unwrap();
+    let registered_revision = world.revision();
 
     assert_eq!(world.remove_object(source(region, 5), NonZeroU32::new(1).unwrap()).unwrap().outcome, TombstoneRecorded(address(region, 1)));
     assert_eq!(
         world.remove_object(source(region, 10), NonZeroU32::new(2).unwrap()).unwrap().outcome,
         TombstoneRecorded(address(region, 2))
     );
-    assert_eq!(world.revision(), adopted_revision);
+    assert_eq!(world.revision(), registered_revision);
 
     assert_eq!(world.observe_object(observation(source(region, 9), 90, 2)).unwrap().outcome, IgnoredStale);
     let stale_evicted = world.observe_object(observation(source(region, 5), 91, 1)).unwrap();
@@ -577,10 +547,8 @@ fn tombstone_eviction_advances_region_floor() {
 
 #[test]
 fn tombstone_limits_are_per_region_and_evict_oldest() {
-    let region_a = Region::new(10);
-    let region_b = Region::new(11);
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 2,
+        max_regions: 2,
         max_entities: 4,
         max_entities_per_region: 4,
         max_tombstones_per_region: 8,
@@ -592,8 +560,8 @@ fn tombstone_limits_are_per_region_and_evict_oldest() {
         max_region_name_bytes: 8,
         max_recovery_targets: 2,
     });
-    assert!(matches!(world.adopt_region(region_a).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(region_b).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region_a = world.register_region().unwrap();
+    let region_b = world.register_region().unwrap();
 
     assert!(matches!(world.remove_object(source(region_a, 5), NonZeroU32::new(1).unwrap()).unwrap().outcome, TombstoneRecorded(_)));
     assert!(matches!(world.remove_object(source(region_b, 5), NonZeroU32::new(1).unwrap()).unwrap().outcome, TombstoneRecorded(_)));
@@ -607,10 +575,8 @@ fn tombstone_limits_are_per_region_and_evict_oldest() {
 
 #[test]
 fn tombstone_pressure_only_degrades_affected_region() {
-    let region_a = Region::new(14);
-    let region_b = Region::new(15);
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 2,
+        max_regions: 2,
         max_entities: 4,
         max_entities_per_region: 4,
         max_tombstones_per_region: 4,
@@ -622,8 +588,8 @@ fn tombstone_pressure_only_degrades_affected_region() {
         max_region_name_bytes: 8,
         max_recovery_targets: 2,
     });
-    assert!(matches!(world.adopt_region(region_a).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(region_b).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region_a = world.register_region().unwrap();
+    let region_b = world.register_region().unwrap();
 
     assert!(matches!(world.remove_object(source(region_a, 5), NonZeroU32::new(1).unwrap()).unwrap().outcome, TombstoneRecorded(_)));
     assert!(matches!(world.remove_object(source(region_b, 5), NonZeroU32::new(1).unwrap()).unwrap().outcome, TombstoneRecorded(_)));
@@ -636,11 +602,9 @@ fn tombstone_pressure_only_degrades_affected_region() {
 }
 
 #[test]
-fn region_retirement_keeps_registration_budget() {
-    let first = Region::new(12);
-    let second = Region::new(13);
+fn region_retirement_releases_active_capacity() {
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 1,
+        max_regions: 1,
         max_entities: 1,
         max_entities_per_region: 1,
         max_tombstones_per_region: 1,
@@ -652,11 +616,47 @@ fn region_retirement_keeps_registration_budget() {
         max_region_name_bytes: 8,
         max_recovery_targets: 1,
     });
-
-    assert!(matches!(world.adopt_region(first).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(first).unwrap().outcome, world::RegionOutcome::Unchanged));
+    let first = world.register_region().unwrap();
+    let revision = world.revision();
+    assert_eq!(world.register_region(), Err(RegionBudgetExhausted));
+    assert_eq!(world.revision(), revision);
     assert!(matches!(world.remove_object(source(first, 1), NonZeroU32::new(1).unwrap()).unwrap().outcome, TombstoneRecorded(_)));
     let retired = world.retire_region(first).unwrap();
     assert!(matches!(retired.outcome, world::RegionOutcome::Retired { entities_removed: 0, .. }));
-    assert_eq!(world.adopt_region(second), Err(RegistrationBudgetExhausted));
+    let second = world.register_region().unwrap();
+    assert_ne!(first, second);
+    assert!(second.get() > first.get());
+    assert_eq!(world.retire_region(first).unwrap().outcome, world::RegionOutcome::Unchanged);
+    assert_eq!(world.patch_region(first, RegionInfo::default()), Err(RegionRetired));
+}
+
+#[test]
+fn registration_reuses_capacity_without_reusing_handles() {
+    let mut bounds = limits();
+    bounds.max_regions = 1;
+    bounds.max_journal_entries = 2;
+    let mut world = World::new(bounds);
+    let mut issued: Vec<Region> = Vec::new();
+
+    for _ in 0..64 {
+        let region = world.register_region().unwrap();
+        assert_eq!(world.patch_region(region, RegionInfo::default()).unwrap().outcome, world::RegionOutcome::Unchanged);
+        if let Some(previous) = issued.last() {
+            assert!(region.get() > previous.get());
+            assert_eq!(world.patch_region(*previous, RegionInfo::default()), Err(RegionRetired));
+        }
+        assert_eq!(world.register_region(), Err(RegionBudgetExhausted));
+        assert!(matches!(world.retire_region(region).unwrap().outcome, world::RegionOutcome::Retired { .. }));
+        issued.push(region);
+    }
+
+    for region in issued {
+        assert_eq!(world.patch_region(region, RegionInfo::default()), Err(RegionRetired));
+        assert_eq!(world.retire_region(region).unwrap().outcome, world::RegionOutcome::Unchanged);
+    }
+
+    let mut foreign_world = World::new(limits());
+    let foreign = foreign_world.register_region().unwrap();
+    assert_eq!(world.patch_region(foreign, RegionInfo::default()), Err(StaleRegion));
+    assert_eq!(world.retire_region(foreign), Err(StaleRegion));
 }

@@ -17,7 +17,7 @@ use world::{
 
 fn limits(entities: usize) -> WorldLimits {
     WorldLimits {
-        max_region_registrations: 2,
+        max_regions: 2,
         max_entities: entities,
         max_entities_per_region: entities,
         max_tombstones_per_region: 4,
@@ -56,14 +56,14 @@ fn with_pose(mut object: ObjectObservation, position: Vec3, rotation: Quat) -> O
     object
 }
 
-fn world_with_origin(region: Region, origin: DVec3, entities: usize) -> World {
+fn world_with_origin(origin: DVec3, entities: usize) -> (World, Region) {
     let mut world = World::new(limits(entities));
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     assert!(matches!(
         world.patch_region(region, RegionInfo { origin: Some(origin), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
     ));
-    world
+    (world, region)
 }
 
 fn introduced(outcome: Applied) -> Entity {
@@ -73,9 +73,8 @@ fn introduced(outcome: Applied) -> Entity {
 
 #[test]
 fn root_pose_uses_region_origin() {
-    let region = Region::new(1);
     let origin = DVec3::new(1024.0, 2048.0, 0.0);
-    let mut world = world_with_origin(region, origin, 4);
+    let (mut world, region) = world_with_origin(origin, 4);
     let entity = introduced(
         world.observe_object(with_pose(observation(region, 1, 1, 1, Object, Root), Vec3::new(3.0, 4.0, 5.0), Quat::IDENTITY)).unwrap(),
     );
@@ -88,9 +87,8 @@ fn root_pose_uses_region_origin() {
 
 #[test]
 fn nested_rotations_keep_f64_origin() {
-    let region = Region::new(42);
     let origin = DVec3::new(2_f64.powi(45), -2_f64.powi(45), 4.0e12);
-    let mut world = world_with_origin(region, origin, 4);
+    let (mut world, region) = world_with_origin(origin, 4);
     let quarter_turn = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
     let half_turn = Quat::from_rotation_z(std::f32::consts::PI);
     let root = with_pose(observation(region, 1, 45, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), quarter_turn);
@@ -110,9 +108,8 @@ fn nested_rotations_keep_f64_origin() {
 
 #[test]
 fn reused_parent_invalidates_pose() {
-    let region = Region::new(45);
     let mut world = World::new(limits(3));
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let old_parent = with_pose(observation(region, 10, 190, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY);
     introduced(world.observe_object(old_parent).unwrap());
     assert_eq!(world.remove_object(source(region, 12), local_id(1)).unwrap().outcome, Removed(uuid(190)));
@@ -134,8 +131,7 @@ fn reused_parent_invalidates_pose() {
 
 #[test]
 fn resolved_pose_can_lack_scale() {
-    let region = Region::new(14);
-    let mut world = world_with_origin(region, DVec3::ZERO, 1);
+    let (mut world, region) = world_with_origin(DVec3::ZERO, 1);
     let object = with_pose(observation(region, 1, 17, 1, Object, Root), Vec3::X, Quat::IDENTITY);
     let entity = introduced(world.observe_object(object).unwrap());
     let pose = WorldPose { position: DVec3::X, rotation: Quat::IDENTITY };
@@ -146,9 +142,8 @@ fn resolved_pose_can_lack_scale() {
 
 #[test]
 fn late_origin_resolves_existing_pose() {
-    let region = Region::new(12);
     let mut world = World::new(limits(2));
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let entity = introduced(world.observe_object(with_pose(observation(region, 1, 16, 1, Object, Root), Vec3::X, Quat::IDENTITY)).unwrap());
     assert_eq!(world.object(entity).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::MissingRegionOrigin));
 
@@ -162,10 +157,9 @@ fn late_origin_resolves_existing_pose() {
 
 #[test]
 fn handle_origin_resolves_pose() {
-    let region = Region::new(15);
     let handle = RegionHandle::new((1024_u64 << 32) | 2048);
     let mut world = World::new(limits(1));
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     assert!(matches!(
         world.patch_region(region, RegionInfo { handle: Some(handle), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
@@ -180,9 +174,8 @@ fn handle_origin_resolves_pose() {
 
 #[test]
 fn pending_parent_is_first() {
-    let region = Region::new(16);
     let mut world = World::new(limits(1));
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let child = introduced(world.observe_object(observation(region, 1, 19, 1, Object, Local(local_id(2)))).unwrap());
 
     assert_eq!(world.object(child).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::PendingParent));
@@ -190,9 +183,8 @@ fn pending_parent_is_first() {
 
 #[test]
 fn linkset_rotation_ignores_parent_scale() {
-    let region = Region::new(2);
     let origin = DVec3::new(100.0, 200.0, 0.0);
-    let mut world = world_with_origin(region, origin, 4);
+    let (mut world, region) = world_with_origin(origin, 4);
     let parent_rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
     let parent = with_pose(observation(region, 1, 2, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), parent_rotation);
     let mut parent = parent;
@@ -215,8 +207,7 @@ fn linkset_rotation_ignores_parent_scale() {
 
 #[test]
 fn parent_motion_updates_descendant_pose() {
-    let region = Region::new(46);
-    let mut world = world_with_origin(region, DVec3::ZERO, 3);
+    let (mut world, region) = world_with_origin(DVec3::ZERO, 3);
     let parent = with_pose(observation(region, 1, 52, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY);
     let parent = introduced(world.observe_object(parent).unwrap());
     let child = with_pose(observation(region, 2, 53, 2, Object, Local(local_id(1))), Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY);
@@ -233,8 +224,7 @@ fn parent_motion_updates_descendant_pose() {
 
 #[test]
 fn avatar_transform_uses_accepted_scale() {
-    let region = Region::new(47);
-    let mut world = world_with_origin(region, DVec3::ZERO, 1);
+    let (mut world, region) = world_with_origin(DVec3::ZERO, 1);
     let scale = Vec3::new(0.7, 0.7, 1.8);
     let mut avatar = with_pose(observation(region, 1, 54, 1, Avatar, Root), Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY);
     avatar.scale = Some(scale);
@@ -249,8 +239,7 @@ fn avatar_transform_uses_accepted_scale() {
 
 #[test]
 fn sit_target_does_not_change_pose() {
-    let region = Region::new(43);
-    let mut world = world_with_origin(region, DVec3::new(100.0, 200.0, 0.0), 3);
+    let (mut world, region) = world_with_origin(DVec3::new(100.0, 200.0, 0.0), 3);
     let seat = with_pose(
         observation(region, 1, 48, 1, Object, Root),
         Vec3::new(10.0, 0.0, 0.0),
@@ -284,9 +273,8 @@ fn sit_target_does_not_change_pose() {
 
 #[test]
 fn missing_local_pose_precedes_missing_origin() {
-    let region = Region::new(44);
     let mut world = World::new(limits(2));
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let no_pose = introduced(world.observe_object(observation(region, 1, 50, 1, Object, Root)).unwrap());
     assert_eq!(world.object(no_pose).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::MissingLocalPose));
     assert_eq!(
@@ -301,9 +289,8 @@ fn missing_local_pose_precedes_missing_origin() {
 
 #[test]
 fn missing_pose_beats_joint() {
-    let region = Region::new(18);
     let mut world = World::new(limits(2));
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     introduced(world.observe_object(observation(region, 1, 22, 1, Avatar, Root)).unwrap());
     let child = with_pose(observation(region, 2, 23, 2, Object, Local(local_id(1))), Vec3::X, Quat::IDENTITY);
     let child = introduced(world.observe_object(child).unwrap());
@@ -313,8 +300,7 @@ fn missing_pose_beats_joint() {
 
 #[test]
 fn pending_parent_resolution_keeps_pose() {
-    let region = Region::new(3);
-    let mut world = world_with_origin(region, DVec3::ZERO, 4);
+    let (mut world, region) = world_with_origin(DVec3::ZERO, 4);
     let child = with_pose(observation(region, 2, 5, 2, Object, Local(local_id(1))), Vec3::X, Quat::IDENTITY);
     let child_entity = introduced(world.observe_object(child).unwrap());
     assert_eq!(world.object(child_entity).unwrap().parent(), Parent::Pending { address: address(region, 1), expected_uuid: None });
@@ -330,8 +316,7 @@ fn pending_parent_resolution_keeps_pose() {
 
 #[test]
 fn cascade_rebind_keeps_pose() {
-    let region = Region::new(49);
-    let mut world = world_with_origin(region, DVec3::ZERO, 3);
+    let (mut world, region) = world_with_origin(DVec3::ZERO, 3);
     let root = with_pose(observation(region, 1, 194, 1, Object, Root), Vec3::ZERO, Quat::IDENTITY);
     introduced(world.observe_object(root).unwrap());
     let parent = with_pose(observation(region, 2, 195, 2, Object, Local(local_id(1))), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY);
@@ -356,8 +341,7 @@ fn cascade_rebind_keeps_pose() {
 
 #[test]
 fn parent_change_requires_fresh_pose() {
-    let region = Region::new(4);
-    let mut world = world_with_origin(region, DVec3::ZERO, 4);
+    let (mut world, region) = world_with_origin(DVec3::ZERO, 4);
     let parent = introduced(
         world.observe_object(with_pose(observation(region, 1, 6, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
     );
@@ -378,8 +362,7 @@ fn parent_change_requires_fresh_pose() {
 
 #[test]
 fn repeated_parent_update_is_not_a_cycle() {
-    let region = Region::new(65);
-    let mut world = world_with_origin(region, DVec3::ZERO, 3);
+    let (mut world, region) = world_with_origin(DVec3::ZERO, 3);
     let parent = introduced(world.observe_object(observation(region, 1, 650, 1, Object, Root)).unwrap());
     let child = introduced(world.observe_object(observation(region, 2, 651, 2, Object, Local(local_id(1)))).unwrap());
 
@@ -394,8 +377,7 @@ fn repeated_parent_update_is_not_a_cycle() {
 
 #[test]
 fn delayed_observation_cannot_apply_pose_from_an_old_parent_frame() {
-    let region = Region::new(64);
-    let mut world = world_with_origin(region, DVec3::ZERO, 5);
+    let (mut world, region) = world_with_origin(DVec3::ZERO, 5);
     let first_parent = introduced(
         world.observe_object(with_pose(observation(region, 1, 640, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
     );
@@ -433,8 +415,7 @@ fn delayed_observation_cannot_apply_pose_from_an_old_parent_frame() {
 
 #[test]
 fn partial_pose_frames_update_independently() {
-    let region = Region::new(40);
-    let mut world = world_with_origin(region, DVec3::ZERO, 4);
+    let (mut world, region) = world_with_origin(DVec3::ZERO, 4);
     let first_parent = introduced(
         world.observe_object(with_pose(observation(region, 1, 40, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
     );
@@ -484,8 +465,7 @@ fn partial_pose_frames_update_independently() {
 
 #[test]
 fn partial_pose_replaces_detach_snapshot() {
-    let region = Region::new(41);
-    let mut world = world_with_origin(region, DVec3::new(100.0, 0.0, 0.0), 3);
+    let (mut world, region) = world_with_origin(DVec3::new(100.0, 0.0, 0.0), 3);
     let prim = introduced(
         world.observe_object(with_pose(observation(region, 1, 43, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
     );
@@ -514,8 +494,7 @@ fn partial_pose_replaces_detach_snapshot() {
 
 #[test]
 fn removed_seat_keeps_avatar_pending() {
-    let region = Region::new(42);
-    let mut world = world_with_origin(region, DVec3::new(100.0, 0.0, 0.0), 3);
+    let (mut world, region) = world_with_origin(DVec3::new(100.0, 0.0, 0.0), 3);
     let seat = introduced(
         world.observe_object(with_pose(observation(region, 1, 45, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
     );
@@ -532,8 +511,7 @@ fn removed_seat_keeps_avatar_pending() {
 
 #[test]
 fn seat_kill_requires_fresh_unseat() {
-    let region = Region::new(42);
-    let mut world = world_with_origin(region, DVec3::new(100.0, 0.0, 0.0), 3);
+    let (mut world, region) = world_with_origin(DVec3::new(100.0, 0.0, 0.0), 3);
     let seat = introduced(
         world.observe_object(with_pose(observation(region, 1, 45, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
     );
@@ -572,11 +550,9 @@ fn seat_kill_requires_fresh_unseat() {
 
 #[test]
 fn transfer_accepts_destination_pose() {
-    let first = Region::new(5);
-    let second = Region::new(6);
     let mut world = World::new(limits(4));
-    assert!(matches!(world.adopt_region(first).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(second).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let first = world.register_region().unwrap();
+    let second = world.register_region().unwrap();
     assert!(matches!(
         world.patch_region(first, RegionInfo { origin: Some(DVec3::new(100.0, 0.0, 0.0)), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
@@ -599,9 +575,8 @@ fn transfer_accepts_destination_pose() {
 
 #[test]
 fn attachment_waits_for_joint_pose() {
-    let region = Region::new(7);
     let mut world = World::new(limits(4));
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let avatar =
         introduced(world.observe_object(with_pose(observation(region, 1, 9, 1, Avatar, Root), Vec3::ZERO, Quat::IDENTITY)).unwrap());
     let attachment = with_pose(observation(region, 2, 10, 2, Object, Local(local_id(1))), Vec3::X, Quat::IDENTITY);
@@ -613,8 +588,7 @@ fn attachment_waits_for_joint_pose() {
 
 #[test]
 fn attachment_change_stales_pose() {
-    let region = Region::new(17);
-    let mut world = world_with_origin(region, DVec3::ZERO, 4);
+    let (mut world, region) = world_with_origin(DVec3::ZERO, 4);
     introduced(world.observe_object(with_pose(observation(region, 1, 20, 1, Avatar, Root), Vec3::ZERO, Quat::IDENTITY)).unwrap());
     let mut initial = with_pose(observation(region, 2, 21, 2, Object, Local(local_id(1))), Vec3::X, Quat::IDENTITY);
     initial.attachment_point = NonZeroU8::new(3).map_or(FieldUpdate::Clear, |value| FieldUpdate::Set(AttachmentPoint::new(value)));
@@ -654,8 +628,7 @@ fn attachment_change_stales_pose() {
 
 #[test]
 fn same_attachment_point_keeps_pose_frame() {
-    let region = Region::new(12);
-    let mut world = world_with_origin(region, DVec3::ZERO, 4);
+    let (mut world, region) = world_with_origin(DVec3::ZERO, 4);
     let avatar =
         introduced(world.observe_object(with_pose(observation(region, 1, 15, 1, Avatar, Root), Vec3::ZERO, Quat::IDENTITY)).unwrap());
     let point = AttachmentPoint::new(NonZeroU8::new(3).expect("nonzero attachment point"));
@@ -678,9 +651,8 @@ fn same_attachment_point_keeps_pose_frame() {
 
 #[test]
 fn detach_keeps_only_resolved_snapshot() {
-    let region = Region::new(8);
     let origin = DVec3::new(50.0, 60.0, 0.0);
-    let mut world = world_with_origin(region, origin, 4);
+    let (mut world, region) = world_with_origin(origin, 4);
     let _seat = introduced(
         world.observe_object(with_pose(observation(region, 1, 11, 1, Object, Root), Vec3::new(4.0, 5.0, 0.0), Quat::IDENTITY)).unwrap(),
     );
@@ -700,9 +672,8 @@ fn detach_keeps_only_resolved_snapshot() {
     assert_eq!(reason, UnresolvedReason::PoseNotValidForCurrentFrame);
     assert_eq!(world.object(avatar).unwrap().world_transform().unwrap(), WorldTransformState::Provisional { pose, reason });
 
-    let missing = Region::new(9);
     let mut world = World::new(limits(4));
-    assert!(matches!(world.adopt_region(missing).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let missing = world.register_region().unwrap();
     let _seat =
         introduced(world.observe_object(with_pose(observation(missing, 1, 13, 1, Object, Root), Vec3::ZERO, Quat::IDENTITY)).unwrap());
     let avatar = introduced(
@@ -716,11 +687,9 @@ fn detach_keeps_only_resolved_snapshot() {
 
 #[test]
 fn transfer_clears_region_sit_target() {
-    let first = Region::new(10);
-    let second = Region::new(11);
     let mut world = World::new(limits(4));
-    assert!(matches!(world.adopt_region(first).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(second).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let first = world.register_region().unwrap();
+    let second = world.register_region().unwrap();
     let entity =
         introduced(world.observe_object(with_pose(observation(first, 10, 15, 1, Avatar, Root), Vec3::ZERO, Quat::IDENTITY)).unwrap());
     assert_eq!(
@@ -739,8 +708,7 @@ fn transfer_clears_region_sit_target() {
 
 #[test]
 fn parent_depth_limit_is_enforced() {
-    let region = Region::new(13);
-    let mut world = world_with_origin(region, DVec3::ZERO, 18);
+    let (mut world, region) = world_with_origin(DVec3::ZERO, 18);
     let mut last = None;
     let mut root = None;
     for index in 0..=16 {

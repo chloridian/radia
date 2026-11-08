@@ -1,25 +1,22 @@
 use super::Effects;
 use super::lifecycle::RemovalCause;
-use crate::history::WorldChange::{RegionAdopted, RegionRetired, RegionUpdated};
+use crate::history::WorldChange::{RegionRegistered, RegionRetired, RegionUpdated};
 use crate::update::FieldStamp;
 use crate::{ApplyError, Region, RegionApplied, RegionInfo, RegionOutcome, UpdateSource};
 use crate::{RegionState, World, newer_field};
 
 impl World {
-    pub fn adopt_region(&mut self, region: Region) -> Result<RegionApplied, ApplyError> {
-        if self.retired.contains(&region) {
-            return Err(ApplyError::RegionRetired);
-        }
-        if self.regions.contains_key(&region) {
-            return Ok(RegionApplied::unchanged());
-        }
-        if self.regions.len().saturating_add(self.retired.len()) >= self.limits.max_region_registrations {
-            return Err(ApplyError::RegistrationBudgetExhausted);
+    pub fn register_region(&mut self) -> Result<Region, ApplyError> {
+        if self.regions.len() >= self.limits.max_regions {
+            return Err(ApplyError::RegionBudgetExhausted);
         }
         self.ensure_revision_available()?;
+        let generation = self.last_region_generation.checked_add(1).ok_or(ApplyError::RegionGenerationExhausted)?;
+        let region = Region::new(self.id, generation);
         self.regions.insert(region, RegionState::default());
-        let revision = self.publish_changes(vec![RegionAdopted(region)]).expect("adopting a region journals a change");
-        Ok(RegionApplied::new(RegionOutcome::Adopted { revision }))
+        self.last_region_generation = generation;
+        self.publish_changes(vec![RegionRegistered(region)]).expect("registering a region journals a change");
+        Ok(region)
     }
     pub fn patch_region(&mut self, region: Region, info: RegionInfo) -> Result<RegionApplied, ApplyError> {
         self.require_active_region(region)?;
@@ -63,7 +60,10 @@ impl World {
         Ok(self.publish_region_patch(RegionUpdated(region)))
     }
     pub fn retire_region(&mut self, region: Region) -> Result<RegionApplied, ApplyError> {
-        if self.retired.contains(&region) {
+        if !self.region_was_issued(region) {
+            return Err(ApplyError::StaleRegion);
+        }
+        if !self.regions.contains_key(&region) {
             return Ok(RegionApplied::unchanged());
         }
         self.require_active_region(region)?;
@@ -78,7 +78,6 @@ impl World {
         self.terrain_patches -= removed_region.terrain.patch_count();
         self.environment_bytes -= removed_region.environment.source_bytes();
         self.parcel_bytes -= removed_region.parcels.retained_bytes();
-        self.retired.insert(region);
         self.tombstones.remove_region(region);
         self.retained.remove_region(region);
         self.floors.remove(&region);
@@ -133,11 +132,12 @@ mod tests {
     use std::num::NonZeroU32;
 
     use crate::{
-        ApplyError::RevisionExhausted, ApplyOutcome, DeferredReason, ObjectPatch, PbrMaterialOverrides, WorldLimits, WorldRevision,
+        ApplyError::{RegionGenerationExhausted, RevisionExhausted},
+        ApplyOutcome, DeferredReason, ObjectPatch, PbrMaterialOverrides, WorldLimits, WorldRevision,
     };
     fn limits() -> WorldLimits {
         WorldLimits {
-            max_region_registrations: 2,
+            max_regions: 2,
             max_entities: 2,
             max_entities_per_region: 2,
             max_tombstones_per_region: 2,
@@ -152,9 +152,8 @@ mod tests {
     }
     #[test]
     fn failed_name_commit_does_not_advance_ordering() {
-        let region = Region::new(1);
         let mut world = World::new(limits());
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         let source = |order| UpdateSource::new(region, order as u32, crate::OrderEvidence::Ordered(order), 0);
         let name = |name: &str| RegionInfo { name: Some(name.into()), ..RegionInfo::default() };
         let _ = world.observe_region_metadata(source(10), name("First")).unwrap();
@@ -168,19 +167,51 @@ mod tests {
     }
     #[test]
     fn revision_exhaustion_keeps_region_active() {
-        let region = Region::new(1);
         let mut world = World::new(limits());
-        let _ = world.adopt_region(region).expect("adopt region");
+        let region = world.register_region().unwrap();
         world.journal.revision = WorldRevision(u64::MAX);
         assert!(matches!(world.retire_region(region), Err(RevisionExhausted)));
         assert!(world.region(region).is_some());
-        assert!(!world.retired.contains(&region));
     }
+
+    #[test]
+    fn registration_generation_exhaustion_is_atomic() {
+        let mut world = World::new(limits());
+        let existing = world.register_region().unwrap();
+        let active = world.regions.len();
+        let revision = world.revision();
+        let journal_len = world.journal.entries.len();
+        world.last_region_generation = u64::MAX;
+
+        assert_eq!(world.register_region(), Err(RegionGenerationExhausted));
+        assert_eq!(world.regions.len(), active);
+        assert!(world.region(existing).is_some());
+        assert_eq!(world.revision(), revision);
+        assert_eq!(world.journal.entries.len(), journal_len);
+        assert_eq!(world.last_region_generation, u64::MAX);
+    }
+
+    #[test]
+    fn registration_revision_exhaustion_is_atomic() {
+        let mut world = World::new(limits());
+        let existing = world.register_region().unwrap();
+        let active = world.regions.len();
+        let generation = world.last_region_generation;
+        let journal_len = world.journal.entries.len();
+        world.journal.revision = WorldRevision(u64::MAX);
+
+        assert_eq!(world.register_region(), Err(RevisionExhausted));
+        assert_eq!(world.regions.len(), active);
+        assert!(world.region(existing).is_some());
+        assert_eq!(world.last_region_generation, generation);
+        assert_eq!(world.journal.entries.len(), journal_len);
+        assert_eq!(world.revision(), WorldRevision(u64::MAX));
+    }
+
     #[test]
     fn retirement_clears_retained_overrides() {
-        let region = Region::new(1);
         let mut world = World::new(limits());
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         let source = UpdateSource::new(region, 1, crate::OrderEvidence::Ordered(1), 0);
         let patch = ObjectPatch {
             pbr_material_overrides: Some(PbrMaterialOverrides::default()),

@@ -175,11 +175,25 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{World, WorldLimits};
 
     #[test]
     fn tombstone_index_tracks_mutations() {
-        let first_region = Region::new(1);
-        let second_region = Region::new(2);
+        let mut world = World::new(WorldLimits {
+            max_regions: 2,
+            max_entities: 0,
+            max_entities_per_region: 0,
+            max_tombstones_per_region: 0,
+            max_tombstones: 0,
+            max_tombstone_bytes_per_region: 0,
+            max_tombstone_bytes: 0,
+            max_journal_entries: 0,
+            max_journal_changes: 0,
+            max_region_name_bytes: 0,
+            max_recovery_targets: 0,
+        });
+        let first_region = world.register_region().unwrap();
+        let second_region = world.register_region().unwrap();
         let first = LocalAddress::new(first_region, NonZeroU32::new(1).unwrap());
         let second = LocalAddress::new(first_region, NonZeroU32::new(2).unwrap());
         let other = LocalAddress::new(second_region, NonZeroU32::new(1).unwrap());

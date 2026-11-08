@@ -32,6 +32,10 @@ use world::{
     UpdateSource, WorldPose,
 };
 
+fn fixture_region(world: &world::World) -> Region {
+    world.region_page(None, 64).expect("fixture regions fit one page").regions[0].region
+}
+
 fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_pages: bool) {
     let scope = device.push_error_scope(ErrorFilter::Validation);
     let (_scene, view, camera) = scene(alpha);
@@ -260,7 +264,7 @@ fn settle_scene(world: &world::World, scene: &mut Reconciler, view: &mut SceneVi
 
 fn move_object(world: &mut world::World, id: u32, order: u64, position: Vec3, color: [u8; 4]) {
     let mut observation = ObjectObservation::new(
-        UpdateSource::new(Region::new(1), u32::try_from(order).expect("fixture sequence"), OrderEvidence::Ordered(order), 0),
+        UpdateSource::new(fixture_region(world), u32::try_from(order).expect("fixture sequence"), OrderEvidence::Ordered(order), 0),
         uuid::Uuid::from_u128(u128::from(id)),
         std::num::NonZeroU32::new(id).expect("fixture local ID"),
         Kind::Object,
@@ -287,7 +291,7 @@ fn mesh_scene_with_alpha(
 ) -> (world::World, Reconciler, SceneView, Camera, Vec<AssetRequest>) {
     let count = objects.len();
     let mut world = world::World::new(world::WorldLimits {
-        max_region_registrations: 1,
+        max_regions: 1,
         max_entities: count,
         max_entities_per_region: count,
         max_tombstones_per_region: 1,
@@ -299,8 +303,7 @@ fn mesh_scene_with_alpha(
         max_region_name_bytes: 64,
         max_recovery_targets: count,
     });
-    let region = Region::new(1);
-    let _adopted = world.adopt_region(region).unwrap();
+    let region = world.register_region().unwrap();
     let _metadata = world.patch_region(region, world::RegionInfo { origin: Some(DVec3::ZERO), ..Default::default() }).unwrap();
     for (id, asset, position) in objects {
         let mut observation = ObjectObservation::new(
@@ -336,7 +339,7 @@ fn mesh_scene_with_alpha(
 
 fn avatar_mesh_scene() -> (world::World, Reconciler, SceneView, Camera) {
     let mut world = world::World::new(world::WorldLimits {
-        max_region_registrations: 1,
+        max_regions: 1,
         max_entities: 1,
         max_entities_per_region: 1,
         max_tombstones_per_region: 1,
@@ -348,8 +351,7 @@ fn avatar_mesh_scene() -> (world::World, Reconciler, SceneView, Camera) {
         max_region_name_bytes: 64,
         max_recovery_targets: 1,
     });
-    let region = Region::new(1);
-    let _ = world.adopt_region(region).expect("avatar region");
+    let region = world.register_region().expect("avatar region registers");
     let _ =
         world.patch_region(region, world::RegionInfo { origin: Some(DVec3::ZERO), ..Default::default() }).expect("avatar region origin");
     let mut observation = ObjectObservation::new(
@@ -866,7 +868,7 @@ fn gpu_removed_pending_replacement_reconciles_snapshot() {
     let blocker = geometry.memory.reserve(blocker_bytes, crate::geometry::Resource::Mesh).expect("fill mesh budget");
 
     let mut patch = world::ObjectPatch::new(
-        UpdateSource::new(Region::new(1), 20, OrderEvidence::Ordered(20), 0),
+        UpdateSource::new(fixture_region(&world), 20, OrderEvidence::Ordered(20), 0),
         std::num::NonZeroU32::new(1).expect("target local id"),
     );
     patch.shape =
@@ -889,7 +891,7 @@ fn gpu_removed_pending_replacement_reconciles_snapshot() {
 
     let _ = world
         .remove_object(
-            UpdateSource::new(Region::new(1), 30, OrderEvidence::Ordered(30), 0),
+            UpdateSource::new(fixture_region(&world), 30, OrderEvidence::Ordered(30), 0),
             std::num::NonZeroU32::new(1).expect("target local id"),
         )
         .expect("target removal applies");
@@ -971,7 +973,7 @@ fn gpu_replacement_visibility_tracks_its_own_bounds() {
     let blocker_bytes = crate::geometry::MESH_BYTES - geometry.memory.mesh_state().bytes;
     let blocker = geometry.memory.reserve(blocker_bytes, crate::geometry::Resource::Mesh).expect("fill mesh budget");
     let mut patch = world::ObjectPatch::new(
-        UpdateSource::new(Region::new(1), 2, OrderEvidence::Ordered(2), 0),
+        UpdateSource::new(fixture_region(&world), 2, OrderEvidence::Ordered(2), 0),
         std::num::NonZeroU32::new(1).expect("target local ID"),
     );
     patch.shape = FieldUpdate::Set(Shape::Mesh { asset_id: second_asset, flags: SculptFlags::default() });
@@ -1194,7 +1196,7 @@ fn gpu_avatar_mesh_ready_late_uses_agent_pose() {
     assert!(!geometry.cache.objects.contains_key(&entity), "the unresolved avatar has no render item");
 
     let mut observation = ObjectObservation::new(
-        UpdateSource::new(Region::new(1), 10, OrderEvidence::Ordered(10), 0),
+        UpdateSource::new(fixture_region(&world), 10, OrderEvidence::Ordered(10), 0),
         agent_id,
         std::num::NonZeroU32::new(1).expect("avatar local id"),
         Kind::Avatar,
@@ -1340,7 +1342,7 @@ fn gpu_mesh_faces_and_alpha() {
 
     let _removed = world
         .remove_object(
-            UpdateSource::new(Region::new(1), 10, OrderEvidence::Ordered(10), 0),
+            UpdateSource::new(fixture_region(&world), 10, OrderEvidence::Ordered(10), 0),
             std::num::NonZeroU32::new(2).expect("fixture local ID"),
         )
         .expect("competing object removal applies");
@@ -1350,7 +1352,7 @@ fn gpu_mesh_faces_and_alpha() {
     assert_eq!(geometry.stats.instances, 1, "only the mesh target remains visible");
 
     let mut patch = world::ObjectPatch::new(
-        UpdateSource::new(Region::new(1), 11, OrderEvidence::Ordered(11), 0),
+        UpdateSource::new(fixture_region(&world), 11, OrderEvidence::Ordered(11), 0),
         std::num::NonZeroU32::new(1).expect("fixture local ID"),
     );
     patch.shape = FieldUpdate::Set(Shape::Mesh { asset_id: mesh_asset, flags: SculptFlags { invert: true, mirror: true } });
@@ -1465,7 +1467,7 @@ fn gpu_lod_keeps_fallback_during_unrelated_retirement() {
 
     let _ = world
         .remove_object(
-            UpdateSource::new(Region::new(1), 30, OrderEvidence::Ordered(30), 0),
+            UpdateSource::new(fixture_region(&world), 30, OrderEvidence::Ordered(30), 0),
             std::num::NonZeroU32::new(2).expect("unrelated local id"),
         )
         .expect("unrelated object removal applies");
@@ -1618,7 +1620,7 @@ fn gpu_lod_keeps_fallback() {
 
     let _applied = world
         .remove_object(
-            UpdateSource::new(Region::new(1), 30, OrderEvidence::Ordered(30), 0),
+            UpdateSource::new(fixture_region(&world), 30, OrderEvidence::Ordered(30), 0),
             std::num::NonZeroU32::new(2).expect("capacity freeing local id"),
         )
         .expect("capacity freeing object removal applies");
@@ -2024,7 +2026,7 @@ fn gpu_first_appearance_wait_is_bounded() {
     let key = crate::geometry::first_appearance::AppearanceKey { entity, asset };
     assert!(geometry.first_appearances.shown(key));
     let _removed = world
-        .remove_object(UpdateSource::new(Region::new(1), 2, OrderEvidence::Ordered(2), 0), std::num::NonZeroU32::new(1).unwrap())
+        .remove_object(UpdateSource::new(fixture_region(&world), 2, OrderEvidence::Ordered(2), 0), std::num::NonZeroU32::new(1).unwrap())
         .unwrap();
     scene.notify_world_change();
     let _requests = settle_scene(&world, &mut scene, &mut view, now + wait);
@@ -2442,7 +2444,7 @@ fn gpu_prep_cleanup_on_lifecycle() {
     assert!(geometry.cache.preparation_mesh_ids.contains(&target_mesh));
 
     let _ = world
-        .remove_object(UpdateSource::new(Region::new(1), 10, OrderEvidence::Ordered(10), 0), std::num::NonZeroU32::new(2).unwrap())
+        .remove_object(UpdateSource::new(fixture_region(&world), 10, OrderEvidence::Ordered(10), 0), std::num::NonZeroU32::new(2).unwrap())
         .expect("target removal applies");
     scene.notify_world_change();
     let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
@@ -2462,7 +2464,7 @@ fn gpu_prep_cleanup_on_lifecycle() {
     assert!(geometry.cache.preparation_candidates.contains(&remaining_index));
     assert!(geometry.cache.preparation_mesh_ids.contains(&remaining_mesh));
 
-    let _ = world.retire_region(Region::new(1)).expect("region retirement applies");
+    let _ = world.retire_region(fixture_region(&world)).expect("region retirement applies");
     scene.notify_world_change();
     let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
     prepare_frame(&device, &queue, &mut geometry, &view, moved_camera);
@@ -2575,7 +2577,7 @@ fn gpu_visible_upload_wins() {
 
     let set_texture = |world: &mut world::World, id: u32, sequence: u32, texture: AssetId| {
         let mut observation = ObjectObservation::new(
-            UpdateSource::new(Region::new(1), sequence, OrderEvidence::Ordered(u64::from(sequence)), 0),
+            UpdateSource::new(fixture_region(world), sequence, OrderEvidence::Ordered(u64::from(sequence)), 0),
             Uuid::from_u128(100_000 + u128::from(id)),
             std::num::NonZeroU32::new(id).expect("fixture local id"),
             Kind::Object,
