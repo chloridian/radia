@@ -842,7 +842,7 @@ mod tests {
     use utils::{AssetId, ExperienceId};
     use uuid::Uuid;
     use world::{
-        Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate, Pose, Region,
+        Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate, Pose,
         RegionInfo, Shape, SurfaceAppearance, UpdateSource, World, WorldLimits,
     };
 
@@ -867,7 +867,7 @@ mod tests {
 
     fn world() -> World {
         World::new(WorldLimits {
-            max_region_registrations: 2,
+            max_regions: 2,
             max_entities: 16,
             max_entities_per_region: 16,
             max_tombstones_per_region: 16,
@@ -885,25 +885,23 @@ mod tests {
     async fn water_height_follows_agent_region() {
         let mut world = world();
         let agent = Uuid::from_u128(1);
-        for region in [Region::new(1), Region::new(2)] {
-            let _ = world.adopt_region(region).unwrap();
+        let first_region = world.register_region().unwrap();
+        let second_region = world.register_region().unwrap();
+        for (index, region) in [first_region, second_region].into_iter().enumerate() {
             let _ = world
-                .patch_region(
-                    region,
-                    RegionInfo { origin: Some(DVec3::new((region.get() - 1) as f64 * 256.0, 0.0, 7.0)), ..RegionInfo::default() },
-                )
+                .patch_region(region, RegionInfo { origin: Some(DVec3::new(index as f64 * 256.0, 0.0, 7.0)), ..RegionInfo::default() })
                 .unwrap();
         }
         let _ = world
             .observe_object(ObjectObservation::new(
-                UpdateSource::new(Region::new(1), 1, Ordered(1), 0),
+                UpdateSource::new(first_region, 1, Ordered(1), 0),
                 agent,
                 NonZeroU32::new(1).unwrap(),
                 Kind::Avatar,
                 ParentUpdate::Root,
             ))
             .unwrap();
-        let _ = world.observe_water_height(UpdateSource::new(Region::new(2), 1, Ordered(1), 0), 31.0).unwrap();
+        let _ = world.observe_water_height(UpdateSource::new(second_region, 1, Ordered(1), 0), 31.0).unwrap();
         let budget = Budget::default();
         let (mut scene, view) = Reconciler::new(budget.clone());
         let (sender, incoming) = mpsc::channel(1);
@@ -978,16 +976,16 @@ mod tests {
         };
         let (height, original) = hydrate(&world);
         assert_eq!(height, None, "another region's water must not supply the water height");
-        assert_eq!(selected_environment.borrow().agent_region, Some(Region::new(1)));
+        assert_eq!(selected_environment.borrow().agent_region, Some(first_region));
         assert_eq!(selected_environment.borrow().choice, choice);
         let original = original.expect("the observed avatar is available before its water height");
-        let _ = world.observe_water_height(UpdateSource::new(Region::new(1), 2, Ordered(2), 0), 17.0).unwrap();
+        let _ = world.observe_water_height(UpdateSource::new(first_region, 2, Ordered(2), 0), 17.0).unwrap();
         assert_eq!(hydrate(&world), (Some(24.0), Some(original)));
-        let _ = world.retire_region(Region::new(1)).unwrap();
+        let _ = world.retire_region(first_region).unwrap();
         assert_eq!(hydrate(&world), (None, None), "retirement must remove both the avatar and previous water height");
         let _ = world
             .observe_object(ObjectObservation::new(
-                UpdateSource::new(Region::new(2), 3, Ordered(3), 0),
+                UpdateSource::new(second_region, 3, Ordered(3), 0),
                 agent,
                 NonZeroU32::new(1).unwrap(),
                 Kind::Avatar,
@@ -998,14 +996,13 @@ mod tests {
         assert_eq!(height, Some(38.0), "the new avatar region supplies its own observed height");
         assert_ne!(replacement.expect("the replacement avatar is available"), original, "a retired entity must not remain cached");
         assert_eq!(selected_environment.borrow().choice, choice);
-        assert_eq!(selected_environment.borrow().agent_region, Some(Region::new(2)));
+        assert_eq!(selected_environment.borrow().agent_region, Some(second_region));
     }
 
     #[tokio::test]
     async fn pending_asset_preserves_scene() {
         let mut world = world();
-        let region = Region::new(1);
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap();
         let mut object = ObjectObservation::new(
             UpdateSource::new(region, 1, Ordered(1), 0),
@@ -1080,8 +1077,7 @@ mod tests {
     #[tokio::test]
     async fn stalled_publication_preserves_intake() {
         let mut world = world();
-        let region = Region::new(1);
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         let _ = world
             .observe_object(ObjectObservation::new(
                 UpdateSource::new(region, 1, Ordered(1), 0),

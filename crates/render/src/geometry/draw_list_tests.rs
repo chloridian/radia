@@ -47,6 +47,7 @@ fn stateful_draw_changes_match_fresh_layouts() {
 
 #[test]
 fn blended_parameter_patch_does_not_sort() {
+    let (_region_world, region) = crate::test_support::registered_region();
     let (_scene, view, _) = super::super::fixtures::scene(255);
     let object = view.objects().next().expect("fixture object");
     let (_, mesh) = object.mesh().expect("fixture mesh");
@@ -57,7 +58,7 @@ fn blended_parameter_patch_does_not_sort() {
     let id = item_id(0);
     let mut items = FrameCache::default();
     let mut list = DrawList::default();
-    let index = items.insert_item(new_item(id, 3, 0.0, origin, &mesh, &textures, &mut list)).expect("test item index");
+    let index = items.insert_item(new_item(id, 3, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index");
     list.layout(&[], &[index], &mut items.items, camera);
     if let Some(face) = items.get_by_id_mut(id).and_then(|item| item.faces.first_mut()) {
         face.parameter_bytes[0] ^= 1;
@@ -69,6 +70,7 @@ fn blended_parameter_patch_does_not_sort() {
 
 #[test]
 fn overflow_omits_items_until_within_budget() {
+    let (_region_world, region) = crate::test_support::registered_region();
     let (_scene, view, _) = super::super::fixtures::scene(255);
     let object = view.objects().next().expect("fixture object");
     let (_, mesh) = object.mesh().expect("fixture mesh");
@@ -83,7 +85,7 @@ fn overflow_omits_items_until_within_budget() {
 
     for (slot, style, x) in [(0, 0, 1.0), (1, 3, 100.0)] {
         let id = item_id(slot);
-        let mut item = new_item(id, style, 0.0, origin, &mesh, &textures, &mut list);
+        let mut item = new_item(id, style, 0.0, origin, &mesh, region, &textures, &mut list);
         item.position = DVec3::new(x, 0.0, 0.0);
         let first_face = item.faces.pop().expect("test item face");
         let center = item.info.centers[0];
@@ -162,6 +164,7 @@ proptest! {
 }
 
 fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
+    let (_region_world, region) = crate::test_support::registered_region();
     let (_scene, view, _) = super::super::fixtures::scene(255);
     let first_object = view.objects().next().expect("fixture object");
     let (_, mesh) = first_object.mesh().expect("fixture mesh");
@@ -188,7 +191,9 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
         match kind % 6 {
             0 => {
                 if items.index(id).is_none() {
-                    items.insert_item(new_item(id, *style, camera_x, origin, &mesh, &textures, &mut list)).expect("test item index");
+                    items
+                        .insert_item(new_item(id, *style, camera_x, origin, &mesh, region, &textures, &mut list))
+                        .expect("test item index");
                     layout = true;
                 }
             }
@@ -267,6 +272,7 @@ fn new_item(
     camera_x: f64,
     origin: DVec3,
     mesh: &SharedMesh,
+    region: Region,
     textures: &[assets::TextureHandle; 2],
     list: &mut DrawList,
 ) -> CachedItem {
@@ -281,7 +287,7 @@ fn new_item(
     CachedItem {
         id,
         entity: None,
-        region: Region::new(1),
+        region,
         mesh: mesh.clone(),
         info,
         position,

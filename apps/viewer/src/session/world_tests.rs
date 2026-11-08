@@ -198,10 +198,12 @@ fn recovery_routes_follow_active_region_lifetimes() {
     let destination_simulator = simulator_id();
     let source_region = session.register_simulator(source_simulator, None).expect("source simulator");
     let destination_region = session.register_simulator(destination_simulator, None).expect("destination simulator");
+    let mut foreign_session = SessionWorld::new(viewer_world_limits());
+    let foreign_region = foreign_session.register_simulator(simulator_id(), None).expect("foreign simulator");
 
     assert_eq!(session.simulator_for_region(source_region), Some(source_simulator));
     assert_eq!(session.simulator_for_region(destination_region), Some(destination_simulator));
-    assert_eq!(session.simulator_for_region(Region::new(u64::MAX)), None);
+    assert_eq!(session.simulator_for_region(foreign_region), None);
 
     session.retire_simulator(source_simulator).expect("retire source simulator");
     assert_eq!(session.region_for(source_simulator), None);
@@ -646,6 +648,69 @@ fn live_kill_cancels_removed_entities() {
     assert!(cancelled.contains(&parent_address));
     assert!(cancelled.contains(&child_address));
     assert_eq!(killed.recovery_targets().count(), 0);
+}
+
+#[test]
+fn relationship_pressure_requests_recovery() {
+    let simulator = simulator_id();
+    let mut limits = viewer_world_limits();
+    limits.max_entities = 512;
+    limits.max_entities_per_region = 512;
+    let mut session = SessionWorld::new(limits);
+    let region = session.register_simulator(simulator, None).unwrap();
+    let local = |id| NonZeroU32::new(id).unwrap();
+    for id in 1..=3 {
+        apply_one(
+            &mut session,
+            simulator,
+            region,
+            ObjectOperation::Observe(observation(region, id, u128::from(id), local(id), ParentUpdate::Root)),
+        );
+        apply_one(
+            &mut session,
+            simulator,
+            region,
+            ObjectOperation::Remove { source: UpdateSource::new(region, 10, OrderEvidence::Ordered(10), 0), local_id: local(id) },
+        );
+    }
+    for child in 0..195 {
+        apply_one(
+            &mut session,
+            simulator,
+            region,
+            ObjectOperation::Observe(observation(
+                region,
+                child + 30,
+                u128::from(child + 100),
+                local(child + 10),
+                ParentUpdate::Local(local(child / 65 + 1)),
+            )),
+        );
+    }
+    let mut blocked = None;
+    'parents: for parent in 0..200 {
+        for (step, destination) in [1, 2, 3, parent + 300].into_iter().enumerate() {
+            let request =
+                observation(region, 1000 + parent * 4 + step as u32, u128::from(parent + 10_000), local(destination), ParentUpdate::Root);
+            let summary = apply_one(&mut session, simulator, region, ObjectOperation::Observe(request.clone()));
+            assert_eq!(summary.status, IngestStatus::Applied);
+            let applied = summary.blocks[0].applied().expect("valid observation produces an outcome");
+            if applied.outcome == world::ApplyOutcome::Deferred(world::DeferredReason::RelationshipCapacity) {
+                let address = LocalAddress::new(region, local(destination));
+                assert_eq!(summary.recovery_requests().collect::<Vec<_>>(), [(address, CacheMissType::Full)]);
+                blocked = Some((request, address));
+                break 'parents;
+            }
+        }
+    }
+    let (request, address) = blocked.expect("reused addresses saturate relationship admission");
+    while session.world().has_pending_relationships() {
+        let _ = session.resolve_relationships().unwrap();
+    }
+    let replay = apply_one(&mut session, simulator, region, ObjectOperation::Observe(request));
+    assert_matches!(replay.blocks[0].applied().unwrap().outcome, world::ApplyOutcome::Introduced(_) | world::ApplyOutcome::Updated(_));
+    assert!(replay.recovery_requests().all(|(requested, _)| requested != address));
+    assert!(replay.recovery_cancellation_addresses().any(|cancelled| cancelled == address));
 }
 
 #[tokio::test(start_paused = true)]

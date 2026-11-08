@@ -2,13 +2,14 @@ use std::assert_matches;
 
 use super::support::{
     BTreeMap, BTreeSet, Budget, Duration, Instant, NonZeroU32, ParentUpdate, Placement, ProptestConfig, ReadFailure, ReadQuery, ReadReply,
-    ReconcileStep, Reconciler, RecoveryReason, Region, Status, Uuid, WorldReadError, add, ids, move_root, positions, prop, prop_assert_eq,
-    proptest, reply, settle, source, world,
+    ReconcileStep, Reconciler, RecoveryReason, Status, Uuid, WorldReadError, add, ids, move_root, positions, prop, prop_assert_eq,
+    proptest, reply, settle, source, world, world_region,
 };
 
 #[test]
 fn atomic_region_retirement() {
     let mut world = world();
+    let region = world_region(&world, 0);
     for id in 1..301 {
         add(&mut world, id, id as u32, ParentUpdate::Root, 0.0, id as u64);
     }
@@ -16,7 +17,7 @@ fn atomic_region_retirement() {
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let entities: Vec<_> = view.objects().map(|object| object.detail().summary.entity).collect();
-    let _ = world.retire_region(Region::new(1)).unwrap();
+    let _ = world.retire_region(region).unwrap();
     scene.notify_world_change();
     let mut partial = false;
     loop {
@@ -39,7 +40,7 @@ fn atomic_region_retirement() {
     }
     assert!(partial);
     assert!(entities.into_iter().all(|entity| view.object(entity).is_none()), "retirement removes direct object lookups atomically");
-    assert!(view.region(Region::new(1)).is_none(), "retirement removes the region lookup with its objects");
+    assert!(view.region(region).is_none(), "retirement removes the region lookup with its objects");
     assert_eq!(view.objects().count(), 0);
     assert_eq!(view.regions().count(), 0);
     assert_eq!(view.revision(), Some(world.revision()));
@@ -124,7 +125,7 @@ fn publication_backpressure_and_close() {
     assert_eq!(view.objects().count(), 0);
     assert_eq!(view.status(), Status::Closed);
     assert!(view.object(retained.detail().summary.entity).is_none(), "retained data cannot bypass the session lifetime");
-    assert!(view.region(Region::new(1)).is_none(), "closed sessions hide retained region data");
+    assert!(view.region(world_region(&world, 0)).is_none(), "closed sessions hide retained region data");
     drop(scene);
     drop(view);
     assert!(budget.charged_bytes() > 0);
@@ -311,7 +312,7 @@ proptest! {
         for (index, (op, address)) in ops.into_iter().enumerate() {
             let order = index as u64 + 1;
             if op == 0 {
-                let _ = world.remove_object(source(1, order), NonZeroU32::new(address).unwrap()).unwrap();
+                let _ = world.remove_object(source(&world, 0, order), NonZeroU32::new(address).unwrap()).unwrap();
                 expected.remove(&address);
             } else {
                 let id = if op == 1 { u128::from(address) } else { 1000 + index as u128 };

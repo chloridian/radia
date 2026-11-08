@@ -5,8 +5,8 @@ use world::{FaceAppearance, SurfaceAppearance, TerrainPatch, TerrainSettings, Te
 use super::support::{
     AssetId, BTreeMap, BTreeSet, Budget, DVec3, Detail, DrawnMeshKey, FieldUpdate, Instant, Kind, NonZeroU32, ObjectObservation,
     ObjectPatch, ParentUpdate, Placement, Pose, PreparedMesh, Quat, ReadFailure, ReadQuery, ReconcileStep, Reconciler, RecoveryReason,
-    Region, RegionInfo, Request, Shape, Status, Uuid, Vec3, add, add_shaped, camera, ids, move_root, positions, prepared_asset, reply,
-    settle, settle_materials, source, world, world_with_capacity,
+    RegionInfo, Request, Shape, Status, Uuid, Vec3, add, add_shaped, camera, ids, move_root, positions, prepared_asset, reply, settle,
+    settle_materials, source, world, world_region, world_with_capacity,
 };
 
 #[test]
@@ -89,7 +89,7 @@ fn mesh_reuse_and_replacement() {
     assert!(view.objects().all(|object| {
         matches!(object.mesh(), Some((DrawnMeshKey::Prim(key), mesh)) if key.detail == Detail::High && mesh.id() != meshes[0].1.id())
     }));
-    let mut patch = ObjectPatch::new(source(1, 3), NonZeroU32::new(1).unwrap());
+    let mut patch = ObjectPatch::new(source(&world, 0, 3), NonZeroU32::new(1).unwrap());
     patch.shape = FieldUpdate::Set(Shape::Prim(world::PrimShape { profile_curve: 15, ..Default::default() }));
     let _ = world.patch_object(patch).unwrap();
     scene.notify_world_change();
@@ -249,7 +249,7 @@ fn busy_scene_tracks_live_updates() {
         add(&mut world, id as u128, id, ParentUpdate::Root, 100.0, id as u64);
     }
     for id in 1..=2 {
-        let mut patch = ObjectPatch::new(source(1, 4000 + id as u64), NonZeroU32::new(id).unwrap());
+        let mut patch = ObjectPatch::new(source(&world, 0, 4000 + id as u64), NonZeroU32::new(id).unwrap());
         patch.surface_appearance = Some(
             SurfaceAppearance::new(
                 FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(9000 + id as u128))), ..FaceAppearance::default() },
@@ -260,8 +260,9 @@ fn busy_scene_tracks_live_updates() {
         let _ = world.patch_object(patch).unwrap();
     }
     let terrain_ids = std::array::from_fn(|index| Uuid::from_u128(9100 + index as u128));
-    let _ = world.observe_terrain_settings(source(1, 4100), TerrainSettings::new(terrain_ids, [0.0; 4], [64.0; 4]).unwrap()).unwrap();
-    let _ = world.observe_terrain_patch(source(1, 4101), TerrainPatch::new(0, 0, Box::new([0.0; 256])).unwrap()).unwrap();
+    let _ =
+        world.observe_terrain_settings(source(&world, 0, 4100), TerrainSettings::new(terrain_ids, [0.0; 4], [64.0; 4]).unwrap()).unwrap();
+    let _ = world.observe_terrain_patch(source(&world, 0, 4101), TerrainPatch::new(0, 0, Box::new([0.0; 256])).unwrap()).unwrap();
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     scene.set_camera(camera(98.0));
@@ -273,7 +274,7 @@ fn busy_scene_tracks_live_updates() {
     settle_materials(&mut scene, &mut view, &world, &mut now);
 
     for id in 1..=50 {
-        let mut patch = ObjectPatch::new(source(1, 5000 + id as u64), NonZeroU32::new(id).unwrap());
+        let mut patch = ObjectPatch::new(source(&world, 0, 5000 + id as u64), NonZeroU32::new(id).unwrap());
         patch.pose = Some(Pose { position: Some(Vec3::new(200.0 + id as f32, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
         if id <= 2 {
             patch.surface_appearance = Some(
@@ -287,7 +288,8 @@ fn busy_scene_tracks_live_updates() {
         let _ = world.patch_object(patch).unwrap();
     }
     let terrain_ids = std::array::from_fn(|index| Uuid::from_u128(if index == 0 { 9300 } else { 9100 + index as u128 }));
-    let _ = world.observe_terrain_settings(source(1, 5100), TerrainSettings::new(terrain_ids, [0.0; 4], [64.0; 4]).unwrap()).unwrap();
+    let _ =
+        world.observe_terrain_settings(source(&world, 0, 5100), TerrainSettings::new(terrain_ids, [0.0; 4], [64.0; 4]).unwrap()).unwrap();
     scene.set_camera(camera(99.0));
     scene.notify_world_change();
     let arrivals = settle_materials(&mut scene, &mut view, &world, &mut now);
@@ -386,16 +388,16 @@ fn descendant_pose_updates() {
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(positions(&view), BTreeMap::from([(1, 20.0), (2, 22.0), (3, 25.0)]));
-    let mut patch = ObjectPatch::new(source(1, 5), NonZeroU32::new(2).unwrap());
+    let mut patch = ObjectPatch::new(source(&world, 0, 5), NonZeroU32::new(2).unwrap());
     patch.parent = Some(ParentUpdate::Root);
     patch.pose = Some(Pose { position: Some(Vec3::new(7.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
     let _ = world.patch_object(patch).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(positions(&view), BTreeMap::from([(1, 20.0), (2, 7.0), (3, 10.0)]));
-    let _ = world.adopt_region(Region::new(2)).unwrap();
+    let second_region = world.register_region().unwrap();
     let mut transfer =
-        ObjectObservation::new(source(2, 1), Uuid::from_u128(2), NonZeroU32::new(9).unwrap(), Kind::Object, ParentUpdate::Root);
+        ObjectObservation::new(source(&world, 1, 1), Uuid::from_u128(2), NonZeroU32::new(9).unwrap(), Kind::Object, ParentUpdate::Root);
     transfer.pose = Some(Pose { position: Some(Vec3::new(8.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
     transfer.scale = Some(Vec3::ONE);
     let _ = world.observe_object(transfer).unwrap();
@@ -404,7 +406,7 @@ fn descendant_pose_updates() {
     for obj in view.objects().filter(|obj| obj.detail().summary.id != Uuid::from_u128(1)) {
         assert_matches!(obj.placement(), Placement::Hidden(_));
     }
-    let _ = world.patch_region(Region::new(2), RegionInfo { origin: Some(DVec3::new(100.0, 0.0, 0.0)), ..RegionInfo::default() }).unwrap();
+    let _ = world.patch_region(second_region, RegionInfo { origin: Some(DVec3::new(100.0, 0.0, 0.0)), ..RegionInfo::default() }).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     let root = view.objects().find(|obj| obj.detail().summary.id == Uuid::from_u128(2)).unwrap();
@@ -412,7 +414,7 @@ fn descendant_pose_updates() {
     let child = view.objects().find(|obj| obj.detail().summary.id == Uuid::from_u128(3)).unwrap();
     assert_matches!(child.placement(), Placement::Hidden(_));
     let mut child = ObjectObservation::new(
-        source(2, 2),
+        source(&world, 1, 2),
         Uuid::from_u128(3),
         NonZeroU32::new(10).unwrap(),
         Kind::Object,
@@ -445,10 +447,10 @@ fn own_signed_dimensions() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
     add(&mut world, 2, 2, ParentUpdate::Local(NonZeroU32::new(1).unwrap()), 2.0, 2);
-    let mut root = ObjectPatch::new(source(1, 3), NonZeroU32::new(1).unwrap());
+    let mut root = ObjectPatch::new(source(&world, 0, 3), NonZeroU32::new(1).unwrap());
     root.scale = Some(Vec3::new(100.0, 200.0, 300.0));
     let _ = world.patch_object(root).unwrap();
-    let mut child = ObjectPatch::new(source(1, 4), NonZeroU32::new(2).unwrap());
+    let mut child = ObjectPatch::new(source(&world, 0, 4), NonZeroU32::new(2).unwrap());
     child.scale = Some(Vec3::new(-2.0, 3.0, 4.0));
     child.surface_appearance =
         Some(SurfaceAppearance::new(FaceAppearance { mapping: TextureMapping::Planar, ..Default::default() }, Vec::new()).unwrap());
@@ -468,7 +470,7 @@ fn own_signed_dimensions() {
         &face.material,
         assets::MaterialDescription::Legacy(material) if material.mapping == assets::TextureMapping::Planar
     );
-    let mut zero = ObjectPatch::new(source(1, 5), NonZeroU32::new(2).unwrap());
+    let mut zero = ObjectPatch::new(source(&world, 0, 5), NonZeroU32::new(2).unwrap());
     zero.scale = Some(Vec3::new(0.0, 3.0, 4.0));
     let _ = world.patch_object(zero).unwrap();
     scene.notify_world_change();
@@ -508,8 +510,8 @@ fn abandoned_read_recovers() {
     settle(&mut scene, &mut view, &world, &mut now);
 
     assert_eq!(view.status(), Status::Ready);
-    let retained = view.region(Region::new(1)).expect("recovery restores region");
-    assert_eq!(retained.summary().region, Region::new(1));
+    let retained = view.region(world_region(&world, 0)).expect("recovery restores region");
+    assert_eq!(retained.summary().region, world_region(&world, 0));
     assert_eq!(retained.summary().info.resolved_origin(), Some(DVec3::ZERO));
 }
 

@@ -3,13 +3,14 @@ use world::TextureAnimation;
 
 #[test]
 fn texture_entries_apply_to_volumes_only() {
+    let (_region_world, region) = crate::test_helpers::registered_region();
     let texture_entry = valid_texture_entry();
 
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects[0].texture_entry = texture_entry.clone();
     update.objects[1].texture_entry = texture_entry.clone();
-    let full_batch = decode_object_message(REGION, 30, OrderEvidence::Ordered(30), &full).expect("full object batch");
+    let full_batch = decode_object_message(region, 30, OrderEvidence::Ordered(30), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(object)) = full_batch.blocks[0].as_ref() else { panic!("expected volume observation") };
     assert_eq!(*object.surface_appearance.as_ref().unwrap().default_face(), FaceAppearance::default());
     let Some(ObjectOperation::Observe(avatar)) = full_batch.blocks[1].as_ref() else { panic!("expected avatar observation") };
@@ -19,7 +20,7 @@ fn texture_entries_apply_to_volumes_only() {
     let mut compressed = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED).message().clone();
     let ObjectUpdateCompressed(update) = &mut compressed else { panic!("expected compressed object fixture") };
     update.objects[0].texture_entry = Some(texture_entry);
-    let compressed_batch = decode_object_message(REGION, 31, OrderEvidence::Ordered(31), &compressed).expect("compressed object batch");
+    let compressed_batch = decode_object_message(region, 31, OrderEvidence::Ordered(31), &compressed).expect("compressed object batch");
     let Some(ObjectOperation::Observe(object)) = compressed_batch.blocks[0].as_ref() else {
         panic!("expected compressed volume observation")
     };
@@ -28,20 +29,21 @@ fn texture_entries_apply_to_volumes_only() {
     let mut terse = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).message().clone();
     let ImprovedTerseObjectUpdate(update) = &mut terse else { panic!("expected improved-terse fixture") };
     update.objects[0].as_decoded_mut().expect("fixture block is structurally valid").texture_entry = packed_texture_entry();
-    let terse_batch = decode_object_message(REGION, 32, OrderEvidence::Ordered(32), &terse).expect("terse object batch");
+    let terse_batch = decode_object_message(region, 32, OrderEvidence::Ordered(32), &terse).expect("terse object batch");
     let Some(ObjectOperation::Patch(patch)) = terse_batch.blocks[0].as_ref() else { panic!("expected terse patch") };
     assert_eq!(*patch.surface_appearance.as_ref().unwrap().default_face(), FaceAppearance::default());
 
     let mut terse_avatar = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE_AVATAR).message().clone();
     let ImprovedTerseObjectUpdate(update) = &mut terse_avatar else { panic!("expected improved-terse avatar fixture") };
     update.objects[0].as_decoded_mut().expect("fixture block is structurally valid").texture_entry = packed_texture_entry();
-    let avatar_batch = decode_object_message(REGION, 33, OrderEvidence::Ordered(33), &terse_avatar).expect("terse avatar batch");
+    let avatar_batch = decode_object_message(region, 33, OrderEvidence::Ordered(33), &terse_avatar).expect("terse avatar batch");
     let Some(ObjectOperation::Patch(patch)) = avatar_batch.blocks[0].as_ref() else { panic!("expected terse avatar patch") };
     assert_eq!(patch.surface_appearance, None);
 }
 
 #[test]
 fn texture_animation_updates_clear_and_preserve_by_path() {
+    let (_region_world, region) = crate::test_helpers::registered_region();
     let mut wire = vec![0x01, 0xff, 2, 2];
     wire.extend_from_slice(&0.0_f32.to_le_bytes());
     wire.extend_from_slice(&0.0_f32.to_le_bytes());
@@ -55,7 +57,7 @@ fn texture_animation_updates_clear_and_preserve_by_path() {
     } else {
         panic!("expected full object fixture");
     }
-    let batch = decode_object_message(REGION, 35, OrderEvidence::Ordered(35), &full).expect("full object batch");
+    let batch = decode_object_message(region, 35, OrderEvidence::Ordered(35), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(object)) = batch.blocks[0].as_ref() else { panic!("expected full observation") };
     assert_eq!(object.texture_animation, FieldUpdate::Set(expected));
 
@@ -64,7 +66,7 @@ fn texture_animation_updates_clear_and_preserve_by_path() {
     } else {
         panic!("expected full object fixture");
     }
-    let batch = decode_object_message(REGION, 36, OrderEvidence::Ordered(36), &full).expect("full clear batch");
+    let batch = decode_object_message(region, 36, OrderEvidence::Ordered(36), &full).expect("full clear batch");
     let Some(ObjectOperation::Observe(object)) = batch.blocks[0].as_ref() else { panic!("expected full observation") };
     assert_eq!(object.texture_animation, FieldUpdate::Clear);
 
@@ -73,7 +75,7 @@ fn texture_animation_updates_clear_and_preserve_by_path() {
     } else {
         panic!("expected full object fixture");
     }
-    let batch = decode_object_message(REGION, 37, OrderEvidence::Ordered(37), &full).expect("malformed field batch");
+    let batch = decode_object_message(region, 37, OrderEvidence::Ordered(37), &full).expect("malformed field batch");
     let Some(ObjectOperation::Observe(object)) = batch.blocks[0].as_ref() else { panic!("expected full observation") };
     assert_eq!(batch.invalid_blocks, 0);
     assert_eq!(batch.invalid_fields, 1);
@@ -85,7 +87,7 @@ fn texture_animation_updates_clear_and_preserve_by_path() {
     } else {
         panic!("expected compressed object fixture");
     }
-    let batch = decode_object_message(REGION, 38, OrderEvidence::Ordered(38), &compressed).expect("compressed object batch");
+    let batch = decode_object_message(region, 38, OrderEvidence::Ordered(38), &compressed).expect("compressed object batch");
     let Some(ObjectOperation::Observe(object)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
     assert_eq!(object.texture_animation, FieldUpdate::Set(expected));
 
@@ -94,22 +96,23 @@ fn texture_animation_updates_clear_and_preserve_by_path() {
     } else {
         panic!("expected compressed object fixture");
     }
-    let batch = decode_object_message(REGION, 39, OrderEvidence::Ordered(39), &compressed).expect("compressed clear batch");
+    let batch = decode_object_message(region, 39, OrderEvidence::Ordered(39), &compressed).expect("compressed clear batch");
     let Some(ObjectOperation::Observe(object)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
     assert_eq!(object.texture_animation, FieldUpdate::Clear);
 
     let terse = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).message().clone();
-    let batch = decode_object_message(REGION, 40, OrderEvidence::Ordered(40), &terse).expect("terse object batch");
+    let batch = decode_object_message(region, 40, OrderEvidence::Ordered(40), &terse).expect("terse object batch");
     let Some(ObjectOperation::Patch(patch)) = batch.blocks[0].as_ref() else { panic!("expected terse patch") };
     assert_eq!(patch.texture_animation, FieldUpdate::Keep);
 
     let cached = packet(vectors::OBJECT_UPDATE_CACHED).message().clone();
-    let batch = decode_object_message(REGION, 41, OrderEvidence::Ordered(41), &cached).expect("cached object batch");
+    let batch = decode_object_message(region, 41, OrderEvidence::Ordered(41), &cached).expect("cached object batch");
     std::assert_matches!(batch.blocks[0], Some(ObjectOperation::Cached { .. }));
 }
 
 #[test]
 fn texture_flags_are_normalized() {
+    let (_region_world, region) = crate::test_helpers::registered_region();
     for (flags, bump, shiny, fullbright, media_flags, mapping, media) in [
         (0x00, 0, 0, false, 0x00, TextureMapping::Default, false),
         (0x1f, 31, 0, false, 0x01, TextureMapping::Default, true),
@@ -131,7 +134,7 @@ fn texture_flags_are_normalized() {
         let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
         let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
         update.objects[0].texture_entry = texture_entry;
-        let batch = decode_object_message(REGION, 1, OrderEvidence::Ordered(1), &full).unwrap();
+        let batch = decode_object_message(region, 1, OrderEvidence::Ordered(1), &full).unwrap();
         let Some(ObjectOperation::Observe(object)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
         assert_eq!(
             *object.surface_appearance.as_ref().unwrap().default_face(),
@@ -154,6 +157,7 @@ fn texture_flags_are_normalized() {
 
 #[test]
 fn clear_textures_are_absent() {
+    let (_region_world, region) = crate::test_helpers::registered_region();
     for (texture, material, expected_material) in
         [(Uuid::nil(), Uuid::nil(), None), (Uuid::max(), Uuid::max(), Some(AssetId::new(Uuid::max())))]
     {
@@ -163,7 +167,7 @@ fn clear_textures_are_absent() {
         let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
         let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
         update.objects[0].texture_entry = texture_entry;
-        let batch = decode_object_message(REGION, 1, OrderEvidence::Ordered(1), &full).unwrap();
+        let batch = decode_object_message(region, 1, OrderEvidence::Ordered(1), &full).unwrap();
         let Some(ObjectOperation::Observe(object)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
         let face = object.surface_appearance.as_ref().unwrap().default_face();
         assert_eq!(face.texture, None, "wire clear sentinel {texture}");
@@ -173,12 +177,13 @@ fn clear_textures_are_absent() {
 
 #[test]
 fn malformed_texture_entries_are_field_local() {
+    let (_region_world, region) = crate::test_helpers::registered_region();
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects[0].texture_entry = vec![0];
     update.objects[0].texture_anim.clear();
 
-    let batch = decode_object_message(REGION, 34, OrderEvidence::Ordered(34), &full).expect("full object batch");
+    let batch = decode_object_message(region, 34, OrderEvidence::Ordered(34), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
 
     assert_eq!(batch.invalid_blocks, 0);
@@ -191,18 +196,19 @@ fn malformed_texture_entries_are_field_local() {
 
 #[test]
 fn embedded_materials_replace_and_clear() {
+    let mut state = world();
+    let region = region(&state);
     let bindings = [(0, Uuid::from_u128(0x310)), (44, Uuid::from_u128(0x311))];
 
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects[0].extra_parameters = vec![render_material_parameter(&bindings)];
-    let full_batch = decode_object_message(REGION, 40, OrderEvidence::Ordered(40), &full).expect("full object batch");
+    let full_batch = decode_object_message(region, 40, OrderEvidence::Ordered(40), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(object)) = full_batch.blocks[0].as_ref() else { panic!("expected volume observation") };
     let materials = object.pbr_materials.as_ref().expect("PBR parameter decoded");
     assert_eq!(materials.material(0), Some(asset_id(0x310)));
     assert_eq!(materials.material(44), Some(asset_id(0x311)));
     assert_eq!(materials.material(1), None);
-    let mut state = world();
     let Introduced(entity) = state.observe_object(object.clone()).expect("PBR update seeds World").outcome else {
         panic!("expected volume object introduction")
     };
@@ -212,7 +218,7 @@ fn embedded_materials_replace_and_clear() {
     let mut compressed = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED).message().clone();
     let ObjectUpdateCompressed(update) = &mut compressed else { panic!("expected compressed object fixture") };
     update.objects[0].extra_parameters = vec![render_material_parameter(&bindings)];
-    let compressed_batch = decode_object_message(REGION, 41, OrderEvidence::Ordered(41), &compressed).expect("compressed batch");
+    let compressed_batch = decode_object_message(region, 41, OrderEvidence::Ordered(41), &compressed).expect("compressed batch");
     let Some(ObjectOperation::Observe(object)) = compressed_batch.blocks[0].as_ref() else {
         panic!("expected compressed volume observation")
     };
@@ -221,7 +227,7 @@ fn embedded_materials_replace_and_clear() {
     let mut absent = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut absent else { panic!("expected full object fixture") };
     update.objects[0].extra_parameters.clear();
-    let absent_batch = decode_object_message(REGION, 42, OrderEvidence::Ordered(42), &absent).expect("full object batch");
+    let absent_batch = decode_object_message(region, 42, OrderEvidence::Ordered(42), &absent).expect("full object batch");
     let Some(ObjectOperation::Observe(object)) = absent_batch.blocks[0].as_ref() else { panic!("expected volume observation") };
     assert_eq!(object.pbr_materials, Some(PbrMaterialAssignments::default()));
     assert_eq!(state.observe_object(object.clone()).unwrap().outcome, Updated(entity));
@@ -231,7 +237,7 @@ fn embedded_materials_replace_and_clear() {
     let ObjectUpdateCompressed(update) = &mut compressed_absent else { panic!("expected compressed object fixture") };
     update.objects[0].extra_parameters.clear();
     let compressed_absent_batch =
-        decode_object_message(REGION, 45, OrderEvidence::Ordered(45), &compressed_absent).expect("compressed batch");
+        decode_object_message(region, 45, OrderEvidence::Ordered(45), &compressed_absent).expect("compressed batch");
     let Some(ObjectOperation::Observe(object)) = compressed_absent_batch.blocks[0].as_ref() else {
         panic!("expected compressed volume observation")
     };
@@ -240,7 +246,7 @@ fn embedded_materials_replace_and_clear() {
     let mut terse = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).message().clone();
     let ImprovedTerseObjectUpdate(update) = &mut terse else { panic!("expected terse fixture") };
     update.objects[0].as_decoded_mut().expect("fixture block is structurally valid").texture_entry = packed_texture_entry();
-    let terse_batch = decode_object_message(REGION, 43, OrderEvidence::Ordered(43), &terse).expect("terse batch");
+    let terse_batch = decode_object_message(region, 43, OrderEvidence::Ordered(43), &terse).expect("terse batch");
     let Some(ObjectOperation::Patch(patch)) = terse_batch.blocks[0].as_ref() else { panic!("expected terse patch") };
     assert!(patch.surface_appearance.is_some());
     assert_eq!(patch.pbr_materials, None);
@@ -248,13 +254,14 @@ fn embedded_materials_replace_and_clear() {
 
 #[test]
 fn non_volume_updates_clear_pbr_materials() {
+    let mut state = world();
+    let region = region(&state);
     let bindings = [(0, Uuid::from_u128(0x320))];
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects[0].extra_parameters = vec![render_material_parameter(&bindings)];
 
-    let mut state = world();
-    let initial_batch = decode_object_message(REGION, 50, OrderEvidence::Ordered(50), &full).expect("initial volume batch");
+    let initial_batch = decode_object_message(region, 50, OrderEvidence::Ordered(50), &full).expect("initial volume batch");
     let Some(ObjectOperation::Observe(initial)) = initial_batch.blocks[0].as_ref() else { panic!("expected volume observation") };
     let Introduced(entity) = state.observe_object(initial.clone()).expect("initial PBR object applies").outcome else {
         panic!("expected object introduction")
@@ -264,13 +271,13 @@ fn non_volume_updates_clear_pbr_materials() {
     let ObjectUpdate(update) = &mut full_non_volume else { panic!("expected full object fixture") };
     update.objects[0].pcode = 14;
     update.objects[0].extra_parameters.clear();
-    let full_batch = decode_object_message(REGION, 51, OrderEvidence::Ordered(51), &full_non_volume).expect("full batch");
+    let full_batch = decode_object_message(region, 51, OrderEvidence::Ordered(51), &full_non_volume).expect("full batch");
     let Some(ObjectOperation::Observe(observation)) = full_batch.blocks[0].as_ref() else { panic!("expected non-volume observation") };
     assert_eq!(observation.pbr_materials, Some(PbrMaterialAssignments::default()));
     assert_eq!(state.observe_object(observation.clone()).expect("full update applies").outcome, Updated(entity));
     assert_eq!(state.object(entity).expect("object remains").pbr_materials(), None);
 
-    let restored_batch = decode_object_message(REGION, 52, OrderEvidence::Ordered(52), &full).expect("restored volume batch");
+    let restored_batch = decode_object_message(region, 52, OrderEvidence::Ordered(52), &full).expect("restored volume batch");
     let Some(ObjectOperation::Observe(observation)) = restored_batch.blocks[0].as_ref() else {
         panic!("expected restored volume observation")
     };
@@ -283,7 +290,7 @@ fn non_volume_updates_clear_pbr_materials() {
     update.objects[0].local_id = initial.local_id.get();
     update.objects[0].pcode = 14;
     update.objects[0].extra_parameters.clear();
-    let compressed_batch = decode_object_message(REGION, 53, OrderEvidence::Ordered(53), &compressed_non_volume).expect("compressed batch");
+    let compressed_batch = decode_object_message(region, 53, OrderEvidence::Ordered(53), &compressed_non_volume).expect("compressed batch");
     let Some(ObjectOperation::Observe(observation)) = compressed_batch.blocks[0].as_ref() else {
         panic!("expected compressed non-volume observation")
     };
@@ -294,6 +301,7 @@ fn non_volume_updates_clear_pbr_materials() {
 
 #[test]
 fn malformed_pbr_materials_are_field_local() {
+    let (_region_world, region) = crate::test_helpers::registered_region();
     for parameters in
         [vec![ExtraParameter { parameter_type: 0x0080, data: vec![1] }], vec![ExtraParameter { parameter_type: 0x0080, data: vec![0, 0] }]]
     {
@@ -301,7 +309,7 @@ fn malformed_pbr_materials_are_field_local() {
         let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
         update.objects[0].extra_parameters = parameters;
 
-        let batch = decode_object_message(REGION, 44, OrderEvidence::Ordered(44), &full).expect("full object batch");
+        let batch = decode_object_message(region, 44, OrderEvidence::Ordered(44), &full).expect("full object batch");
         let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
         assert_eq!(observation.pbr_materials, None);
         assert!(observation.pose.is_some());
@@ -312,6 +320,7 @@ fn malformed_pbr_materials_are_field_local() {
 
 #[test]
 fn u8_material_count_skips_extra_faces() {
+    let (_region_world, region) = crate::test_helpers::registered_region();
     let bindings: Vec<_> = (0..usize::from(u8::MAX))
         .map(|index| {
             let face = if index < world::MAX_SURFACE_FACES { index as u8 } else { u8::MAX };
@@ -325,7 +334,7 @@ fn u8_material_count_skips_extra_faces() {
 
     let encoded = Packet::new(45, compressed).with_zero_coding(false).encode().expect("full U8 count fits compressed ObjectUpdate");
     let packet = Packet::decode(&encoded).expect("decode full U8 count compressed ObjectUpdate");
-    let batch = decode_object_message(REGION, 45, OrderEvidence::Ordered(45), packet.message()).expect("compressed object batch");
+    let batch = decode_object_message(region, 45, OrderEvidence::Ordered(45), packet.message()).expect("compressed object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
     let materials = observation.pbr_materials.as_ref().expect("PBR parameter decoded");
     assert_eq!(materials.material(44), Some(asset_id(0x42c)));
@@ -334,6 +343,7 @@ fn u8_material_count_skips_extra_faces() {
 
 #[test]
 fn full_materials_follow_variable1_limit() {
+    let (_region_world, region) = crate::test_helpers::registered_region();
     for count in [14_usize, 15] {
         let bindings = (0..count).map(|face| (face as u8, Uuid::from_u128(0x500 + face as u128))).collect::<Vec<_>>();
         let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
@@ -344,7 +354,7 @@ fn full_materials_follow_variable1_limit() {
         if count == 14 {
             let encoded = encoded.expect("14 records fit the full-update ExtraParams Variable 1 envelope");
             let packet = Packet::decode(&encoded).expect("decode 14-record full ObjectUpdate");
-            let batch = decode_object_message(REGION, 46, OrderEvidence::Ordered(46), packet.message()).expect("full object batch");
+            let batch = decode_object_message(region, 46, OrderEvidence::Ordered(46), packet.message()).expect("full object batch");
             let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected full volume observation") };
             assert_eq!(observation.pbr_materials.as_ref().unwrap().bindings().count(), 14);
         } else {
@@ -356,14 +366,14 @@ fn full_materials_follow_variable1_limit() {
 #[test]
 fn incremental_materials_replace_and_clear() {
     let mut state = world_with_regions(2);
+    let region = region_at(&state, 0);
+    let neighbor_region = region_at(&state, 1);
     let object_id = Uuid::from_u128(0x600);
     let neighbor_id = Uuid::from_u128(0x601);
-    let first = media_observation(REGION, object_id, 0x610);
+    let first = media_observation(region, object_id, 0x610);
     let Introduced(first_entity) = state.observe_object(first).expect("introduce addressed object").outcome else {
         panic!("expected object introduction")
     };
-    let neighbor_region = Region::new(12);
-    let _ = state.adopt_region(neighbor_region).expect("adopt neighbor region");
     let neighbor = media_observation(neighbor_region, neighbor_id, 0x620);
     let Introduced(neighbor_entity) = state.observe_object(neighbor).expect("introduce same local ID in neighbor").outcome else {
         panic!("expected neighbor object introduction")
@@ -371,7 +381,7 @@ fn incremental_materials_replace_and_clear() {
 
     let replacement = render_material_parameter(&[(44, Uuid::from_u128(0x630))]).data;
     let set = extra_param_message(0x0102_0304, 0x0080, true, replacement);
-    let batch = apply_extra_param_message(&mut state, REGION, &set, 2);
+    let batch = apply_extra_param_message(&mut state, region, &set, 2);
     assert_eq!(batch.invalid_blocks, 0);
     {
         let object = state.object(first_entity).expect("addressed object remains");
@@ -383,7 +393,7 @@ fn incremental_materials_replace_and_clear() {
     assert_eq!(state.object(neighbor_entity).unwrap().pbr_materials().unwrap().material(0), Some(asset_id(0x620)));
 
     let clear = extra_param_message(0x0102_0304, 0x0080, false, vec![1]);
-    let batch = apply_extra_param_message(&mut state, REGION, &clear, 3);
+    let batch = apply_extra_param_message(&mut state, region, &clear, 3);
     assert_eq!(batch.invalid_blocks, 0);
     {
         let object = state.object(first_entity).expect("addressed object remains");
@@ -394,20 +404,21 @@ fn incremental_materials_replace_and_clear() {
     assert_eq!(state.object(neighbor_entity).unwrap().pbr_materials().unwrap().material(0), Some(asset_id(0x620)));
 
     let set_again = extra_param_message(0x0102_0304, 0x0080, true, render_material_parameter(&[(1, Uuid::from_u128(0x631))]).data);
-    apply_extra_param_message(&mut state, REGION, &set_again, 4);
+    apply_extra_param_message(&mut state, region, &set_again, 4);
     let malformed = extra_param_message(0x0102_0304, 0x0080, true, vec![1]);
-    let batch = apply_extra_param_message(&mut state, REGION, &malformed, 5);
+    let batch = apply_extra_param_message(&mut state, region, &malformed, 5);
     assert_eq!(batch.invalid_blocks, 1);
     assert!(batch.blocks[0].is_none());
     assert_eq!(state.object(first_entity).unwrap().pbr_materials().unwrap().material(1), Some(asset_id(0x631)));
 
     let unknown_clear = extra_param_message(0x0102_0304, 0x0030, false, Vec::new());
-    apply_extra_param_message(&mut state, REGION, &unknown_clear, 6);
+    apply_extra_param_message(&mut state, region, &unknown_clear, 6);
     assert_eq!(state.object(first_entity).unwrap().pbr_materials().unwrap().material(1), Some(asset_id(0x631)));
 }
 
 #[test]
 fn repeated_material_params_replace_in_order() {
+    let (_region_world, region) = crate::test_helpers::registered_region();
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects[0].texture_entry = valid_texture_entry();
@@ -418,7 +429,7 @@ fn repeated_material_params_replace_in_order() {
         render_material_parameter(&[(44, Uuid::from_u128(0x314))]),
     ];
 
-    let batch = decode_object_message(REGION, 46, OrderEvidence::Ordered(46), &full).expect("full object batch");
+    let batch = decode_object_message(region, 46, OrderEvidence::Ordered(46), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
     let materials = observation.pbr_materials.as_ref().expect("PBR parameter decoded");
     assert_eq!(batch.invalid_fields, 1);
@@ -429,7 +440,7 @@ fn repeated_material_params_replace_in_order() {
     update.objects[0].extra_parameters =
         vec![render_material_parameter(&[(0, Uuid::from_u128(0x313))]), ExtraParameter { parameter_type: 0x0080, data: vec![1] }];
     update.objects[0].texture_anim.clear();
-    let batch = decode_object_message(REGION, 47, OrderEvidence::Ordered(47), &full).expect("full object batch");
+    let batch = decode_object_message(region, 47, OrderEvidence::Ordered(47), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
     assert_eq!(batch.invalid_fields, 1);
     assert_eq!(observation.pbr_materials, None);
@@ -437,8 +448,9 @@ fn repeated_material_params_replace_in_order() {
 
 #[test]
 fn terse_preserves_shape_and_appearance() {
+    let (_region_world, region) = crate::test_helpers::registered_region();
     let packet = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
-    let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(21), packet.message()).expect("terse batch");
+    let batch = decode_object_message(region, packet.sequence(), OrderEvidence::Ordered(21), packet.message()).expect("terse batch");
     let Some(ObjectOperation::Patch(patch)) = batch.blocks[0].as_ref() else { panic!("expected terse patch") };
     assert_eq!(patch.shape, FieldUpdate::Keep);
     assert_eq!(patch.appearance, FieldUpdate::Keep);

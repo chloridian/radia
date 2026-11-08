@@ -875,7 +875,7 @@ mod tests {
             Budget::default(),
             None,
         );
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let id = resource(Kind::Mesh).id;
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
@@ -1000,7 +1000,7 @@ mod tests {
             Budget::default(),
             None,
         );
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let id = resource(Kind::Mesh).id;
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
@@ -1054,7 +1054,7 @@ mod tests {
             _ => unreachable!(),
         });
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let id = resource(Kind::Mesh).id;
         let service = AssetCoordinator::new(Handle::current(), pending(), Some(Arc::clone(&cache)));
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
@@ -1152,7 +1152,7 @@ mod tests {
             _ => unreachable!(),
         });
         let service = AssetCoordinator::with_budget(Handle::current(), pending(), Budget::default(), None);
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut demand = handle.request_with_importance(region, Request::MeshLod(block), Priority::Visible, 0).await.unwrap();
@@ -1189,7 +1189,7 @@ mod tests {
             _ => unreachable!(),
         });
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let id = resource(Kind::Mesh).id;
         let (cancel_first, cancelled_first) = oneshot::channel();
         let first_service = AssetCoordinator::with_budget(
@@ -1363,7 +1363,7 @@ mod tests {
             Budget::default(),
             None,
         );
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut demand =
@@ -1398,7 +1398,7 @@ mod tests {
             Budget::default(),
             Some(Arc::clone(&cache)),
         );
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         first_service.register(region, Client::new(first_peer.url().join("seed").unwrap()).unwrap());
         let first_handle = first_service.handle();
         let mut first_demand = first_handle
@@ -1474,7 +1474,7 @@ mod tests {
             Budget::default(),
             Some(Arc::clone(&cache)),
         );
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut demand =
@@ -1518,7 +1518,7 @@ mod tests {
                 Budget::default(),
                 Some(Arc::clone(&cache)),
             );
-            let region = Region::new(1);
+            let (_region_world, region) = crate::test_helpers::registered_region();
             service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
             let handle = service.handle();
             let mut demand =
@@ -1601,7 +1601,7 @@ mod tests {
             budget.clone(),
             None,
         );
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let handle = service.handle();
         let request = assets::Request::new(resource(Kind::PbrMaterial));
         let mut requesting = Box::pin(handle.request_with_importance(region, request, Priority::Visible, 0));
@@ -1652,7 +1652,7 @@ mod tests {
             Budget::default(),
             None,
         );
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         service.register(region, client);
         let mut demand =
             service.handle().request_with_importance(region, assets::Request::Environment(asset), Priority::Visible, 0).await.unwrap();
@@ -1677,7 +1677,7 @@ mod tests {
     async fn pending_route_closes_with_session() {
         let service = AssetCoordinator::with_budget(Handle::current(), pending(), Budget::default(), None);
         let handle = service.handle();
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let request = assets::Request::new(resource(Kind::Texture));
         let mut requesting = Box::pin(handle.request_with_importance(region, request, Priority::Visible, 0));
         assert!(futures::poll!(&mut requesting).is_pending());
@@ -1711,7 +1711,7 @@ mod tests {
             budget.clone(),
             None,
         );
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         service.register(region, client);
         let handle = service.handle();
         let first =
@@ -1770,7 +1770,7 @@ mod tests {
             budget.clone(),
             None,
         );
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         service.register(region, client);
         let demand = service
             .handle()
@@ -1820,7 +1820,7 @@ mod tests {
             }),
             Box::new(move || shutdown_drain_started.send(()).expect("signal cache write drain started")),
         );
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut demand =

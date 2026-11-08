@@ -1,15 +1,14 @@
 use super::support::{
     Appearance, AssetId, Avatar, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance,
     FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, Introduced, MAX_AVATAR_TEXTURE_SLOTS, MAX_PBR_MATERIAL_BINDINGS,
-    MediaEntry, Object, ObjectMediaUpdate, ObjectPatch, PbrMaterialAssignments, PbrMaterialAssignmentsError, Quat, Region, Root, Shape,
-    SitTarget, SurfaceAppearance, SurfaceAppearanceError, Unchanged, Unknown, UntrustedSource, Updated, Uuid, Vec3, address, local_id,
-    mesh_shape, object, pbr_materials, sculpt_shape, source, surface, untracked, uuid, with_region,
+    MediaEntry, Object, ObjectMediaUpdate, ObjectPatch, PbrMaterialAssignments, PbrMaterialAssignmentsError, Quat, Root, Shape, SitTarget,
+    SurfaceAppearance, SurfaceAppearanceError, Unchanged, Unknown, UntrustedSource, Updated, Uuid, Vec3, address, local_id, mesh_shape,
+    object, pbr_materials, sculpt_shape, source, surface, untracked, uuid, with_region,
 };
 
 #[test]
 fn shape_and_appearance_are_independent() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut observation = object(source(region, 1), 207, 1, Unknown(231), Root);
     observation.shape = FieldUpdate::Set(mesh_shape(0x207));
     observation.appearance = FieldUpdate::Set(Appearance::Surface);
@@ -24,8 +23,7 @@ fn shape_and_appearance_are_independent() {
 
 #[test]
 fn shape_appearance_order_and_clear() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut observation = object(source(region, 1), 208, 1, Object, Root);
     observation.shape = FieldUpdate::Set(sculpt_shape(0x208));
     observation.appearance = FieldUpdate::Set(Appearance::Surface);
@@ -51,8 +49,7 @@ fn shape_appearance_order_and_clear() {
 
 #[test]
 fn shape_appearance_fences_are_independent() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut observation = object(source(region, 10), 209, 1, Object, Root);
     observation.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
     observation.appearance = FieldUpdate::Set(Appearance::Surface);
@@ -90,8 +87,7 @@ fn shape_appearance_fences_are_independent() {
 
 #[test]
 fn texture_entry_has_independent_freshness() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut observation = object(source(region, 10), 211, 1, Object, Root);
     observation.appearance = FieldUpdate::Set(Appearance::Surface);
     observation.surface_appearance = Some(surface(0x211, 0x244));
@@ -115,8 +111,7 @@ fn texture_entry_has_independent_freshness() {
 
 #[test]
 fn avatar_values_merge() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut avatar = object(source(region, 1), 214, 1, Avatar, Root);
     avatar.appearance = FieldUpdate::Set(Appearance::Avatar);
     let Introduced(entity) = world.observe_object(avatar).unwrap().outcome else { panic!("expected avatar introduction") };
@@ -148,8 +143,7 @@ fn avatar_values_merge() {
 
 #[test]
 fn self_cof_is_stale() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     world.set_self_agent(uuid(215)).unwrap();
     for (id, local_id_value) in [(215, 1), (216, 2)] {
         let mut avatar = object(source(region, 1), id, local_id_value, Avatar, Root);
@@ -183,8 +177,7 @@ fn self_cof_is_stale() {
 
 #[test]
 fn self_missing_cof_is_stale() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     world.set_self_agent(uuid(218)).unwrap();
     let mut avatar = object(source(region, 1), 218, 1, Avatar, Root);
     avatar.appearance = FieldUpdate::Set(Appearance::Avatar);
@@ -219,8 +212,7 @@ fn self_missing_cof_is_stale() {
 
 #[test]
 fn avatar_update_rejects_object() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let Introduced(entity) = world.observe_object(object(source(region, 1), 217, 1, Object, Root)).unwrap().outcome else {
         panic!("expected object introduction")
     };
@@ -238,8 +230,7 @@ fn avatar_update_rejects_object() {
 
 #[test]
 fn untracked_texture_entry_cannot_replace() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut observation = object(source(region, 1), 212, 1, Object, Root);
     observation.surface_appearance = Some(surface(0x214, 0x244));
     let Introduced(entity) = world.observe_object(observation).unwrap().outcome else { panic!("expected object introduction") };
@@ -256,8 +247,7 @@ fn untracked_texture_entry_cannot_replace() {
 
 #[test]
 fn pbr_materials_freshness_and_clears() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut observation = object(source(region, 10), 213, 1, Object, Root);
     observation.appearance = FieldUpdate::Set(Appearance::Surface);
     observation.pbr_materials = Some(pbr_materials(0x220, 0x244));
@@ -292,8 +282,7 @@ fn pbr_materials_reject_invalid_bindings() {
 
 #[test]
 fn avatars_ignore_prim_face_data() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut observation = object(source(region, 1), 214, 1, Avatar, Root);
     observation.surface_appearance = Some(surface(0x230, 0x244));
     observation.pbr_materials = Some(pbr_materials(0x231, 0x245));
@@ -340,8 +329,7 @@ fn surface_appearance_rejects_bad_faces() {
 
 #[test]
 fn media_prefix_clears_and_preserves_suffix() {
-    let region = Region::new(1);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut observation = object(source(region, 1), 215, 1, Object, Root);
     observation.appearance = FieldUpdate::Set(Appearance::Surface);
     let Introduced(entity) = world.observe_object(observation).unwrap().outcome else { panic!("expected object") };
@@ -398,8 +386,7 @@ fn media_prefix_clears_and_preserves_suffix() {
 
 #[test]
 fn media_requires_tracked_surface() {
-    let region = Region::new(1);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let observation = object(source(region, 1), 216, 1, Object, Root);
     let Introduced(entity) = world.observe_object(observation).unwrap().outcome else { panic!("expected object") };
     let update = ObjectMediaUpdate::new(1, vec![Some(MediaEntry::default())]).unwrap();
@@ -422,8 +409,7 @@ fn media_requires_tracked_surface() {
 
 #[test]
 fn untracked_shape_appearance_rejected() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut observation = object(source(region, 2), 210, 1, Object, Root);
     observation.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
     observation.appearance = FieldUpdate::Set(Appearance::Surface);
@@ -451,10 +437,8 @@ fn untracked_shape_appearance_rejected() {
 
 #[test]
 fn transfer_scopes_regional_fields() {
-    let first = Region::new(38);
-    let second = Region::new(39);
-    let mut world = with_region(first);
-    std::assert_matches!(world.adopt_region(second).unwrap().outcome, world::RegionOutcome::Adopted { .. });
+    let (mut world, first) = with_region();
+    let second = world.register_region().unwrap();
     let object_id = uuid(380);
     let first_object = world.observe_object(object(source(first, 1), 380, 1, Object, Root)).unwrap();
     let Introduced(entity) = first_object.outcome else { panic!("expected object introduction") };

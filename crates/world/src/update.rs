@@ -327,6 +327,7 @@ impl ObjectPatch {
 pub enum DeferredReason {
     UnknownObject,
     AmbiguousOrder,
+    RelationshipCapacity,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -344,7 +345,6 @@ pub enum ApplyOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegionOutcome {
     Unchanged,
-    Adopted { revision: WorldRevision },
     Patched { revision: WorldRevision },
     Retired { revision: WorldRevision, entities_removed: usize },
 }
@@ -353,9 +353,9 @@ pub enum RegionOutcome {
 pub enum ApplyError {
     StaleRegion,
     RegionRetired,
-    RegistrationBudgetExhausted,
+    RegionBudgetExhausted,
+    RegionGenerationExhausted,
     EntityBudgetExhausted,
-    RelationshipBudgetExhausted,
     TerrainBudgetExhausted,
     EnvironmentBudgetExhausted,
     ParcelBudgetExhausted,
@@ -371,9 +371,9 @@ impl Display for ApplyError {
         match self {
             Self::StaleRegion => f.write_str("region is not registered"),
             Self::RegionRetired => f.write_str("region lifetime is retired"),
-            Self::RegistrationBudgetExhausted => f.write_str("region registration budget is exhausted"),
+            Self::RegionBudgetExhausted => f.write_str("active region budget is exhausted"),
+            Self::RegionGenerationExhausted => f.write_str("region generation space is exhausted"),
             Self::EntityBudgetExhausted => f.write_str("object budget is exhausted"),
-            Self::RelationshipBudgetExhausted => f.write_str("pending relationship work budget is exhausted"),
             Self::TerrainBudgetExhausted => f.write_str("terrain patch budget is exhausted"),
             Self::EnvironmentBudgetExhausted => f.write_str("environment source budget is exhausted"),
             Self::ParcelBudgetExhausted => f.write_str("parcel state budget is exhausted"),
@@ -471,7 +471,7 @@ impl Recovery {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorldLimits {
-    pub max_region_registrations: usize,
+    pub max_regions: usize,
     pub max_entities: usize,
     pub max_entities_per_region: usize,
     pub max_tombstones_per_region: usize,
@@ -495,11 +495,25 @@ mod tests {
     use std::num::NonZeroU32;
 
     use super::{FieldGroup, FieldRejection, FieldRejectionReason, Recovery, Rejections};
-    use crate::{LocalAddress, Region};
+    use crate::{LocalAddress, World, WorldLimits};
 
     #[test]
     fn recovery_keeps_first_occurrences_within_limit() {
-        let region = Region::new(1);
+        let bounds = WorldLimits {
+            max_regions: 1,
+            max_entities: 0,
+            max_entities_per_region: 0,
+            max_tombstones_per_region: 0,
+            max_tombstones: 0,
+            max_tombstone_bytes_per_region: 0,
+            max_tombstone_bytes: 0,
+            max_journal_entries: 0,
+            max_journal_changes: 0,
+            max_region_name_bytes: 0,
+            max_recovery_targets: 0,
+        };
+        let mut world = World::new(bounds);
+        let region = world.register_region().unwrap();
         let first = LocalAddress::new(region, NonZeroU32::new(3).unwrap());
         let second = LocalAddress::new(region, NonZeroU32::new(1).unwrap());
         let third = LocalAddress::new(region, NonZeroU32::new(2).unwrap());

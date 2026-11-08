@@ -5,7 +5,7 @@ use protocol::messages::CacheMissType;
 use uuid::Uuid;
 use world::{
     Appearance, Applied, ApplyError,
-    ApplyOutcome::{AgentHandedOff, Introduced, TombstoneRecorded},
+    ApplyOutcome::{AgentHandedOff, Deferred, Introduced, TombstoneRecorded},
     EnvironmentAssignment, EnvironmentTarget, FieldRejectionReason, Kind, LocalAddress, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
     OrderEvidence, ParcelLocalId, ParcelOverlayObservation, ParcelPropertiesObservation, Region, RegionApplied, RegionHandle, RegionInfo,
     RegionOutcome, TerrainSettings, UpdateSource, World, WorldLimits,
@@ -148,7 +148,7 @@ impl IngestSummary {
     pub(super) fn log_incomplete_data(&self, simulator_id: SimulatorId, region: Option<Region>) {
         use ApplyError::{
             AddressGenerationExhausted, EntityBudgetExhausted, EnvironmentBudgetExhausted, FrameGenerationExhausted, InvalidValue,
-            KindMismatch, RegionRetired, RegistrationBudgetExhausted, RelationshipBudgetExhausted, RevisionExhausted, StaleRegion,
+            KindMismatch, RegionBudgetExhausted, RegionGenerationExhausted, RegionRetired, RevisionExhausted, StaleRegion,
             TerrainBudgetExhausted,
         };
         use FieldRejectionReason::{
@@ -177,11 +177,11 @@ impl IngestSummary {
                 BlockOutcome::Rejected {
                     error:
                         EntityBudgetExhausted
-                        | RelationshipBudgetExhausted
                         | TerrainBudgetExhausted
                         | EnvironmentBudgetExhausted
                         | world::ApplyError::ParcelBudgetExhausted
-                        | RegistrationBudgetExhausted
+                        | RegionBudgetExhausted
+                        | RegionGenerationExhausted
                         | RevisionExhausted
                         | FrameGenerationExhausted
                         | AddressGenerationExhausted,
@@ -192,6 +192,10 @@ impl IngestSummary {
                 }
                 BlockOutcome::Rejected { error: StaleRegion | RegionRetired, .. } => {}
                 BlockOutcome::Applied { applied, .. } => {
+                    if matches!(&applied.outcome, Deferred(world::DeferredReason::RelationshipCapacity)) {
+                        resource_limits = resource_limits.saturating_add(1);
+                        rejected = true;
+                    }
                     for rejection in applied.rejections.iter() {
                         match rejection.reason {
                             RejectedValue { .. } | InvalidRotation | ParentCycle | ParentDependsOnRejectedParent => {
@@ -333,8 +337,7 @@ impl SessionWorld {
             return Ok(region);
         }
 
-        let region = Region::new(simulator_id.get());
-        self.world.adopt_region(region).map(|_| ()).map_err(RegistrationError::Apply)?;
+        let region = self.world.register_region().map_err(RegistrationError::Apply)?;
         self.regions.insert(simulator_id, region);
         self.update_region_handle(region, handle).map_err(RegistrationError::Apply)?;
         Ok(region)
@@ -681,7 +684,7 @@ fn apply_operation(world: &mut World, operation: ObjectOperation) -> Result<Appl
 
 pub(super) fn viewer_world_limits() -> WorldLimits {
     WorldLimits {
-        max_region_registrations: MAX_WORLD_ENTITIES,
+        max_regions: MAX_WORLD_ENTITIES,
         max_entities: MAX_WORLD_ENTITIES,
         max_entities_per_region: MAX_WORLD_ENTITIES,
         max_tombstones_per_region: MAX_WORLD_TOMBSTONES_PER_REGION,

@@ -27,7 +27,7 @@ struct Latency {
 fn add_mesh(world: &mut World, id: u32, asset: AssetId) {
     let order = u64::from(id) * 4;
     add_shaped(world, u128::from(id), id, ParentUpdate::Root, 100.0, order, PrimShape::default());
-    let mut patch = ObjectPatch::new(source(1, order + 1), NonZeroU32::new(id).expect("fixture local ID is nonzero"));
+    let mut patch = ObjectPatch::new(source(world, 0, order + 1), NonZeroU32::new(id).expect("fixture local ID is nonzero"));
     patch.shape = FieldUpdate::Set(Shape::Mesh { asset_id: asset, flags: SculptFlags::default() });
     let _ = world.patch_object(patch).expect("fixture mesh shape applies");
 }

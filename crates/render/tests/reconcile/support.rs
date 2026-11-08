@@ -37,10 +37,18 @@ pub(super) fn world_with_capacity(capacity: usize) -> World {
 }
 
 fn world_with_limits(origin: DVec3, journal_entries: usize, capacity: usize) -> World {
+    world_with_regions(origin, journal_entries, capacity, 1).0
+}
+
+pub(super) fn world_with_region_count(count: usize) -> (World, Vec<Region>) {
+    world_with_regions(DVec3::ZERO, 4096, 2048, count)
+}
+
+fn world_with_regions(origin: DVec3, journal_entries: usize, capacity: usize, count: usize) -> (World, Vec<Region>) {
     let tombstones_per_region = capacity.max(2048);
     let tombstones = tombstones_per_region * 2;
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 40,
+        max_regions: 40,
         max_entities: capacity,
         max_entities_per_region: capacity,
         max_tombstones_per_region: tombstones_per_region,
@@ -52,13 +60,19 @@ fn world_with_limits(origin: DVec3, journal_entries: usize, capacity: usize) -> 
         max_region_name_bytes: 256,
         max_recovery_targets: 8,
     });
-    let _ = world.adopt_region(Region::new(1)).unwrap();
-    let _ = world.patch_region(Region::new(1), RegionInfo { origin: Some(origin), ..RegionInfo::default() }).unwrap();
-    world
+    let regions = (0..count).map(|_| world.register_region().unwrap()).collect::<Vec<_>>();
+    if let Some(region) = regions.first().copied() {
+        let _ = world.patch_region(region, RegionInfo { origin: Some(origin), ..RegionInfo::default() }).unwrap();
+    }
+    (world, regions)
 }
 
-pub(super) fn source(region: u64, order: u64) -> world::UpdateSource {
-    world::UpdateSource::new(Region::new(region), order as u32, Ordered(order), 0)
+pub(super) fn world_region(world: &World, index: usize) -> Region {
+    world.region_page(None, 64).expect("fixture regions are readable").regions.get(index).expect("fixture region exists").region
+}
+
+pub(super) fn source(world: &World, index: usize, order: u64) -> world::UpdateSource {
+    world::UpdateSource::new(world_region(world, index), order as u32, Ordered(order), 0)
 }
 
 pub(super) fn add(world: &mut World, id: u128, local: u32, parent: ParentUpdate, x: f32, order: u64) {
@@ -66,7 +80,8 @@ pub(super) fn add(world: &mut World, id: u128, local: u32, parent: ParentUpdate,
 }
 
 pub(super) fn add_shaped(world: &mut World, id: u128, local: u32, parent: ParentUpdate, x: f32, order: u64, shape: world::PrimShape) {
-    let mut obj = ObjectObservation::new(source(1, order), Uuid::from_u128(id), NonZeroU32::new(local).unwrap(), Kind::Object, parent);
+    let mut obj =
+        ObjectObservation::new(source(world, 0, order), Uuid::from_u128(id), NonZeroU32::new(local).unwrap(), Kind::Object, parent);
     obj.pose = Some(Pose { position: Some(Vec3::new(x, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
     obj.scale = Some(Vec3::ONE);
     obj.shape = FieldUpdate::Set(Shape::Prim(shape));
@@ -75,7 +90,7 @@ pub(super) fn add_shaped(world: &mut World, id: u128, local: u32, parent: Parent
 }
 
 pub(super) fn move_root(world: &mut World, x: f32, order: u64) {
-    let mut patch = ObjectPatch::new(source(1, order), NonZeroU32::new(1).unwrap());
+    let mut patch = ObjectPatch::new(source(world, 0, order), NonZeroU32::new(1).unwrap());
     patch.pose = Some(Pose { position: Some(Vec3::new(x, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
     let _ = world.patch_object(patch).unwrap();
 }

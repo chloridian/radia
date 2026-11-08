@@ -2,6 +2,8 @@ use super::*;
 
 #[test]
 fn compressed_shape_classification() {
+    let world = world();
+    let region = region(&world);
     let fixture_packet = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
     for (parameter_type, subtype, asset_uuid, expected) in [
         (
@@ -79,7 +81,7 @@ fn compressed_shape_classification() {
         let mut message = fixture_packet.message().clone();
         let ObjectUpdateCompressed(update) = &mut message else { panic!("expected compressed object fixture") };
         update.objects[0].extra_parameters = vec![ExtraParameter { parameter_type, data }];
-        let batch = decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(19), &message)
+        let batch = decode_object_message(region, fixture_packet.sequence(), OrderEvidence::Ordered(19), &message)
             .expect("compressed object batch");
         let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
         assert_eq!(
@@ -101,7 +103,7 @@ fn compressed_shape_classification() {
     let ObjectUpdateCompressed(update) = &mut message else { panic!("expected compressed object fixture") };
     update.objects[0].extra_parameters = vec![ExtraParameter { parameter_type: 0x0030, data: vec![0; 16] }];
     let batch =
-        decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(20), &message).expect("compressed object batch");
+        decode_object_message(region, fixture_packet.sequence(), OrderEvidence::Ordered(20), &message).expect("compressed object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
     assert_eq!(observation.shape, FieldUpdate::Keep);
 
@@ -116,7 +118,7 @@ fn compressed_shape_classification() {
     update.objects[0].extra_parameters =
         vec![ExtraParameter { parameter_type: 0x0030, data: first_data }, ExtraParameter { parameter_type: 0x0060, data: last_data }];
     let batch =
-        decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(20), &message).expect("compressed object batch");
+        decode_object_message(region, fixture_packet.sequence(), OrderEvidence::Ordered(20), &message).expect("compressed object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
     assert_eq!(observation.shape, FieldUpdate::Set(Shape::Mesh { asset_id: asset_id(0x555), flags: SculptFlags::default() }));
 
@@ -132,7 +134,7 @@ fn compressed_shape_classification() {
         ExtraParameter { parameter_type: 0x0060, data: valid_data.clone() },
     ];
     let batch =
-        decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(20), &message).expect("compressed object batch");
+        decode_object_message(region, fixture_packet.sequence(), OrderEvidence::Ordered(20), &message).expect("compressed object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
     assert_eq!(observation.shape, FieldUpdate::Set(Shape::Mesh { asset_id: asset_id(0x777), flags: SculptFlags::default() }));
 
@@ -141,19 +143,21 @@ fn compressed_shape_classification() {
     update.objects[0].extra_parameters =
         vec![ExtraParameter { parameter_type: 0x0060, data: valid_data }, ExtraParameter { parameter_type: 0x0030, data: malformed_data }];
     let batch =
-        decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(20), &message).expect("compressed object batch");
+        decode_object_message(region, fixture_packet.sequence(), OrderEvidence::Ordered(20), &message).expect("compressed object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
     assert_eq!(observation.shape, FieldUpdate::Keep);
 }
 
 #[test]
 fn full_shape_classification() {
+    let world = world();
+    let region = region(&world);
     let fixture_packet = packet(vectors::OBJECT_UPDATE);
     let mut regular = fixture_packet.message().clone();
     let Message::ObjectUpdate(update) = &mut regular else { panic!("expected full object fixture") };
     update.objects.truncate(1);
     update.objects[0].pcode = 9;
-    let batch = decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(18), &regular).expect("full batch");
+    let batch = decode_object_message(region, fixture_packet.sequence(), OrderEvidence::Ordered(18), &regular).expect("full batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected full observation") };
     assert_eq!(observation.shape, FieldUpdate::Set(Shape::Prim(full_prim_shape())));
 
@@ -166,7 +170,7 @@ fn full_shape_classification() {
     data[16] = 1;
     update.objects[0].extra_parameters = vec![ExtraParameter { parameter_type: 0x0030, data }];
 
-    let batch = decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(19), &message).expect("full batch");
+    let batch = decode_object_message(region, fixture_packet.sequence(), OrderEvidence::Ordered(19), &message).expect("full batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected full observation") };
 
     assert_eq!(
@@ -178,6 +182,8 @@ fn full_shape_classification() {
 
 #[test]
 fn malformed_shape_params_preserve_shape() {
+    let mut world = world();
+    let region = region(&world);
     let fixture_packet = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
     let mut valid_message = fixture_packet.message().clone();
     let ObjectUpdateCompressed(update) = &mut valid_message else { panic!("expected compressed object fixture") };
@@ -185,13 +191,12 @@ fn malformed_shape_params_preserve_shape() {
     sculpt_data[..16].copy_from_slice(Uuid::from_u128(0x666).as_bytes());
     sculpt_data[16] = 0xc1;
     update.objects[0].extra_parameters = vec![ExtraParameter { parameter_type: 0x0030, data: sculpt_data }];
-    let valid_batch = decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(22), &valid_message)
+    let valid_batch = decode_object_message(region, fixture_packet.sequence(), OrderEvidence::Ordered(22), &valid_message)
         .expect("compressed object batch");
     let Some(ObjectOperation::Observe(valid_observation)) = valid_batch.blocks[0].as_ref() else {
         panic!("expected compressed observation")
     };
 
-    let mut world = world();
     let Introduced(entity) = world.observe_object(valid_observation.clone()).expect("valid sculpt update").outcome else {
         panic!("expected object introduction")
     };
@@ -208,7 +213,7 @@ fn malformed_shape_params_preserve_shape() {
     let ObjectUpdateCompressed(update) = &mut malformed_message else { panic!("expected compressed object fixture") };
     update.objects[0].extra_parameters = vec![ExtraParameter { parameter_type: 0x0030, data: vec![0; 16] }];
     update.objects[0].scale = Vec3::splat(2.0);
-    let malformed_batch = decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(23), &malformed_message)
+    let malformed_batch = decode_object_message(region, fixture_packet.sequence(), OrderEvidence::Ordered(23), &malformed_message)
         .expect("compressed object batch");
     let Some(ObjectOperation::Observe(malformed_observation)) = malformed_batch.blocks[0].as_ref() else {
         panic!("expected compressed observation")
