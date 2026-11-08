@@ -209,7 +209,11 @@ fn boundary_roots(distance: f64, velocity: f64, acceleration: f64) -> [f64; 2] {
         return [f64::NAN; 2];
     }
     let root = discriminant.sqrt();
-    [(-b - root) / (2.0 * a), (-b + root) / (2.0 * a)]
+    let q = -0.5 * (b + root.copysign(b));
+    if q == 0.0 {
+        return [0.0; 2];
+    }
+    [q / a, -distance / q]
 }
 
 fn region_at(position: DVec3, regions: &[RegionBounds]) -> Option<u64> {
@@ -338,6 +342,37 @@ mod tests {
         let position = bounded_position(1, DVec3::new(255.0, 20.0, 0.0), Vec3::X * 100.0, Vec3::ZERO, 2.0, 1.0, &regions);
 
         assert_eq!(position.x, 256.0);
+    }
+
+    #[test]
+    fn tiny_acceleration_stops_at_edges() {
+        let regions = [RegionBounds { region_id: 1, origin: DVec3::ZERO }];
+        let tiny = f32::from_bits(1);
+        let cases = [
+            (DVec3::new(255.0, 20.0, 0.0), Vec3::X * 100.0, Vec3::X * tiny, DVec3::new(256.0, 20.0, 0.0)),
+            (DVec3::new(1.0, 20.0, 0.0), Vec3::X * -100.0, Vec3::X * tiny, DVec3::new(0.0, 20.0, 0.0)),
+            (DVec3::new(20.0, 255.0, 0.0), Vec3::Y * 100.0, Vec3::Y * tiny, DVec3::new(20.0, 256.0, 0.0)),
+            (DVec3::new(20.0, 1.0, 0.0), Vec3::Y * -100.0, Vec3::Y * tiny, DVec3::new(20.0, 0.0, 0.0)),
+        ];
+
+        for (start, velocity, acceleration, expected) in cases {
+            for acceleration in [acceleration, -acceleration] {
+                let position = bounded_position(1, start, velocity, acceleration, 2.0, 1.0, &regions);
+
+                assert!(
+                    position.distance(expected) < 1.0e-12,
+                    "position {position:?}, expected edge {expected:?}, start {start:?}, velocity {velocity:?}, acceleration {acceleration:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tangent_boundary_allows_inward_motion() {
+        let regions = [RegionBounds { region_id: 1, origin: DVec3::ZERO }];
+        let position = bounded_position(1, DVec3::new(0.0, 20.0, 0.0), Vec3::X, Vec3::X * 90.0, 2.0, 1.0, &regions);
+
+        assert!((position.x - 180.0).abs() < 1.0e-8, "{position:?}");
     }
 
     #[test]
