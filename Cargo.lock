@@ -373,6 +373,7 @@ dependencies = [
  "tempfile",
  "test-support",
  "tokio",
+ "tracing",
  "utils",
  "uuid",
 ]

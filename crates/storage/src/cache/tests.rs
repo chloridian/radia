@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Barrier,
-        mpsc::{Receiver, SyncSender},
+        mpsc::{self, Receiver, SyncSender},
     },
     thread,
     time::Duration,
@@ -23,6 +23,14 @@ use super::*;
 const TEST_NAMESPACES: [Namespace; 2] = [Namespace::new("tests/storage", "bin"), Namespace::new("assets/textures", "j2c")];
 const TEST_NAMESPACE: NamespaceId = NamespaceId::new(0);
 type QueuedPuts = (Receiver<()>, Vec<SyncSender<()>>, Vec<thread::JoinHandle<Result<(), StorageError>>>);
+
+struct PanickingPolicy;
+
+impl EvictionPolicy for PanickingPolicy {
+    fn score(&self, _candidate: EvictionCandidate, _now: u64) -> EvictionScore {
+        panic!("eviction policy failed")
+    }
+}
 
 fn key(value: u16) -> Key {
     let mut name = [0; 16];
@@ -223,6 +231,15 @@ fn namespace_change_remaps_entries() {
     assert!(retained_path.exists());
     std::assert_matches!(cache.put(Key::new(NamespaceId::new(1), [3; 16]), vec![0]), Err(StorageError::UnknownNamespace));
     cache.shutdown().expect("close remapped cache");
+}
+
+#[test]
+fn discard_handles_missing_and_unknown() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    cache.discard(key(24)).expect("discard absent key");
+    std::assert_matches!(cache.discard(Key::new(NamespaceId::new(2), [0; 16])), Err(StorageError::UnknownNamespace));
+    cache.shutdown().expect("close cache");
 }
 
 #[test]
@@ -452,6 +469,25 @@ fn write_failure_keeps_existing_entries() {
 }
 
 #[test]
+fn writer_panic_shutdown_returns() {
+    let directory = tempdir().expect("cache directory");
+    let empty = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open empty cache");
+    let empty_size = empty.accounted_size();
+    empty.shutdown().expect("close empty cache");
+
+    let limit = empty_size + 40 * 1024;
+    let cache = Cache::open_with_policy(directory.path(), limit, &TEST_NAMESPACES, PanickingPolicy).expect("open cache");
+    cache.put(key(1), vec![1; 16 * 1024]).expect("store first payload");
+    std::assert_matches!(cache.put(key(2), vec![2; 16 * 1024]), Err(StorageError::Unavailable(UnavailableReason::WriterStopped)));
+
+    let (finished, completion) = mpsc::channel();
+    let shutdown = thread::spawn(move || finished.send(cache.shutdown()).expect("send shutdown result"));
+    let result = completion.recv_timeout(Duration::from_secs(3)).expect("shutdown returns after writer panic");
+    shutdown.join().expect("shutdown thread completes");
+    std::assert_matches!(result, Err(StorageError::WorkerPanicked));
+}
+
+#[test]
 fn lookup_ignores_slow_writes() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
@@ -494,6 +530,30 @@ fn lookup_retries_after_replacement() {
 }
 
 #[test]
+fn discard_reservation_failure_retries() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    let payload = b"semantically invalid payload";
+    cache.put(key(22), payload.to_vec()).expect("store payload");
+
+    cache.arm_fault(WritePoint::InvalidReserve);
+    std::assert_matches!(cache.discard(key(22)), Err(StorageError::Unavailable(UnavailableReason::Allocation)));
+    assert_eq!(cache.entry_count(), 1, "failed reservation must leave the entry valid");
+    std::assert_matches!(cache.lookup(key(22)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == payload);
+    cache.arm_fault(WritePoint::InvalidReserve);
+    assert_eq!(cache.lookup_bounded(key(22), 1), Lookup::Unavailable(UnavailableReason::Allocation));
+    assert_eq!(cache.entry_count(), 1, "failed reservation must leave the entry valid");
+    cache.discard(key(22)).expect("retry discard");
+    cache.flush().expect("persist invalid entry removal");
+    cache.shutdown().expect("close cache");
+
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("reopen cache");
+    assert_eq!(cache.lookup(key(22)), Lookup::Miss);
+    assert!(!cache.contains(key(22)));
+    cache.shutdown().expect("close reopened cache");
+}
+
+#[test]
 fn replacement_crash_never_trusts_bytes() {
     for point in crash_points() {
         let directory = tempdir().expect("cache directory");
@@ -525,6 +585,7 @@ fn replacement_crash_never_trusts_bytes() {
             | WritePoint::IndexBatchFailure
             | WritePoint::LookupEntrySelected
             | WritePoint::LookupHashMismatch
+            | WritePoint::InvalidReserve
             | WritePoint::IndexTouchBusy
             | WritePoint::PutQueued
             | WritePoint::SetLimitQueued

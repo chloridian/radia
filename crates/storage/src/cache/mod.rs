@@ -641,19 +641,19 @@ impl Cache {
         Ok(Protection { shared: Arc::clone(&self.read_state.protection), key })
     }
 
-    pub fn discard(&self, key: Key) {
+    pub fn discard(&self, key: Key) -> Result<(), StorageError> {
         if !self.read_state.namespaces.contains(key.namespace) {
-            return;
+            return Err(StorageError::UnknownNamespace);
         }
         let entries = match self.read_state.entries.read() {
             Ok(entries) => entries,
             Err(poisoned) => poisoned.into_inner(),
         };
         let Some(entry) = entries.get(&key).cloned() else {
-            return;
+            return Ok(());
         };
         drop(entries);
-        self.mark_invalid(&key, entry);
+        self.mark_invalid(&key, entry).map(|_| ())
     }
 
     pub fn clear(&self) -> Result<(), StorageError> {
@@ -709,8 +709,10 @@ impl Cache {
 
     pub fn shutdown(mut self) -> Result<(), StorageError> {
         let (reply, receiver) = mpsc::sync_channel(0);
-        self.queue.send_terminal(Command::Shutdown { reply })?;
-        let result = receive(receiver);
+        let result = match self.queue.send_terminal(Command::Shutdown { reply }) {
+            Ok(()) => receive(receiver),
+            Err(error) => Err(error),
+        };
         self.queue.close();
         if let Some(worker) = self.worker.take() {
             worker.join().map_err(|_| StorageError::WorkerPanicked)?;
@@ -811,35 +813,48 @@ impl Cache {
         entries.get(key).is_some_and(|current| Arc::ptr_eq(current, entry))
     }
 
-    fn mark_invalid(&self, key: &Key, entry: Arc<Entry>) -> bool {
+    fn mark_invalid(&self, key: &Key, entry: Arc<Entry>) -> Result<bool, StorageError> {
         let entries = match self.read_state.entries.read() {
             Ok(entries) => entries,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let matches = entries.get(key).is_some_and(|current| Arc::ptr_eq(current, &entry));
-        if !matches {
-            return false;
+        if !entries.get(key).is_some_and(|current| Arc::ptr_eq(current, &entry)) {
+            return Ok(false);
         }
-        match entry.state.compare_exchange(ENTRY_VALID, ENTRY_INVALID, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) | Err(ENTRY_INVALID) => {}
-            Err(ENTRY_REPLACING) => return false,
-            Err(_) => return false,
-        }
-        drop(entries);
         let mut invalid = match self.read_state.invalid.lock() {
             Ok(invalid) => invalid,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if invalid.try_reserve(1).is_err() {
-            return true;
+        let state = entry.state.load(Ordering::Acquire);
+        if state != ENTRY_VALID && state != ENTRY_INVALID {
+            return Ok(false);
+        }
+        if state == ENTRY_INVALID && invalid.get(key).is_some_and(|current| Arc::ptr_eq(current, &entry)) {
+            return Ok(true);
+        }
+        if !invalid.contains_key(key) {
+            #[cfg(test)]
+            if self.read_state.hooks.check(WritePoint::InvalidReserve).is_err() {
+                return Err(StorageError::Unavailable(UnavailableReason::Allocation));
+            }
+            invalid.try_reserve(1).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        }
+        if state == ENTRY_VALID {
+            match entry.state.compare_exchange(ENTRY_VALID, ENTRY_INVALID, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) | Err(ENTRY_INVALID) => {}
+                Err(_) => return Ok(false),
+            }
         }
         invalid.insert(*key, entry);
-        true
+        Ok(true)
     }
 
     fn invalid_lookup_result(&self, key: &Key, entry: &Arc<Entry>) -> Option<Lookup> {
-        if self.mark_invalid(key, Arc::clone(entry)) {
-            return Some(Lookup::Corrupt);
+        match self.mark_invalid(key, Arc::clone(entry)) {
+            Ok(true) => return Some(Lookup::Corrupt),
+            Err(StorageError::Unavailable(reason)) => return Some(Lookup::Unavailable(reason)),
+            Err(_) => return Some(Lookup::Unavailable(UnavailableReason::Io)),
+            Ok(false) => {}
         }
         if entry.state.load(Ordering::Acquire) == ENTRY_REPLACING && self.entry_is_current(key, entry) {
             return Some(Lookup::Unavailable(UnavailableReason::Io));

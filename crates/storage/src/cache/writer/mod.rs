@@ -58,6 +58,8 @@ pub(super) enum WritePoint {
     #[cfg(test)]
     LookupHashMismatch,
     #[cfg(test)]
+    InvalidReserve,
+    #[cfg(test)]
     IndexTouchBusy,
     #[cfg(test)]
     PutQueued,

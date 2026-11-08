@@ -155,9 +155,33 @@ impl WriteQueue {
         self.ready.notify_all();
         self.space.notify_all();
     }
+
+    fn fail_pending(&self) {
+        let commands = {
+            let mut state = lock(&self.state);
+            state.closed = true;
+            state.pending_bytes = 0;
+            state.pending_commands = 0;
+            self.ready.notify_all();
+            self.space.notify_all();
+            std::mem::take(&mut state.commands)
+        };
+        drop(commands);
+    }
+}
+
+struct WorkerQueueGuard<'queue> {
+    queue: &'queue WriteQueue,
+}
+
+impl Drop for WorkerQueueGuard<'_> {
+    fn drop(&mut self) {
+        self.queue.fail_pending();
+    }
 }
 
 pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueue>) {
+    let _queue_guard = WorkerQueueGuard { queue: &queue };
     #[cfg(test)]
     if state.hooks.check(super::WritePoint::WriterReady).is_err() {
         return;
@@ -359,5 +383,27 @@ mod tests {
         assert!(retry.ready(now));
         retry.failed(now);
         assert!(retry.ready(now + MAINTENANCE_RETRY_INITIAL));
+    }
+
+    #[test]
+    fn byte_limit_releases_admission() {
+        let queue = WriteQueue::default();
+        let empty_put = || Command::Put {
+            key: Key::new(crate::cache::NamespaceId::new(0), [0; 16]),
+            bytes: Vec::new(),
+            reply: std::sync::mpsc::sync_channel(0).0,
+        };
+
+        queue.try_send(empty_put(), MAX_QUEUED_WRITE_BYTES).expect("admit exact byte limit");
+        std::assert_matches!(queue.try_send(empty_put(), 1), Err(StorageError::Unavailable(UnavailableReason::WriteQueueFull)));
+        std::assert_matches!(queue.try_send(empty_put(), usize::MAX), Err(StorageError::Unavailable(UnavailableReason::WriteQueueFull)));
+
+        for queued in queue.receive_batch().commands {
+            queue.complete(queued.bytes);
+        }
+        queue.try_send(empty_put(), MAX_QUEUED_WRITE_BYTES).expect("admit after completion");
+
+        queue.close();
+        std::assert_matches!(queue.try_send(empty_put(), 0), Err(StorageError::Unavailable(UnavailableReason::WriterStopped)));
     }
 }
