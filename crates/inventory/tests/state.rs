@@ -140,6 +140,118 @@ fn invariant(snapshot: &inventory::InventorySnapshot) -> Option<&'static str> {
 }
 
 #[test]
+fn folder_generations_follow_direct_changes() {
+    let owner = owner(16);
+    let mut inventory = inventory(owner);
+    let root = inventory.snapshot().roots().personal();
+    let first = category(owner, 2, Some(1), "first");
+    let second = category(owner, 3, Some(1), "second");
+    let first_key = first.key;
+    let second_key = second.key;
+    inventory.upsert_category(first.clone()).expect("add first folder");
+    inventory.upsert_category(second).expect("add second folder");
+
+    let before_category_change = inventory.snapshot();
+    let mut renamed = first;
+    renamed.name = Arc::from("renamed");
+    inventory.upsert_category(renamed).expect("rename first folder");
+    let after_category_change = inventory.snapshot();
+    assert_eq!(after_category_change.folder_generation(first_key), Some(after_category_change.revision()));
+    assert_eq!(after_category_change.folder_generation(root), Some(after_category_change.revision()));
+    assert_eq!(after_category_change.folder_generation(second_key), before_category_change.folder_generation(second_key));
+
+    let before_item_change = inventory.snapshot();
+    inventory.upsert_item(item(owner, 4, 2, AssetType::Notecard, 5)).expect("add item to first folder");
+    let after_item_change = inventory.snapshot();
+    assert_eq!(after_item_change.folder_generation(first_key), Some(after_item_change.revision()));
+    assert_eq!(after_item_change.folder_generation(root), before_item_change.folder_generation(root));
+    assert_eq!(after_item_change.folder_generation(second_key), before_item_change.folder_generation(second_key));
+}
+
+#[test]
+fn item_move_changes_both_folder_generations() {
+    let owner = owner(17);
+    let mut inventory = inventory(owner);
+    let root = inventory.snapshot().roots().personal();
+    let first = CategoryKey::new(owner, FolderId::new(uuid(2)));
+    let second = CategoryKey::new(owner, FolderId::new(uuid(3)));
+    inventory.upsert_category(category(owner, 2, Some(1), "first")).expect("add first folder");
+    inventory.upsert_category(category(owner, 3, Some(1), "second")).expect("add second folder");
+    inventory.upsert_item(item(owner, 4, 2, AssetType::Notecard, 5)).expect("add item");
+    let before_move = inventory.snapshot();
+
+    inventory.move_node(InventoryNodeKey::new(owner, InventoryNodeId::Item(ItemId::new(uuid(4)))), second).expect("move item");
+
+    let after_move = inventory.snapshot();
+    assert_eq!(after_move.folder_generation(first), Some(after_move.revision()));
+    assert_eq!(after_move.folder_generation(second), Some(after_move.revision()));
+    assert_eq!(after_move.folder_generation(root), before_move.folder_generation(root));
+}
+
+#[test]
+fn deleted_folder_generation_is_not_reused() {
+    let owner = owner(18);
+    let mut inventory = inventory(owner);
+    let folder = category(owner, 2, Some(1), "folder");
+    let key = folder.key;
+    inventory.upsert_category(folder.clone()).expect("add folder");
+    let old_generation = inventory.snapshot().folder_generation(key).expect("folder generation exists");
+
+    inventory.remove_subtree(owner, key.id()).expect("remove folder");
+    assert_eq!(inventory.snapshot().folder_generation(key), None);
+
+    inventory.upsert_category(folder).expect("recreate folder");
+    let new_snapshot = inventory.snapshot();
+    let new_generation = new_snapshot.folder_generation(key).expect("recreated folder has a generation");
+    assert_ne!(new_generation, old_generation);
+    assert_eq!(new_generation, new_snapshot.revision());
+}
+
+#[test]
+fn failed_and_noop_changes_keep_folder_generations() {
+    let owner = owner(19);
+    let mut inventory = inventory(owner);
+    let root = inventory.snapshot().roots().personal();
+    let before = inventory.snapshot();
+
+    assert_eq!(
+        inventory.apply_folder_fetch(
+            root,
+            ServerVersion::UNKNOWN,
+            None,
+            vec![InventoryChild::Item(item(owner, 4, 99, AssetType::Notecard, 5))],
+        ),
+        Err(InventoryError::InvalidParent)
+    );
+    assert_eq!(inventory.snapshot().folder_generation(root), before.folder_generation(root));
+    assert_eq!(inventory.revision(), before.revision());
+
+    let no_op = inventory.upsert_category(category(owner, 1, None, "root")).expect("same root is a no-op");
+    assert!(no_op.is_empty());
+    assert_eq!(inventory.snapshot().folder_generation(root), before.folder_generation(root));
+    assert_eq!(inventory.revision(), before.revision());
+}
+
+#[test]
+fn folder_fetch_and_version_updates_stamp_the_folder() {
+    let owner = owner(20);
+    let mut inventory = inventory(owner);
+    let root = inventory.snapshot().roots().personal();
+    let before_fetch = inventory.snapshot();
+
+    let changes = inventory.apply_folder_fetch(root, ServerVersion::UNKNOWN, None, Vec::new()).expect("empty folder fetch is valid");
+    let after_fetch = inventory.snapshot();
+    assert_eq!(changes.revision, after_fetch.revision());
+    assert_eq!(after_fetch.folder_generation(root), Some(after_fetch.revision()));
+    assert_ne!(after_fetch.revision(), before_fetch.revision());
+
+    inventory.set_version(root, ServerVersion::from_raw(7)).expect("set server version");
+    let after_version = inventory.snapshot();
+    assert_eq!(after_version.folder_generation(root), Some(after_version.revision()));
+    assert_ne!(after_version.revision(), after_fetch.revision());
+}
+
+#[test]
 fn cycle_attempt_keeps_state() {
     let owner = owner(9);
     let mut inventory = inventory(owner);

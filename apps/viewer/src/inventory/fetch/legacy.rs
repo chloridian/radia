@@ -5,7 +5,8 @@ use protocol::inventory::{self, DecodeError, RequestedFolder};
 use uuid::Uuid;
 
 use super::{
-    FolderFetch, InventoryFetchError, MAX_FALLBACK_FOLDERS, MAX_FETCH_RESPONSE_BYTES, RequestFailure, classify_request_error,
+    FolderFetch, FolderFetchProvenance, InventoryFetchError, MAX_FALLBACK_FOLDERS, MAX_FETCH_RESPONSE_BYTES, RequestFailure,
+    classify_request_error,
     decode::{to_category, to_item},
 };
 
@@ -65,6 +66,7 @@ fn to_folder_fetch(folder: protocol::inventory::FolderDescendents, key: Category
         version: ::inventory::ServerVersion::from_raw(folder.version),
         descendent_count: Some(folder.descendent_count),
         children,
+        provenance: FolderFetchProvenance::Untracked,
     })
 }
 

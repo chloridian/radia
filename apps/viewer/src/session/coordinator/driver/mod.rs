@@ -28,7 +28,7 @@ use super::{
     inventory_bootstrap::{InventoryBootstrapReport, InventoryWorkerError, spawn_inventory_build},
     inventory_cache::{InventoryCacheEvent, InventoryCacheSession},
     media::ObjectMediaIntake,
-    presentation::{AuthenticationUpdate, PresentationMailbox, SessionEnd, SessionReadyUpdate, ViewerUpdate},
+    presentation::{AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, SessionEnd, SessionReadyUpdate, ViewerUpdate},
 };
 use crate::{
     asset_coordinator::AssetCoordinator,
@@ -70,6 +70,7 @@ enum DriverInput {
     ObjectCache(Option<ObjectCacheEvent>),
     InventoryEdit(Option<InventoryEditEvent>),
     InventoryBootstrap(Result<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>, tokio::task::JoinError>),
+    Favorites(Result<FavoritesUpdate, tokio::task::JoinError>),
 }
 
 #[derive(Default)]
@@ -141,6 +142,7 @@ struct SessionDriver {
     active_login_data: Option<ResponseData>,
     active_capabilities: Option<Client>,
     favorites_enabled: bool,
+    favorites_load: Option<tokio::task::JoinHandle<FavoritesUpdate>>,
     inventory_bootstrap: Option<tokio::task::JoinHandle<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>>>,
     inventory_bootstrap_dirty: bool,
     inventory: Option<Inventory>,
@@ -227,6 +229,7 @@ impl SessionDriver {
             active_login_data: None,
             active_capabilities: None,
             favorites_enabled: false,
+            favorites_load: None,
             inventory_bootstrap: None,
             inventory_bootstrap_dirty: false,
             inventory: None,
@@ -266,6 +269,12 @@ impl SessionDriver {
                     None => pending().await,
                 }
             };
+            let favorites_load = async {
+                match self.favorites_load.as_mut() {
+                    Some(task) => Some(task.await),
+                    None => pending().await,
+                }
+            };
             let input = tokio::select! {
                 input = select_drain_input(
                     &mut self.reads,
@@ -282,8 +291,13 @@ impl SessionDriver {
                 cache_event = self.object_cache.next_event() => DriverInput::ObjectCache(cache_event),
                 edit_event = self.inventory_edits.next_event() => DriverInput::InventoryEdit(edit_event),
                 bootstrap = inventory_bootstrap => DriverInput::InventoryBootstrap(bootstrap.expect("bootstrap task must be pending")),
+                favorites = favorites_load => DriverInput::Favorites(favorites.expect("favorites task must be pending")),
             };
             let flow = match input {
+                DriverInput::Favorites(result) => {
+                    self::inventory::publish_favorites_refresh(&mut self.favorites_load, &self.mailbox, result);
+                    ControlFlow::Continue(())
+                }
                 DriverInput::InventoryBootstrap(result) => {
                     self.inventory_bootstrap = None;
                     match result {
@@ -778,6 +792,7 @@ impl SessionDriver {
         self.media.forget_simulator(simulator_id);
         if Some(simulator_id) == self.primary_simulator {
             self.primary_simulator = None;
+            self::inventory::cancel_favorites_refresh(&mut self.favorites_load);
             self.camera.request_update();
         }
         ControlFlow::Continue(())
@@ -904,6 +919,7 @@ impl SessionDriver {
     }
 
     async fn finish(mut self) {
+        self::inventory::stop_favorites_refresh(&mut self.favorites_load).await;
         if let Some(inventory_bootstrap) = self.inventory_bootstrap.take() {
             inventory_bootstrap.abort();
         }

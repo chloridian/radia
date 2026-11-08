@@ -21,8 +21,8 @@ use tokio::{
 
 use super::state::{BackgroundRequest, SourceKind, enqueue_background, next_background_job};
 use super::{
-    FolderFetch, InventoryFetchError, InventoryFetchEvent, MAX_AIS_DEPTH, MAX_FETCH_RETRIES, RequestFailure, ais, classify_request_error,
-    legacy,
+    FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent, MAX_AIS_DEPTH, MAX_FETCH_RETRIES, RequestFailure, ais,
+    classify_request_error, legacy,
 };
 use crate::inventory::InventoryEditHandle;
 
@@ -313,7 +313,7 @@ async fn run_scheduler(
             in_flight.insert(folder);
             let job = BackgroundJob { id: next_job_id, folders: vec![folder], depth: 0 };
             next_job_id = next_job_id.wrapping_add(1);
-            let fetch = execute_job(&client, source.clone(), job.clone());
+            let fetch = execute_job(&client, source.clone(), job.clone(), &model, &snapshot);
             futures::pin_mut!(fetch);
             let result = loop {
                 tokio::select! {
@@ -389,10 +389,12 @@ async fn run_scheduler(
                 in_flight.insert(*folder);
             }
             let client = client.clone();
+            let model = model.clone();
+            let initial = snapshot.clone();
             let active_job = job.clone();
             jobs.push(
                 async move {
-                    let result = execute_job(&client, source, active_job.clone()).await;
+                    let result = execute_job(&client, source, active_job.clone(), &model, &initial).await;
                     JobCompletion { job: active_job, result }
                 }
                 .boxed(),
@@ -518,14 +520,20 @@ async fn discover(
     }
 }
 
-async fn execute_job(client: &Client, source: SourceCapabilities, job: BackgroundJob) -> Result<Vec<FolderFetch>, InventoryFetchError> {
+async fn execute_job(
+    client: &Client,
+    source: SourceCapabilities,
+    job: BackgroundJob,
+    model: &watch::Receiver<Option<InventorySnapshot>>,
+    initial: &InventorySnapshot,
+) -> Result<Vec<FolderFetch>, InventoryFetchError> {
     let Some(folder) = job.folders.first().copied() else {
         return Err(InventoryFetchError::InvalidResponse);
     };
     if let Some(capability) = source.ais {
-        fetch_ais(client, &capability, folder, job.depth).await
+        fetch_ais_with_provenance(client, &capability, folder, job.depth, || Some(latest_snapshot(model, initial))).await
     } else if let Some(capability) = source.legacy {
-        fetch_legacy(client, &capability, &job.folders).await
+        fetch_legacy_with_provenance(client, &capability, &job.folders, || Some(latest_snapshot(model, initial))).await
     } else {
         Err(InventoryFetchError::CapabilityUnavailable)
     }
@@ -593,11 +601,25 @@ async fn fetch_ais(
     folder: CategoryKey,
     initial_depth: u8,
 ) -> Result<Vec<FolderFetch>, InventoryFetchError> {
+    fetch_ais_with_provenance(client, capability, folder, initial_depth, || None).await
+}
+
+async fn fetch_ais_with_provenance(
+    client: &Client,
+    capability: &CapabilityUrl,
+    folder: CategoryKey,
+    initial_depth: u8,
+    mut capture_snapshot: impl FnMut() -> Option<InventorySnapshot>,
+) -> Result<Vec<FolderFetch>, InventoryFetchError> {
     let mut depth = initial_depth.min(MAX_AIS_DEPTH);
     let mut retries = 0;
     loop {
+        let request_snapshot = capture_snapshot();
         match ais::fetch_once(client, capability, folder, depth).await {
-            Ok(folders) => return Ok(folders),
+            Ok(mut folders) => {
+                stamp_request_provenance(&mut folders, request_snapshot.as_ref());
+                return Ok(folders);
+            }
             Err(RequestFailure::Forbidden | RequestFailure::FolderTooLarge) if depth > 0 => {
                 depth /= 2;
                 retries = 0;
@@ -619,10 +641,23 @@ async fn fetch_legacy(
     capability: &CapabilityUrl,
     folders: &[CategoryKey],
 ) -> Result<Vec<FolderFetch>, InventoryFetchError> {
+    fetch_legacy_with_provenance(client, capability, folders, || None).await
+}
+
+async fn fetch_legacy_with_provenance(
+    client: &Client,
+    capability: &CapabilityUrl,
+    folders: &[CategoryKey],
+    mut capture_snapshot: impl FnMut() -> Option<InventorySnapshot>,
+) -> Result<Vec<FolderFetch>, InventoryFetchError> {
     let mut retries = 0;
     loop {
+        let request_snapshot = capture_snapshot();
         match legacy::fetch_batch(client, capability, folders).await {
-            Ok(folders) => return Ok(folders),
+            Ok(mut folders) => {
+                stamp_request_provenance(&mut folders, request_snapshot.as_ref());
+                return Ok(folders);
+            }
             Err(RequestFailure::Transient(retry_after)) if retries < MAX_FETCH_RETRIES => {
                 wait_retry_foreground(retries, retry_after).await;
                 retries += 1;
@@ -634,6 +669,13 @@ async fn fetch_legacy(
                 return Err(InventoryFetchError::RequestFailed);
             }
         }
+    }
+}
+
+fn stamp_request_provenance(folders: &mut [FolderFetch], snapshot: Option<&InventorySnapshot>) {
+    let Some(snapshot) = snapshot else { return };
+    for fetch in folders {
+        fetch.provenance = FolderFetchProvenance::StartedAt(snapshot.folder_generation(fetch.folder));
     }
 }
 
@@ -707,18 +749,39 @@ async fn process_completion(
                 Err(_) => return false,
             },
         };
-        if outcome.rejected {
-            failed.insert(folder_key);
-            if foreground_folder == Some(folder_key) {
-                foreground_outcome = Some(InventoryFetchOutcome::Failed);
+        match outcome {
+            super::FolderApplyOutcome::Rejected => {
+                failed.insert(folder_key);
+                if foreground_folder == Some(folder_key) {
+                    foreground_outcome = Some(InventoryFetchOutcome::Failed);
+                }
+                continue;
             }
-            continue;
+            super::FolderApplyOutcome::Stale => {
+                failed.remove(&folder_key);
+                let current = latest_snapshot(model, initial);
+                let complete = current.is_complete(folder_key);
+                if foreground_folder == Some(folder_key) {
+                    foreground_outcome = Some(if complete { InventoryFetchOutcome::Succeeded } else { InventoryFetchOutcome::Failed });
+                }
+                if current.category(folder_key).is_some() && !complete {
+                    let was_queued = queued.contains(&folder_key);
+                    enqueue_background(BackgroundRequest { folder: folder_key, depth: 0 }, &current, failed, background, queued);
+                    if !was_queued && queued.contains(&folder_key) {
+                        *background_done = false;
+                    }
+                }
+                continue;
+            }
+            super::FolderApplyOutcome::Applied => {
+                failed.remove(&folder_key);
+            }
         }
-        if foreground_folder == Some(folder_key) {
-            foreground_outcome = Some(InventoryFetchOutcome::Succeeded);
-        }
-        failed.remove(&folder_key);
         let current = latest_snapshot(model, initial);
+        if foreground_folder == Some(folder_key) {
+            foreground_outcome =
+                Some(if current.is_complete(folder_key) { InventoryFetchOutcome::Succeeded } else { InventoryFetchOutcome::Failed });
+        }
         for category in current.children(folder_key).filter_map(|node| match node.id() {
             ::inventory::InventoryNodeId::Category(id) => Some(CategoryKey::new(folder_key.owner(), id)),
             ::inventory::InventoryNodeId::Item(_) => None,
