@@ -7,6 +7,7 @@
 };
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 pub struct TestProcess {
     child: Child,
@@ -58,11 +59,7 @@ impl TestProcess {
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        self.child.stdin.take();
-        let status = self.child.wait()?;
-        self.reaped = true;
-        self.finish_reader()?;
-        Ok(status)
+        self.wait_until(Instant::now() + PROCESS_TIMEOUT)
     }
 
     pub fn kill(&mut self) -> io::Result<ExitStatus> {
@@ -75,6 +72,28 @@ impl TestProcess {
 
     pub fn stdout(&self) -> &str {
         &self.output
+    }
+
+    fn wait_until(&mut self, deadline: Instant) -> io::Result<ExitStatus> {
+        self.child.stdin.take();
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                self.reaped = true;
+                self.finish_reader()?;
+                return Ok(status);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let _status = kill_and_wait(&mut self.child)?;
+                self.reaped = true;
+                self.finish_reader()?;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("subprocess did not exit before its deadline; stdout: {}", self.output),
+                ));
+            }
+            thread::sleep(remaining.min(PROCESS_POLL_INTERVAL));
+        }
     }
 
     fn finish_reader(&mut self) -> io::Result<()> {
@@ -166,16 +185,52 @@ mod tests {
     }
 
     #[test]
+    fn wait_timeout_kills_and_reaps_child() -> io::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let mode = format!("hold:{}", listener.local_addr()?);
+        let mut child = helper(&mode)?;
+        child.wait_for_stdout("ready")?;
+        let (mut peer, _) = listener.accept()?;
+        peer.set_read_timeout(Some(PROCESS_TIMEOUT))?;
+
+        let stdin = child.child.stdin.take().ok_or_else(|| io::Error::other("subprocess stdin is not piped"))?;
+        drop(stdin);
+        child.wait_for_stdout("stdin closed")?;
+
+        let error = child.wait_until(Instant::now()).expect_err("expired deadline must time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(child.stdout().contains("ready\n"), "{}", child.stdout());
+        assert!(child.stdout().contains("stdin closed\n"), "{}", child.stdout());
+        assert!(error.to_string().contains(child.stdout()), "{error}");
+        match peer.read(&mut [0]) {
+            Ok(0) => {}
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            result => panic!("child connection must close on timeout: {result:?}"),
+        }
+
+        let status = child.wait()?;
+        assert!(!status.success(), "timed out child must be reaped after termination");
+        Ok(())
+    }
+
+    #[test]
     fn child_helper() -> io::Result<()> {
         let Ok(mode) = env::var("RADIA_TEST_PROCESS_MODE") else { return Ok(()) };
         if mode == "exit" {
             println!("helper exiting");
             return Ok(());
         }
-        let _peer = TcpStream::connect(mode)?;
+        let (address, hold_open) = mode.strip_prefix("hold:").map_or((mode.as_str(), false), |address| (address, true));
+        let mut peer = TcpStream::connect(address)?;
         println!("ready");
         io::stdout().flush()?;
         io::stdin().read_line(&mut String::new())?;
+        if hold_open {
+            println!("stdin closed");
+            io::stdout().flush()?;
+            let mut byte = [0];
+            while peer.read(&mut byte)? != 0 {}
+        }
         Ok(())
     }
 }

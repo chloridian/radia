@@ -800,7 +800,7 @@ mod tests {
                 _ => unreachable!(),
             }
         });
-        let transport = CapabilityTransport::new(Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let transport = CapabilityTransport::new(Client::new(peer.url().join("seed").unwrap()).unwrap());
         let mut store = Store::new(Budget::default());
         let route = store.register_route().unwrap();
         for (kind, expected) in
@@ -832,7 +832,7 @@ mod tests {
             }
             _ => unreachable!(),
         });
-        let transport = CapabilityTransport::new(Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let transport = CapabilityTransport::new(Client::new(peer.url().join("seed").unwrap()).unwrap());
         let mut store = Store::new(Budget::default());
         let route = store.register_route().unwrap();
         let id = resource(Kind::Mesh).id;
@@ -877,7 +877,7 @@ mod tests {
         );
         let region = Region::new(1);
         let id = resource(Kind::Mesh).id;
-        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut demand = handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 1).await.unwrap();
         loop {
@@ -909,7 +909,7 @@ mod tests {
                 (200, Vec::new(), body.clone())
             }
         });
-        let transport = CapabilityTransport::new(Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let transport = CapabilityTransport::new(Client::new(peer.url().join("seed").unwrap()).unwrap());
         let budget = Budget::default();
         let mut store = Store::new(budget.clone());
         let route = store.register_route().unwrap();
@@ -957,7 +957,7 @@ mod tests {
             }
             _ => unreachable!(),
         });
-        let transport = CapabilityTransport::new(Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let transport = CapabilityTransport::new(Client::new(peer.url().join("seed").unwrap()).unwrap());
         let mut store = Store::new(Budget::default());
         let route = store.register_route().unwrap();
         let demand = store.request(route, Request::MeshLod(block), Priority::Visible, Instant::now()).unwrap();
@@ -1002,7 +1002,7 @@ mod tests {
         );
         let region = Region::new(1);
         let id = resource(Kind::Mesh).id;
-        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut header_demand = handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
         let mesh_header = loop {
@@ -1057,7 +1057,7 @@ mod tests {
         let region = Region::new(1);
         let id = resource(Kind::Mesh).id;
         let service = AssetCoordinator::new(Handle::current(), pending(), Some(Arc::clone(&cache)));
-        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut header_demand = handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
         let header = loop {
@@ -1094,7 +1094,7 @@ mod tests {
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
         let warm_peer = Peer::new(0, |_, _, _| panic!("persisted mesh assets must not make HTTP requests"));
         let warm_service = AssetCoordinator::new(Handle::current(), pending(), Some(Arc::clone(&cache)));
-        warm_service.register(region, Client::new(warm_peer.url.join("seed").unwrap()).unwrap());
+        warm_service.register(region, Client::new(warm_peer.url().join("seed").unwrap()).unwrap());
         let warm_handle = warm_service.handle();
         let mut warm_header_demand =
             warm_handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
@@ -1153,7 +1153,7 @@ mod tests {
         });
         let service = AssetCoordinator::with_budget(Handle::current(), pending(), Budget::default(), None);
         let region = Region::new(1);
-        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut demand = handle.request_with_importance(region, Request::MeshLod(block), Priority::Visible, 0).await.unwrap();
         loop {
@@ -1200,7 +1200,7 @@ mod tests {
             Budget::default(),
             Some(Arc::clone(&cache)),
         );
-        first_service.register(region, Client::new(first_peer.url.join("seed").unwrap()).unwrap());
+        first_service.register(region, Client::new(first_peer.url().join("seed").unwrap()).unwrap());
         let first_handle = first_service.handle();
         let mut first_header_demand =
             first_handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
@@ -1247,7 +1247,7 @@ mod tests {
             Budget::default(),
             Some(Arc::clone(&cache)),
         );
-        second_service.register(region, Client::new(second_peer.url.join("seed").unwrap()).unwrap());
+        second_service.register(region, Client::new(second_peer.url().join("seed").unwrap()).unwrap());
         let second_handle = second_service.handle();
         let mut second_header_demand =
             second_handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
@@ -1303,7 +1303,7 @@ mod tests {
             }
             _ => unreachable!(),
         });
-        let transport = CapabilityTransport::new(Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let transport = CapabilityTransport::new(Client::new(peer.url().join("seed").unwrap()).unwrap());
         let now = Instant::now();
         let mut store = Store::new(Budget::default());
         let route = store.register_route().unwrap();
@@ -1364,7 +1364,7 @@ mod tests {
             None,
         );
         let region = Region::new(1);
-        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut demand =
             handle.request_with_importance(region, assets::Request::new(resource(Kind::Environment)), Priority::Visible, 0).await.unwrap();
@@ -1399,7 +1399,7 @@ mod tests {
             Some(Arc::clone(&cache)),
         );
         let region = Region::new(1);
-        first_service.register(region, Client::new(first_peer.url.join("seed").unwrap()).unwrap());
+        first_service.register(region, Client::new(first_peer.url().join("seed").unwrap()).unwrap());
         let first_handle = first_service.handle();
         let mut first_demand = first_handle
             .request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0)
@@ -1433,7 +1433,7 @@ mod tests {
             Budget::default(),
             Some(Arc::clone(&cache)),
         );
-        second_service.register(region, Client::new(second_peer.url.join("seed").unwrap()).unwrap());
+        second_service.register(region, Client::new(second_peer.url().join("seed").unwrap()).unwrap());
         let second_handle = second_service.handle();
         let mut second_demand = second_handle
             .request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0)
@@ -1475,7 +1475,7 @@ mod tests {
             Some(Arc::clone(&cache)),
         );
         let region = Region::new(1);
-        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut demand =
             handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
@@ -1519,7 +1519,7 @@ mod tests {
                 Some(Arc::clone(&cache)),
             );
             let region = Region::new(1);
-            service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+            service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
             let handle = service.handle();
             let mut demand =
                 handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
@@ -1551,7 +1551,7 @@ mod tests {
     #[tokio::test]
     async fn missing_grants_and_discovery_retry() {
         let peer = Peer::new(2, |index, _, _| if index == 0 { (503, Vec::new()) } else { (200, b"<llsd><map/></llsd>".to_vec()) });
-        let transport = CapabilityTransport::new(Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let transport = CapabilityTransport::new(Client::new(peer.url().join("seed").unwrap()).unwrap());
         let mut store = Store::new(Budget::default());
         let route = store.register_route().unwrap();
         let now = Instant::now();
@@ -1590,7 +1590,7 @@ mod tests {
             );
             (200, binary::to_vec(&fields).unwrap())
         });
-        let client = Client::new(peer.url.join("seed").unwrap()).unwrap();
+        let client = Client::new(peer.url().join("seed").unwrap()).unwrap();
         let (cancel, cancelled) = oneshot::channel();
         let budget = Budget::default();
         let service = AssetCoordinator::with_budget(
@@ -1642,7 +1642,7 @@ mod tests {
             assert!(header.starts_with(&format!("GET /content/?settings_id={} HTTP/1.1", asset.uuid())));
             (200, b"{'type':'sky','sunlight_color':[r1,r0,r0]}".to_vec())
         });
-        let client = Client::new(peer.url.join("seed").unwrap()).unwrap();
+        let client = Client::new(peer.url().join("seed").unwrap()).unwrap();
         let (cancel, cancelled) = oneshot::channel();
         let service = AssetCoordinator::with_budget(
             Handle::current(),
@@ -1700,7 +1700,7 @@ mod tests {
             hold.recv_timeout(Duration::from_secs(5)).unwrap();
             (200, RGBA_J2C.to_vec())
         });
-        let client = Client::new(peer.url.join("seed").unwrap()).unwrap();
+        let client = Client::new(peer.url().join("seed").unwrap()).unwrap();
         let (cancel, cancelled) = oneshot::channel();
         let budget = Budget::default();
         let service = AssetCoordinator::with_budget(
@@ -1759,7 +1759,7 @@ mod tests {
             hold.recv_timeout(Duration::from_secs(5)).unwrap();
             (200, b"late data".to_vec())
         });
-        let client = Client::new(peer.url.join("seed").unwrap()).unwrap();
+        let client = Client::new(peer.url().join("seed").unwrap()).unwrap();
         let (cancel, cancelled) = oneshot::channel();
         let budget = Budget::default();
         let service = AssetCoordinator::with_budget(
@@ -1821,7 +1821,7 @@ mod tests {
             Box::new(move || shutdown_drain_started.send(()).expect("signal cache write drain started")),
         );
         let region = Region::new(1);
-        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut demand =
             handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
