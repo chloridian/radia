@@ -35,8 +35,13 @@ impl Default for UvTransform {
 }
 
 pub fn normal_matrix(rotation: Quat, scale: Vec3) -> Mat3 {
-    let inverse = scale.recip();
-    Mat3::from_quat(rotation) * Mat3::from_diagonal(inverse / inverse.abs().max_element())
+    let smallest_scale = f32::from_bits(1);
+    let minimum = scale.abs().min_element().max(smallest_scale);
+    let inverse = scale.to_array().map(|component| {
+        let component = if component == 0.0 { smallest_scale.copysign(component) } else { component };
+        minimum / component
+    });
+    Mat3::from_quat(rotation) * Mat3::from_diagonal(Vec3::from_array(inverse))
 }
 
 pub fn flips_winding(scale: Vec3) -> bool {
@@ -78,6 +83,15 @@ mod tests {
         assert!(normal.dot(tangent).abs() < 1e-5);
         assert!((normal_matrix(Quat::IDENTITY, Vec3::splat(1e30)) * Vec3::X).is_finite());
         assert_eq!(normal_matrix(Quat::IDENTITY, scale) * Vec3::X, -Vec3::X);
+    }
+
+    #[test]
+    fn singular_scale_keeps_finite_normals() {
+        let tiny = f32::from_bits(1);
+
+        for scale in [Vec3::ZERO, Vec3::new(0.0, 1.0, 1.0), Vec3::new(tiny, 1.0, 1.0)] {
+            assert!(normal_matrix(Quat::IDENTITY, scale).is_finite(), "scale {scale:?}");
+        }
     }
 
     #[test]
