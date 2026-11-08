@@ -236,6 +236,31 @@ impl WorkQueue {
         state.closed = true;
         self.ready.notify_all();
     }
+
+    fn close_and_drain(&self) {
+        let work = {
+            let mut state = lock(&self.state);
+            state.closed = true;
+            state.pending_bytes = 0;
+            state.pending_rows = 0;
+            state.pending_batches = 0;
+            state.control_pending = 0;
+            state.blocked = false;
+            self.ready.notify_all();
+            std::mem::take(&mut state.work)
+        };
+        drop(work);
+    }
+}
+
+struct WorkerQueueGuard<'queue> {
+    queue: &'queue WorkQueue,
+}
+
+impl Drop for WorkerQueueGuard<'_> {
+    fn drop(&mut self) {
+        self.queue.close_and_drain();
+    }
 }
 
 pub struct SqliteDb {
@@ -591,6 +616,7 @@ struct WorkerDatabase {
 }
 
 fn worker_loop(path: &Path, migrate: Arc<Migration>, queue: &WorkQueue, failed_writes: Arc<AtomicBool>, opened: OpenedDatabase) {
+    let _queue_guard = WorkerQueueGuard { queue };
     let mut database = WorkerDatabase { connection: Some(opened.connection), lock: Some(opened.lock) };
     loop {
         let work = queue.receive();

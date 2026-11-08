@@ -140,6 +140,31 @@ fn full_queue_admits_control_work() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn panic_resolves_queued_receipt() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let (db, _) = SqliteDb::open(directory.path().join("inventory.sqlite"), migrate)?;
+    let control = db.control_handle();
+    let (started, started_rx) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    let panicking = SqliteBatch::new(1, 8, move |_transaction| {
+        started.send(()).map_err(|_| RusqliteError::InvalidQuery)?;
+        release_rx.recv().map_err(|_| RusqliteError::InvalidQuery)?;
+        panic!("test batch panic");
+    })?;
+    let panicking_receipt = db.submit_batches(vec![panicking])?;
+    started_rx.recv()?;
+
+    let queued_receipt = db.submit_batches(vec![insert(1)?])?;
+    release.send(())?;
+
+    std::assert_matches!(block_on(panicking_receipt.wait()), Err(SqliteError::WorkerStopped));
+    std::assert_matches!(db.shutdown(), Err(SqliteError::WorkerStopped));
+    std::assert_matches!(futures::FutureExt::now_or_never(queued_receipt.wait()), Some(Err(SqliteError::WorkerStopped)));
+    std::assert_matches!(control.submit_control_batch(insert(2)?), Err(SqliteError::WorkerStopped));
+    Ok(())
+}
+
+#[test]
 fn second_process_write_returns_busy() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let path = directory.path().join("inventory.sqlite");
