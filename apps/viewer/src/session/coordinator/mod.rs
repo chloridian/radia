@@ -10,6 +10,8 @@ mod presentation;
 
 #[cfg(test)]
 pub(crate) use self::driver::inventory::resolve_pending_inventory_moves;
+#[cfg(test)]
+pub(crate) use self::driver::inventory::{FolderFetchApply, apply_inventory_fetch};
 pub(crate) use self::driver::{CredentialPersistence, drain_session};
 #[cfg(test)]
 use self::input::select_drain_input;

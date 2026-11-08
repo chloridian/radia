@@ -8,11 +8,17 @@ use tokio::sync::oneshot;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
-use crate::inventory::FolderFetch;
+use crate::inventory::{FolderFetch, FolderFetchProvenance, favorites::FavoritesError};
 
-use super::inventory::{apply_inventory_fetch, cache_restore_move_changes, resolve_pending_inventory_moves};
+use super::inventory::{
+    FolderFetchApply, apply_inventory_fetch, cache_restore_move_changes, cancel_favorites_refresh, publish_favorites_refresh,
+    resolve_pending_inventory_moves, stop_favorites_refresh,
+};
 use super::{MoveExpectation, PendingHandshakeReplies, network_end_after_stream_close};
-use crate::session::SessionEnd;
+use crate::session::{
+    SessionEnd,
+    coordinator::{FavoritesUpdate, PresentationMailbox},
+};
 
 #[test]
 fn pending_handshake_replies_share_one_drain_and_keep_each_reply() {
@@ -111,9 +117,10 @@ fn stale_fetch_does_not_replace_a_complete_newer_folder() {
         version: ServerVersion::from_raw(9),
         descendent_count: Some(1),
         children: vec![InventoryChild::Item(stale_item)],
+        provenance: FolderFetchProvenance::Untracked,
     };
 
-    std::assert_matches!(apply_inventory_fetch(&mut inventory, stale_fetch), Ok(None));
+    std::assert_matches!(apply_inventory_fetch(&mut inventory, stale_fetch), Ok(FolderFetchApply::Stale));
     let snapshot = inventory.snapshot();
     assert_eq!(snapshot.revision(), revision);
     assert_eq!(snapshot.items().count(), 0);
@@ -153,17 +160,19 @@ fn older_parent_result_preserves_newer_child_version() {
         sale: SaleInfo { sale_type: SaleType::NotForSale, price: 0 },
     };
 
-    apply_inventory_fetch(
+    let FolderFetchApply::Applied(_) = apply_inventory_fetch(
         &mut inventory,
         FolderFetch {
             folder: child,
             version: ServerVersion::from_raw(10),
             descendent_count: Some(1),
             children: vec![InventoryChild::Item(item)],
+            provenance: FolderFetchProvenance::Untracked,
         },
     )
-    .expect("child response applies")
-    .expect("child response is not stale");
+    .expect("child response applies") else {
+        panic!("child response is not stale");
+    };
     let stale_child = category(child, Some(root), ServerVersion::from_raw(9), Some(0));
     apply_inventory_fetch(
         &mut inventory,
@@ -172,10 +181,10 @@ fn older_parent_result_preserves_newer_child_version() {
             version: ServerVersion::from_raw(3),
             descendent_count: Some(1),
             children: vec![InventoryChild::Category(stale_child)],
+            provenance: FolderFetchProvenance::Untracked,
         },
     )
-    .expect("parent response applies")
-    .expect("parent response is not stale");
+    .expect("parent response applies");
 
     let snapshot = inventory.snapshot();
     let child_category = snapshot.category(child).expect("child remains present");
@@ -202,17 +211,19 @@ async fn folder_fetch_move_resolves_pending_inventory_edit() {
     let expectation = MoveExpectation { node, from: first, to: second };
     let (confirmed, confirmation) = oneshot::channel();
     let mut pending = HashMap::from([(node, (expectation, confirmed))]);
-    let changes = apply_inventory_fetch(
+    let FolderFetchApply::Applied(changes) = apply_inventory_fetch(
         &mut inventory,
         FolderFetch {
             folder: second,
             version: ServerVersion::UNKNOWN,
             descendent_count: Some(1),
             children: vec![InventoryChild::Category(category(folder, Some(second), ServerVersion::UNKNOWN, Some(0)))],
+            provenance: FolderFetchProvenance::Untracked,
         },
     )
-    .expect("apply destination fetch")
-    .expect("destination fetch changes inventory");
+    .expect("apply destination fetch") else {
+        panic!("destination fetch should apply");
+    };
     let selected = changes
         .changes
         .iter()
@@ -251,4 +262,81 @@ async fn cache_restore_move_resolves_pending_inventory_edit() {
     resolve_pending_inventory_moves(&mut pending, &changes);
     confirmation.await.expect("cache restore change set confirms pending edit");
     assert!(pending.is_empty());
+}
+
+fn favorites_update(username: &str) -> FavoritesUpdate {
+    FavoritesUpdate {
+        grid: network::Grid::Agni,
+        agent_id: Uuid::from_u128(1),
+        session_id: Uuid::from_u128(2),
+        username: username.to_owned(),
+        result: Err(FavoritesError::MissingFavoritesFolder),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completed_favorites_refresh_is_superseded() {
+    let (mailbox, mut receiver) = PresentationMailbox::new(19);
+    let (old_started, old_started_rx) = oneshot::channel();
+    let (finish_old, finish_old_rx) = oneshot::channel();
+    let (old_finished, old_finished_rx) = oneshot::channel();
+    let old = tokio::spawn(async move {
+        old_started.send(()).expect("test is waiting for the old worker");
+        finish_old_rx.await.expect("test releases the old worker");
+        old_finished.send(()).expect("test is waiting for old completion");
+        favorites_update("old")
+    });
+    let mut current = Some(old);
+    old_started_rx.await.expect("old worker started");
+    finish_old.send(()).expect("old worker is waiting");
+    old_finished_rx.await.expect("old worker returned its update");
+    assert!(current.as_ref().is_some_and(|task| task.is_finished()));
+
+    cancel_favorites_refresh(&mut current);
+    let (new_started, new_started_rx) = oneshot::channel();
+    let (finish_new, finish_new_rx) = oneshot::channel();
+    let new = tokio::spawn(async move {
+        new_started.send(()).expect("test is waiting for the new worker");
+        finish_new_rx.await.expect("test releases the new worker");
+        favorites_update("new")
+    });
+    current = Some(new);
+    new_started_rx.await.expect("new worker started");
+    finish_new.send(()).expect("new worker is waiting");
+    let result = current.as_mut().expect("new favorites refresh is owned").await;
+    publish_favorites_refresh(&mut current, &mailbox, result);
+
+    let snapshot = receiver.next().await.expect("owner published the current result");
+    assert_eq!(snapshot.favorites.as_ref().map(|update| update.username.as_str()), Some("new"));
+    assert!(current.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn favorites_shutdown_cancels_and_reaps_worker() {
+    use std::future::pending;
+
+    let (started, started_rx) = oneshot::channel();
+    let (dropped, dropped_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        struct DropSignal(Option<oneshot::Sender<()>>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    sender.send(()).expect("shutdown observer remains alive");
+                }
+            }
+        }
+
+        let _signal = DropSignal(Some(dropped));
+        started.send(()).expect("test is waiting for the worker");
+        pending::<FavoritesUpdate>().await
+    });
+    let mut current = Some(task);
+    started_rx.await.expect("worker started");
+
+    stop_favorites_refresh(&mut current).await;
+
+    assert!(current.is_none());
+    dropped_rx.await.expect("shutdown reaped the cancelled worker");
 }

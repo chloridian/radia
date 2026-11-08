@@ -4,22 +4,21 @@ use ::inventory::{
     CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryChild, InventoryDelta, InventoryError, InventoryNodeId, InventoryNodeKey,
     InventorySnapshot, ServerVersion,
 };
-use futures::{FutureExt, pin_mut};
 use network::{AgentSession, capabilities::Client};
 use protocol::lludp::Message;
 use tracing::Instrument;
 
 use crate::{
     inventory::{
-        AisDelta, FolderApplyOutcome, FolderFetch, InventoryEditEvent, InventoryFetchError, InventoryFetchEvent, InventoryLoadingStatus,
-        MoveExpectation, favorites::load_favorites,
+        AisDelta, FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryEditEvent, InventoryFetchError, InventoryFetchEvent,
+        InventoryLoadingStatus, MoveExpectation, favorites::load_favorites,
     },
     session::{
         RegionLookup,
         coordinator::{
             inventory_bootstrap::InventoryBootstrapReport,
             inventory_intake::{self, InventoryIntakeError, InventoryIntakeOutcome},
-            presentation::{FavoritesUpdate, ViewerUpdate},
+            presentation::{FavoritesUpdate, PresentationMailbox, ViewerUpdate},
         },
     },
 };
@@ -123,7 +122,8 @@ impl SessionDriver {
         self.start_favorites_load_for_active();
     }
 
-    pub(super) fn start_favorites_load_for_active(&self) {
+    pub(super) fn start_favorites_load_for_active(&mut self) {
+        cancel_favorites_refresh(&mut self.favorites_load);
         if !self.favorites_enabled {
             return;
         }
@@ -137,7 +137,7 @@ impl SessionDriver {
             None if self.inventory_bootstrap.is_some() => return,
             None => None,
         };
-        self.spawn_favorites_load(session, capabilities, lookup, inventory);
+        self.favorites_load = Some(self.spawn_favorites_load(session, capabilities, lookup, inventory));
     }
 
     fn spawn_favorites_load(
@@ -146,31 +146,15 @@ impl SessionDriver {
         capabilities: Client,
         lookup: RegionLookup,
         inventory: Option<InventorySnapshot>,
-    ) {
-        let mailbox = self.mailbox.clone();
+    ) -> tokio::task::JoinHandle<FavoritesUpdate> {
         let username = self.credentials.username.clone();
-        let cancelled = self.cancellation.clone();
-        drop(
-            self.runtime.spawn(
-                async move {
-                    let load = load_favorites(&capabilities, &lookup, &session, inventory.as_ref()).fuse();
-                    pin_mut!(load);
-                    let cancelled = cancelled.fuse();
-                    pin_mut!(cancelled);
-                    futures::select! {
-                        result = load => mailbox.publish(ViewerUpdate::Favorites(FavoritesUpdate {
-                            grid: session.grid,
-                            agent_id: session.agent_id,
-                            session_id: session.session_id,
-                            username,
-                            result,
-                        })),
-                        _ = cancelled => {}
-                    }
-                }
-                .in_current_span(),
-            ),
-        );
+        self.runtime.spawn(
+            async move {
+                let result = load_favorites(&capabilities, &lookup, &session, inventory.as_ref()).await;
+                FavoritesUpdate { grid: session.grid, agent_id: session.agent_id, session_id: session.session_id, username, result }
+            }
+            .in_current_span(),
+        )
     }
 
     fn start_inventory_fetch(&mut self, capabilities: Client) {
@@ -292,9 +276,8 @@ impl SessionDriver {
                 let before = self.inventory.as_ref().map(Inventory::snapshot);
                 let result = self.inventory.as_mut().map(|inventory| apply_inventory_fetch(inventory, fetch));
                 let snapshot = self.inventory.as_ref().map(Inventory::snapshot);
-                let mut rejected = false;
-                match result {
-                    Some(Ok(Some(changes))) => {
+                let outcome = match result {
+                    Some(Ok(FolderFetchApply::Applied(changes))) => {
                         if let Some(snapshot) = snapshot.as_ref() {
                             self.process_inventory_changes(&changes, snapshot);
                             if snapshot.is_complete(folder) {
@@ -311,15 +294,15 @@ impl SessionDriver {
                                 self.inventory_cache.record_change(&self.runtime, changes, before, snapshot.clone());
                             }
                         }
+                        FolderApplyOutcome::Applied
                     }
-                    Some(Ok(None)) => {}
+                    Some(Ok(FolderFetchApply::Stale)) => FolderApplyOutcome::Stale,
                     Some(Err(error)) => {
-                        rejected = true;
                         self.record_inventory_failure(folder, InventoryFetchError::Model(error));
+                        FolderApplyOutcome::Rejected
                     }
-                    None => rejected = true,
-                }
-                let outcome = FolderApplyOutcome { rejected };
+                    None => FolderApplyOutcome::Rejected,
+                };
                 if applied.send(outcome).is_err() {
                     tracing::debug!(folder = %folder.id().uuid(), "inventory fetch worker stopped before apply acknowledgement");
                 }
@@ -393,6 +376,36 @@ impl SessionDriver {
     }
 }
 
+pub(super) fn cancel_favorites_refresh(task: &mut Option<tokio::task::JoinHandle<FavoritesUpdate>>) {
+    if let Some(task) = task.take() {
+        task.abort();
+    }
+}
+
+pub(super) fn publish_favorites_refresh(
+    task: &mut Option<tokio::task::JoinHandle<FavoritesUpdate>>,
+    mailbox: &PresentationMailbox,
+    result: Result<FavoritesUpdate, tokio::task::JoinError>,
+) {
+    *task = None;
+    match result {
+        Ok(update) => mailbox.publish(ViewerUpdate::Favorites(update)),
+        Err(error) if error.is_cancelled() => {}
+        Err(error) => tracing::warn!(%error, "favorites refresh worker failed"),
+    }
+}
+
+pub(super) async fn stop_favorites_refresh(task: &mut Option<tokio::task::JoinHandle<FavoritesUpdate>>) {
+    if let Some(task) = task.take() {
+        task.abort();
+        if let Err(error) = task.await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, "favorites refresh worker failed during shutdown");
+        }
+    }
+}
+
 pub(crate) fn resolve_pending_inventory_moves(
     pending: &mut HashMap<InventoryNodeKey, (MoveExpectation, tokio::sync::oneshot::Sender<()>)>,
     changes: &ChangeSet,
@@ -432,14 +445,28 @@ fn inventory_node_parent(snapshot: &InventorySnapshot, node: InventoryNodeKey) -
     }
 }
 
-pub(super) fn apply_inventory_fetch(inventory: &mut Inventory, mut fetch: FolderFetch) -> Result<Option<ChangeSet>, InventoryError> {
+#[derive(Debug)]
+pub(crate) enum FolderFetchApply {
+    Applied(ChangeSet),
+    Stale,
+}
+
+pub(crate) fn apply_inventory_fetch(inventory: &mut Inventory, mut fetch: FolderFetch) -> Result<FolderFetchApply, InventoryError> {
     let current = inventory.snapshot();
+    if current.category(fetch.folder).is_none() {
+        return Ok(FolderFetchApply::Stale);
+    }
+    if let FolderFetchProvenance::StartedAt(generation) = fetch.provenance
+        && current.folder_generation(fetch.folder) != generation
+    {
+        return Ok(FolderFetchApply::Stale);
+    }
     let stale = current.is_complete(fetch.folder)
         && current.category(fetch.folder).is_some_and(|category| {
             category.server_version.is_known() && fetch.version.is_known() && category.server_version.raw() > fetch.version.raw()
         });
     if stale {
-        return Ok(None);
+        return Ok(FolderFetchApply::Stale);
     }
     for child in &mut fetch.children {
         let InventoryChild::Category(incoming) = child else { continue };
@@ -453,5 +480,5 @@ pub(super) fn apply_inventory_fetch(inventory: &mut Inventory, mut fetch: Folder
             incoming.server_descendent_count = existing.server_descendent_count;
         }
     }
-    inventory.apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children).map(Some)
+    inventory.apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children).map(FolderFetchApply::Applied)
 }
