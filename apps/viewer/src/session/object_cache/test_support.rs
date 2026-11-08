@@ -109,7 +109,7 @@ pub(super) fn decoded_cached_batch(update: &ObjectUpdateCached, sequence: u32) -
 
 pub(super) async fn resolve(cache: &mut ObjectCacheSession, update: &ObjectUpdateCached, sequence: u32) -> ObjectBatch {
     let batch = decoded_cached_batch(update, sequence);
-    cache.resolve_cached(SIMULATOR, REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), |_| false, update, batch).await.0
+    cache.resolve_cached(SIMULATOR, REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), |_| None, update, batch).await.0
 }
 
 pub(super) async fn flush(cache: &mut ObjectCacheSession) {
