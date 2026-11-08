@@ -1,8 +1,9 @@
 use std::assert_matches;
 use std::{fmt::Write, hint::black_box};
 
-use llsd::{Limits, Value, xml};
+use llsd::{Error, Limits, Value, notation, xml};
 use test_support::allocation::{self, CountingAllocator, live_bytes};
+use uuid::Uuid;
 
 #[global_allocator]
 static ALLOC: CountingAllocator = CountingAllocator;
@@ -10,6 +11,12 @@ static ALLOC: CountingAllocator = CountingAllocator;
 fn measure<T>(operation: impl FnOnce() -> T) -> (T, i128, i128) {
     let (value, allocations) = allocation::measure(operation);
     (value, allocations.live_bytes, allocations.peak_bytes)
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+struct UuidField {
+    #[serde(with = "llsd::uuid")]
+    id: Uuid,
 }
 
 #[test]
@@ -85,4 +92,72 @@ fn oversized_keys_stay_bounded() {
         assert_eq!((small_live, large_live), (0, 0), "failed decode retained storage for {name}");
         assert!(large_peak <= small_peak + 4096, "oversized key was copied for {name}: {small_peak} -> {large_peak}");
     }
+}
+
+#[test]
+fn xml_binary_text_stays_bounded() {
+    let limits = Limits { max_binary_bytes: 1, ..Limits::default() };
+    let small = b"<llsd><binary>AA==</binary></llsd>";
+    let whitespace = format!("<llsd><binary>{}AA==</binary></llsd>", " \t\r\n".repeat(1024 * 1024));
+    let (small_result, _, small_peak) = measure(|| xml::from_slice_with_limits::<Value>(small, limits));
+    let (large_result, _, large_peak) = measure(|| xml::from_slice_with_limits::<Value>(whitespace.as_bytes(), limits));
+
+    assert_eq!(small_result.expect("decode one byte"), Value::Binary(vec![0].into()));
+    assert_eq!(large_result.expect("decode whitespace-wrapped one byte"), Value::Binary(vec![0].into()));
+    assert!(large_peak <= small_peak + 4096, "binary whitespace was copied: {small_peak} -> {large_peak}");
+
+    let small_oversized = b"<llsd><binary>AAAAA</binary></llsd>";
+    let oversized = format!("<llsd><binary>{}</binary></llsd>", "A".repeat(4 * 1024 * 1024));
+    let (small_result, _, small_peak) = measure(|| xml::from_slice_with_limits::<Value>(small_oversized, limits));
+    let (large_result, _, large_peak) = measure(|| xml::from_slice_with_limits::<Value>(oversized.as_bytes(), limits));
+
+    assert_matches!(small_result, Err(Error::LimitExceeded("binary bytes")));
+    assert_matches!(large_result, Err(Error::LimitExceeded("binary bytes")));
+    assert!(large_peak <= small_peak + 4096, "oversized base64 text was copied: {small_peak} -> {large_peak}");
+}
+
+#[test]
+fn notation_uuid_spellings_keep_text_and_value() {
+    let canonical = "12345678-90ab-cdef-0123-456789abcdef";
+    let expected = Uuid::parse_str(canonical).expect("valid UUID");
+    let limits = Limits { max_string_bytes: 0, ..Limits::default() };
+    for spelling in [canonical, "1234567890abcdef0123456789abcdef"] {
+        let encoded = format!("u{spelling}");
+        assert_eq!(
+            notation::from_slice_with_limits::<String>(encoded.as_bytes(), limits).expect("decode UUID text"),
+            spelling,
+            "UUID text changed for {spelling}"
+        );
+        assert_eq!(
+            notation::from_slice_with_limits::<Value>(encoded.as_bytes(), limits).expect("decode UUID value"),
+            Value::Uuid(expected),
+            "UUID value changed for {spelling}"
+        );
+
+        let encoded_field = format!("{{'id':u{spelling}}}");
+        assert_eq!(
+            notation::from_slice_with_limits::<UuidField>(encoded_field.as_bytes(), limits).expect("decode typed UUID"),
+            UuidField { id: expected },
+            "typed UUID changed for {spelling}"
+        );
+    }
+}
+
+#[test]
+fn invalid_uuid_tokens_stay_bounded() {
+    let limits = Limits { max_string_bytes: 1, ..Limits::default() };
+    let large = format!("u{}", "x".repeat(1024 * 1024));
+    let baseline = live_bytes();
+    let (small_result, _, small_peak) = measure(|| notation::from_slice_with_limits::<Value>(b"unot-a-uuid", limits));
+    let (large_result, _, large_peak) = measure(|| notation::from_slice_with_limits::<Value>(large.as_bytes(), limits));
+
+    assert_matches!(&small_result, Err(Error::InvalidValue(_)));
+    assert_matches!(&large_result, Err(Error::InvalidValue(_)));
+    assert!(large_peak <= small_peak + 4096, "oversized UUID token was copied: {small_peak} -> {large_peak}");
+    drop((small_result, large_result));
+    assert_eq!(live_bytes(), baseline);
+
+    assert_matches!(notation::from_slice_with_limits::<Value>(b"u\xff", limits), Err(Error::InvalidUtf8));
+    assert_matches!(notation::from_slice_with_limits::<UuidField>(b"{'id':unot-a-uuid}", limits), Err(Error::InvalidValue(_)));
+    assert_matches!(notation::from_slice_with_limits::<UuidField>(b"{'id':u\xff}", limits), Err(Error::InvalidUtf8));
 }

@@ -68,11 +68,13 @@ fn boolean_spellings() {
         (b"T", true),
         (b"true", true),
         (b"TRUE", true),
+        (b"TrUe", true),
         (b"0", false),
         (b"f", false),
         (b"F", false),
         (b"false", false),
         (b"FALSE", false),
+        (b"FaLsE", false),
     ] {
         assert_eq!(notation::from_slice::<Value>(encoded).expect("decode boolean spelling"), Value::Boolean(expected), "{encoded:?}");
     }
