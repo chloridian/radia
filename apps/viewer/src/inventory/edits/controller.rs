@@ -675,7 +675,12 @@ fn request_outcome(error: network::Error) -> InventoryEditOutcome {
 }
 
 fn request_has_unknown_outcome(error: &network::Error) -> bool {
-    matches!(error, network::Error::CapabilityHttp(http) if matches!(http.kind, HttpErrorKind::Timeout | HttpErrorKind::Transport))
+    matches!(
+        error,
+        network::Error::CapabilityHttp(http)
+            if matches!(http.kind, HttpErrorKind::Timeout | HttpErrorKind::Transport)
+                || http.status.is_some_and(|status| status.is_server_error())
+    )
 }
 
 fn request_is_gone(error: &network::Error) -> bool {
