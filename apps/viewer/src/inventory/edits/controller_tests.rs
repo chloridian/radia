@@ -452,8 +452,11 @@ async fn ais_failures_and_gone_refresh_do_not_apply_unconfirmed_changes() {
     http.grant(&[("InventoryAPIv3", "/ais")]).await;
     let request = http.next().await;
     assert_eq!(request.method, "PATCH");
-    request.respond(503, b"{}").await;
-    assert_eq!(rename.await.expect("failed rename result"), InventoryEditOutcome::ServerError);
+    request.respond(400, b"{}").await;
+    assert_eq!(
+        timeout(TEST_TIMEOUT, rename).await.expect("4xx edit result timeout").expect("failed rename task"),
+        InventoryEditOutcome::ServerError
+    );
     assert_eq!(inventory.snapshot().item(item).map(|item| item.name.as_ref()), Some("item"));
 
     let empty = tokio::spawn({
@@ -618,6 +621,67 @@ async fn ais_timeout_refreshes_a_committed_rename() {
     if let Err(error) = request.write_response(200, metadata("_updated_items", &[item_key.id().uuid()])).await {
         std::assert_matches!(error.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted);
     }
+    assert_eq!(
+        model.borrow().as_ref().and_then(|snapshot| snapshot.item(item_key)).map(|item| item.name.as_ref()),
+        Some("server committed rename")
+    );
+    controller.stop().await;
+}
+
+#[tokio::test]
+async fn ais_503_refreshes_committed_rename() {
+    let mut http = LoopbackPeer::start().await;
+    let (mut inventory, owner, _root, folder, _, _, _, item_key, _, _) = inventory_fixture();
+    let (mut server_inventory, _, _, _, _, _, _, _, _, _) = inventory_fixture();
+    let (mut controller, model) = start_controller(
+        &http,
+        &inventory,
+        EditSession { agent_id: owner.id(), session_id: Uuid::from_u128(26) },
+        Arc::new(NoopMoveTransport),
+    );
+    let handle = controller.handle();
+    let rename = tokio::spawn(async move { handle.rename_item(item_key, "requested rename").await });
+
+    http.grant(&[("InventoryAPIv3", "/ais")]).await;
+    let request = http.next().await;
+    assert_eq!(request.method, "PATCH");
+    assert_eq!(request.path, format!("/ais/item/{}", item_key.id().uuid()));
+    let fields = request.value();
+    assert_eq!(fields.as_map().and_then(|fields| fields.get("name")), Some(&Value::String("requested rename".into())));
+
+    let mut committed_item = server_inventory.snapshot().item(item_key).expect("server item").clone();
+    committed_item.name = Arc::from("server committed rename");
+    server_inventory
+        .apply_delta(InventoryDelta { updated_items: vec![committed_item], ..InventoryDelta::default() })
+        .expect("commit server-side rename");
+    request.respond(503, b"{}").await;
+
+    let Some(InventoryEditEvent::RefreshFolders { folders, refreshed }) = controller.next_event().await else {
+        panic!("expected refresh after 503");
+    };
+    assert_eq!(folders, vec![folder]);
+    assert_eq!(inventory.snapshot().item(item_key).map(|item| item.name.as_ref()), Some("item"));
+    assert_eq!(model.borrow().as_ref().and_then(|snapshot| snapshot.item(item_key)).map(|item| item.name.as_ref()), Some("item"));
+
+    let invalidated = inventory
+        .apply_delta(InventoryDelta { updated_category_versions: vec![(folder, ServerVersion::UNKNOWN)], ..InventoryDelta::default() })
+        .expect("mark folder incomplete");
+    assert!(invalidated.refetch_categories.contains(&folder));
+    model.send_replace(Some(inventory.snapshot()));
+    assert_eq!(model.borrow().as_ref().and_then(|snapshot| snapshot.item(item_key)).map(|item| item.name.as_ref()), Some("item"));
+
+    let fetched_item = server_inventory.snapshot().item(item_key).expect("refetched item").clone();
+    inventory
+        .apply_delta(InventoryDelta {
+            updated_items: vec![fetched_item],
+            updated_category_versions: vec![(folder, ServerVersion::known(2).expect("known server version"))],
+            ..InventoryDelta::default()
+        })
+        .expect("apply refreshed folder contents");
+    model.send_replace(Some(inventory.snapshot()));
+    refreshed.send(true).expect("edit worker waits for refresh scheduling");
+
+    assert_eq!(rename.await.expect("server error rename result"), InventoryEditOutcome::ServerError);
     assert_eq!(
         model.borrow().as_ref().and_then(|snapshot| snapshot.item(item_key)).map(|item| item.name.as_ref()),
         Some("server committed rename")
