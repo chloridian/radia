@@ -180,7 +180,10 @@ mod tests {
                     REGION,
                     sequence,
                     OrderEvidence::Ordered(u64::from(sequence)),
-                    |address| world.world().entity_at(address).is_some(),
+                    |address| {
+                        let world = world.world();
+                        world.entity_at(address).and_then(|entity| world.object(entity).map(|object| object.id()))
+                    },
                     update,
                     batch,
                 )
