@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
 
 use ::inventory::{
     AssetType, Category, CategoryKey, FolderType, Inventory, InventoryDelta, InventoryLimits, InventoryNodeId, InventoryOwner,
@@ -9,110 +9,20 @@ use llsd::{Map, Value, xml};
 use network::{Error as NetworkError, capabilities::Client};
 use protocol::lludp::{Message, Packet};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream, UdpSocket},
+    net::UdpSocket,
     runtime::Handle,
-    sync::{mpsc, watch},
-    task::JoinHandle,
+    sync::watch,
     time::{self, timeout},
 };
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
+use crate::inventory::test_support::{LoopbackPeer, TEST_TIMEOUT};
+
 use super::{
     controller::{EditSession, InventoryMove, MoveTransport},
     *,
 };
-
-const TEST_TIMEOUT: Duration = Duration::from_secs(20);
-
-struct PeerRequest {
-    method: String,
-    path: String,
-    body: Vec<u8>,
-    stream: TcpStream,
-}
-
-impl PeerRequest {
-    async fn respond(self, status: u16, body: impl AsRef<[u8]>) {
-        self.write_response(status, body).await.expect("write AIS peer response");
-    }
-
-    async fn write_response(self, status: u16, body: impl AsRef<[u8]>) -> io::Result<()> {
-        let body = body.as_ref();
-        let reason = match status {
-            200 => "OK",
-            410 => "Gone",
-            500 => "Internal Server Error",
-            503 => "Service Unavailable",
-            _ => "Response",
-        };
-        let response = format!(
-            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/llsd+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        let mut stream = self.stream;
-        stream.write_all(response.as_bytes()).await?;
-        stream.write_all(body).await?;
-        Ok(())
-    }
-
-    fn value(&self) -> Value {
-        let body = std::str::from_utf8(&self.body).expect("request LLSD is UTF-8");
-        xml::from_str(body).expect("request body is LLSD XML")
-    }
-}
-
-struct LoopbackPeer {
-    base: url::Url,
-    requests: mpsc::Receiver<PeerRequest>,
-    task: JoinHandle<()>,
-}
-
-impl LoopbackPeer {
-    async fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind AIS test peer");
-        let address = listener.local_addr().expect("read AIS peer address");
-        let base = url::Url::parse(&format!("http://{address}")).expect("build AIS peer URL");
-        let (sender, requests) = mpsc::channel(16);
-        let task = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                let sender = sender.clone();
-                tokio::spawn(async move {
-                    if let Ok(request) = read_request(stream).await
-                        && let Err(send_error) = sender.send(request).await
-                    {
-                        drop(send_error);
-                    }
-                });
-            }
-        });
-        Self { base, requests, task }
-    }
-
-    fn url(&self, path: &str) -> url::Url {
-        self.base.join(path).expect("join AIS peer path")
-    }
-
-    async fn next(&mut self) -> PeerRequest {
-        timeout(TEST_TIMEOUT, self.requests.recv()).await.expect("AIS peer request timeout").expect("AIS peer stopped")
-    }
-
-    async fn grant(&mut self, capabilities: &[(&str, &str)]) {
-        let request = self.next().await;
-        assert_eq!(request.method, "POST");
-        assert_eq!(request.path, "/seed");
-        let body =
-            Value::Map(capabilities.iter().map(|(name, path)| ((*name).to_owned(), Value::String(self.url(path).to_string()))).collect());
-        request.respond(200, xml::to_vec(&body).expect("encode capability grants")).await;
-    }
-}
-
-impl Drop for LoopbackPeer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
 
 struct UdpMovePeer {
     sender: UdpSocket,
@@ -281,45 +191,6 @@ async fn confirm_udp_move(
 fn metadata(name: &str, ids: &[Uuid]) -> Vec<u8> {
     let value = Value::Map(Map::from([(name.to_owned(), Value::Array(ids.iter().copied().map(Value::Uuid).collect()))]));
     xml::to_vec(&value).expect("encode AIS metadata response")
-}
-
-async fn read_request(mut stream: TcpStream) -> io::Result<PeerRequest> {
-    let mut bytes = Vec::new();
-    let mut chunk = [0; 8192];
-    let (header_end, content_length) = loop {
-        let read = stream.read(&mut chunk).await?;
-        if read == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        bytes.extend_from_slice(&chunk[..read]);
-        if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-            let headers = std::str::from_utf8(&bytes[..end]).map_err(io::Error::other)?;
-            let content_length = headers
-                .lines()
-                .filter_map(|line| line.split_once(':'))
-                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                .map(|(_, value)| value.trim().parse::<usize>())
-                .transpose()
-                .map_err(io::Error::other)?
-                .unwrap_or_default();
-            if content_length > 1024 * 1024 {
-                return Err(io::Error::other("test request exceeded its body bound"));
-            }
-            break (end + 4, content_length);
-        }
-    };
-    while bytes.len() < header_end.saturating_add(content_length) {
-        let read = stream.read(&mut chunk).await?;
-        if read == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        bytes.extend_from_slice(&chunk[..read]);
-    }
-    let headers = std::str::from_utf8(&bytes[..header_end - 4]).map_err(io::Error::other)?;
-    let mut line = headers.lines().next().ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?.split_whitespace();
-    let method = line.next().ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?.to_owned();
-    let path = line.next().ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?.to_owned();
-    Ok(PeerRequest { method, path, body: bytes[header_end..header_end + content_length].to_vec(), stream })
 }
 
 #[tokio::test]
@@ -618,7 +489,7 @@ async fn ais_timeout_refreshes_a_committed_rename() {
     refreshed.send(true).expect("edit worker waits for refresh scheduling");
 
     assert_eq!(rename.await.expect("timed out rename result"), InventoryEditOutcome::TimedOut);
-    if let Err(error) = request.write_response(200, metadata("_updated_items", &[item_key.id().uuid()])).await {
+    if let Err(error) = request.try_respond(200, metadata("_updated_items", &[item_key.id().uuid()])).await {
         std::assert_matches!(error.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted);
     }
     assert_eq!(
