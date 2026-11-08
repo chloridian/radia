@@ -249,8 +249,16 @@ impl AssetCache {
                 if valid {
                     AssetLookup::Hit(value)
                 } else {
-                    self.storage.discard(key);
-                    AssetLookup::Corrupt
+                    match self.storage.discard(key) {
+                        Ok(()) => AssetLookup::Corrupt,
+                        Err(error) => {
+                            self.counters.corrupt_entries.fetch_add(1, Ordering::Relaxed);
+                            AssetLookup::Unavailable(match error {
+                                StorageError::Unavailable(reason) => reason,
+                                _ => UnavailableReason::Io,
+                            })
+                        }
+                    }
                 }
             }
             StorageLookup::Miss => AssetLookup::Miss,
@@ -297,13 +305,13 @@ impl AssetCache {
         self.decode_costs.observe(kind, micros);
     }
 
-    pub(crate) fn discard(&self, request: Request) {
-        self.storage.discard(storage_key(request));
+    pub(crate) fn discard(&self, request: Request) -> Result<(), AssetCacheError> {
+        self.storage.discard(storage_key(request)).map_err(map_storage_error)
     }
 
-    pub(crate) fn discard_corrupt(&self, request: Request) {
+    pub(crate) fn discard_corrupt(&self, request: Request) -> Result<(), AssetCacheError> {
         self.counters.corrupt_entries.fetch_add(1, Ordering::Relaxed);
-        self.discard(request);
+        self.discard(request)
     }
 
     pub(crate) fn queue_write(self: &Arc<Self>, request: Request, payload: Blob, budget: &Budget) -> Option<CacheWrite> {
