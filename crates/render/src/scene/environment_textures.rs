@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use assets::{
-    Content, EnvironmentDescription, EnvironmentSettings, Priority, Request, Sky, Status, TextureHandle, TextureRef, TextureSize, Water,
+    Content, EnvironmentDescription, EnvironmentSettings, Failure, Priority, Request, Sky, Status, TextureHandle, TextureRef, TextureSize,
+    Water,
 };
 use utils::AssetId;
 use world::Region;
@@ -183,6 +184,13 @@ impl EnvironmentTextures {
     pub(in crate::scene) fn complete(&mut self, ticket: AssetTicket, status: &Status) -> Option<bool> {
         let id = self.tickets.get(&ticket).copied()?;
         let entry = self.entries.get_mut(&id)?;
+        if matches!(status, Status::Failed { failure: Failure::RouteClosed, .. }) {
+            self.tickets.remove(&ticket);
+            if entry.ticket == Some(ticket) {
+                entry.ticket = None;
+            }
+            return Some(false);
+        }
         let handle = match status {
             Status::Ready(Content::Texture(handle))
             | Status::Refining(Content::Texture(handle))
