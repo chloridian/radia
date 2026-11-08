@@ -136,6 +136,8 @@ Owns accepted simulator state for regions, objects, relationships, poses, appear
 
 Object details expose the latest accepted linear velocity, acceleration, angular velocity, physical mode, time dilation, and motion update source. Motion sources retain whether the update explicitly carried angular velocity, so a non-terse explicit zero can stop accumulated spin while a missing compressed field leaves it alone. World rejects non-finite motion and components outside the wire or sanity bounds: full and compressed updates use ±4096 per component to reject absurd values; terse updates use ±128 for velocity and ±64 for acceleration and angular velocity. A newly accepted motion or pose observation gives prediction a new base without changing authoritative World poses.
 
+Pending relationships use UUID-ordered child indexes. A parent observation resolves at most 64 waiting children immediately; World retains identity and binding evidence for the rest. The session drains at most 64 children per turn and yields between turns, including while simulator traffic remains ready. Each drain publishes its own journal revision and recovery effects. Removal and transfer include eligible children whose resolution is still queued. Continuations distinguish parent UUIDs that use the same local address, and their count is capped by the World entity limit; admission failure leaves observations unapplied.
+
 Bounded reads and change history expose current state, unresolved relationships, and whether more data is available. Consumers resynchronize when journal history has been evicted.
 
 ## Keeping this file sharp

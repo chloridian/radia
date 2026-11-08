@@ -1,5 +1,6 @@
 use std::{
     assert_matches,
+    collections::HashSet,
     num::NonZeroU32,
     sync::{
         Arc,
@@ -10,6 +11,7 @@ use std::{
 use crate::test_helpers::simulator_id;
 use math::{DVec3, Vec3};
 use network::SimulatorId;
+use protocol::messages::{CacheMissType, RequestAgentData};
 use tokio::sync::oneshot::channel;
 use utils::AssetId;
 use uuid::Uuid;
@@ -19,7 +21,10 @@ use world::{
     PbrMaterialAssignments, Pose, Region, RegionHandle, RegionInfo, Shape, UpdateSource,
 };
 
-use crate::session::inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation};
+use crate::session::{
+    inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation},
+    recovery::{MAX_RECOVERY_OBJECTS_PER_REQUEST, RecoveryCompletion, RecoveryIntake},
+};
 
 use super::{
     BlockOutcome, IngestStatus, IngestSummary, MAX_OBJECTS_PER_INTAKE_QUANTUM, MAX_WORLD_ENTITIES, RegistrationError, SessionWorld,
@@ -641,6 +646,73 @@ fn live_kill_cancels_removed_entities() {
     assert!(cancelled.contains(&parent_address));
     assert!(cancelled.contains(&child_address));
     assert_eq!(killed.recovery_targets().count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn parent_removal_batches_all_children() {
+    let child_count = MAX_RECOVERY_OBJECTS_PER_REQUEST + 45;
+    let simulator_id = simulator_id();
+    let mut session = SessionWorld::new(viewer_world_limits());
+    let region = session.register_simulator(simulator_id, None).expect("register simulator");
+    assert_eq!(viewer_world_limits().max_recovery_targets, MAX_WORLD_ENTITIES);
+    let parent_local_id = NonZeroU32::new(1).expect("nonzero parent local ID");
+    let mut children = HashSet::new();
+    let mut blocks = vec![Some(ObjectOperation::Observe(observation(region, 1, 1, parent_local_id, ParentUpdate::Root)))];
+
+    for local_id in 2..=u32::try_from(child_count + 1).expect("test child IDs fit u32") {
+        let local_id = NonZeroU32::new(local_id).expect("nonzero child local ID");
+        children.insert(LocalAddress::new(region, local_id));
+        blocks.push(Some(ObjectOperation::Observe(observation(
+            region,
+            local_id.get() + 1,
+            1_000 + u128::from(local_id.get()),
+            local_id,
+            ParentUpdate::Local(parent_local_id),
+        ))));
+    }
+    assert_eq!(children.len(), child_count);
+
+    let attached = session
+        .apply_object_batch(simulator_id, ObjectBatch { region, region_handle: None, blocks, invalid_blocks: 0, invalid_fields: 0 })
+        .expect("registered simulator");
+    assert!(attached.blocks.iter().all(|block| block.applied().is_some()));
+
+    let removed = apply_one(
+        &mut session,
+        simulator_id,
+        region,
+        ObjectOperation::Remove { source: UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0), local_id: parent_local_id },
+    );
+    let requests = removed.recovery_requests().collect::<Vec<_>>();
+    assert_eq!(requests.len(), children.len());
+    assert_eq!(requests.iter().map(|(address, _)| *address).collect::<HashSet<_>>(), children);
+    assert!(requests.iter().all(|(_, cache_miss_type)| *cache_miss_type == CacheMissType::Full));
+
+    let mut intake = RecoveryIntake::new();
+    intake.schedule(
+        requests.into_iter().map(|(address, cache_miss_type)| (Some(simulator_id), address, cache_miss_type)).collect(),
+        Vec::new(),
+        Some(RequestAgentData { agent_id: Uuid::from_u128(1), session_id: Uuid::from_u128(2) }),
+    );
+
+    let mut missing = children;
+    let mut batches = 0;
+    while !missing.is_empty() {
+        let RecoveryCompletion::Deadline { due, aged_out } = intake.next_completion().await else {
+            panic!("recovery intake is not sending while batches drain");
+        };
+        assert!(aged_out.is_empty());
+        assert!(!due.is_empty());
+        assert!(due.len() <= MAX_RECOVERY_OBJECTS_PER_REQUEST);
+        batches += 1;
+        for recovery in &due {
+            assert!(missing.remove(&recovery.key), "each retained child is dispatched once");
+        }
+        intake.schedule(Vec::new(), due.iter().map(|recovery| recovery.key).collect(), None);
+    }
+
+    assert_eq!(batches, 2);
+    assert!(missing.is_empty());
 }
 
 #[test]

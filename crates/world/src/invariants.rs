@@ -34,7 +34,7 @@ impl World {
             return Err("World storage exceeds its configured limits");
         }
         let mut expected_children = HashMap::<Entity, BTreeMap<Uuid, Entity>>::new();
-        let mut expected_pending_children = HashMap::<LocalAddress, HashSet<Entity>>::new();
+        let mut expected_pending_children = HashMap::<LocalAddress, BTreeMap<Uuid, Entity>>::new();
         let mut object_media_bytes = 0_usize;
         for (id, entity) in crate::object::storage::object_store_entities(&self.store) {
             let object = self.object(entity).ok_or("UUID index points to an incomplete or dead ECS entity")?;
@@ -55,13 +55,25 @@ impl World {
                     if address.region() != object.address().region() {
                         return Err("pending parent and child belong to different regions");
                     }
-                    expected_pending_children.entry(address).or_default().insert(entity);
+                    expected_pending_children.entry(address).or_default().insert(id, entity);
                 }
                 Parent::Unknown | Parent::Root => {}
             };
         }
         if self.children != expected_children || self.pending_children != expected_pending_children {
             return Err("parent relationship indexes are inconsistent");
+        }
+        if self.relationship_work.len() > self.limits.max_entities {
+            return Err("pending relationship work exceeds its configured limit");
+        }
+        for ((id, address), work) in &self.relationship_work {
+            let record = self.store.object_record(work.parent).ok_or("queued relationship parent is not live")?;
+            if record.id != *id || record.state.binding.address.region != address.region() || work.binding.address != *address {
+                return Err("queued relationship identity is inconsistent");
+            }
+            if !self.pending_children.contains_key(address) {
+                return Err("queued relationship has no pending children");
+            }
         }
         let mut checked = HashSet::with_capacity(self.store.len());
         let mut path = HashSet::new();

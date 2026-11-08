@@ -19,6 +19,7 @@ use crate::identity::WorldId;
 use crate::object::components::{
     Binding, Fences, ObjectOrdering, ObjectRecord, ObjectState, ParentRejectionBarrier, RegionalStamp, newer_field, newer_region_field,
 };
+use crate::object::relationships::PendingResolution;
 use crate::object::storage::ObjectStore;
 use crate::object::view::IndexedObjects;
 use crate::region::RegionState;
@@ -39,6 +40,7 @@ pub use object::media::{
     MAX_MEDIA_DIMENSION, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MAX_MEDIA_WHITELIST_ENTRIES, MediaControls, MediaEntry,
     ObjectMedia, ObjectMediaError, ObjectMediaUpdate,
 };
+pub use object::relationships::RelationshipResolution;
 pub use object::shape::{PrimShape, SculptFlags, SculptType, Shape};
 pub use object::transform::{
     AttachmentPoint, CoordinateFrame, LinearMotion, LocalTransform, Pose, PoseError, PoseState, SitTarget, Transform, UnresolvedReason,
@@ -81,7 +83,8 @@ pub struct World {
     retired: HashSet<Region>,
     self_agent: Option<Uuid>,
     children: HashMap<Entity, BTreeMap<Uuid, Entity>>,
-    pending_children: HashMap<LocalAddress, HashSet<Entity>>,
+    pending_children: HashMap<LocalAddress, BTreeMap<Uuid, Entity>>,
+    relationship_work: BTreeMap<(Uuid, LocalAddress), PendingResolution>,
     tombstones: Tombstones,
     retained: RetainedOverrides,
     floors: HashMap<Region, Stamp>,
@@ -104,6 +107,7 @@ impl World {
             self_agent: None,
             children: HashMap::new(),
             pending_children: HashMap::new(),
+            relationship_work: BTreeMap::new(),
             tombstones: Tombstones::default(),
             retained: RetainedOverrides::default(),
             floors: HashMap::new(),

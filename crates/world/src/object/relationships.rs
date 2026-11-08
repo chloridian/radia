@@ -1,4 +1,8 @@
-use std::num::NonZeroU32;
+use std::{
+    collections::BTreeMap,
+    num::NonZeroU32,
+    ops::Bound::{Excluded, Unbounded},
+};
 
 use uuid::Uuid;
 
@@ -8,9 +12,26 @@ use crate::history::{
 };
 use crate::mutation::Effects;
 use crate::update::{FieldStamp, Stamp};
+use crate::{ApplyError, Recovery, WorldRevision};
 use crate::{AttachmentPoint, Entity, Kind, LocalAddress, ObjectRecord, Parent, ParentUpdate, Region};
 use crate::{Binding, World};
 use ParentResolution::{Accepted, Cycle};
+
+const IMMEDIATE_RELATIONSHIPS: usize = 64;
+
+#[derive(Clone, Copy)]
+pub(crate) struct PendingResolution {
+    pub(crate) parent: Entity,
+    pub(crate) binding: Binding,
+    after: Option<Uuid>,
+}
+
+#[derive(Debug, Default)]
+pub struct RelationshipResolution {
+    pub revision: Option<WorldRevision>,
+    pub recovery: Recovery,
+    pub recovery_cancellations: Vec<LocalAddress>,
+}
 
 pub(crate) enum ParentResolution {
     Accepted(Parent),
@@ -18,6 +39,16 @@ pub(crate) enum ParentResolution {
 }
 
 impl World {
+    pub(crate) fn ensure_relationship_capacity(&self, address: LocalAddress, parent_uuid: Uuid) -> Result<(), ApplyError> {
+        if self.relationship_work.len() >= self.limits.max_entities
+            && !self.relationship_work.contains_key(&(parent_uuid, address))
+            && self.pending_children.get(&address).is_some_and(|children| children.len() > IMMEDIATE_RELATIONSHIPS)
+        {
+            return Err(ApplyError::RelationshipBudgetExhausted);
+        }
+        Ok(())
+    }
+
     pub(crate) fn waiting_children_will_change(
         &self,
         address: LocalAddress,
@@ -26,12 +57,13 @@ impl World {
         parent_binding: Binding,
     ) -> bool {
         let Some(waiting) = self.pending_children.get(&address) else { return false };
+        let original_binding = self.relationship_work.get(&(parent_uuid, address)).map_or(parent_binding, |work| work.binding);
         let records = self.store.ordered_records();
-        waiting.iter().any(|child| {
+        waiting.values().take(IMMEDIATE_RELATIONSHIPS).any(|child| {
             let Some((record, ordering)) = records.get(child.0) else { return false };
             match record.state.parent {
-                Parent::Pending { expected_uuid, .. } if expected_uuid.is_none_or(|expected| expected == parent_uuid) => {
-                    parent_binding.admits_parent_link(expected_uuid, ordering.fences.parent, parent_uuid)
+                Parent::Pending { expected_uuid, .. } => {
+                    Self::pending_link_admitted(parent_binding, original_binding, expected_uuid, ordering.fences.parent, parent_uuid)
                         && (!self.would_cycle(*child, entity) || expected_uuid.is_none())
                 }
                 _ => false,
@@ -160,7 +192,7 @@ impl World {
                 self.children.entry(parent).or_default().insert(child_uuid, child);
             }
             Parent::Pending { address, .. } => {
-                self.pending_children.entry(address).or_default().insert(child);
+                self.pending_children.entry(address).or_default().insert(child_uuid, child);
             }
             Parent::Unknown | Parent::Root => {}
         }
@@ -181,9 +213,10 @@ impl World {
             }
             Parent::Pending { address, .. } => {
                 if let Some(children) = self.pending_children.get_mut(&address) {
-                    children.remove(&child);
+                    children.remove(&child_uuid);
                     if children.is_empty() {
                         self.pending_children.remove(&address);
+                        self.relationship_work.retain(|(_, pending_address), _| *pending_address != address);
                     }
                 }
             }
@@ -192,14 +225,13 @@ impl World {
     }
 
     pub(crate) fn pend_source_children(&mut self, parent: Entity, old_address: LocalAddress, parent_uuid: Uuid, effects: &mut Effects) {
-        let children = self.children.remove(&parent).unwrap_or_default();
+        let children = self.take_dependents(parent);
         for child in children.into_values() {
-            let Some((child_parent, child_address, child_uuid)) =
-                self.store.object_record(child).map(|object| (object.state.parent, object.state.binding.address, object.id))
+            let Some((child_address, child_uuid)) = self.store.object_record(child).map(|object| (object.state.binding.address, object.id))
             else {
                 continue;
             };
-            if child_parent != Parent::Resolved(parent) || child_address.region != old_address.region {
+            if child_address.region != old_address.region {
                 continue;
             }
 
@@ -209,22 +241,117 @@ impl World {
         }
     }
 
+    pub(crate) fn take_dependents(&mut self, parent: Entity) -> BTreeMap<Uuid, Entity> {
+        let mut children = self.children.remove(&parent).unwrap_or_default();
+        let Some(record) = self.store.object_record(parent) else { return children };
+        let parent_uuid = record.id;
+        let current_binding = record.state.binding;
+        let start = (parent_uuid, LocalAddress::new(Region::new(0), NonZeroU32::MIN));
+        let keys: Vec<_> =
+            self.relationship_work.range(start..).take_while(|((id, _), _)| *id == parent_uuid).map(|(key, _)| *key).collect();
+        for key in keys {
+            let address = key.1;
+            let work = self.relationship_work.remove(&key).expect("a dependent resolution remains queued");
+            if let Some(waiting) = self.pending_children.get(&address) {
+                for (&id, &child) in waiting {
+                    let mut read = self.store.read(child.0);
+                    let Ok((record, ordering)) = read.get() else { continue };
+                    let Parent::Pending { expected_uuid, .. } = record.state.parent else { continue };
+                    if Self::pending_link_admitted(current_binding, work.binding, expected_uuid, ordering.fences.parent, parent_uuid)
+                        && !self.would_cycle(child, parent)
+                    {
+                        children.insert(id, child);
+                    }
+                }
+            }
+        }
+        children
+    }
+
     pub(crate) fn relink_changed(&self, child: Entity, id: Uuid, effects: &mut Effects) {
         effects.changes.push(EntityUpdated { id, entity: child, classes: WorldChangeClasses::RELATIONSHIP | WorldChangeClasses::POSE });
         self.invalidate_subtree(child, effects);
     }
 
     pub(crate) fn resolve_waiting_children(&mut self, address: LocalAddress, parent: Entity, parent_uuid: Uuid, effects: &mut Effects) {
-        let waiting = self.pending_children.get(&address).cloned().unwrap_or_default();
+        let key = (parent_uuid, address);
+        let previous = self.relationship_work.remove(&key);
         let binding = self.store.object_record(parent).expect("address index contains a live parent").state.binding;
-        for child in waiting {
+        let mut resolution = PendingResolution { parent, binding: previous.map_or(binding, |work| work.binding), after: None };
+        self.resolve_children(address, parent_uuid, &mut resolution, IMMEDIATE_RELATIONSHIPS, effects);
+        if self.next_pending_child(address, resolution.after).is_some() {
+            self.relationship_work.insert(key, resolution);
+        }
+    }
+
+    pub fn has_pending_relationships(&self) -> bool {
+        !self.relationship_work.is_empty()
+    }
+
+    pub fn resolve_relationships(&mut self, max_children: usize) -> Result<RelationshipResolution, ApplyError> {
+        if max_children == 0 || self.relationship_work.is_empty() {
+            return Ok(RelationshipResolution::default());
+        }
+        self.ensure_revision_available()?;
+        let mut effects = Effects::default();
+        let mut remaining = max_children;
+        while remaining > 0 {
+            let Some((key, mut resolution)) = self.relationship_work.first_key_value().map(|(key, work)| (*key, *work)) else { break };
+            let address = key.1;
+            let Some(record) = self.store.object_record(resolution.parent) else {
+                self.relationship_work.remove(&key);
+                remaining -= 1;
+                continue;
+            };
+            if record.state.binding.address.region != address.region {
+                self.relationship_work.remove(&key);
+                remaining -= 1;
+                continue;
+            }
+            let parent_uuid = record.id;
+            let processed = self.resolve_children(address, parent_uuid, &mut resolution, remaining, &mut effects);
+            remaining -= processed.max(1);
+            if self.next_pending_child(address, resolution.after).is_some() {
+                self.relationship_work.insert(key, resolution);
+            } else {
+                self.relationship_work.remove(&key);
+            }
+        }
+        Ok(RelationshipResolution {
+            revision: self.publish_changes(effects.changes),
+            recovery: self.recovery(effects.recovery_targets),
+            recovery_cancellations: effects.recovery_cancellations,
+        })
+    }
+
+    fn next_pending_child(&self, address: LocalAddress, after: Option<Uuid>) -> Option<(Uuid, Entity)> {
+        let children = self.pending_children.get(&address)?;
+        let lower = after.map_or(Unbounded, Excluded);
+        children.range((lower, Unbounded)).next().map(|(id, entity)| (*id, *entity))
+    }
+
+    fn resolve_children(
+        &mut self,
+        address: LocalAddress,
+        parent_uuid: Uuid,
+        resolution: &mut PendingResolution,
+        limit: usize,
+        effects: &mut Effects,
+    ) -> usize {
+        let parent = resolution.parent;
+        let binding = self.store.object_record(parent).expect("a pending resolution parent is live").state.binding;
+        let mut processed = 0;
+        while processed < limit {
+            let Some((id, child)) = self.next_pending_child(address, resolution.after) else { break };
+            resolution.after = Some(id);
+            processed += 1;
             let (parent_state, child_address, uuid, parent_stamp) = {
                 let mut read = self.store.read(child.0);
                 let Ok((record, ordering)) = read.get() else { continue };
                 (record.state.parent, record.state.binding.address, record.id, ordering.fences.parent)
             };
             let Parent::Pending { expected_uuid, .. } = parent_state else { continue };
-            if !binding.admits_parent_link(expected_uuid, parent_stamp, parent_uuid) {
+            if !Self::pending_link_admitted(binding, resolution.binding, expected_uuid, parent_stamp, parent_uuid) {
                 effects.recovery_targets.push(child_address);
                 continue;
             }
@@ -240,6 +367,17 @@ impl World {
             self.relink_changed(child, uuid, effects);
             effects.recovery_cancellations.push(child_address);
         }
+        processed
+    }
+
+    fn pending_link_admitted(current: Binding, original: Binding, expected: Option<Uuid>, stamp: Option<FieldStamp>, id: Uuid) -> bool {
+        if (current.address != original.address || current.address_generation != original.address_generation)
+            && expected != Some(id)
+            && stamp.is_none_or(|stamp| stamp.stamp > original.fence())
+        {
+            return false;
+        }
+        original.admits_parent_link(expected, stamp, id)
     }
 
     pub(crate) fn would_cycle(&self, child: Entity, mut parent: Entity) -> bool {
@@ -300,6 +438,32 @@ mod tests {
             max_region_name_bytes: 32,
             max_recovery_targets: 2,
         }
+    }
+
+    #[test]
+    fn queued_resolution_reserves_revision() {
+        let region = Region::new(1);
+        let mut limits = test_limits();
+        limits.max_entities = 130;
+        limits.max_entities_per_region = 130;
+        let mut world = World::new(limits);
+        let _ = world.adopt_region(region).unwrap();
+        for child in 2..=130 {
+            observation(&mut world, region, u64::from(child), child, Object, Local(NonZeroU32::new(1).unwrap()));
+        }
+        let parent = observation(&mut world, region, 200, 1, Object, Root);
+        let resolved = world.children(parent).count();
+        assert!(world.has_pending_relationships());
+        world.journal.revision = WorldRevision(u64::MAX);
+        assert_eq!(world.resolve_relationships(7).unwrap_err(), ApplyError::RevisionExhausted);
+        assert_eq!(world.children(parent).count(), resolved);
+        assert!(world.has_pending_relationships());
+        assert_eq!(world.check_invariants(), Ok(()));
+        world.journal.revision = WorldRevision(u64::MAX - 1);
+        let applied = world.resolve_relationships(7).unwrap();
+        assert_eq!(applied.revision, Some(WorldRevision(u64::MAX)));
+        assert_eq!(world.children(parent).count(), resolved + 7);
+        assert_eq!(world.check_invariants(), Ok(()));
     }
 
     #[test]

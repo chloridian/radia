@@ -52,6 +52,47 @@ proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config { cases: 48, max_shrink_iters: 128, ..Default::default() })]
 
     #[test]
+    fn queued_relationships_preserve_indexes(
+        operations in proptest::collection::vec((0_u8..6, 2_u32..130, 0_usize..9), 1..80)
+    ) {
+        let region = Region::new(750);
+        let mut bounds = limits();
+        bounds.max_entities = 256;
+        bounds.max_entities_per_region = 256;
+        let mut world = World::new(bounds);
+        let _ = world.adopt_region(region).unwrap();
+        for child in 2..130 {
+            let _ = world.observe_object(object(source(region, u64::from(child)), u128::from(child), child, Local(local_id(1)))).unwrap();
+        }
+        let _ = world.observe_object(object(source(region, 200), 1, 1, Root)).unwrap();
+        for (index, (operation, child, batch)) in operations.into_iter().enumerate() {
+            let update = source(region, 1000 + index as u64);
+            match operation {
+                0 => { let _ = world.resolve_relationships(batch).unwrap(); }
+                1 | 2 => {
+                    let mut patch = ObjectPatch::new(update, local_id(child));
+                    patch.parent = Some(if operation == 1 { Root } else { Local(local_id(1)) });
+                    let _ = world.patch_object(patch).unwrap();
+                }
+                3 => {
+                    let destination = if batch.is_multiple_of(2) { 1 } else { 250 };
+                    let _ = world.observe_object(object(update, 1, destination, Root)).unwrap();
+                }
+                4 => { let _ = world.remove_object(update, local_id(child)).unwrap(); }
+                5 => {
+                    let _ = world.observe_object(object(update, u128::from(child), child, Local(local_id(1)))).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            proptest::prop_assert_eq!(world.check_invariants(), Ok(()));
+        }
+        while world.has_pending_relationships() {
+            let _ = world.resolve_relationships(7).unwrap();
+            proptest::prop_assert_eq!(world.check_invariants(), Ok(()));
+        }
+    }
+
+    #[test]
     fn mutation_sequences_preserve_world_indexes(
         operations in proptest::collection::vec((0_u8..5, 0_u8..3, 0_u8..16, 0_u8..8, 1_u8..32, 0_u8..9, 0_u8..32), 1..128)
     ) {

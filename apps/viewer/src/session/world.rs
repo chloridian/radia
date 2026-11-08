@@ -15,7 +15,6 @@ use super::{
     inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation, SitTargetUpdate},
     object_cache::CachedOverride,
     object_media::ObjectMediaTarget,
-    recovery::MAX_RECOVERY_OBJECTS_PER_REQUEST,
     terrain::DecodedTerrain,
 };
 
@@ -26,6 +25,7 @@ const MAX_WORLD_JOURNAL_ENTRIES: usize = 4_096;
 const MAX_REGION_NAME_BYTES: usize = 256;
 const MAX_INGEST_DIAGNOSTIC_ADDRESSES: usize = 8;
 pub(super) const MAX_OBJECTS_PER_INTAKE_QUANTUM: usize = 32;
+const MAX_RELATIONSHIPS_PER_TURN: usize = 64;
 const PARCEL_REJECTION_LOG_INTERVAL: u64 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,7 +148,8 @@ impl IngestSummary {
     pub(super) fn log_incomplete_data(&self, simulator_id: SimulatorId, region: Option<Region>) {
         use ApplyError::{
             AddressGenerationExhausted, EntityBudgetExhausted, EnvironmentBudgetExhausted, FrameGenerationExhausted, InvalidValue,
-            KindMismatch, RegionRetired, RegistrationBudgetExhausted, RevisionExhausted, StaleRegion, TerrainBudgetExhausted,
+            KindMismatch, RegionRetired, RegistrationBudgetExhausted, RelationshipBudgetExhausted, RevisionExhausted, StaleRegion,
+            TerrainBudgetExhausted,
         };
         use FieldRejectionReason::{
             InvalidRotation, InvalidValue as RejectedValue, ParentCycle, ParentDependsOnRejectedParent, ResourceLimit, StaleFrame,
@@ -176,6 +177,7 @@ impl IngestSummary {
                 BlockOutcome::Rejected {
                     error:
                         EntityBudgetExhausted
+                        | RelationshipBudgetExhausted
                         | TerrainBudgetExhausted
                         | EnvironmentBudgetExhausted
                         | world::ApplyError::ParcelBudgetExhausted
@@ -254,6 +256,10 @@ impl SessionWorld {
 
     pub(super) fn world(&self) -> &World {
         &self.world
+    }
+
+    pub(super) fn resolve_relationships(&mut self) -> Result<world::RelationshipResolution, ApplyError> {
+        self.world.resolve_relationships(MAX_RELATIONSHIPS_PER_TURN)
     }
 
     pub(super) fn observe_agent_parcel(
@@ -685,7 +691,7 @@ pub(super) fn viewer_world_limits() -> WorldLimits {
         max_journal_entries: MAX_WORLD_JOURNAL_ENTRIES,
         max_journal_changes: MAX_WORLD_ENTITIES,
         max_region_name_bytes: MAX_REGION_NAME_BYTES,
-        max_recovery_targets: MAX_RECOVERY_OBJECTS_PER_REQUEST,
+        max_recovery_targets: MAX_WORLD_ENTITIES,
     }
 }
 
