@@ -6,10 +6,36 @@ mod patch;
 mod region;
 
 use super::World;
+use crate::object::components::{RegionalStamp, newer_field, newer_region_field};
+use crate::update::{FieldStamp, Stamp};
 use crate::{
     Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, Parent, PoseState, Recovery, RegionApplied,
-    RegionOutcome, WorldChange, WorldPose, WorldRevision,
+    RegionOutcome, UpdateSource, WorldChange, WorldPose, WorldRevision,
 };
+
+#[derive(Clone, Copy)]
+struct Origin {
+    source: UpdateSource,
+    stamp: Stamp,
+}
+
+impl Origin {
+    fn field(self) -> FieldStamp {
+        FieldStamp { authority: self.source.authority(), stamp: self.stamp }
+    }
+
+    fn regional(self) -> RegionalStamp {
+        RegionalStamp { region: self.source.region, stamp: self.field() }
+    }
+
+    fn newer(self, fence: Option<FieldStamp>) -> bool {
+        newer_field(self.field(), fence)
+    }
+
+    fn newer_regional(self, fence: Option<RegionalStamp>) -> bool {
+        newer_region_field(self.source.region, self.field(), fence)
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct Effects {

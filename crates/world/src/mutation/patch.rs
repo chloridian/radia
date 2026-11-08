@@ -2,9 +2,9 @@ use std::num::NonZeroU32;
 
 use uuid::Uuid;
 
-use super::Effects;
+use super::{Effects, Origin};
 use super::facet::{FacetChanges, FacetSet};
-use super::fields::{Draft, Fields, Origin, Settlement, normalized_rotation, validate_uuid, validate_vec3};
+use super::fields::{Draft, Fields, Settlement, normalized_rotation, validate_uuid, validate_vec3};
 use crate::FieldRejectionReason::UntrustedSource;
 use crate::UpdateAuthority::{Tracked, Untracked};
 use crate::history::WorldChange::EntityUpdated;
