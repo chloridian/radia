@@ -54,6 +54,21 @@ fn scalar_boundary_is_exact() {
 }
 
 #[test]
+fn singleton_arrays_fit_budget() {
+    const ITEMS: usize = 32;
+    const BYTES: usize = 2 * ITEMS * size_of::<Value>();
+    let mut input = vec![b'['];
+    input.extend_from_slice(&(ITEMS as u32).to_be_bytes());
+    for _ in 0..ITEMS {
+        input.extend_from_slice(b"[\0\0\0\x01i\0\0\0\x01]");
+    }
+    input.push(b']');
+    let value = binary::from_slice::<Bounded<BYTES>>(&input).expect("known singleton arrays fit their storage budget").0;
+    let expected = Value::Array((0..ITEMS).map(|_| Value::Array(vec![Value::Integer(1)])).collect());
+    assert_eq!(value, expected);
+}
+
+#[test]
 fn duplicate_budget_is_released() {
     let text = "x".repeat(512);
     let pair = format!("<key>same</key><string>{text}</string>");
