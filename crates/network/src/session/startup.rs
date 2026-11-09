@@ -128,111 +128,109 @@ impl RootConnectionStart {
 }
 
 impl SessionRuntime {
-    pub(super) async fn connect_inner(
+    #[tracing::instrument(name = "simulator.connect", level = "info", skip_all)]
+    pub(super) async fn connect(
         session: AgentSession,
         login_data: ResponseData,
         options: SessionRuntimeOptions,
     ) -> Result<Option<Self>, SessionError> {
         let application_event_capacity = options.application_event_capacity();
         let SessionRuntimeOptions { coverage_losses, session: options, mut startup_disconnect, root_transport, .. } = options;
-        async {
-            if startup_disconnect.as_ref().is_some_and(|disconnect| *disconnect.borrow()) {
+        if startup_disconnect.as_ref().is_some_and(|disconnect| *disconnect.borrow()) {
+            return Ok(None);
+        }
+        let simulator_id = SimulatorId::allocate().ok_or(SessionError::SimulatorIdSpaceExhausted)?;
+        let capability_budget = CapabilityBudget::new();
+        let capabilities = Client::new_with_budget(session.seed_capability.clone(), capability_budget.clone())?;
+        let outbound_budget = OutboundBudget::new(options.upstream_bytes_per_second().get());
+        let mut capability_request_waiters = JoinSet::new();
+        track_capability_requests(&mut capability_request_waiters, &capabilities);
+        let (neighbor_events, neighbor_event_receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY);
+        let (neighbor_requests, neighbor_request_receiver) = mpsc::channel(32);
+        let (root_commands, root_command_receiver) = mpsc::channel(NEIGHBOR_COMMAND_CAPACITY);
+        let (root_logout, root_logout_receiver) = mpsc::channel(1);
+        let (primary_state_sender, primary_state_receiver) = watch::channel(PrimaryState::Connecting);
+        let (neighbor_cancellation, _) = watch::channel(false);
+        let packet_memory = SimulatorMemoryBudget::with_application_capacity(application_event_capacity);
+        let mut root_connection_workers = JoinSet::<ConnectionTaskResult>::new();
+        let (root_connection_abort, ready_receiver) = RootConnectionStart {
+            simulator_id,
+            endpoint: session.simulator_address,
+            session: session.clone(),
+            options: SimulatorConnectionOptions {
+                simulator_id,
+                region_handle: None,
+                coverage_losses: coverage_losses.clone(),
+                primary_state: Some(primary_state_receiver),
+                budget: outbound_budget.handle(),
+                owned_budget: None,
+                transport: root_transport,
+            },
+            events: neighbor_events.clone(),
+            neighbor_requests: neighbor_requests.clone(),
+            shutdown: neighbor_cancellation.subscribe(),
+            memory: packet_memory.clone(),
+            commands: root_command_receiver,
+            logout: root_logout_receiver,
+        }
+        .spawn(&mut root_connection_workers);
+        match Self::wait_for_primary_startup(&mut startup_disconnect, ready_receiver).await {
+            Ok(true) => {}
+            Ok(false) => {
+                Self::shutdown_connect_attempt(
+                    &mut root_connection_workers,
+                    &capabilities,
+                    &mut capability_request_waiters,
+                    outbound_budget,
+                )
+                .await;
                 return Ok(None);
             }
-            let simulator_id = SimulatorId::allocate().ok_or(SessionError::SimulatorIdSpaceExhausted)?;
-            let capability_budget = CapabilityBudget::new();
-            let capabilities = Client::new_with_budget(session.seed_capability.clone(), capability_budget.clone())?;
-            let outbound_budget = OutboundBudget::new(options.upstream_bytes_per_second().get());
-            let mut capability_request_waiters = JoinSet::new();
-            track_capability_requests(&mut capability_request_waiters, &capabilities);
-            let (neighbor_events, neighbor_event_receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY);
-            let (neighbor_requests, neighbor_request_receiver) = mpsc::channel(32);
-            let (root_commands, root_command_receiver) = mpsc::channel(NEIGHBOR_COMMAND_CAPACITY);
-            let (root_logout, root_logout_receiver) = mpsc::channel(1);
-            let (primary_state_sender, primary_state_receiver) = watch::channel(PrimaryState::Connecting);
-            let (neighbor_cancellation, _) = watch::channel(false);
-            let packet_memory = SimulatorMemoryBudget::with_application_capacity(application_event_capacity);
-            let mut root_connection_workers = JoinSet::<ConnectionTaskResult>::new();
-            let (root_connection_abort, ready_receiver) = RootConnectionStart {
-                simulator_id,
-                endpoint: session.simulator_address,
-                session: session.clone(),
-                options: SimulatorConnectionOptions {
-                    simulator_id,
-                    region_handle: None,
-                    coverage_losses: coverage_losses.clone(),
-                    primary_state: Some(primary_state_receiver),
-                    budget: outbound_budget.handle(),
-                    owned_budget: None,
-                    transport: root_transport,
-                },
-                events: neighbor_events.clone(),
-                neighbor_requests: neighbor_requests.clone(),
-                shutdown: neighbor_cancellation.subscribe(),
-                memory: packet_memory.clone(),
-                commands: root_command_receiver,
-                logout: root_logout_receiver,
+            Err(error) => {
+                Self::shutdown_connect_attempt(
+                    &mut root_connection_workers,
+                    &capabilities,
+                    &mut capability_request_waiters,
+                    outbound_budget,
+                )
+                .await;
+                return Err(error);
             }
-            .spawn(&mut root_connection_workers);
-            match Self::wait_for_primary_startup(&mut startup_disconnect, ready_receiver).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    Self::shutdown_connect_attempt(
-                        &mut root_connection_workers,
-                        &capabilities,
-                        &mut capability_request_waiters,
-                        outbound_budget,
-                    )
-                    .await;
-                    return Ok(None);
-                }
-                Err(error) => {
-                    Self::shutdown_connect_attempt(
-                        &mut root_connection_workers,
-                        &capabilities,
-                        &mut capability_request_waiters,
-                        outbound_budget,
-                    )
-                    .await;
-                    return Err(error);
-                }
-            }
-            Ok(Some(Self {
-                state: SessionState {
-                    simulator_id,
-                    primary: PrimaryRoute {
-                        simulator_id,
-                        memory: packet_memory.clone(),
-                        endpoint: session.simulator_address,
-                        region_handle: None,
-                        commands: root_commands,
-                        state: primary_state_sender,
-                        logout: root_logout,
-                    },
-                    root_connection_abort: Some(root_connection_abort),
-                    neighbor_events,
-                    neighbor_requests,
-                    neighbor_cancellation,
-                    root_connection_failed: false,
-                    logout_request_sent: false,
-                    logout_attempted: false,
-                    logout_unavailable: None,
-                    pending_primary_logout: None,
-                    session,
-                    capabilities,
-                    capability_budget,
-                    capability_request_waiters,
-                    login_data,
-                    event_backlog: PrimaryEventBacklog::default(),
-                    packet_memory,
-                    coverage_losses,
-                    outbound_budget: Some(outbound_budget),
-                    handoff_generation: Some(0),
-                },
-                runtime_inputs: RuntimeInputs { neighbor_event_receiver, neighbor_request_receiver, root_connection_workers },
-            }))
         }
-        .await
+        Ok(Some(Self {
+            state: SessionState {
+                simulator_id,
+                primary: PrimaryRoute {
+                    simulator_id,
+                    memory: packet_memory.clone(),
+                    endpoint: session.simulator_address,
+                    region_handle: None,
+                    commands: root_commands,
+                    state: primary_state_sender,
+                    logout: root_logout,
+                },
+                root_connection_abort: Some(root_connection_abort),
+                neighbor_events,
+                neighbor_requests,
+                neighbor_cancellation,
+                root_connection_failed: false,
+                logout_request_sent: false,
+                logout_attempted: false,
+                logout_unavailable: None,
+                pending_primary_logout: None,
+                session,
+                capabilities,
+                capability_budget,
+                capability_request_waiters,
+                login_data,
+                event_backlog: PrimaryEventBacklog::default(),
+                packet_memory,
+                coverage_losses,
+                outbound_budget: Some(outbound_budget),
+                handoff_generation: Some(0),
+            },
+            runtime_inputs: RuntimeInputs { neighbor_event_receiver, neighbor_request_receiver, root_connection_workers },
+        }))
     }
 
     async fn wait_for_primary_startup(

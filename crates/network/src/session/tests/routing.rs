@@ -231,9 +231,13 @@ async fn replacing_neighbor_releases_queued_state() {
     let (capability_events, _capability_event_receiver) = mpsc::channel(8);
     let mut setup =
         PromotionSetup { state: &mut run_state, neighbor_requests, application_events, neighbor_events, shutdown, capability_events };
-    let root_simulator_id = connection.simulator_id;
+    let root_simulator_id = connection.state.simulator_id;
 
-    connection.start_neighbor(root_simulator_id, region_handle, old_endpoint, None, &mut setup).await.expect("start initial neighbor");
+    connection
+        .state
+        .start_neighbor(root_simulator_id, region_handle, old_endpoint, None, &mut setup)
+        .await
+        .expect("start initial neighbor");
     let _ = receive(&old_neighbor).await;
     let old_id = setup.state.neighbor_connections.get(&region_handle).expect("old neighbor is tracked").simulator_id;
 
@@ -255,6 +259,7 @@ async fn replacing_neighbor_releases_queued_state() {
     assert!(packet_memory.global_available_bytes() < MAX_QUEUED_SIMULATOR_EVENT_BYTES);
 
     connection
+        .state
         .start_neighbor(root_simulator_id, region_handle, new_endpoint, None, &mut setup)
         .await
         .expect("replace unannounced neighbor");
@@ -301,9 +306,10 @@ async fn preconnect_overflow_reports_coverage_without_disconnect() {
     }
     let (events, mut received) = mpsc::channel(1);
     let source = CoverageSource::EventQueue { incarnation: 54 };
-    let watermark = connection.coverage_losses.watermark(simulator_id, source);
+    let watermark = connection.state.coverage_losses.watermark(simulator_id, source);
 
     connection
+        .state
         .publish_simulator_event(
             simulator_id,
             event_with_coverage_watermark(
@@ -326,7 +332,7 @@ async fn preconnect_overflow_reports_coverage_without_disconnect() {
     assert!(!run_state.connected_simulators.contains(&simulator_id));
     assert!(received.try_recv().is_err(), "the pre-connect event remains buffered until connection ordering is established");
     std::assert_matches!(
-        connection.coverage_losses.snapshot().losses.as_slice(),
+        connection.state.coverage_losses.snapshot().losses.as_slice(),
         [CoverageLoss::Source(record)]
             if record.watermark.simulator_id == simulator_id
                 && record.watermark.source == source

@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, future::pending, pin::Pin};
+use std::{collections::VecDeque, future::pending, pin::Pin, time::Duration};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinSet,
@@ -7,15 +7,18 @@ use tokio::{
 
 use super::handoff::HandoffState;
 use super::{
-    APPLICATION_EVENT_PRESSURE_GRACE_PERIOD, CLIENT_EVENT_CAPACITY, ConnectionTaskResult, HANDOFF_COMMAND_RETRY_INTERVAL, LOGOUT_TIMEOUT,
-    RunState, RuntimeInputs, SESSION_TIMEOUT, SessionError, SessionStartup, SessionState, SimulatorCapabilitySession, SimulatorEvent,
-    SimulatorRequest,
+    CLIENT_EVENT_CAPACITY, ConnectionTaskResult, LOGOUT_TIMEOUT, RunState, RuntimeInputs, SessionError, SessionStartup, SessionState,
+    SimulatorCapabilitySession, SimulatorEvent, SimulatorRequest,
 };
 use crate::{
     capabilities::{EventQueueRoleHandle, EventQueueTask},
     event::EventEnvelope,
     session::Command,
 };
+
+const SESSION_TIMEOUT: Duration = Duration::from_secs(40);
+pub(super) const APPLICATION_EVENT_PRESSURE_GRACE_PERIOD: Duration = Duration::from_secs(30);
+pub(super) const HANDOFF_COMMAND_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 pub(super) struct SessionDispatcher<'a> {
     pub(super) state: &'a mut SessionState,

@@ -53,15 +53,15 @@ use crate::{
 use neighbors::{neighbor_completion_event, neighbor_event_queue_failure};
 #[cfg(test)]
 use routing::{EventQueueOutcome, PreconnectEvents, PreconnectOutcome, queue_simulator_event, queue_until_connected};
+#[cfg(test)]
+use runtime::{APPLICATION_EVENT_PRESSURE_GRACE_PERIOD, HANDOFF_COMMAND_RETRY_INTERVAL};
 use runtime::{RuntimeAction, SessionDispatcher};
 #[cfg(test)]
 use simulators::retry_pending_handoff_commands;
 use simulators::{
-    APPLICATION_EVENT_PRESSURE_GRACE_PERIOD, ConnectionQueueFailure, ConnectionTaskResult, EVENT_BACKLOG_WARNING_INTERVAL,
-    EVENT_BACKLOG_WARNING_THRESHOLD, HANDOFF_COMMAND_RETRY_INTERVAL, HandoffCommand, MAX_PENDING_LIFECYCLE_EVENTS,
-    MAX_PENDING_SESSION_EVENTS, NEIGHBOR_COMMAND_CAPACITY, NeighborEventQueueJoin, PrimaryRoute, RunState, RuntimeInputs, SESSION_TIMEOUT,
-    SessionRuntime, SessionRuntimeOptions, SessionState, SimulatorCapabilitySession, SimulatorConnectionState, is_current_simulator,
-    queue_connection_message, queue_primary_message, remove_simulator_capability, track_capability_requests,
+    ConnectionQueueFailure, ConnectionTaskResult, HandoffCommand, NEIGHBOR_COMMAND_CAPACITY, NeighborEventQueueJoin, PrimaryRoute,
+    RunState, RuntimeInputs, SessionRuntime, SessionRuntimeOptions, SessionState, SimulatorCapabilitySession, SimulatorConnectionState,
+    is_current_simulator, queue_connection_message, queue_primary_message, remove_simulator_capability, track_capability_requests,
 };
 use startup::SessionStartup;
 #[cfg(test)]
@@ -103,6 +103,8 @@ impl Default for SessionOptions {
 }
 
 pub trait OutboundMessage: outbound_message::Sealed + Into<Message> {}
+
+impl<T: outbound_message::Sealed + Into<Message>> OutboundMessage for T {}
 
 pub struct MfaChallenge {
     commands: Sender<Command>,
@@ -461,39 +463,21 @@ pub(crate) enum Command {
 
 impl outbound_message::Sealed for TeleportCancel {}
 
-impl OutboundMessage for TeleportCancel {}
-
 impl outbound_message::Sealed for AgentUpdate {}
-
-impl OutboundMessage for AgentUpdate {}
 
 impl outbound_message::Sealed for SetAlwaysRun {}
 
-impl OutboundMessage for SetAlwaysRun {}
-
 impl outbound_message::Sealed for ChatFromViewer {}
-
-impl OutboundMessage for ChatFromViewer {}
 
 impl outbound_message::Sealed for MapBlockRequest {}
 
-impl OutboundMessage for MapBlockRequest {}
-
 impl outbound_message::Sealed for MoveInventoryFolder {}
-
-impl OutboundMessage for MoveInventoryFolder {}
 
 impl outbound_message::Sealed for MoveInventoryItem {}
 
-impl OutboundMessage for MoveInventoryItem {}
-
 impl outbound_message::Sealed for RegionHandleRequest {}
 
-impl OutboundMessage for RegionHandleRequest {}
-
 impl outbound_message::Sealed for RequestMultipleObjects {}
-
-impl OutboundMessage for RequestMultipleObjects {}
 
 fn validate_outbound_message(message: &Message) -> Result<(), Error> {
     match message {

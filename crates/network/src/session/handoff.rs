@@ -733,15 +733,16 @@ mod tests {
         let mut owners = HashMap::new();
         let mut capabilities = HashMap::new();
         let client = connection
+            .state
             .ensure_handoff_capabilities(id, &target, events, shutdown, &mut queues, &mut owners, &mut capabilities)
             .expect("start destination capability");
-        assert_eq!(connection.capability_request_waiters.len(), 2);
+        assert_eq!(connection.state.capability_request_waiters.len(), 2);
         remove_simulator_capability(&mut capabilities, id);
         assert!(capabilities.is_empty());
-        timeout(Duration::from_secs(2), connection.finish_capability_request_waiters())
+        timeout(Duration::from_secs(2), connection.state.finish_capability_request_waiters())
             .await
             .expect("wait for root and retired destination capability requests");
-        assert!(connection.capability_request_waiters.is_empty());
+        assert!(connection.state.capability_request_waiters.is_empty());
         while timeout(Duration::from_secs(2), queues.join_next()).await.expect("join retired EventQueue").is_some() {}
         std::assert_matches!(client.request_capabilities(&["TestCapability"]).await, Err(Error::CapabilitySessionClosed));
     }

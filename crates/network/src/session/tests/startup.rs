@@ -119,7 +119,7 @@ async fn retired_capability_requests_are_waited_for() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind held capability");
     let seed = Url::parse(&format!("http://{}/held", listener.local_addr().expect("HTTP endpoint"))).expect("held URL");
     let mut connection = connect_runtime(login_session(endpoint), ResponseData::default()).await.expect("connect runtime");
-    let client = connection.new_capability_client(seed.clone()).expect("track capability requests");
+    let client = connection.state.new_capability_client(seed.clone()).expect("track capability requests");
     let id = SimulatorId::allocate().expect("neighbor ID");
     let mut capabilities = HashMap::from([(
         id,
@@ -139,11 +139,11 @@ async fn retired_capability_requests_are_waited_for() {
     let (mut socket, _) = timeout(WAIT, listener.accept()).await.expect("request reaches server").expect("accept request");
     let mut bytes = [0; 1024];
     assert!(timeout(WAIT, socket.read(&mut bytes)).await.expect("read held request").expect("HTTP request bytes") > 0);
-    assert_eq!(connection.capability_request_waiters.len(), 2, "root and neighbor capability requests stay tracked");
+    assert_eq!(connection.state.capability_request_waiters.len(), 2, "root and neighbor capability requests stay tracked");
     crate::session::remove_simulator_capability(&mut capabilities, id);
     assert!(capabilities.is_empty());
-    timeout(WAIT, connection.finish_capability_request_waiters()).await.expect("wait for retired and root capability requests");
-    assert!(connection.capability_request_waiters.is_empty());
+    timeout(WAIT, connection.state.finish_capability_request_waiters()).await.expect("wait for retired and root capability requests");
+    assert!(connection.state.capability_request_waiters.is_empty());
     let result = timeout(WAIT, request).await.expect("closed request resolves").expect("request task");
     std::assert_matches!(result, Err(Error::CapabilitySessionClosed));
     std::assert_matches!(client.request_capabilities(&["TestCapability"]).await, Err(Error::CapabilitySessionClosed));
@@ -155,18 +155,18 @@ async fn capability_client_count_is_bounded() {
     let mut connection = connect_runtime(login_session(simulator.local_addr().expect("simulator endpoint")), ResponseData::default())
         .await
         .expect("connect runtime");
-    let seed = connection.session.seed_capability.clone();
+    let seed = connection.state.session.seed_capability.clone();
     let mut clients = Vec::new();
     for _ in 1..crate::circuit::MAX_SIMULATOR_CONNECTIONS {
-        clients.push(connection.new_capability_client(seed.clone()).expect("admit client within limit"));
+        clients.push(connection.state.new_capability_client(seed.clone()).expect("admit client within limit"));
     }
-    assert!(connection.new_capability_client(seed).is_err());
-    assert_eq!(connection.capability_request_waiters.len(), crate::circuit::MAX_SIMULATOR_CONNECTIONS);
+    assert!(connection.state.new_capability_client(seed).is_err());
+    assert_eq!(connection.state.capability_request_waiters.len(), crate::circuit::MAX_SIMULATOR_CONNECTIONS);
     for client in &clients {
         client.close_session();
     }
-    timeout(WAIT, connection.finish_capability_request_waiters()).await.expect("wait for bounded capability requests");
-    assert!(connection.capability_request_waiters.is_empty());
+    timeout(WAIT, connection.state.finish_capability_request_waiters()).await.expect("wait for bounded capability requests");
+    assert!(connection.state.capability_request_waiters.is_empty());
 }
 
 #[tokio::test(start_paused = true)]
@@ -181,8 +181,8 @@ async fn full_decode_slots_do_not_block_primary_retry_timers() {
     )
     .await
     .expect("connect simulator circuit");
-    let simulator_id = connection.simulator_id;
-    let held_slots = connection.packet_memory.hold_all_decode_slots().await;
+    let simulator_id = connection.state.simulator_id;
+    let held_slots = connection.state.packet_memory.hold_all_decode_slots().await;
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, _received) = mpsc::channel(TEST_EVENT_CAPACITY);
     let terminal_event_permit = events.clone().reserve_owned().await.expect("reserve terminal event slot");
@@ -366,7 +366,7 @@ async fn capability_events_wait_for_simulator_connection() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
     let mut connection = connect_runtime(login_session(endpoint), ResponseData::default()).await.expect("connect simulator circuit");
-    let simulator_id = connection.simulator_id;
+    let simulator_id = connection.state.simulator_id;
     let (events, mut received) = mpsc::channel(4);
     let mut run_state = RunState::new();
     let queued_bytes = Arc::new(Semaphore::new(10));
@@ -380,6 +380,7 @@ async fn capability_events_wait_for_simulator_connection() {
             EventEnvelope::new(event)
         };
         connection
+            .state
             .publish_simulator_event(simulator_id, envelope, &events, &mut run_state)
             .await
             .expect("buffer pre-connect capability event");
@@ -388,6 +389,7 @@ async fn capability_events_wait_for_simulator_connection() {
     assert!(received.try_recv().is_err(), "capability events must wait for SimulatorConnected");
 
     connection
+        .state
         .publish_simulator_connected(
             simulator_id,
             Event::SimulatorConnected { simulator_id, region_handle: None, endpoint },
