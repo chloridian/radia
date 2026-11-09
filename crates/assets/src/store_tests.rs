@@ -1486,6 +1486,92 @@ fn shared_detail_refines_and_releases() {
 }
 
 #[test]
+fn uploaded_sources_follow_handle_ownership() {
+    let budget = Budget::default();
+    let StoreHarness { now, mut store, route } = StoreHarness::with_budget(budget.clone());
+    let mut demands = Vec::new();
+    let mut textures = Vec::new();
+    for id in 801..804 {
+        let demand = store.request(route, Request::new(resource(id)), Priority::Visible, now).expect("texture demand");
+        let input = fetch(&mut store, now, RGBA_J2C.to_vec());
+        let decoded = store.start_decode(input).expect("decode admission").run();
+        assert!(store.complete(decoded, now).is_empty());
+        let Status::Ready(Content::Texture(texture)) = demand.status() else { panic!("ready texture") };
+        texture.uploaded(texture.info().expect("image metadata").revision);
+        assert!(texture.image().is_none(), "upload releases CPU pixels");
+        textures.push(texture);
+        demands.push(demand);
+        assert_eq!(budget.stats().resident_bytes, textures.len() * RGBA_J2C.len());
+    }
+    let work = budget.reserve(ASSET_WORK_BYTES).expect("retained sources do not consume work admission");
+    drop(work);
+    let pixels = textures[0].decode_job().expect("GPU recovery source").run().expect("re-decode");
+    assert_eq!(pixels.pixels(), RGBA_RAW);
+    drop(pixels);
+    store.retire_route(route);
+    drop(demands);
+    store.maintain(now);
+    assert_eq!(budget.stats().resident_bytes, 3 * RGBA_J2C.len(), "scene handles retain encoded sources");
+    drop(textures.pop());
+    store.maintain(now);
+    assert_eq!(budget.stats().resident_bytes, 2 * RGBA_J2C.len());
+    drop(textures);
+    store.maintain(now);
+    assert_eq!(budget.stats().charged_bytes, 0);
+
+    let route = store.register_route().expect("replacement route");
+    let demand = store.request(route, Request::new(resource(801)), Priority::Visible, now).expect("reload demand");
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("uncached reload") else { panic!("network fetch") };
+    let input = fetch.complete(Ok(RGBA_J2C.to_vec())).expect("network response");
+    let decoded = store.start_decode(input).expect("reload decode").run();
+    store.complete(decoded, now);
+    assert_eq!(ready(&demand).pixels(), RGBA_RAW);
+    drop(demand);
+    store.maintain(now);
+    assert_eq!(budget.stats().charged_bytes, 0);
+}
+
+#[test]
+fn released_texture_uses_disk_cache() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let budget = Budget::default();
+    let mut store = Store::with_cache(budget.clone(), Arc::clone(&cache));
+    let now = Instant::now();
+    let route = store.register_route().expect("route");
+    let request = Request::new(resource(806));
+    let demand = store.request(route, request, Priority::Visible, now).expect("cold demand");
+    let input = fetch(&mut store, now, RGBA_J2C.to_vec());
+    let decoded = store.start_decode(input).expect("network decode").run();
+    let writes = store.complete(decoded, now);
+    assert_eq!(writes.len(), 1);
+    for write in writes {
+        write.run();
+    }
+    let Status::Ready(Content::Texture(texture)) = demand.status() else { panic!("ready texture") };
+    texture.uploaded(texture.info().expect("image metadata").revision);
+    drop((texture, demand));
+    store.maintain(now);
+    assert_eq!(budget.stats().charged_bytes, 0);
+
+    let demand = store.request(route, request, Priority::Visible, now).expect("cached demand");
+    let LoadJob::ReadCache(read) = store.next_job(now).expect("disk reload") else { panic!("cache read") };
+    let Some(LoadJob::Decode(input)) = store.complete_cache_read(read.run(), now) else { panic!("cached decode") };
+    let decoded = store.start_decode(input).expect("disk decode").run();
+    assert!(store.complete(decoded, now).is_empty(), "disk reload does not rewrite cache");
+    let Status::Ready(Content::Texture(texture)) = demand.status() else { panic!("reloaded texture") };
+    texture.uploaded(texture.info().expect("image metadata").revision);
+    let pixels = texture.decode_job().expect("disk-loaded recovery source").run().expect("re-decode");
+    assert_eq!(pixels.pixels(), RGBA_RAW);
+    drop((pixels, texture, demand));
+    store.maintain(now);
+    assert_eq!(budget.stats().charged_bytes, 0);
+    assert_eq!(cache.stats().hits, 1);
+    assert!(store.next_job(now).is_none(), "disk reload requires no network fetch");
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache owners released").shutdown().expect("close cache");
+}
+#[test]
 fn failed_refinement_keeps_image() {
     let StoreHarness { now, mut store, route, .. } = StoreHarness::new();
     let id = resource(1).id;
