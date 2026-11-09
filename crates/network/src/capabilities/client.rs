@@ -556,25 +556,10 @@ impl Client {
         let runtime = Handle::try_current().map_err(|_| SetupError::EventQueueRuntimeUnavailable)?;
         let http = self.http.clone().with_timeout(Some(EVENT_QUEUE_REQUEST_TIMEOUT));
         let seed = self.seed.as_ref().clone();
-        let ordinary_requests = Arc::clone(&self.budget.ordinary_requests);
-        let primary_event_queues = Arc::clone(&self.budget.primary_event_queues);
-        let neighbor_event_queues = Arc::clone(&self.budget.neighbor_event_queues);
-        let queued_event_bytes = Arc::clone(&self.budget.queued_event_bytes);
         let (role, primary) = event_queue::EventQueueRoleHandle::channel(is_primary);
         let session_closed = self.session_closed.subscribe();
         let (completed, completion) = oneshot::channel();
-        let context = EventQueueContext {
-            simulator_id,
-            source,
-            seed,
-            http,
-            events,
-            ordinary_requests,
-            primary_event_queues,
-            neighbor_event_queues,
-            queued_event_bytes,
-            coverage_losses,
-        };
+        let context = EventQueueContext { simulator_id, source, seed, http, events, budget: self.budget.clone(), coverage_losses };
         let stop = Stop::new(shutdown, session_closed);
         let task = runtime.spawn(
             async move {

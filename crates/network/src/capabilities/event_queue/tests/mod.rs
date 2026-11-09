@@ -81,10 +81,7 @@ fn seed_context(events: mpsc::Sender<EventEnvelope>) -> EventQueueContext {
         seed: Url::parse("http://127.0.0.1:9/seed").expect("valid seed URL"),
         http: http::Client::new(None, false, None).expect("build HTTP client"),
         events,
-        ordinary_requests: Arc::new(Semaphore::new(1)),
-        primary_event_queues: Arc::new(Semaphore::new(1)),
-        neighbor_event_queues: Arc::new(Semaphore::new(1)),
-        queued_event_bytes: Arc::new(Semaphore::new(MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES)),
+        budget: CapabilityBudget::new(),
         coverage_losses: CoverageLossLedger::new(),
     }
 }

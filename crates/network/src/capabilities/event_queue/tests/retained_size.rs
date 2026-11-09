@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 use llsd::{Binary, Uri};
 
 use super::*;
+use crate::capabilities::budget::{MAX_CONCURRENT_NEIGHBOR_EVENT_BODIES, MAX_CONCURRENT_PRIMARY_EVENT_BODIES};
 
 #[test]
 fn counts_owned_buffer_capacity() {
@@ -74,6 +75,7 @@ fn decode_working_sets() {
         panic!("a near-limit string must be rejected by the retained event limit");
     };
     assert!(error.contains("string bytes limit exceeded"), "{error}");
+    assert!(peak <= (2 * MAX_QUEUED_CAPABILITY_EVENT_BYTES) as i128, "oversized string was copied before rejection: peak={peak}");
     assert!((0..=4096).contains(&live), "rejected decode retained unexpected allocations: {live} bytes");
     let ((), released, _, _) = crate::fixtures::allocation::measure(|| drop(error));
     assert_eq!(released, -live, "rejected decode output should release its allocations");
@@ -235,6 +237,11 @@ fn decode_working_sets() {
         let retained_bytes = capability_event_batch_retained_size(&events, events.capacity());
         assert!(retained_bytes >= MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES * 98 / 100, "retained={retained_bytes}");
         assert!(retained_bytes <= MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, "retained={retained_bytes}");
+        let temporary_bytes = 3 * MAX_QUEUED_CAPABILITY_EVENT_BYTES + (oversized_event_count - 1) * std::mem::size_of::<CapabilityEvent>();
+        assert!(
+            peak <= live + temporary_bytes as i128,
+            "accepted batch copied its input or exceeded parser scratch allowance: {label}, peak={peak}"
+        );
         let total = report_decode(label, body.len(), body.capacity(), live, peak, elapsed_ns, retained_bytes, "accepted");
         if total > largest.1 {
             largest = (label, total);
@@ -244,12 +251,14 @@ fn decode_working_sets() {
     }
 
     println!("event_queue_decode_largest label={} raw_capacity_plus_measured_peak={}", largest.0, largest.1);
+    let active_bodies = MAX_CONCURRENT_PRIMARY_EVENT_BODIES + MAX_CONCURRENT_NEIGHBOR_EVENT_BODIES;
     println!(
-        "event_queue_decode_model kind=identical_concurrent_polls poll_count={} source_label={} single_poll_raw_capacity_plus_measured_peak={} modeled_nine_poll_peak_bytes={}",
+        "event_queue_decode_model kind=identical_admitted_bodies open_poll_count={} active_body_count={} source_label={} single_poll_raw_capacity_plus_measured_peak={} modeled_active_body_peak_bytes={}",
         MAX_CONCURRENT_EVENT_QUEUES,
+        active_bodies,
         largest.0,
         largest.1,
-        largest.1 * MAX_CONCURRENT_EVENT_QUEUES as i128
+        largest.1 * active_bodies as i128
     );
     println!(
         "event_queue_decode_limits response_bytes={} batch_retained_bytes={} event_retained_bytes={} batch_events={} llsd_values={} container_items={} key_map_entries={} dense_nested_array_maps={} dense_regular_map_entries={} dense_final_map_entries={} ignored_envelope_map_entries={} rejected_array_events={} accepted_batch_events={}",

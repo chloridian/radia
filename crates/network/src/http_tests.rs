@@ -18,10 +18,7 @@ use url::Url;
 
 use crate::fixtures::http::{LocalServer, response};
 
-use super::{
-    Client, Error, ErrorKind, RETRY_AFTER, RedirectPolicy, Response, read_bounded_body, response_retry_after as parse_response_retry_after,
-    retry_after_delay, send_with_deadline, validate_http_url,
-};
+use super::{Client, Error, ErrorKind, RETRY_AFTER, RedirectPolicy, Response, retry_after_delay, validate_http_url};
 
 #[test]
 fn retry_after_formats() {
@@ -215,12 +212,11 @@ async fn truncated_body_keeps_response_metadata() {
     assert_eq!(server.finish().len(), 1);
 }
 
-#[tokio::test]
-async fn body_deadline_preserves_response_metadata() {
+async fn held_body_response() -> (Url, tokio::sync::oneshot::Sender<()>, JoinHandle<()>) {
     let listener = net::TcpListener::bind("127.0.0.1:0").await.expect("bind local HTTP server");
     let address = listener.local_addr().expect("read local listener address");
     let (release_body, body_released) = tokio::sync::oneshot::channel();
-    let server: JoinHandle<()> = tokio::spawn(async move {
+    let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept HTTP request");
         let mut request = Vec::new();
         let mut chunk = [0; 1024];
@@ -235,40 +231,111 @@ async fn body_deadline_preserves_response_metadata() {
             }
         }
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nRetry-After: 2\r\nConnection: close\r\n\r\n")
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nRetry-After: 2\r\nConnection: close\r\n\r\n")
             .await
-            .expect("write headers");
-        body_released.await.expect("allow body deadline to expire");
+            .expect("write response headers");
+        body_released.await.expect("release held response body");
         if let Err(error) = stream.write_all(b"data").await {
             std::assert_matches!(
                 error.kind(),
                 std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted,
-                "write response body after the client deadline: {error}"
+                "write response body after the client stopped reading: {error}"
             );
         }
     });
+    let url = Url::parse(&format!("http://{address}/body")).expect("local HTTP URL");
+
+    (url, release_body, server)
+}
+
+#[tokio::test]
+async fn post_headers_returns_before_body() {
+    let (url, release_body, server) = held_body_response().await;
+    let client = Client::new(Some(Duration::from_secs(20)), false, None).expect("build HTTP client");
+    let incoming = match time::timeout(
+        Duration::from_secs(45),
+        client.post_headers("test", &url, "text/plain", Some("text/plain"), b"request".to_vec(), 16),
+    )
+    .await
+    {
+        Ok(Ok(incoming)) => incoming,
+        Ok(Err(error)) => {
+            release_body.send(()).expect("release body after request failure");
+            server.await.expect("server should finish");
+            panic!("receive response headers: {error}");
+        }
+        Err(error) => {
+            release_body.send(()).expect("release body after header timeout");
+            server.await.expect("server should finish");
+            panic!("post_headers should finish before response body: {error}");
+        }
+    };
+    let header_timeout = incoming.timeout_error();
+
+    assert_eq!(header_timeout.status, Some(StatusCode::OK));
+    assert_eq!(header_timeout.retry_after, Some(Duration::from_secs(2)));
+    release_body.send(()).expect("release response body");
+    let response = incoming.read().await.expect("read released response body");
+    server.await.expect("server should finish");
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.headers.get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()), Some("text/plain"));
+    assert_eq!(response.retry_after(), Some(Duration::from_secs(2)));
+    assert_eq!(response.body, b"data");
+}
+
+#[tokio::test]
+async fn expired_headers_reject_buffered_body() {
+    let server = LocalServer::start(vec![response(200, "OK", "text/plain", Some("7"), "data")]);
+    let deadline = Duration::from_secs(20);
+    let client = Client::new(Some(deadline), false, None).expect("build HTTP client");
+    let incoming =
+        client.post_headers("test", &server.url("/body"), "text/plain", None, Vec::new(), 16).await.expect("parsed response headers");
+    time::pause();
+    time::advance(deadline).await;
+    let error = incoming.read().await.expect_err("a buffered body cannot extend an expired operation");
+    assert_eq!(error.kind, ErrorKind::Timeout);
+    assert_eq!(error.status, Some(StatusCode::OK));
+    assert_eq!(error.retry_after, Some(Duration::from_secs(7)));
+    assert_eq!(server.finish().len(), 1);
+}
+
+#[tokio::test]
+async fn body_deadline_preserves_response_metadata() {
+    let (url, release_body, server) = held_body_response().await;
     let timeout = Duration::from_secs(20);
     let client = Client::new(Some(timeout), false, None).expect("build HTTP client");
-    let url = Url::parse(&format!("http://{address}/body")).expect("local HTTP URL");
-    let started = Instant::now();
-    let deadline = started + timeout;
-    let request = client.client.get(url).timeout(deadline.saturating_duration_since(Instant::now())).send();
-    let response =
-        send_with_deadline(request, Some(deadline), started).await.expect("HTTP client should consume response headers before the body");
-    assert_eq!(response.status(), StatusCode::OK);
-    let retry_after = parse_response_retry_after(response.headers());
-    assert_eq!(retry_after, Some(Duration::from_secs(2)));
+    let incoming = match time::timeout(Duration::from_secs(45), client.post_headers("test", &url, "text/plain", None, Vec::new(), 16)).await
+    {
+        Ok(Ok(incoming)) => incoming,
+        Ok(Err(error)) => {
+            release_body.send(()).expect("release body after request failure");
+            server.await.expect("server should finish");
+            panic!("receive response headers: {error}");
+        }
+        Err(error) => {
+            release_body.send(()).expect("release body after header timeout");
+            server.await.expect("server should finish");
+            panic!("post_headers should finish before response body: {error}");
+        }
+    };
+    let deadline = incoming.deadline().expect("client configured a request deadline");
+    let header_timeout = incoming.timeout_error();
+    assert_eq!(header_timeout.status, Some(StatusCode::OK));
+    assert_eq!(header_timeout.retry_after, Some(Duration::from_secs(2)));
 
-    let mut body = Box::pin(read_bounded_body(response, 16, Some(deadline), started));
+    time::pause();
+    time::advance(Duration::from_secs(5)).await;
+    let mut body = Box::pin(incoming.read());
     let body_read_pending = std::future::poll_fn(|context| Poll::Ready(body.as_mut().poll(context).is_pending())).await;
     assert!(body_read_pending, "body read should be pending with response metadata available");
-    time::pause();
     time::advance(deadline.saturating_duration_since(Instant::now())).await;
     let error = body.await.expect_err("body read must hit its deadline");
 
     assert_eq!(error.kind, ErrorKind::Timeout);
     assert_eq!(error.status, Some(StatusCode::OK));
-    assert_eq!(error.retry_after, retry_after);
+    assert_eq!(error.retry_after, header_timeout.retry_after);
+    assert!(error.elapsed >= timeout, "elapsed {} should include the request's original deadline", error.elapsed.as_secs_f64());
     assert!(!error.is_timeout_after(timeout), "a body timeout has response metadata");
     release_body.send(()).expect("release held response body");
     server.await.expect("server should finish");
