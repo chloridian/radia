@@ -147,7 +147,7 @@ pub fn bounded_position(
             allowed_elapsed = effective_time.min(effective_elapsed(crossing_time + MAX_REGION_CROSSING_TIME, time_dilation));
         }
         bounds = next_bounds;
-        after_elapsed = crossing_elapsed + crossing_elapsed.abs().max(1.0) * f64::EPSILON * 8.0;
+        after_elapsed = crossing_elapsed;
     }
     last_boundary
 }
@@ -183,11 +183,14 @@ fn first_region_exit(
                 continue;
             }
             let derivative = component_velocity + component_acceleration * (time - 0.5 * PHYSICS_TIMESTEP);
-            if direction * derivative <= 0.0 {
+            let outward_velocity = direction * derivative;
+            if outward_velocity < 0.0 || (outward_velocity == 0.0 && direction * component_acceleration <= 0.0) {
                 continue;
             }
-            if crossing.is_none_or(|(current, _, _)| time < current) {
-                crossing = Some((time, position_at_effective(start, velocity, acceleration, time), vector));
+            match &mut crossing {
+                Some((current, _, current_vector)) if time == *current => *current_vector += vector,
+                Some((current, _, _)) if time > *current => {}
+                _ => crossing = Some((time, position_at_effective(start, velocity, acceleration, time), vector)),
             }
         }
     }
@@ -333,6 +336,44 @@ mod tests {
     #[test]
     fn unmeasured_ping_uses_only_frame_lead() {
         assert!((half_ping_lead(0.5, None, 0.02) - 0.005).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn corner_exit_requires_diagonal_region() {
+        for x in [-1.0, 1.0] {
+            for y in [-1.0, 1.0] {
+                let start = DVec3::new(if x < 0.0 { 1.0 } else { 255.0 }, if y < 0.0 { 1.0 } else { 255.0 }, 0.0);
+                let velocity = Vec3::new(x, y, 0.0) * 100.0;
+                let corner = DVec3::new(if x < 0.0 { 0.0 } else { 256.0 }, if y < 0.0 { 0.0 } else { 256.0 }, 0.0);
+                let regions = [
+                    RegionBounds { region_id: 1, origin: DVec3::ZERO },
+                    RegionBounds { region_id: 2, origin: DVec3::new(f64::from(x) * 256.0, 0.0, 0.0) },
+                ];
+                let result = bounded_position(1, start, velocity, Vec3::ZERO, 2.0, 1.0, &regions);
+                assert!(result.distance(corner) < 1e-12, "direction {velocity:?}: {result:?}");
+
+                let regions =
+                    [regions[0], RegionBounds { region_id: 3, origin: DVec3::new(f64::from(x) * 256.0, f64::from(y) * 256.0, 0.0) }];
+                let result = bounded_position(1, start, velocity, Vec3::ZERO, 2.0, 1.0, &regions);
+                assert!(result.distance(corner + velocity.as_dvec3()) < 1e-10, "loaded diagonal {velocity:?}: {result:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn nearby_exits_are_not_skipped() {
+        let regions =
+            [RegionBounds { region_id: 1, origin: DVec3::ZERO }, RegionBounds { region_id: 2, origin: DVec3::new(-256.0, 0.0, 0.0) }];
+        let start = DVec3::new(1.0, 1.0 + 1e-14, 0.0);
+        let result = bounded_position(1, start, Vec3::new(-100.0, -100.0, 0.0), Vec3::ZERO, 2.0, 1.0, &regions);
+        assert!(result.distance(DVec3::ZERO) < 1e-12, "second exit: {result:?}");
+    }
+
+    #[test]
+    fn outward_acceleration_stops_at_edge() {
+        let regions = [RegionBounds { region_id: 1, origin: DVec3::ZERO }];
+        let start = DVec3::new(0.0, 128.0, 0.0);
+        assert_eq!(bounded_position(1, start, -Vec3::X, -Vec3::X * 90.0, 1.0, 1.0, &regions), start);
     }
 
     #[test]
