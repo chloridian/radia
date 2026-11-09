@@ -189,6 +189,14 @@ cargo bench -p <crate> -- <filter> --sample-size 200 --warm-up-time 5 --measurem
 
 Each crate has one `main` benchmark target. Replace the package and Criterion filter as needed. The inventory package name is version-qualified because a dependency also uses `inventory`. For example, `cargo bench -p render -- reconcile` selects reconciliation benchmarks. The protocol receive benchmark is `cargo bench -p protocol -- receive_pipeline`. It reports packets per second for mixed packet framing, preflight, and decode. It does not include circuit deduplication or ack bookkeeping.
 
+Network also has an ignored loopback measurement through the production session, UDP receive, ACK, and application-event paths:
+
+```bash
+cargo test --release --locked -p network udp_burst_measurement -- --ignored --nocapture
+```
+
+It measures one primary circuit and one session with three neighbors, excluding setup, packet construction, and shutdown. Reported ACK latency includes circuit batching and pacing. The acknowledged-burst completion rate is a closed-loop measurement, not saturation throughput. Delivery observations end at the application receiver; they do not include World or scene processing or real-network latency.
+
 Storage's insertion benchmarks start each sample with 50,000 existing entries and reset inserted keys outside the measured operation. The lookup and reopen benchmarks verify that same fixture size. Run timing baselines without concurrent tests or builds; the parallel workspace load above is for flakiness validation.
 
 - `cargo perf` runs workspace benchmarks with 200 samples, a 5-second warm-up, and a 15-second measurement. `cargo perf-quick` uses 30 samples, a 1-second warm-up, a 3-second measurement, and no plot. Use `cargo bench -p <crate> -- <filter> ...` for a focused run.

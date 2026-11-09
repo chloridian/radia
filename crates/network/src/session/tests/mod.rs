@@ -1,3 +1,4 @@
+mod burst_latency;
 mod connection;
 mod control;
 mod coverage;
