@@ -76,7 +76,10 @@ impl<'input> Tokens<'input> {
     fn read(&mut self) -> Result<Option<Token<'input>>> {
         loop {
             self.check_next_name()?;
-            let event = self.reader.read_event().map_err(|error| Error::InvalidValue(error.to_string()))?;
+            let event = self
+                .reader
+                .read_event()
+                .map_err(|_| Error::InvalidValue(format!("malformed XML at byte {}", self.reader.error_position())))?;
             self.count_event()?;
             let token = match event {
                 Event::Start(element) => {
@@ -152,14 +155,16 @@ fn tag_name(name: &str) -> Result<&'static str> {
 
 fn validate_binary_encoding(element: &BytesStart<'_>) -> Result<()> {
     for attribute in element.attributes().with_checks(true) {
-        let attribute = attribute.map_err(|error| Error::InvalidValue(error.to_string()))?;
+        let attribute = attribute.map_err(|_| Error::InvalidValue("malformed LLSD binary attribute".into()))?;
         if attribute.key.as_ref() != "encoding" {
             continue;
         }
 
-        let encoding = attribute.normalized_value(XmlVersion::Implicit1_0).map_err(|error| Error::InvalidValue(error.to_string()))?;
+        let encoding = attribute
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|_| Error::InvalidValue("invalid LLSD binary encoding attribute".into()))?;
         if encoding != "base64" {
-            return Err(Error::InvalidValue(format!("unsupported LLSD binary encoding {encoding:?}")));
+            return Err(Error::InvalidValue("unsupported LLSD binary encoding".into()));
         }
     }
     Ok(())
