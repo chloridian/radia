@@ -1070,6 +1070,10 @@ fn xml_binary_encoding() {
 
 #[test]
 fn xml_errors_omit_input() {
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Empty {}
+
     let secret = "private-capability-token".repeat(40_000);
     for input in [format!("<llsd><binary encoding=\"{secret}\"/></llsd>"), format!("<llsd><binary encoding=\"&{secret};\"/></llsd>")] {
         let error = xml::from_str::<Value>(&input).expect_err("invalid encoding");
@@ -1078,6 +1082,22 @@ fn xml_errors_omit_input() {
         assert!(diagnostic.len() <= 256, "XML diagnostic retained {} input bytes", diagnostic.len());
         assert!(!diagnostic.contains("private-capability-token"));
     }
+    let scalar = format!("<llsd><string>{secret}</string></llsd>");
+    let error = xml::from_str::<u32>(&scalar).expect_err("a string is not an integer");
+    assert_matches!(error, Error::InvalidValue(_));
+    assert!(error.to_string().len() <= 256);
+    assert!(!error.to_string().contains("private-capability-token"));
+
+    let error = xml::from_str::<WireEnum>(&scalar).expect_err("unknown enum variant");
+    assert_matches!(error, Error::InvalidValue(_));
+    assert!(error.to_string().len() <= 256);
+    assert!(!error.to_string().contains("private-capability-token"));
+
+    let field = format!("<llsd><map><key>{}</key><undef/></map></llsd>", "private-capability-token".repeat(1000));
+    let error = xml::from_str::<Empty>(&field).expect_err("unknown record field");
+    assert_matches!(error, Error::InvalidValue(_));
+    assert!(error.to_string().len() <= 256);
+    assert!(!error.to_string().contains("private-capability-token"));
 }
 
 #[test]
