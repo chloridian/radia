@@ -16,6 +16,10 @@ impl Uri {
         &self.0
     }
 
+    pub(super) fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
     pub fn into_string(self) -> String {
         self.0
     }

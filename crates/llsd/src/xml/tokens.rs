@@ -1,14 +1,16 @@
 use std::{borrow::Cow, str};
 
 use quick_xml::{
-    Reader, XmlVersion,
+    Reader,
     escape::resolve_predefined_entity,
-    events::{BytesStart, Event},
+    events::{BytesRef, BytesStart, Event},
 };
 
 use crate::{Error, Limits, Result};
 
 use super::is_xml_char;
+
+const MAX_BINARY_ATTRIBUTES: usize = 4096;
 
 #[derive(Debug)]
 pub(super) enum Token<'a> {
@@ -154,20 +156,40 @@ fn tag_name(name: &str) -> Result<&'static str> {
 }
 
 fn validate_binary_encoding(element: &BytesStart<'_>) -> Result<()> {
-    for attribute in element.attributes().with_checks(true) {
+    for (index, attribute) in element.attributes().with_checks(true).enumerate() {
+        if index >= MAX_BINARY_ATTRIBUTES {
+            return Err(Error::LimitExceeded("XML attribute count"));
+        }
         let attribute = attribute.map_err(|_| Error::InvalidValue("malformed LLSD binary attribute".into()))?;
         if attribute.key.as_ref() != "encoding" {
             continue;
         }
 
-        let encoding = attribute
-            .normalized_value(XmlVersion::Implicit1_0)
-            .map_err(|_| Error::InvalidValue("invalid LLSD binary encoding attribute".into()))?;
-        if encoding != "base64" {
+        if !base64_encoding(attribute.value.as_ref()) {
             return Err(Error::InvalidValue("unsupported LLSD binary encoding".into()));
         }
     }
     Ok(())
+}
+
+fn base64_encoding(mut text: &str) -> bool {
+    for expected in "base64".chars() {
+        if let Some(remaining) = text.strip_prefix(expected) {
+            text = remaining;
+            continue;
+        }
+        let Some(reference) = text.strip_prefix('&') else {
+            return false;
+        };
+        let Some((reference, remaining)) = reference.split_once(';') else {
+            return false;
+        };
+        if !BytesRef::new(reference).resolve_char_ref().is_ok_and(|character| character == Some(expected)) {
+            return false;
+        }
+        text = remaining;
+    }
+    text.is_empty()
 }
 
 #[cfg(test)]

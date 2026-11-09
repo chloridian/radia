@@ -1044,7 +1044,13 @@ fn binary_length_limit() {
 fn xml_binary_encoding() {
     let expected = Value::Binary(Binary::from(vec![0, 1, 0xff]));
 
-    for input in [&b"<llsd><binary>AAH/</binary></llsd>"[..], &b"<llsd><binary encoding=\"base64\">AAH/</binary></llsd>"[..]] {
+    for input in [
+        &b"<llsd><binary>AAH/</binary></llsd>"[..],
+        &b"<llsd><binary encoding=\"base64\">AAH/</binary></llsd>"[..],
+        &b"<llsd><binary encoding=\"b&#97;se64\">AAH/</binary></llsd>"[..],
+        &b"<llsd><binary encoding=\"&#x00062;ase64\">AAH/</binary></llsd>"[..],
+        &b"<llsd><binary encoding=\"&#00098;&#97;&#115;&#101;&#54;&#52;\">AAH/</binary></llsd>"[..],
+    ] {
         assert_eq!(xml::from_slice::<Value>(input).expect("decode base64 binary"), expected);
     }
 
@@ -1058,7 +1064,17 @@ fn xml_binary_encoding() {
         assert_eq!(xml::from_slice::<Value>(input).expect("decode empty binary"), Value::Binary(Binary::default()));
     }
 
-    for input in [&b"<llsd><binary encoding=\"base16\">AAH/</binary></llsd>"[..], &b"<llsd><binary encoding=\"base16\"/></llsd>"[..]] {
+    for input in [
+        &b"<llsd><binary encoding=\"base16\">AAH/</binary></llsd>"[..],
+        &b"<llsd><binary encoding=\"base16\"/></llsd>"[..],
+        &b"<llsd><binary encoding=\"\"/></llsd>"[..],
+        &b"<llsd><binary encoding=\"BASE64\"/></llsd>"[..],
+        &b"<llsd><binary encoding=\"base64 \"/></llsd>"[..],
+        &b"<llsd><binary encoding=\"&unknown;\"/></llsd>"[..],
+        &b"<llsd><binary encoding=base64/></llsd>"[..],
+        &b"<llsd><binary encoding=\"base64\" encoding=\"base64\"/></llsd>"[..],
+        &b"<llsd><binary note=\"x\" note=\"y\"/></llsd>"[..],
+    ] {
         assert_matches!(xml::from_slice::<Value>(input), Err(Error::InvalidValue(_)));
     }
 
@@ -1066,6 +1082,20 @@ fn xml_binary_encoding() {
     assert_matches!(xml::from_slice::<Value>(b"<llsd><binary>AA<undef/>==</binary></llsd>"), Err(Error::InvalidValue(_)));
     assert_matches!(xml::from_slice::<Value>(b"<llsd><binary>AA==</uuid></llsd>"), Err(Error::InvalidValue(_)));
     assert_matches!(xml::from_slice::<Value>(b"<llsd><binary>AA=="), Err(Error::UnexpectedEof));
+}
+
+#[test]
+fn xml_binary_attribute_limit() {
+    for count in [4096, 4097] {
+        let attributes = (0..count - 1).map(|index| format!("a{index}=\"x\" ")).collect::<String>();
+        let input = format!("<llsd><binary {attributes}encoding=\"base64\">AA==</binary></llsd>");
+        let result = xml::from_str::<Value>(&input);
+        if count == 4096 {
+            assert_eq!(result.expect("attributes at the limit"), Value::Binary(vec![0].into()));
+        } else {
+            assert_matches!(result, Err(Error::LimitExceeded("XML attribute count")));
+        }
+    }
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use serde::de::{self, DeserializeSeed, value::StringDeserializer};
+use serde::de::{self, DeserializeSeed, IntoDeserializer};
 
 use crate::{
     Error, Limits, Result,
@@ -117,26 +117,27 @@ impl Wrapper {
     }
 }
 
-pub(crate) struct VariantEnumAccess<V> {
-    variant: String,
+pub(crate) struct VariantEnumAccess<V, N> {
+    variant: N,
     access: V,
 }
 
-impl<V> VariantEnumAccess<V> {
-    pub(crate) fn new(variant: String, access: V) -> Self {
+impl<V, N> VariantEnumAccess<V, N> {
+    pub(crate) fn new(variant: N, access: V) -> Self {
         Self { variant, access }
     }
 }
 
-impl<'de, V> de::EnumAccess<'de> for VariantEnumAccess<V>
+impl<'de, V, N> de::EnumAccess<'de> for VariantEnumAccess<V, N>
 where
     V: de::VariantAccess<'de, Error = Error>,
+    N: IntoDeserializer<'de, Error>,
 {
     type Error = Error;
     type Variant = V;
 
     fn variant_seed<S: DeserializeSeed<'de>>(self, seed: S) -> Result<(S::Value, Self::Variant)> {
-        let variant = seed.deserialize(StringDeserializer::<Error>::new(self.variant))?;
+        let variant = seed.deserialize(self.variant.into_deserializer())?;
         Ok((variant, self.access))
     }
 }
