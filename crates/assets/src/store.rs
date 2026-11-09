@@ -16,7 +16,7 @@ use utils::AssetId;
 use crate::{
     Blob, Budget, Content, TextureEvents, TextureHandle, TextureSize, WeakTexture,
     budget::{Reservation, TEXTURE_WORK_BYTES, WORK_BYTES},
-    cache::{AssetCache, AssetLookup, CacheUnit, CacheWrite, cache_unit, read_work_bytes_for_request},
+    cache::{AssetCache, AssetLookup, CacheWrite, read_work_bytes_for_request},
     content::{Finished, Prepared, StoredContent},
     mesh::{MeshLod, MeshLodRequest},
 };
@@ -118,10 +118,6 @@ impl Request {
         }
     }
 
-    fn unit(self) -> CacheUnit {
-        cache_unit(self)
-    }
-
     fn size(self) -> Option<TextureSize> {
         match self {
             Self::Texture { size, .. } => Some(size),
@@ -140,7 +136,7 @@ impl Request {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct LoadKey {
     resource: Resource,
-    unit: CacheUnit,
+    lod: Option<MeshLod>,
 }
 
 #[derive(Debug)]
@@ -836,7 +832,15 @@ impl Store {
         now: Instant,
     ) -> Result<Demand, AdmissionError> {
         let resource = request.resource();
-        let key = LoadKey { resource, unit: request.unit() };
+        let lod = match request {
+            Request::MeshLod(block) => Some(block.lod()),
+            Request::Texture { .. }
+            | Request::PbrMaterial(_)
+            | Request::LegacyMaterial(_)
+            | Request::Environment(_)
+            | Request::MeshHeader(_) => None,
+        };
+        let key = LoadKey { resource, lod };
         if self.closed {
             return Err(AdmissionError::Closed);
         }
@@ -1153,7 +1157,7 @@ impl Store {
     fn mesh_lod_prefix(&self, request: Request) -> Option<(MeshLodRequest, Vec<u8>)> {
         let Request::MeshLod(block) = request else { return None };
         let resource = Resource { id: block.asset_id(), kind: Kind::Mesh };
-        let key = LoadKey { resource, unit: CacheUnit::Header };
+        let key = LoadKey { resource, lod: None };
         let Content::MeshHeader(header) = self.entries.get(&key)?.ready()? else { return None };
         let source = header.lod_bytes(block)?;
         let mut bytes = Vec::new();
