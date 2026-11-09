@@ -191,6 +191,8 @@ Each crate has one `main` benchmark target. Replace the package and Criterion fi
 
 Inventory restore preparation has a folder-heavy workload: `cargo bench -p inventory@0.0.1 --bench main -- cache_prepare_restore_10k_folders`. It prepares a restore for 10,000 sibling folders, with SQLite reads and fixture construction outside the timed operation. A setup check verifies that the restore includes all folders and their root.
 
+The storage burst workload is `cargo bench -p storage --bench main -- put_burst_16`. It measures sixteen concurrent 64-byte writes against a cache containing 50,000 entries. Producer threads persist across samples. Timing includes producer signaling and completion of all writes, but excludes thread startup, teardown, and removal of the prior sample's entries.
+
 Network also has an ignored loopback measurement through the production session, UDP receive, ACK, and application-event paths:
 
 ```bash
