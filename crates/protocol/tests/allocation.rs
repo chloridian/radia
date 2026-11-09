@@ -1,14 +1,79 @@
-use std::{hint::black_box, mem::size_of};
+use std::{fmt::Write as _, hint::black_box, mem::size_of, time::Instant};
 
+use protocol::inventory::{RequestedFolder, decode_ais_children, decode_fetch_inventory_descendents2};
 use protocol::lludp::{FieldValue, Message, Packet};
 use test_support::{
     allocation::{self, CountingAllocator, measure},
     lludp::vectors,
     parse_hex_fixture,
 };
+use uuid::Uuid;
 
 #[global_allocator]
 static ALLOC: CountingAllocator = CountingAllocator;
+
+#[test]
+#[ignore = "manual inventory decode working-set measurement"]
+fn inventory_working_sets() {
+    const RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+    let owner = Uuid::from_u128(99);
+    let folder = Uuid::from_u128(1);
+    let mut body = String::with_capacity(RESPONSE_BYTES);
+    write!(body, "<llsd><map><key>category_id</key><uuid>{folder}</uuid><key>agent_id</key><uuid>{owner}</uuid><key>name</key><string>root</string><key>ignored</key><map>").expect("fixture text");
+    for index in 0..1_000_000 {
+        write!(body, "<key>k{index:06}</key><undef/>").expect("fixture key");
+    }
+    body.push_str("</map></map></llsd>");
+    assert!(body.len() <= RESPONSE_BYTES);
+    let baseline = allocation::live_bytes();
+    let started = Instant::now();
+    let (decoded, allocations) = measure(|| decode_ais_children(body.as_bytes(), folder, owner));
+    let elapsed = started.elapsed();
+    let decoded = decoded.expect("unknown fields fit current wire limits");
+    assert_eq!(decoded.id, folder);
+    assert_eq!(decoded.name, "root");
+    assert!(decoded.children.is_none());
+    drop(decoded);
+    assert_eq!(allocation::live_bytes(), baseline, "category output releases all decoded allocations");
+    println!(
+        "inventory_decode case=dense_unknown_map raw_bytes={} raw_capacity={} live_bytes={} peak_bytes={} elapsed_us={}",
+        body.len(),
+        body.capacity(),
+        allocations.live_bytes,
+        allocations.peak_bytes,
+        elapsed.as_micros()
+    );
+    drop(body);
+
+    let requested = (100..100_100).map(Uuid::from_u128).collect::<Vec<_>>();
+    let mut body = String::with_capacity(RESPONSE_BYTES);
+    write!(body, "<llsd><map><key>folders</key><array><map><key>folder_id</key><uuid>{folder}</uuid><key>owner_id</key><uuid>{owner}</uuid><key>version</key><integer>1</integer><key>descendents</key><integer>100000</integer><key>categories</key><array/><key>items</key><array>").expect("fixture folder");
+    for id in &requested {
+        write!(body, "<map><key>item_id</key><uuid>{id}</uuid><key>owner_id</key><uuid>{owner}</uuid><key>parent_id</key><uuid>{folder}</uuid><key>name</key><string>x</string></map>").expect("fixture item");
+    }
+    body.push_str("</array></map></array></map></llsd>");
+    assert!(body.len() <= RESPONSE_BYTES);
+    let baseline = allocation::live_bytes();
+    let started = Instant::now();
+    let (decoded, allocations) =
+        measure(|| decode_fetch_inventory_descendents2(body.as_bytes(), &[RequestedFolder { id: folder, owner_id: owner }]));
+    let elapsed = started.elapsed();
+    let decoded = decoded.expect("large item response fits current wire limits");
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].id, folder);
+    assert_eq!(decoded[0].items.len(), requested.len());
+    assert!(decoded[0].items.iter().zip(&requested).all(|(item, id)| item.id == *id && item.parent_id == Some(folder) && item.name == "x"));
+    drop(decoded);
+    assert_eq!(allocation::live_bytes(), baseline, "item output releases all decoded allocations");
+    println!(
+        "inventory_decode case=folder_100k_items raw_bytes={} raw_capacity={} live_bytes={} peak_bytes={} elapsed_us={}",
+        body.len(),
+        body.capacity(),
+        allocations.live_bytes,
+        allocations.peak_bytes,
+        elapsed.as_micros()
+    );
+}
 
 #[test]
 fn decode_allocations() {

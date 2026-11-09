@@ -199,6 +199,14 @@ cargo test --release --locked -p network udp_burst_measurement -- --ignored --no
 
 It measures one primary circuit and one session with three neighbors, excluding setup, packet construction, and shutdown. Reported ACK latency includes circuit batching and pacing. The acknowledged-burst completion rate is a closed-loop measurement, not saturation throughput. Delivery observations end at the application receiver; they do not include World or scene processing or real-network latency.
 
+Protocol has an ignored inventory decode working-set replay:
+
+```bash
+cargo test --locked -p protocol --test allocation inventory_working_sets -- --ignored --nocapture
+```
+
+It measures an accepted dense unknown-field map and a legacy folder containing 100,000 items. Inputs are built before measurement, cases run sequentially, and decoded outputs are checked for release. The report includes raw buffer capacity and additional Rust allocation live/peak bytes. It excludes transport buffers, allocator overhead and process RSS. Debug elapsed time includes allocation instrumentation and is not a runtime-latency benchmark.
+
 Storage's insertion benchmarks start each sample with 50,000 existing entries and reset inserted keys outside the measured operation. The lookup and reopen benchmarks verify that same fixture size. Run timing baselines without concurrent tests or builds; the parallel workspace load above is for flakiness validation.
 
 - `cargo perf` runs workspace benchmarks with 200 samples, a 5-second warm-up, and a 15-second measurement. `cargo perf-quick` uses 30 samples, a 1-second warm-up, a 3-second measurement, and no plot. Use `cargo bench -p <crate> -- <filter> ...` for a focused run.
