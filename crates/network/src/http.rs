@@ -420,21 +420,24 @@ async fn read_bounded_body(
         else {
             break;
         };
-        let required = body.len().checked_add(chunk.len()).filter(|size| *size <= max_size).ok_or_else(|| {
-            Error::resource_exhausted(format!("HTTP response body exceeds the {max_size}-byte limit.")).with_response(
-                status,
-                retry_after,
-                started.elapsed(),
-            )
-        })?;
-        if required > body.capacity() {
-            body.try_reserve(required - body.len()).map_err(|_| {
-                Error::resource_exhausted("Could not grow the HTTP response body.").with_response(status, retry_after, started.elapsed())
-            })?;
-        }
-        body.extend_from_slice(&chunk);
+        append_bounded_body(&mut body, &chunk, max_size).map_err(|error| error.with_response(status, retry_after, started.elapsed()))?;
     }
     Ok(body)
+}
+
+fn append_bounded_body(body: &mut Vec<u8>, chunk: &[u8], max_size: usize) -> Result<(), Error> {
+    let required = body
+        .len()
+        .checked_add(chunk.len())
+        .filter(|size| *size <= max_size)
+        .ok_or_else(|| Error::resource_exhausted(format!("HTTP response body exceeds the {max_size}-byte limit.")))?;
+    if required > body.capacity() {
+        let target_capacity = required.max(body.capacity().saturating_mul(2)).min(max_size);
+        body.try_reserve_exact(target_capacity - body.len())
+            .map_err(|_| Error::resource_exhausted("Could not grow the HTTP response body."))?;
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
 }
 
 pub(crate) fn validate_http_url(url: &Url) -> Result<(), Error> {
