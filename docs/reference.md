@@ -52,6 +52,12 @@ For each compatibility decision, record the behavior Radia must preserve, the so
 
 **Preserve what Second Life requires. Redesign how Radia achieves it.**
 
+## Inventory fetch batches
+
+The [official Inventory API v2 contract](https://wiki.secondlife.com/wiki/Linden_Lab_Official%3AInventory_API), consulted on 2026-11-09, describes item and folder request arrays without stating a ten-entry wire limit. The [pinned Firestorm background fetch](https://github.com/FirestormViewer/phoenix-firestorm/blob/10bd3c9f930c76e1427ddd4ecece6cdf36b4406d/indra/newview/llinventorymodelbackgroundfetch.cpp), revision `10bd3c9f930c76e1427ddd4ecece6cdf36b4406d`, chooses ten as a local batch size shared by folder and item requests. Radia keeps batching in the viewer and lets Protocol decode larger matching responses within its wire-data limits. This separation is an inference from the documented contract and observed client policy, rather than a claim about an undocumented server maximum.
+
+The decoder regressions use hand-constructed legacy records with eleven distinct IDs, reverse-ordered folder responses, and duplicate returned IDs. The viewer's current batch size remains ten. Descendant-count equality needs separate compatibility investigation because the API also describes link targets appearing with folder listings.
+
 ## Verified rendering baseline
 
 For Classic output comparisons, use the installed Firestorm 7.2.4.80712 Mid graphics preset at `C:\Program Files\Firestorm-Releasex64\app_settings`. The matching source tree is pinned to [`10bd3c9f930c76e1427ddd4ecece6cdf36b4406d`](https://github.com/FirestormViewer/phoenix-firestorm/tree/10bd3c9f930c76e1427ddd4ecece6cdf36b4406d); do not substitute current upstream `develop`. The observed default has HDR enabled when supported, exposure 1, ACES tone mapping mixed at 0.7, dynamic exposure coefficient 0.5, diffuse luminance scale 0.5, and sky exposure settings disabled. User overrides are unknown.

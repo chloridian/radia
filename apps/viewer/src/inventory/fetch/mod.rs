@@ -16,7 +16,7 @@ pub(super) use scheduler::{fetch_single_folder, fetch_single_items};
 
 const MAX_FETCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_AIS_DEPTH: u8 = 16;
-const MAX_FALLBACK_FOLDERS: usize = 10;
+const MAX_LEGACY_BATCH: usize = 10;
 const MAX_FETCH_RETRIES: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -89,7 +89,7 @@ EventQueue keeps up to nine long polls open, with one reserved for the primary s
 
 ### `crates/protocol`
 
-Owns Second Life wire types, LLUDP framing and field codecs, and typed messages grouped by protocol area, including `ParcelOverlay` and `ParcelProperties`. Each typed message owns its codec and allocation preflight; a declarative list generates message variants and ID dispatch. Build-generated schema metadata comes from a vendored, SHA-256-verified template and remains the fallback for untyped messages. External message spellings and layouts stay exact. Framing and allocation validation belong here, while domain acceptance belongs to World.
+Owns Second Life wire types, LLUDP framing and field codecs, and typed messages grouped by protocol area, including `ParcelOverlay` and `ParcelProperties`. Each typed message owns its codec and allocation preflight; a declarative list generates message variants and ID dispatch. Build-generated schema metadata comes from a vendored, SHA-256-verified template and remains the fallback for untyped messages. External message spellings and layouts stay exact. Framing and allocation validation belong here, while domain acceptance belongs to World. Inventory response decoding validates bounded wire data and correlates returned identities with the request. The viewer owns inventory request batch sizing; decoder acceptance is independent of that scheduling choice.
 
 ### `crates/render`
 
