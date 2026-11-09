@@ -28,7 +28,7 @@ use self::decode::{decode_event_batch, queued_event_retained_size};
 use super::budget::MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES;
 use super::{
     budget::{
-        MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_EVENT_QUEUE_RESPONSE_BYTES, MAX_SEED_CAPABILITY_RESPONSE_BYTES,
+        CapabilityBudget, MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_EVENT_QUEUE_RESPONSE_BYTES, MAX_SEED_CAPABILITY_RESPONSE_BYTES,
         spawn_blocking_with_permit,
     },
     request::{decode_seed_capabilities, is_transient_seed_lookup, request_capabilities_response, seed_lookup_retry_after},
@@ -140,10 +140,7 @@ pub(super) struct EventQueueContext {
     pub(super) seed: Url,
     pub(super) http: http::Client,
     pub(super) events: mpsc::Sender<EventEnvelope>,
-    pub(super) ordinary_requests: Arc<Semaphore>,
-    pub(super) primary_event_queues: Arc<Semaphore>,
-    pub(super) neighbor_event_queues: Arc<Semaphore>,
-    pub(super) queued_event_bytes: Arc<Semaphore>,
+    pub(super) budget: CapabilityBudget,
     pub(super) coverage_losses: CoverageLossLedger,
 }
 
@@ -290,6 +287,7 @@ impl EventQueueLossNotifier {
 
 struct PollResources {
     event_queue: Option<OwnedSemaphorePermit>,
+    body: Option<OwnedSemaphorePermit>,
     batch: Option<OwnedSemaphorePermit>,
 }
 
@@ -407,7 +405,7 @@ async fn discover_capability(context: &EventQueueContext, stop: &Stop) -> Result
     let names = [EVENT_QUEUE_NAME.to_owned()];
     let mut retries = 0;
     loop {
-        let Some(request_permit) = acquire_budget_permit(Arc::clone(&context.ordinary_requests), stop).await else {
+        let Some(request_permit) = acquire_budget_permit(Arc::clone(&context.budget.ordinary_requests), stop).await else {
             return Err(EventQueueExit::Stopped);
         };
         let requested = tokio::select! {
@@ -509,17 +507,7 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
         Ok(capability) => capability,
         Err(exit) => return exit,
     };
-    let EventQueueContext {
-        simulator_id,
-        source,
-        http,
-        events,
-        primary_event_queues,
-        neighbor_event_queues,
-        queued_event_bytes,
-        coverage_losses,
-        ..
-    } = context;
+    let EventQueueContext { simulator_id, source, http, events, budget, coverage_losses, .. } = context;
 
     let mut acknowledge = Value::Undefined;
     let mut error_count = 0;
@@ -530,13 +518,18 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
             return EventQueueExit::Stopped;
         }
 
-        let Some(event_queue_slot) =
-            acquire_event_queue_permit(Arc::clone(&primary_event_queues), Arc::clone(&neighbor_event_queues), &mut primary, &stop).await
+        let Some(event_queue_slot) = acquire_event_queue_permit(
+            Arc::clone(&budget.primary_event_queues),
+            Arc::clone(&budget.neighbor_event_queues),
+            &mut primary,
+            &stop,
+        )
+        .await
         else {
             return EventQueueExit::Stopped;
         };
-        let mut poll = PollResources { event_queue: Some(event_queue_slot), batch: None };
-        let Some(batch_reservation) = acquire_event_batch_reservation(Arc::clone(&queued_event_bytes), &stop) else {
+        let mut poll = PollResources { event_queue: Some(event_queue_slot), body: None, batch: None };
+        let Some(batch_reservation) = acquire_event_batch_reservation(Arc::clone(&budget.queued_event_bytes), &stop) else {
             drop(poll);
             if matches!(wait_for_retry(EVENT_QUEUE_ADMISSION_RETRY, &stop).await, RetryOutcome::Retry) {
                 continue;
@@ -544,6 +537,8 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
             return EventQueueExit::Stopped;
         };
         poll.batch = Some(batch_reservation);
+        let body_budget =
+            if *primary.borrow() { Arc::clone(&budget.primary_event_bodies) } else { Arc::clone(&budget.neighbor_event_bodies) };
         let mut pending_loss = PendingEventQueueLoss::new(coverage_losses.clone(), simulator_id, coverage_source, loss_notifier.clone());
         let response = tokio::select! {
             biased;
@@ -558,8 +553,12 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                 }
                 continue;
             },
-            result = post_event_queue(&http, &event_capability, &acknowledge, MAX_EVENT_QUEUE_RESPONSE_BYTES) => result,
-        };
+            result = post_event_queue(&http, &event_capability, &acknowledge, MAX_EVENT_QUEUE_RESPONSE_BYTES, body_budget) => result,
+        }
+        .map(|(response, body)| {
+            poll.body = Some(body);
+            response
+        });
 
         match response {
             Ok(response) if response.status == StatusCode::NOT_FOUND => {
@@ -586,7 +585,10 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                 let Some(event_queue_permit) = poll.event_queue.take() else {
                     return EventQueueExit::TaskFailed;
                 };
-                let decoded = decode_admitted_event_batch(response.body, event_queue_permit).await;
+                let Some(body_permit) = poll.body.take() else {
+                    return EventQueueExit::TaskFailed;
+                };
+                let decoded = decode_admitted_event_batch(response.body, event_queue_permit, body_permit).await;
                 match decoded {
                     Ok((id, batch, event_queue_permit)) => {
                         poll.event_queue = Some(event_queue_permit);
@@ -717,12 +719,28 @@ async fn post_event_queue(
     url: &Url,
     acknowledge: &Value,
     max_response_bytes: usize,
-) -> Result<Response, http::Error> {
+    body_budget: Arc<Semaphore>,
+) -> Result<(Response, OwnedSemaphorePermit), http::Error> {
     let payload = Value::Map(Map::from([("ack".to_owned(), acknowledge.clone()), ("done".to_owned(), Value::Boolean(false))]));
     let body = xml::to_string(&payload)
         .map_err(|error| http::Error::resource_exhausted(format!("Could not encode an EventQueueGet request: {error}")))?
         .into_bytes();
-    client.post("event_queue", url, "application/llsd+xml", Some("application/llsd+xml"), body, max_response_bytes).await
+    let incoming =
+        client.post_headers("event_queue", url, "application/llsd+xml", Some("application/llsd+xml"), body, max_response_bytes).await?;
+    read_admitted_body(incoming, body_budget).await
+}
+
+async fn read_admitted_body(
+    incoming: http::IncomingResponse,
+    body_budget: Arc<Semaphore>,
+) -> Result<(Response, OwnedSemaphorePermit), http::Error> {
+    let permit = match incoming.deadline() {
+        Some(deadline) => time::timeout_at(deadline, body_budget.acquire_owned()).await.map_err(|_| incoming.timeout_error())?,
+        None => body_budget.acquire_owned().await,
+    }
+    .map_err(|_| http::Error::resource_exhausted("EventQueueGet response body admission closed."))?;
+    let response = incoming.read().await?;
+    Ok((response, permit))
 }
 
 async fn retry_event_queue_with_hint(

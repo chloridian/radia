@@ -31,6 +31,28 @@ impl fmt::Display for BatchDecodeError {
     }
 }
 
+enum BatchProblem {
+    InvalidEvents,
+    InvalidEvent,
+    InvalidMessage,
+    TooManyEvents,
+    RetainedBytes,
+}
+
+impl fmt::Display for BatchProblem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidEvents => formatter.write_str("EventQueueGet response returned an invalid events array."),
+            Self::InvalidEvent => formatter.write_str("EventQueueGet event was not a map."),
+            Self::InvalidMessage => formatter.write_str("EventQueueGet event omitted a valid message name."),
+            Self::TooManyEvents => write!(formatter, "EventQueueGet batch exceeded the {MAX_EVENT_QUEUE_BATCH_EVENTS}-event limit."),
+            Self::RetainedBytes => {
+                write!(formatter, "EventQueueGet batch exceeded the {MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES}-byte retained-data limit.")
+            }
+        }
+    }
+}
+
 struct DecodedBatch {
     id: i32,
     events: Vec<CapabilityEvent>,
@@ -57,10 +79,8 @@ impl<'de> Visitor<'de> for BatchVisitor {
         while let Some(key) = fields.next_key::<String>()? {
             match key.as_str() {
                 "id" => {
-                    let Value::Integer(value) = fields.next_value_seed(ValueSeed(0))? else {
-                        return Err(de::Error::custom("EventQueueGet response returned an invalid id."));
-                    };
-                    id = Some(value);
+                    drop(id.take());
+                    id = Some(fields.next_value_seed(ValueSeed(super::MAX_QUEUED_CAPABILITY_EVENT_BYTES))?);
                 }
                 "events" => {
                     drop(events.take());
@@ -71,17 +91,19 @@ impl<'de> Visitor<'de> for BatchVisitor {
                 }
             }
         }
-        Ok(DecodedBatch {
-            id: id.ok_or_else(|| de::Error::custom("EventQueueGet response omitted its id."))?,
-            events: events.ok_or_else(|| de::Error::custom("EventQueueGet response omitted its events array."))?,
-        })
+        let Some(Value::Integer(id)) = id else {
+            return Err(de::Error::custom("EventQueueGet response omitted a valid id."));
+        };
+        let events =
+            events.ok_or_else(|| de::Error::custom("EventQueueGet response omitted its events array."))?.map_err(de::Error::custom)?;
+        Ok(DecodedBatch { id, events })
     }
 }
 
 struct EventsVisitor;
 
 impl<'de> DeserializeSeed<'de> for EventsVisitor {
-    type Value = Vec<CapabilityEvent>;
+    type Value = Result<Vec<CapabilityEvent>, BatchProblem>;
 
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         deserializer.deserialize_seq(self)
@@ -89,7 +111,7 @@ impl<'de> DeserializeSeed<'de> for EventsVisitor {
 }
 
 impl<'de> Visitor<'de> for EventsVisitor {
-    type Value = Vec<CapabilityEvent>;
+    type Value = Result<Vec<CapabilityEvent>, BatchProblem>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("an EventQueueGet events array")
@@ -98,15 +120,31 @@ impl<'de> Visitor<'de> for EventsVisitor {
     fn visit_seq<A: SeqAccess<'de>>(self, mut values: A) -> Result<Self::Value, A::Error> {
         let mut events = Vec::new();
         let mut event_data_bytes = 0usize;
-        while let Some(event) = values.next_element_seed(EventVisitor)? {
+        let mut problem = None;
+        loop {
+            if problem.is_some() {
+                while values.next_element::<IgnoredAny>()?.is_some() {}
+                break;
+            }
+            let Some(event) = values.next_element_seed(EventVisitor)? else { break };
+            let event = match event {
+                Ok(event) => event,
+                Err(error) => {
+                    problem = Some(error);
+                    events.clear();
+                    continue;
+                }
+            };
             if events.len() == MAX_EVENT_QUEUE_BATCH_EVENTS {
-                return Err(de::Error::custom(format!("EventQueueGet batch exceeded the {MAX_EVENT_QUEUE_BATCH_EVENTS}-event limit.")));
+                problem = Some(BatchProblem::TooManyEvents);
+                events.clear();
+                continue;
             }
             event_data_bytes = event_data_bytes.saturating_add(event.retained_bytes.saturating_sub(size_of::<CapabilityEvent>()));
             if batch_retained_size(event_data_bytes, events.len() + 1) > MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES {
-                return Err(de::Error::custom(format!(
-                    "EventQueueGet batch exceeded the {MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES}-byte retained-data limit."
-                )));
+                problem = Some(BatchProblem::RetainedBytes);
+                events.clear();
+                continue;
             }
             if events.len() == events.capacity() {
                 let capacity = events.capacity().saturating_mul(2).clamp(4, MAX_EVENT_QUEUE_BATCH_EVENTS);
@@ -116,14 +154,41 @@ impl<'de> Visitor<'de> for EventsVisitor {
             }
             events.push(event);
         }
-        Ok(events.into_boxed_slice().into_vec())
+        Ok(match problem {
+            Some(error) => Err(error),
+            None => Ok(events.into_boxed_slice().into_vec()),
+        })
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut fields: A) -> Result<Self::Value, A::Error> {
+        while fields.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(Err(BatchProblem::InvalidEvents))
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Err(BatchProblem::InvalidEvents))
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(Err(BatchProblem::InvalidEvents))
+    }
+    fn visit_i32<E: de::Error>(self, _: i32) -> Result<Self::Value, E> {
+        Ok(Err(BatchProblem::InvalidEvents))
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(Err(BatchProblem::InvalidEvents))
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(Err(BatchProblem::InvalidEvents))
+    }
+    fn visit_bytes<E: de::Error>(self, _: &[u8]) -> Result<Self::Value, E> {
+        Ok(Err(BatchProblem::InvalidEvents))
     }
 }
 
 struct EventVisitor;
 
 impl<'de> DeserializeSeed<'de> for EventVisitor {
-    type Value = CapabilityEvent;
+    type Value = Result<CapabilityEvent, BatchProblem>;
 
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         deserializer.deserialize_map(self)
@@ -131,7 +196,7 @@ impl<'de> DeserializeSeed<'de> for EventVisitor {
 }
 
 impl<'de> Visitor<'de> for EventVisitor {
-    type Value = CapabilityEvent;
+    type Value = Result<CapabilityEvent, BatchProblem>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("an EventQueueGet event map")
@@ -146,10 +211,9 @@ impl<'de> Visitor<'de> for EventVisitor {
                 "message" => {
                     drop(message.take());
                     let limit = heap_limit.saturating_sub(body.estimated_heap_bytes());
-                    let Value::String(value) = fields.next_value_seed(ValueSeed(limit))? else {
-                        return Err(de::Error::custom("EventQueueGet event returned an invalid message name."));
-                    };
-                    message = Some(value);
+                    if let Value::String(value) = fields.next_value_seed(ValueSeed(limit))? {
+                        message = Some(value);
+                    }
                 }
                 "body" => {
                     drop(body);
@@ -161,7 +225,7 @@ impl<'de> Visitor<'de> for EventVisitor {
                 }
             }
         }
-        let message = message.ok_or_else(|| de::Error::custom("EventQueueGet event omitted its message name."))?;
+        let Some(message) = message else { return Ok(Err(BatchProblem::InvalidMessage)) };
         let retained_bytes = queued_event_retained_size(message.capacity(), &body);
         if retained_bytes > super::MAX_QUEUED_CAPABILITY_EVENT_BYTES {
             return Err(de::Error::custom(format!(
@@ -169,7 +233,31 @@ impl<'de> Visitor<'de> for EventVisitor {
                 super::MAX_QUEUED_CAPABILITY_EVENT_BYTES
             )));
         }
-        Ok(CapabilityEvent { message, body, retained_bytes })
+        Ok(Ok(CapabilityEvent { message, body, retained_bytes }))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut values: A) -> Result<Self::Value, A::Error> {
+        while values.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(Err(BatchProblem::InvalidEvent))
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Err(BatchProblem::InvalidEvent))
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(Err(BatchProblem::InvalidEvent))
+    }
+    fn visit_i32<E: de::Error>(self, _: i32) -> Result<Self::Value, E> {
+        Ok(Err(BatchProblem::InvalidEvent))
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(Err(BatchProblem::InvalidEvent))
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(Err(BatchProblem::InvalidEvent))
+    }
+    fn visit_bytes<E: de::Error>(self, _: &[u8]) -> Result<Self::Value, E> {
+        Ok(Err(BatchProblem::InvalidEvent))
     }
 }
 
@@ -186,11 +274,13 @@ impl<'de> DeserializeSeed<'de> for ValueSeed {
 pub(super) async fn decode_admitted_event_batch(
     body: Vec<u8>,
     event_queue_permit: OwnedSemaphorePermit,
+    body_permit: OwnedSemaphorePermit,
 ) -> Result<(i32, Vec<CapabilityEvent>, OwnedSemaphorePermit), BatchDecodeError> {
-    let (decoded, event_queue_permit) =
-        spawn_blocking_with_permit(event_queue_permit, move || decode_event_batch(&body).map_err(BatchDecodeError::Decode))
+    let (decoded, (event_queue_permit, body_permit)) =
+        spawn_blocking_with_permit((event_queue_permit, body_permit), move || decode_event_batch(&body).map_err(BatchDecodeError::Decode))
             .await
             .map_err(BatchDecodeError::Task)?;
+    drop(body_permit);
     decoded.map(|(id, events)| (id, events, event_queue_permit))
 }
 
