@@ -2,8 +2,6 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     num::NonZeroU64,
-    ops::{Deref, DerefMut},
-    time::Duration,
 };
 
 use llsd::Value;
@@ -22,8 +20,8 @@ use super::capability_events::{decode_agent_communication, decode_enable_simulat
 use super::handoff::{HandoffAnnouncement, HandoffOrder, HandoffState, PromotionSetup, cancel_pending_handoff, teleport_failure_matches};
 use super::logout::{LogoutUnavailable, PendingLogout};
 use super::routing::{
-    EventQueueOutcome, PreconnectEvents, PreconnectOutcome, PrimaryEventBacklog, primary_event_queue_size, queue_simulator_event,
-    queue_until_connected,
+    EventQueueOutcome, MAX_PENDING_REGION_HANDSHAKE_REPLIES, MAX_PENDING_SESSION_EVENTS, PreconnectEvents, PreconnectOutcome,
+    PrimaryEventBacklog, primary_event_queue_size, queue_simulator_event, queue_until_connected,
 };
 use super::runtime::SessionDispatcher;
 use super::teleport::{decode_crossed_region, decode_event_teleport_failed, decode_event_teleport_finish, is_teleport_cancel};
@@ -32,9 +30,9 @@ use crate::{
     AgentSession,
     capabilities::{CapabilityBudget, Client, EventQueueExit, EventQueueRoleHandle},
     circuit::{
-        HandoffCancellation, HandoffGeneration, HandoffTarget, LOGOUT_TIMEOUT, MAX_PENDING_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS,
-        PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome, UdpTransport,
-        admission::{ConnectionRole, SESSION_APPLICATION_EVENT_CREDIT_CAPACITY, SimulatorMemoryBudget},
+        HandoffCancellation, HandoffGeneration, HandoffTarget, LOGOUT_TIMEOUT, MAX_SIMULATOR_CONNECTIONS, PrimaryState, SimulatorCommand,
+        SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome, UdpTransport,
+        admission::{ConnectionRole, SimulatorMemoryBudget},
         lludp::Delivery,
         pacing::OutboundBudget,
     },
@@ -46,16 +44,8 @@ use crate::{
 #[cfg(test)]
 pub(in crate::session) use tests::publish_primary_terminal_event;
 
-pub(super) const SESSION_TIMEOUT: Duration = Duration::from_secs(40);
-pub(super) const EVENT_BACKLOG_WARNING_THRESHOLD: usize = MAX_PENDING_SIMULATOR_EVENTS / 2;
-pub(super) const EVENT_BACKLOG_WARNING_INTERVAL: Duration = Duration::from_secs(10);
-pub(super) const MAX_PENDING_REGION_HANDSHAKE_REPLIES: usize = MAX_SIMULATOR_CONNECTIONS;
-pub(super) const MAX_PENDING_LIFECYCLE_EVENTS: usize = 32;
-pub(super) const MAX_PENDING_SESSION_EVENTS: usize = SESSION_APPLICATION_EVENT_CREDIT_CAPACITY + MAX_PENDING_LIFECYCLE_EVENTS;
-pub(super) const APPLICATION_EVENT_PRESSURE_GRACE_PERIOD: Duration = Duration::from_secs(30);
 pub(super) const MAX_TRACKED_CAPABILITY_CLIENTS: usize = MAX_SIMULATOR_CONNECTIONS;
 pub(super) const NEIGHBOR_COMMAND_CAPACITY: usize = 8;
-pub(super) const HANDOFF_COMMAND_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 pub(super) type ConnectionTaskResult = (SimulatorId, Option<u64>, SocketAddr, SimulatorTaskOutcome);
 pub(super) type NeighborEventQueueJoin = Option<Result<(Id, (SimulatorId, SocketAddr, EventQueueExit)), JoinError>>;
@@ -163,7 +153,7 @@ impl SessionRuntimeOptions {
         }
         #[cfg(not(test))]
         {
-            SESSION_APPLICATION_EVENT_CREDIT_CAPACITY
+            crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY
         }
     }
 }
@@ -203,20 +193,6 @@ pub(super) struct RuntimeInputs {
     pub(super) root_connection_workers: JoinSet<ConnectionTaskResult>,
 }
 
-impl Deref for SessionRuntime {
-    type Target = SessionState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.state
-    }
-}
-
-impl DerefMut for SessionRuntime {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.state
-    }
-}
-
 impl Drop for SessionState {
     fn drop(&mut self) {
         self.neighbor_cancellation.send_replace(true);
@@ -247,15 +223,6 @@ impl SessionState {
 }
 
 impl SessionRuntime {
-    #[tracing::instrument(name = "simulator.connect", level = "info", skip_all)]
-    pub(super) async fn connect(
-        session: AgentSession,
-        login_data: ResponseData,
-        options: SessionRuntimeOptions,
-    ) -> Result<Option<Self>, SessionError> {
-        Self::connect_inner(session, login_data, options).await
-    }
-
     pub(super) async fn run(
         self,
         commands: mpsc::Receiver<Command>,

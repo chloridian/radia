@@ -210,7 +210,7 @@ async fn full_handoff_queue_recovers() {
     )
     .await
     .expect("connect primary circuit");
-    let origin = connection.simulator_id;
+    let origin = connection.state.simulator_id;
     let target = SimulatorId::allocate().expect("allocate neighbor simulator ID");
     let endpoint = "127.0.0.1:13001".parse::<SocketAddr>().expect("neighbor endpoint");
     let mut run_state = RunState::new();
@@ -242,7 +242,7 @@ async fn full_handoff_queue_recovers() {
 
     let accepted = timeout(
         Duration::from_millis(100),
-        connection.start_neighbor(
+        connection.state.start_neighbor(
             origin,
             0x1234,
             endpoint,
