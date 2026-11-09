@@ -1,15 +1,20 @@
-use std::{fmt, mem, mem::size_of, str::from_utf8};
+use std::{fmt, mem::size_of};
 
-use llsd::{Binary, Uri, Value};
+use llsd::{Limits, Value, xml};
+use serde::{
+    Deserialize, Deserializer,
+    de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor},
+};
 use tokio::{sync::OwnedSemaphorePermit, task::JoinError};
 
-use crate::capabilities::{
-    budget::{MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_EVENT_QUEUE_RESPONSE_BYTES, spawn_blocking_with_permit},
-    request::decode_llsd_xml,
+use crate::capabilities::budget::{
+    MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_EVENT_QUEUE_RESPONSE_BYTES, MAX_LLSD_NESTING_DEPTH, MAX_LLSD_XML_ELEMENTS,
+    capability_llsd_limits, spawn_blocking_with_permit,
 };
 use crate::event::{CapabilityEvent, EventEnvelope};
 
 const MAX_EVENT_QUEUE_BATCH_EVENTS: usize = 1024;
+const MAX_EVENT_QUEUE_CONTAINER_ITEMS: usize = super::MAX_QUEUED_CAPABILITY_EVENT_BYTES / size_of::<Value>();
 
 #[derive(Debug)]
 pub(super) enum BatchDecodeError {
@@ -26,6 +31,158 @@ impl fmt::Display for BatchDecodeError {
     }
 }
 
+struct DecodedBatch {
+    id: i32,
+    events: Vec<CapabilityEvent>,
+}
+
+impl<'de> Deserialize<'de> for DecodedBatch {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(BatchVisitor)
+    }
+}
+
+struct BatchVisitor;
+
+impl<'de> Visitor<'de> for BatchVisitor {
+    type Value = DecodedBatch;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an EventQueueGet response map")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut fields: A) -> Result<Self::Value, A::Error> {
+        let mut id = None;
+        let mut events = None;
+        while let Some(key) = fields.next_key::<String>()? {
+            match key.as_str() {
+                "id" => {
+                    let Value::Integer(value) = fields.next_value_seed(ValueSeed(0))? else {
+                        return Err(de::Error::custom("EventQueueGet response returned an invalid id."));
+                    };
+                    id = Some(value);
+                }
+                "events" => {
+                    drop(events.take());
+                    events = Some(fields.next_value_seed(EventsVisitor)?);
+                }
+                _ => {
+                    fields.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(DecodedBatch {
+            id: id.ok_or_else(|| de::Error::custom("EventQueueGet response omitted its id."))?,
+            events: events.ok_or_else(|| de::Error::custom("EventQueueGet response omitted its events array."))?,
+        })
+    }
+}
+
+struct EventsVisitor;
+
+impl<'de> DeserializeSeed<'de> for EventsVisitor {
+    type Value = Vec<CapabilityEvent>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for EventsVisitor {
+    type Value = Vec<CapabilityEvent>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an EventQueueGet events array")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut values: A) -> Result<Self::Value, A::Error> {
+        let mut events = Vec::new();
+        let mut event_data_bytes = 0usize;
+        while let Some(event) = values.next_element_seed(EventVisitor)? {
+            if events.len() == MAX_EVENT_QUEUE_BATCH_EVENTS {
+                return Err(de::Error::custom(format!("EventQueueGet batch exceeded the {MAX_EVENT_QUEUE_BATCH_EVENTS}-event limit.")));
+            }
+            event_data_bytes = event_data_bytes.saturating_add(event.retained_bytes.saturating_sub(size_of::<CapabilityEvent>()));
+            if batch_retained_size(event_data_bytes, events.len() + 1) > MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES {
+                return Err(de::Error::custom(format!(
+                    "EventQueueGet batch exceeded the {MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES}-byte retained-data limit."
+                )));
+            }
+            if events.len() == events.capacity() {
+                let capacity = events.capacity().saturating_mul(2).clamp(4, MAX_EVENT_QUEUE_BATCH_EVENTS);
+                events
+                    .try_reserve_exact(capacity - events.len())
+                    .map_err(|_| de::Error::custom("Could not grow the EventQueueGet batch."))?;
+            }
+            events.push(event);
+        }
+        Ok(events.into_boxed_slice().into_vec())
+    }
+}
+
+struct EventVisitor;
+
+impl<'de> DeserializeSeed<'de> for EventVisitor {
+    type Value = CapabilityEvent;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for EventVisitor {
+    type Value = CapabilityEvent;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an EventQueueGet event map")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut fields: A) -> Result<Self::Value, A::Error> {
+        let heap_limit = super::MAX_QUEUED_CAPABILITY_EVENT_BYTES.saturating_sub(size_of::<CapabilityEvent>());
+        let mut message: Option<String> = None;
+        let mut body = Value::Undefined;
+        while let Some(key) = fields.next_key::<String>()? {
+            match key.as_str() {
+                "message" => {
+                    drop(message.take());
+                    let limit = heap_limit.saturating_sub(body.estimated_heap_bytes());
+                    let Value::String(value) = fields.next_value_seed(ValueSeed(limit))? else {
+                        return Err(de::Error::custom("EventQueueGet event returned an invalid message name."));
+                    };
+                    message = Some(value);
+                }
+                "body" => {
+                    drop(body);
+                    let limit = heap_limit.saturating_sub(message.as_ref().map_or(0, String::capacity));
+                    body = fields.next_value_seed(ValueSeed(limit))?;
+                }
+                _ => {
+                    fields.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        let message = message.ok_or_else(|| de::Error::custom("EventQueueGet event omitted its message name."))?;
+        let retained_bytes = queued_event_retained_size(message.capacity(), &body);
+        if retained_bytes > super::MAX_QUEUED_CAPABILITY_EVENT_BYTES {
+            return Err(de::Error::custom(format!(
+                "EventQueueGet event exceeded the {}-byte limit.",
+                super::MAX_QUEUED_CAPABILITY_EVENT_BYTES
+            )));
+        }
+        Ok(CapabilityEvent { message, body, retained_bytes })
+    }
+}
+
+struct ValueSeed(usize);
+
+impl<'de> DeserializeSeed<'de> for ValueSeed {
+    type Value = Value;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        Value::deserialize_with_heap_limit(deserializer, self.0)
+    }
+}
+
 pub(super) async fn decode_admitted_event_batch(
     body: Vec<u8>,
     event_queue_permit: OwnedSemaphorePermit,
@@ -38,88 +195,52 @@ pub(super) async fn decode_admitted_event_batch(
 }
 
 pub(super) fn decode_event_batch(body: &[u8]) -> Result<(i32, Vec<CapabilityEvent>), String> {
-    if body.len() > MAX_EVENT_QUEUE_RESPONSE_BYTES {
-        return Err(format!("EventQueueGet response exceeded the {MAX_EVENT_QUEUE_RESPONSE_BYTES}-byte limit."));
-    }
-    let body = from_utf8(body).map_err(|error| format!("EventQueueGet response was not UTF-8: {error}"))?;
-    let Value::Map(mut fields) = decode_llsd_xml(body, "Could not decode an EventQueueGet response")? else {
-        return Err("EventQueueGet returned a non-map response.".to_string());
-    };
-    let Some(Value::Integer(id)) = fields.remove("id") else {
-        return Err("EventQueueGet response omitted or returned an invalid id.".to_string());
-    };
-    let Some(Value::Array(event_values)) = fields.remove("events") else {
-        return Err("EventQueueGet response omitted its events array.".to_string());
-    };
-    if event_values.len() > MAX_EVENT_QUEUE_BATCH_EVENTS {
-        return Err(format!("EventQueueGet batch exceeded the {MAX_EVENT_QUEUE_BATCH_EVENTS}-event limit."));
-    }
-    let mut events = Vec::with_capacity(event_values.len());
-
-    for value in event_values {
-        let Value::Map(mut fields) = value else {
-            return Err("EventQueueGet event was not a map.".to_string());
+    let batch: DecodedBatch = xml::from_slice_with_limits(body, event_queue_llsd_limits()).map_err(|error| {
+        let reason = match error {
+            llsd::Error::LimitExceeded("input bytes") => {
+                format!("EventQueueGet response exceeded the {MAX_EVENT_QUEUE_RESPONSE_BYTES}-byte limit.")
+            }
+            llsd::Error::LimitExceeded("nesting depth") => format!("LLSD nesting exceeded the {MAX_LLSD_NESTING_DEPTH}-level limit."),
+            llsd::Error::LimitExceeded("value count") => format!("LLSD exceeded the {MAX_LLSD_XML_ELEMENTS}-element limit."),
+            llsd::Error::LimitExceeded("container items") => {
+                format!("LLSD container exceeded the {MAX_EVENT_QUEUE_CONTAINER_ITEMS}-item limit.")
+            }
+            llsd::Error::LimitExceeded(limit @ ("string bytes" | "map key bytes" | "binary bytes")) => format!(
+                "LLSD {limit} limit exceeded; EventQueueGet event exceeded the {}-byte scalar limit.",
+                super::MAX_QUEUED_CAPABILITY_EVENT_BYTES
+            ),
+            error => error.to_string(),
         };
-        let Some(Value::String(message)) = fields.remove("message") else {
-            return Err("EventQueueGet event omitted its message name.".to_string());
-        };
-        let mut body = fields.remove("body").unwrap_or(Value::Undefined);
-        let event_size = queued_event_retained_size(message.capacity(), &mut body);
-        if event_size > super::MAX_QUEUED_CAPABILITY_EVENT_BYTES {
-            return Err(format!("EventQueueGet event exceeded the {}-byte limit.", super::MAX_QUEUED_CAPABILITY_EVENT_BYTES));
-        }
-        events.push(CapabilityEvent { message, body, retained_bytes: event_size });
-        if capability_event_batch_retained_size(&events, events.capacity()) > MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES {
-            return Err(format!("EventQueueGet batch exceeded the {MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES}-byte retained-data limit."));
-        }
-    }
-
-    Ok((id, events))
+        format!("Could not decode an EventQueueGet response: {reason}")
+    })?;
+    Ok((batch.id, batch.events))
 }
 
-pub(super) fn queued_event_retained_size(message_capacity: usize, body: &mut Value) -> usize {
-    size_of::<CapabilityEvent>().saturating_add(message_capacity).saturating_add(llsd_heap_size(body))
+fn event_queue_llsd_limits() -> Limits {
+    let event_limit = super::MAX_QUEUED_CAPABILITY_EVENT_BYTES;
+    Limits {
+        max_string_bytes: event_limit,
+        max_map_key_bytes: event_limit,
+        max_binary_bytes: event_limit,
+        max_container_items: MAX_EVENT_QUEUE_CONTAINER_ITEMS,
+        ..capability_llsd_limits(MAX_EVENT_QUEUE_RESPONSE_BYTES)
+    }
+}
+
+pub(super) fn queued_event_retained_size(message_capacity: usize, body: &Value) -> usize {
+    size_of::<CapabilityEvent>().saturating_add(message_capacity).saturating_add(body.estimated_heap_bytes())
 }
 
 pub(super) fn capability_event_batch_retained_size(events: &[CapabilityEvent], event_capacity: usize) -> usize {
     let event_data_bytes =
         events.iter().fold(0usize, |total, event| total.saturating_add(event.retained_bytes.saturating_sub(size_of::<CapabilityEvent>())));
+    batch_retained_size(event_data_bytes, event_capacity)
+}
+
+fn batch_retained_size(event_data_bytes: usize, event_capacity: usize) -> usize {
     size_of::<EventEnvelope>()
         .saturating_add(size_of::<OwnedSemaphorePermit>())
         .saturating_add(2 * size_of::<usize>())
         .saturating_add(event_capacity.saturating_mul(size_of::<CapabilityEvent>()))
         .saturating_add(event_data_bytes)
-}
-
-pub(super) fn llsd_heap_size(value: &mut Value) -> usize {
-    match value {
-        Value::String(value) => value.capacity(),
-        Value::Uri(uri) => {
-            let text = mem::take(uri).into_string();
-            let capacity = text.capacity();
-            *uri = Uri::from(text);
-            capacity
-        }
-        Value::Binary(binary) => {
-            let bytes = mem::take(binary).into_vec();
-            let capacity = bytes.capacity();
-            *binary = Binary::from(bytes);
-            capacity
-        }
-        Value::Map(values) => {
-            let entry_size = size_of::<(String, Value)>();
-            let node_size =
-                if values.is_empty() { 0 } else { entry_size.saturating_mul(11).saturating_add(size_of::<usize>().saturating_mul(12)) };
-            values.len().saturating_mul(entry_size.saturating_mul(3)).saturating_add(node_size).saturating_add(
-                values
-                    .iter_mut()
-                    .fold(0usize, |size, (key, value)| size.saturating_add(key.capacity()).saturating_add(llsd_heap_size(value))),
-            )
-        }
-        Value::Array(values) => values
-            .capacity()
-            .saturating_mul(size_of::<Value>())
-            .saturating_add(values.iter_mut().fold(0usize, |size, value| size.saturating_add(llsd_heap_size(value)))),
-        Value::Undefined | Value::Boolean(_) | Value::Real(_) | Value::Integer(_) | Value::Uuid(_) | Value::Date(_) => 0,
-    }
 }

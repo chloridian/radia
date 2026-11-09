@@ -3,6 +3,7 @@ use std::{
     time::Duration,
 };
 
+use llsd::Limits;
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
     task::{JoinError, spawn_blocking},
@@ -57,6 +58,18 @@ impl CapabilityBudget {
             .get_or_init(|| http::Client::new(Some(REQUEST_TIMEOUT), false, None).map_err(Arc::new))
             .clone()
             .map_err(SetupError::HttpClient)
+    }
+}
+
+pub(super) fn capability_llsd_limits(max_bytes: usize) -> Limits {
+    Limits {
+        max_bytes,
+        max_depth: MAX_LLSD_NESTING_DEPTH,
+        max_values: MAX_LLSD_XML_ELEMENTS,
+        max_container_items: MAX_LLSD_XML_ELEMENTS,
+        max_string_bytes: max_bytes,
+        max_map_key_bytes: max_bytes,
+        max_binary_bytes: max_bytes,
     }
 }
 

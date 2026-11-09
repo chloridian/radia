@@ -1,17 +1,16 @@
 use std::{
     collections::HashMap,
     ops::Range,
-    str::from_utf8,
     time::{Duration, Instant},
 };
 
-use llsd::{Limits, Value, xml};
+use llsd::{Value, xml};
 use reqwest::{StatusCode, Url, header::CONTENT_RANGE};
 use tokio::time;
 
 use super::budget::{
-    MAX_CAPABILITY_NAME_BYTES, MAX_CAPABILITY_NAMES, MAX_CAPABILITY_NAMES_BYTES, MAX_CAPABILITY_REQUEST_BODY_BYTES,
-    MAX_CAPABILITY_RESPONSE_BYTES, MAX_LLSD_NESTING_DEPTH, MAX_LLSD_XML_ELEMENTS, MAX_SEED_CAPABILITY_RESPONSE_BYTES,
+    MAX_CAPABILITY_NAME_BYTES, MAX_CAPABILITY_NAMES, MAX_CAPABILITY_NAMES_BYTES, MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_LLSD_NESTING_DEPTH,
+    MAX_LLSD_XML_ELEMENTS, MAX_SEED_CAPABILITY_RESPONSE_BYTES, capability_llsd_limits,
 };
 use super::client::{ContentRange, RangeResponse};
 use crate::{
@@ -104,9 +103,7 @@ pub(super) async fn request_capabilities_response(
 }
 
 pub(super) fn decode_seed_capabilities(response: Response, names: &[String]) -> Result<HashMap<String, Url>, Error> {
-    let body = from_utf8(&response.body)
-        .map_err(|error| Error::Capability(format!("Could not request capabilities: response was not UTF-8: {error}")))?;
-    let value = xml::from_slice_with_limits(body.as_bytes(), seed_capability_llsd_limits())
+    let value = xml::from_slice_with_limits(&response.body, capability_llsd_limits(MAX_SEED_CAPABILITY_RESPONSE_BYTES))
         .map_err(|error| Error::Capability(format!("Could not request capabilities: {}", llsd_error(error))))?;
     decode_capabilities_from_value(&value, names).map_err(Error::Capability)
 }
@@ -240,36 +237,9 @@ fn parse_content_range(value: &reqwest::header::HeaderValue) -> Option<ContentRa
     (start <= end && total.is_none_or(|total| end < total)).then_some(ContentRange { start, end, total })
 }
 
-pub(super) fn decode_llsd_xml(body: &str, context: &str) -> Result<Value, String> {
-    xml::from_slice_with_limits(body.as_bytes(), capability_llsd_limits()).map_err(|error| {
-        let reason = llsd_error(error);
-        format!("{context}: {reason}")
-    })
-}
-
 pub(super) fn decode_capability_value_with_response_limit(body: &[u8], max_response_bytes: usize) -> Result<Value, Error> {
-    xml::from_slice_with_limits(body, capability_llsd_limits_with_response_limit(max_response_bytes))
+    xml::from_slice_with_limits(body, capability_llsd_limits(max_response_bytes))
         .map_err(|error| Error::Capability(format!("Could not decode an LLSD response: {}", llsd_error(error))))
-}
-
-pub(super) fn capability_llsd_limits() -> Limits {
-    capability_llsd_limits_with_response_limit(MAX_CAPABILITY_RESPONSE_BYTES)
-}
-
-pub(super) fn capability_llsd_limits_with_response_limit(max_response_bytes: usize) -> Limits {
-    Limits {
-        max_bytes: max_response_bytes,
-        max_depth: MAX_LLSD_NESTING_DEPTH,
-        max_values: MAX_LLSD_XML_ELEMENTS,
-        max_container_items: MAX_LLSD_XML_ELEMENTS,
-        max_string_bytes: max_response_bytes,
-        max_map_key_bytes: max_response_bytes,
-        max_binary_bytes: max_response_bytes,
-    }
-}
-
-fn seed_capability_llsd_limits() -> Limits {
-    Limits { max_bytes: MAX_SEED_CAPABILITY_RESPONSE_BYTES, ..capability_llsd_limits() }
 }
 
 fn llsd_error(error: llsd::Error) -> String {
