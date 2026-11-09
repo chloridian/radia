@@ -189,6 +189,8 @@ cargo bench -p <crate> -- <filter> --sample-size 200 --warm-up-time 5 --measurem
 
 Each crate has one `main` benchmark target. Replace the package and Criterion filter as needed. The inventory package name is version-qualified because a dependency also uses `inventory`. For example, `cargo bench -p render -- reconcile` selects reconciliation benchmarks. The protocol receive benchmark is `cargo bench -p protocol -- receive_pipeline`. It reports packets per second for mixed packet framing, preflight, and decode. It does not include circuit deduplication or ack bookkeeping.
 
+Inventory restore preparation has a folder-heavy workload: `cargo bench -p inventory@0.0.1 --bench main -- cache_prepare_restore_10k_folders`. It prepares a restore for 10,000 sibling folders, with SQLite reads and fixture construction outside the timed operation. A setup check verifies that the restore includes all folders and their root.
+
 Network also has an ignored loopback measurement through the production session, UDP receive, ACK, and application-event paths:
 
 ```bash
