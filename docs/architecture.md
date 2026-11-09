@@ -31,6 +31,8 @@ The session intake task is the single owner of mutable World state. It services 
 
 `main` creates the Tokio service runtime and starts GPUI. Networking owns a separate runtime and network thread. The scene viewport owns its window/event-loop thread, `SceneView`, and renderer. Asset fetching and scene reconciliation run on service tasks; decoding, mesh generation, and texture preparation use blocking workers. Bounded queues, admission limits, cancellation, and generation checks keep slow or stale work from crossing lifecycle boundaries.
 
+Application shutdown disconnects the active network session, awaits scene shutdown and every retained session-drain task, then quits GPUI. Drain tasks remain owned across login attempts and finish asset-service and cache cleanup before the service runtime stops. The GUI releases its shared asset-cache reference before `main` performs the final cache shutdown.
+
 ## Code map
 
 Each entry identifies a crate's responsibility, its important boundaries, and constraints that callers must preserve. Module listings, numeric limits, and command references belong in source or [tooling.md](tooling.md).

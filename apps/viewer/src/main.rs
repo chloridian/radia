@@ -19,12 +19,17 @@ fn main() -> io::Result<()> {
     };
     let gui_cache = asset_cache.clone();
     gpui_platform::application().with_assets(Assets).run(move |cx| viewer::gui::init(cx, services, gui_cache));
-    if let Some(cache) = asset_cache
-        && let Ok(cache) = Arc::try_unwrap(cache)
-        && let Err(error) = cache.shutdown()
-    {
-        tracing::warn!(%error, "asset cache shutdown failed");
-    }
+    let cache_shutdown = if let Some(cache) = asset_cache {
+        Arc::try_unwrap(cache)
+            .map_err(|cache| io::Error::other(format!("asset cache still has {} owners after viewer shutdown", Arc::strong_count(&cache))))
+            .map(|cache| {
+                if let Err(error) = cache.shutdown() {
+                    tracing::warn!(%error, "asset cache shutdown failed");
+                }
+            })
+    } else {
+        Ok(())
+    };
     runtime.shutdown_background();
-    Ok(())
+    cache_shutdown
 }
