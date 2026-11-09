@@ -1069,6 +1069,18 @@ fn xml_binary_encoding() {
 }
 
 #[test]
+fn xml_errors_omit_input() {
+    let secret = "private-capability-token".repeat(40_000);
+    for input in [format!("<llsd><binary encoding=\"{secret}\"/></llsd>"), format!("<llsd><binary encoding=\"&{secret};\"/></llsd>")] {
+        let error = xml::from_str::<Value>(&input).expect_err("invalid encoding");
+        assert_matches!(error, Error::InvalidValue(_));
+        let diagnostic = error.to_string();
+        assert!(diagnostic.len() <= 256, "XML diagnostic retained {} input bytes", diagnostic.len());
+        assert!(!diagnostic.contains("private-capability-token"));
+    }
+}
+
+#[test]
 fn xml_bounded_sizes() {
     let values = [
         Value::String("a string that exceeds a small output budget".into()),
