@@ -460,6 +460,104 @@ fn retired_route_discards_a_completed_disk_read() {
 }
 
 #[test]
+fn acquired_bytes_survive_route_retirement() {
+    for retire_before_decode in [true, false] {
+        let StoreHarness { now, mut store, route } = StoreHarness::new();
+        let request = Request::new(resource(991));
+        let retired = store.request(route, request, Priority::Visible, now).expect("initial demand");
+        let input = fetch(&mut store, now, RGBA_J2C.to_vec());
+        let surviving_route = store.register_route().expect("surviving route");
+        let surviving = store.request(surviving_route, request, Priority::Visible, now).expect("shared demand");
+        if retire_before_decode {
+            store.retire_route(route);
+        }
+        let decoding = store.start_decode(input).expect("acquired bytes still admit decode");
+        if !retire_before_decode {
+            store.retire_route(route);
+        }
+        assert!(!decoding.is_cancelled(), "surviving demand owns acquired data");
+        store.complete(decoding.run(), now);
+        assert_matches!(retired.status(), Status::Failed { failure: Failure::RouteClosed, .. });
+        assert_matches!(surviving.status(), Status::Ready(Content::Texture(image)) if image.info().expect("texture metadata").size == [8, 8]);
+        assert!(store.next_job(now).is_none(), "shared decode avoids another fetch");
+    }
+}
+
+#[test]
+fn pending_fetch_changes_route() {
+    let StoreHarness { now, mut store, route } = StoreHarness::new();
+    let request = Request::new(resource(992));
+    let retired = store.request(route, request, Priority::Visible, now).expect("initial demand");
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("initial fetch") else { panic!("network fetch") };
+    let surviving_route = store.register_route().expect("surviving route");
+    let surviving = store.request(surviving_route, request, Priority::Visible, now).expect("shared demand");
+    store.retire_route(route);
+    assert!(fetch.is_cancelled(), "unfinished fetch still depends on its transport");
+    let failed = fetch.complete(Ok(RGBA_J2C.to_vec())).expect_err("canceled transport cannot provide a response");
+    store.complete(failed.into(), now);
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("replacement fetch") else { panic!("network fetch") };
+    assert_eq!(fetch.route(), surviving_route);
+    let input = fetch.complete(Ok(RGBA_J2C.to_vec())).expect("surviving transport response");
+    let decoded = store.start_decode(input).expect("decode admission").run();
+    store.complete(decoded, now);
+    assert_matches!(retired.status(), Status::Failed { failure: Failure::RouteClosed, .. });
+    assert_matches!(surviving.status(), Status::Ready(Content::Texture(_)));
+}
+
+#[test]
+fn shared_decode_survives_owner_deadline() {
+    let StoreHarness { now, mut store, route } = StoreHarness::new();
+    let request = Request::new(resource(994));
+    let _initial = store.request(route, request, Priority::Visible, now).expect("initial demand");
+    let input = fetch(&mut store, now, RGBA_J2C.to_vec());
+    let surviving_route = store.register_route().expect("surviving route");
+    let surviving = store.request(surviving_route, request, Priority::Visible, now + DEMAND_DEADLINE / 2).expect("later shared demand");
+    let decoding = store.start_decode(input).expect("decode admission");
+    let expired = now + DEMAND_DEADLINE;
+    store.maintain(expired);
+    assert!(!decoding.is_cancelled(), "another live demand keeps acquired data eligible");
+    store.complete(decoding.run(), expired);
+    assert_matches!(surviving.status(), Status::Ready(Content::Texture(_)));
+}
+
+#[test]
+fn cache_read_survives_route_retirement() {
+    for cache_hit in [true, false] {
+        let directory = tempdir().expect("cache directory");
+        let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+        let request = Request::new(resource(993));
+        cache.put_complete(request, RGBA_J2C.to_vec()).expect("seed texture bytes");
+        let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+        let now = Instant::now();
+        let route = store.register_route().expect("initial route");
+        let retired = store.request(route, request, Priority::Visible, now).expect("initial demand");
+        let LoadJob::ReadCache(read) = store.next_job(now).expect("cache read") else { panic!("cache read") };
+        let surviving_route = store.register_route().expect("surviving route");
+        let surviving = store.request(surviving_route, request, Priority::Visible, now).expect("shared demand");
+        store.retire_route(route);
+        let completion = if cache_hit { read.run() } else { read.run_lookup(|_, _| AssetLookup::Miss) };
+        let input = if cache_hit {
+            let LoadJob::Decode(input) = store.complete_cache_read(completion, now).expect("cache hit survives retirement") else {
+                panic!("cached decode")
+            };
+            input
+        } else {
+            assert!(store.complete_cache_read(completion, now).is_none(), "cache miss returns to current-route scheduling");
+            let LoadJob::Fetch(fetch) = store.next_job(now).expect("fetch after cache miss") else { panic!("network fetch") };
+            assert_eq!(fetch.route(), surviving_route);
+            fetch.complete(Ok(RGBA_J2C.to_vec())).expect("surviving route response")
+        };
+        let decoded = store.start_decode(input).expect("decode admission").run();
+        store.complete(decoded, now);
+        assert_matches!(retired.status(), Status::Failed { failure: Failure::RouteClosed, .. });
+        assert_matches!(surviving.status(), Status::Ready(Content::Texture(_)));
+        assert!(store.next_job(now).is_none(), "cache hit does not refetch");
+        drop((retired, surviving, store));
+        Arc::try_unwrap(cache).expect("cache owners released").shutdown().expect("close cache");
+    }
+}
+
+#[test]
 fn cancelled_read_allows_retry() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
