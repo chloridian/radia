@@ -233,6 +233,10 @@ impl<'input> Deserializer<'input> {
             if output.len() >= max_encoded_len {
                 return Err(Error::LimitExceeded("binary bytes"));
             }
+            if output.len() == output.capacity() {
+                let capacity = output.capacity().saturating_mul(2).clamp(1, max_encoded_len);
+                output.try_reserve_exact(capacity - output.len()).map_err(|_| Error::InvalidValue("LLSD allocation failed".into()))?;
+            }
             output.push(byte);
         }
         Ok(())
@@ -428,7 +432,7 @@ impl<'de, 'input> de::Deserializer<'de> for &mut Deserializer<'input> {
                 _ => return Err(Error::UnexpectedEof),
             };
             let access = VariantAccess::new(self, Deserializer::consume_enum_unit, no_finish);
-            visitor.visit_enum(VariantEnumAccess::new(variant.to_owned(), access))
+            visitor.visit_enum(VariantEnumAccess::new(variant, access))
         } else {
             self.deserialize_plain_enum(visitor)
         }

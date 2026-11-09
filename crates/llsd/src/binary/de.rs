@@ -292,7 +292,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
                 other => return Err(Error::InvalidValue(format!("unknown LLSD binary marker 0x{other:02x}"))),
             };
             let access = VariantAccess::new(self, Deserializer::consume_undefined, no_finish);
-            visitor.visit_enum(VariantEnumAccess::new(variant.to_owned(), access))
+            visitor.visit_enum(VariantEnumAccess::new(variant, access))
         } else {
             self.deserialize_plain_enum(visitor)
         }

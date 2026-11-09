@@ -475,7 +475,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
                 _ => return Err(Error::InvalidValue("unknown LLSD notation value".into())),
             };
             let access = VariantAccess::new(self, Deserializer::consume_enum_unit, no_finish);
-            visitor.visit_enum(VariantEnumAccess::new(variant.to_owned(), access))
+            visitor.visit_enum(VariantEnumAccess::new(variant, access))
         } else {
             self.deserialize_plain_enum(visitor)
         }

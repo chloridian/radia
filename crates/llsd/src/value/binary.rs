@@ -16,6 +16,10 @@ impl Binary {
         &self.0
     }
 
+    pub(super) fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
     pub fn into_vec(self) -> Vec<u8> {
         self.0
     }
