@@ -1,5 +1,7 @@
 use std::{fmt, io};
 
+use serde::de::{Expected, Unexpected};
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
@@ -49,5 +51,30 @@ impl serde::ser::Error for Error {
 impl serde::de::Error for Error {
     fn custom<T: fmt::Display>(message: T) -> Self {
         Self::InvalidValue(message.to_string())
+    }
+
+    fn invalid_type(unexpected: Unexpected<'_>, expected: &dyn Expected) -> Self {
+        Self::InvalidValue(format!("invalid type: {}, expected {expected}", diagnostic_value(unexpected)))
+    }
+
+    fn invalid_value(unexpected: Unexpected<'_>, expected: &dyn Expected) -> Self {
+        Self::InvalidValue(format!("invalid value: {}, expected {expected}", diagnostic_value(unexpected)))
+    }
+
+    fn unknown_variant(_: &str, expected: &'static [&'static str]) -> Self {
+        Self::InvalidValue(format!("unknown variant; expected one of {expected:?}"))
+    }
+
+    fn unknown_field(_: &str, expected: &'static [&'static str]) -> Self {
+        Self::InvalidValue(format!("unknown field; expected one of {expected:?}"))
+    }
+}
+
+fn diagnostic_value(value: Unexpected<'_>) -> Unexpected<'_> {
+    match value {
+        Unexpected::Str(_) => Unexpected::Other("a string"),
+        Unexpected::Bytes(_) => Unexpected::Other("a byte array"),
+        Unexpected::Other(_) => Unexpected::Other("another value"),
+        value => value,
     }
 }
