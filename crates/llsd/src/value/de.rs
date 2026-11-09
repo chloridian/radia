@@ -138,7 +138,10 @@ impl<'de> Visitor<'de> for ArrayBuilder<'_> {
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> std::result::Result<Self::Value, A::Error> {
         let mut values = Vec::new();
-        while let Some(value) = access.next_element_seed(ArrayElementBuilder { budget: self.budget, values: &mut values })? {
+        let initial_capacity = access.size_hint().unwrap_or(4).clamp(1, 4);
+        while let Some(value) =
+            access.next_element_seed(ArrayElementBuilder { budget: self.budget, values: &mut values, initial_capacity })?
+        {
             values.push(value);
         }
         Ok(Value::Array(values))
@@ -148,14 +151,15 @@ impl<'de> Visitor<'de> for ArrayBuilder<'_> {
 struct ArrayElementBuilder<'a> {
     budget: &'a mut HeapBudget,
     values: &'a mut Vec<Value>,
+    initial_capacity: usize,
 }
 
 impl<'de> DeserializeSeed<'de> for ArrayElementBuilder<'_> {
     type Value = Value;
 
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error> {
-        let Self { budget, values } = self;
-        reserve_array::<D::Error>(values, budget)?;
+        let Self { budget, values, initial_capacity } = self;
+        reserve_array::<D::Error>(values, budget, initial_capacity)?;
         ValueBuilder { budget }.deserialize(deserializer)
     }
 }
@@ -203,7 +207,7 @@ impl<'de> Visitor<'de> for MapBuilder<'_> {
     }
 }
 
-fn reserve_array<E: DeError>(values: &mut Vec<Value>, budget: &mut HeapBudget) -> std::result::Result<(), E> {
+fn reserve_array<E: DeError>(values: &mut Vec<Value>, budget: &mut HeapBudget, initial_capacity: usize) -> std::result::Result<(), E> {
     if values.len() < values.capacity() {
         return Ok(());
     }
@@ -214,7 +218,7 @@ fn reserve_array<E: DeError>(values: &mut Vec<Value>, budget: &mut HeapBudget) -
     if max_capacity < min_capacity {
         return Err(heap_limit_error());
     }
-    let growth_capacity = if current_capacity == 0 { 4 } else { current_capacity.saturating_mul(2) }.max(min_capacity);
+    let growth_capacity = if current_capacity == 0 { initial_capacity } else { current_capacity.saturating_mul(2) }.max(min_capacity);
     let target_capacity = growth_capacity.min(max_capacity);
     let current_bytes = current_capacity.checked_mul(value_size).ok_or_else(heap_limit_error)?;
     let target_bytes = target_capacity.checked_mul(value_size).ok_or_else(heap_limit_error)?;
