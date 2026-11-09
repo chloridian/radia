@@ -23,7 +23,7 @@ use tokio::{
 
 use self::decode::{capability_event_batch_retained_size, decode_admitted_event_batch};
 #[cfg(test)]
-use self::decode::{decode_event_batch, llsd_heap_size, queued_event_retained_size};
+use self::decode::{decode_event_batch, queued_event_retained_size};
 #[cfg(test)]
 use super::budget::MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES;
 use super::{

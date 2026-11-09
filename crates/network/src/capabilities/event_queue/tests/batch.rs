@@ -17,9 +17,32 @@ fn source() -> CoverageSource {
 }
 
 fn event(message: &str) -> CapabilityEvent {
-    let mut body = Value::Undefined;
-    let retained_bytes = queued_event_retained_size(message.len(), &mut body);
+    let body = Value::Undefined;
+    let retained_bytes = queued_event_retained_size(message.len(), &body);
     CapabilityEvent { message: message.into(), body, retained_bytes }
+}
+
+fn string_event_response(body_bytes: usize) -> Vec<u8> {
+    let body = "x".repeat(body_bytes);
+    format!(
+        "<llsd><map><key>id</key><integer>5</integer><key>events</key><array><map><key>message</key><string>Limit123</string><key>body</key><string>{body}</string></map></array></map></llsd>"
+    )
+    .into_bytes()
+}
+
+fn array_event_response(item_counts: &[usize]) -> Vec<u8> {
+    let mut body = String::from(
+        "<llsd><map><key>id</key><integer>5</integer><key>events</key><array><map><key>message</key><string>Array</string><key>body</key><array>",
+    );
+    for item_count in item_counts {
+        body.push_str("<array>");
+        for _ in 0..*item_count {
+            body.push_str("<integer>0</integer>");
+        }
+        body.push_str("</array>");
+    }
+    body.push_str("</array></map></array></map></llsd>");
+    body.into_bytes()
 }
 
 fn pending_loss(ledger: &CoverageLossLedger, simulator_id: SimulatorId) -> PendingEventQueueLoss {
@@ -88,6 +111,89 @@ fn decodes_second_life_event_body_as_message_blocks() {
     std::assert_matches!(fields.get("RegionData"), Some(Value::Array(_)));
     std::assert_matches!(fields.get("Info"), Some(Value::Array(_)));
     assert!(!fields.contains_key("CrossedRegion"), "message name is carried beside body, not nested inside it");
+}
+
+#[test]
+fn scalar_boundary_stops_oversized_values() {
+    let at_limit = string_event_response(MAX_QUEUED_CAPABILITY_EVENT_BYTES);
+    let error = decode_event_batch(&at_limit).expect_err("event overhead exceeds the retained event limit");
+    assert!(error.contains("heap limit"), "{error}");
+    assert!(!error.contains("string bytes limit exceeded"), "{error}");
+
+    let over_limit = string_event_response(MAX_QUEUED_CAPABILITY_EVENT_BYTES + 1);
+    let error = decode_event_batch(&over_limit).expect_err("oversized LLSD string should hit its scalar limit");
+    assert!(error.contains("string bytes limit exceeded"), "{error}");
+}
+
+#[test]
+fn accepts_event_at_retained_limit() {
+    let message_bytes = "Limit123".len();
+    let body_bytes = MAX_QUEUED_CAPABILITY_EVENT_BYTES - std::mem::size_of::<CapabilityEvent>() - message_bytes;
+    let body = string_event_response(body_bytes);
+    let (_, events) = decode_event_batch(&body).expect("event at retained limit should be accepted");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].retained_bytes, MAX_QUEUED_CAPABILITY_EVENT_BYTES);
+}
+
+#[test]
+fn accepts_batch_at_retained_limit() {
+    let event_count = 33;
+    let message = "Limit123";
+    let overhead = capability_event_batch_retained_size(&[], event_count) + event_count * message.len();
+    let payload_bytes = MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES - overhead;
+    let regular_bytes = payload_bytes / event_count;
+    let last_bytes = payload_bytes - regular_bytes * (event_count - 1);
+    let mut input = String::from("<llsd><map><key>id</key><integer>5</integer><key>events</key><array>");
+    for index in 0..event_count {
+        input.push_str("<map><key>message</key><string>Limit123</string><key>body</key><string>");
+        let bytes = if index + 1 == event_count { last_bytes } else { regular_bytes };
+        input.extend(std::iter::repeat_n('x', bytes));
+        input.push_str("</string></map>");
+    }
+    input.push_str("</array></map></llsd>");
+
+    let (id, events) = decode_event_batch(input.as_bytes()).expect("batch at retained limit should be accepted");
+    assert_eq!(id, 5);
+    assert_eq!(events.len(), event_count);
+    assert_eq!(capability_event_batch_retained_size(&events, events.capacity()), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES);
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(event.message, message);
+        let bytes = if index + 1 == event_count { last_bytes } else { regular_bytes };
+        assert_eq!(event.body.as_str().expect("event has a string body").len(), bytes);
+    }
+}
+
+#[test]
+fn accepts_array_near_retained_limit() {
+    let item_size = size_of::<Value>();
+    let max_container_items = MAX_QUEUED_CAPABILITY_EVENT_BYTES / item_size;
+    let event_item_budget = MAX_QUEUED_CAPABILITY_EVENT_BYTES
+        .saturating_sub(size_of::<CapabilityEvent>())
+        .saturating_sub("Array".len())
+        .saturating_sub(size_of::<String>())
+        / item_size;
+    let mut item_count = 1usize << (usize::BITS - 1 - max_container_items.leading_zeros());
+    let mut item_counts = Vec::new();
+    let mut retained_array_items = 0usize;
+    while item_count >= 4 {
+        let root_capacity = (item_counts.len() + 1).next_power_of_two();
+        if retained_array_items + item_count + root_capacity <= event_item_budget {
+            item_counts.push(item_count);
+            retained_array_items += item_count;
+        }
+        item_count /= 2;
+    }
+
+    let body = array_event_response(&item_counts);
+    let (_, events) = decode_event_batch(&body).expect("array event near the retained limit should be accepted");
+    assert_eq!(events.len(), 1);
+    let Value::Array(arrays) = &events[0].body else { panic!("event body is an array") };
+    assert_eq!(arrays.len(), item_counts.len());
+    for (array, expected_len) in arrays.iter().zip(&item_counts) {
+        std::assert_matches!(array, Value::Array(values) if values.len() == *expected_len);
+    }
+    assert!(events[0].retained_bytes >= MAX_QUEUED_CAPABILITY_EVENT_BYTES * 95 / 100, "retained={}", events[0].retained_bytes);
+    assert!(events[0].retained_bytes <= MAX_QUEUED_CAPABILITY_EVENT_BYTES, "retained={}", events[0].retained_bytes);
 }
 
 #[test]
