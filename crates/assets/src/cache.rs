@@ -49,21 +49,6 @@ const NAMESPACES: [Namespace; 9] = [
     Namespace::new("meshes/lod/high", "llmesh"),
 ];
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) enum CacheUnit {
-    Whole,
-    Header,
-    Lod(MeshLod),
-}
-
-pub(crate) fn cache_unit(request: Request) -> CacheUnit {
-    match request {
-        Request::MeshHeader(_) => CacheUnit::Header,
-        Request::MeshLod(block) => CacheUnit::Lod(block.lod()),
-        _ => CacheUnit::Whole,
-    }
-}
-
 pub(crate) fn mesh_header_frame(total_length: u64, header: &[u8]) -> Option<Vec<u8>> {
     if total_length == 0 || total_length > MAX_MESH_ASSET_BYTES as u64 || header.is_empty() || header.len() > MAX_MESH_HEADER_BYTES {
         return None;

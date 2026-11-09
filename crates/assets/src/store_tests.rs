@@ -264,11 +264,7 @@ fn disk_hit_uses_decode_admission_and_does_not_count_as_a_fetch_attempt() {
     let input = store.complete_cache_read(read.run(), now).expect("cache hit supplies input");
     let LoadJob::Decode(input) = input else { panic!("cache hit follows decode admission") };
     assert_eq!(
-        store
-            .entries
-            .get(&LoadKey { resource, unit: CacheUnit::Whole })
-            .and_then(|entry| entry.views.get(&route))
-            .map(|view| view.attempts),
+        store.entries.get(&LoadKey { resource, lod: None }).and_then(|entry| entry.views.get(&route)).map(|view| view.attempts),
         Some(0)
     );
     let decode = store.start_decode(input).expect("decode admission");
@@ -1975,7 +1971,7 @@ fn resize_preserves_pending_fetch() {
 
     low.update_size(TextureSize::new(256));
     store.maintain(now);
-    let key = LoadKey { resource: Resource { id, kind: Kind::Texture }, unit: CacheUnit::Whole };
+    let key = LoadKey { resource: Resource { id, kind: Kind::Texture }, lod: None };
     let entry = store.entries.get(&key).expect("resized demand remains registered");
     assert_eq!(entry.target, Some(TextureSize::new(256)));
     assert_eq!(entry.request, Request::Texture { id, size: TextureSize::new(256) });
@@ -2081,7 +2077,7 @@ fn non_texture_size_stays_absent() {
     demand.update_size(TextureSize::new(512));
     store.maintain(now);
 
-    let key = LoadKey { resource: request.resource(), unit: request.unit() };
+    let key = LoadKey { resource: request.resource(), lod: None };
     assert_eq!(store.entries.get(&key).expect("material demand remains registered").target, None);
 }
 
