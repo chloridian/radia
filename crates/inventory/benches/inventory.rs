@@ -24,6 +24,7 @@ const ROOT_ID: u128 = 1;
 pub(super) fn bench(criterion: &mut Criterion) {
     report_memory();
     bench_cache(criterion);
+    bench_folder_restore(criterion);
     criterion.bench_function("inventory/build_100k_items_and_snapshot", |bench| {
         bench.iter_batched(
             item_children,
@@ -88,6 +89,38 @@ fn populate_cache(root: &std::path::Path) -> std::path::PathBuf {
     let path = cache.path().to_path_buf();
     block_on(cache.close()).expect("benchmark initial cache close");
     path
+}
+
+fn bench_folder_restore(criterion: &mut Criterion) {
+    const FOLDERS: usize = 10_000;
+    let directory = tempdir().expect("folder restore cache directory");
+    let mut inventory = root_inventory();
+    inventory
+        .apply_folder_fetch(inventory.roots().personal(), ServerVersion::from_raw(1), Some(FOLDERS as u32), folder_children(FOLDERS))
+        .expect("folder restore skeleton");
+    let skeleton = inventory.snapshot();
+    let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", owner().id(), None).expect("folder restore cache");
+    block_on(cache.submit_bootstrap(&skeleton).expect("persist skeleton").wait()).expect("skeleton committed");
+    let load = block_on(cache.load(&inventory)).expect("verify cached folders");
+    let mut restore = load.prepare_restore(&skeleton).expect("verify restore preparation");
+    let mut verification = inventory.clone();
+    let mut units = 0;
+    loop {
+        let progress = restore.apply_next(&mut verification, &std::collections::HashSet::new()).expect("verify restore units");
+        units += progress.units_processed;
+        if progress.finished {
+            break;
+        }
+    }
+    assert_eq!(units, FOLDERS + 1, "the workload includes every cached folder and its root");
+    criterion.bench_function("inventory/cache_prepare_restore_10k_folders", |bench| {
+        bench.iter_batched(
+            || block_on(cache.load(&inventory)).expect("load cached folders"),
+            |load| black_box(load.prepare_restore(&skeleton).expect("prepare folder restore")),
+            BatchSize::LargeInput,
+        );
+    });
+    block_on(cache.close()).expect("close folder restore cache");
 }
 
 fn report_cache_load_times(root: &std::path::Path, path: &std::path::Path) {
@@ -225,7 +258,12 @@ fn item_inventory() -> Inventory {
 fn folder_inventory() -> Inventory {
     let mut inventory = root_inventory();
     let changes = inventory
-        .apply_folder_fetch(inventory.roots().personal(), ServerVersion::from_raw(1), Some(ENTRY_COUNT as u32), folder_children())
+        .apply_folder_fetch(
+            inventory.roots().personal(),
+            ServerVersion::from_raw(1),
+            Some(ENTRY_COUNT as u32),
+            folder_children(ENTRY_COUNT),
+        )
         .expect("benchmark folders should apply");
     drop(changes);
     inventory
@@ -235,8 +273,8 @@ fn item_children() -> Vec<InventoryChild> {
     (0..ENTRY_COUNT).map(|index| InventoryChild::Item(item(index))).collect()
 }
 
-fn folder_children() -> Vec<InventoryChild> {
-    (0..ENTRY_COUNT)
+fn folder_children(count: usize) -> Vec<InventoryChild> {
+    (0..count)
         .map(|index| {
             InventoryChild::Category(Category {
                 key: category_key(index as u128 + 2),
