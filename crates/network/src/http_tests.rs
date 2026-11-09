@@ -1,4 +1,8 @@
-use std::time::{Duration, UNIX_EPOCH};
+use std::{
+    future::Future,
+    task::Poll,
+    time::{Duration, UNIX_EPOCH},
+};
 
 use reqwest::{
     StatusCode,
@@ -8,12 +12,16 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net,
     task::JoinHandle,
+    time::{self, Instant},
 };
 use url::Url;
 
 use crate::fixtures::http::{LocalServer, response};
 
-use super::{Client, Error, ErrorKind, RETRY_AFTER, RedirectPolicy, Response, retry_after_delay, validate_http_url};
+use super::{
+    Client, Error, ErrorKind, RETRY_AFTER, RedirectPolicy, Response, read_bounded_body, response_retry_after as parse_response_retry_after,
+    retry_after_delay, send_with_deadline, validate_http_url,
+};
 
 #[test]
 fn retry_after_formats() {
@@ -122,6 +130,7 @@ async fn chunked_body_limit() {
     let wire_response = concat!(
         "HTTP/1.1 200 OK\r\n",
         "Transfer-Encoding: chunked\r\n",
+        "Retry-After: 2\r\n",
         "Connection: close\r\n\r\n",
         "3\r\nabc\r\n",
         "3\r\ndef\r\n",
@@ -134,8 +143,42 @@ async fn chunked_body_limit() {
 
     assert_eq!(error.kind, ErrorKind::ResourceExhausted);
     assert_eq!(error.status, Some(StatusCode::OK));
+    assert_eq!(error.retry_after, Some(Duration::from_secs(2)));
     assert!(error.to_string().contains("5-byte limit"));
     server.finish();
+}
+
+#[test]
+fn body_growth_stays_bounded() {
+    let max_size = 37;
+    let chunks = [b"abc".as_slice(), b"defgh", b"ijklmno", b"pqrstuvwxyz", b"ABCDEFGHIJK"];
+    let mut body = Vec::new();
+
+    for chunk in chunks {
+        super::append_bounded_body(&mut body, chunk, max_size).expect("append body within the limit");
+        assert!(body.capacity() <= max_size, "capacity {} exceeds limit {max_size}", body.capacity());
+    }
+
+    assert_eq!(body, b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJK");
+
+    let mut tiny_body = Vec::new();
+    let mut capacity_changes = 0;
+    for _ in 0..max_size {
+        let capacity = tiny_body.capacity();
+        super::append_bounded_body(&mut tiny_body, b"x", max_size).expect("append tiny body chunk");
+        capacity_changes += usize::from(tiny_body.capacity() != capacity);
+        assert!(tiny_body.capacity() <= max_size, "capacity {} exceeds limit {max_size}", tiny_body.capacity());
+    }
+    assert_eq!(tiny_body, vec![b'x'; max_size]);
+    assert!(capacity_changes <= 7, "capacity changed {capacity_changes} times for {max_size} tiny chunks");
+
+    let capacity = tiny_body.capacity();
+    let body_before_overflow = tiny_body.clone();
+    let error = super::append_bounded_body(&mut tiny_body, b"y", max_size).expect_err("overflow must be rejected");
+
+    assert_eq!(error.kind, ErrorKind::ResourceExhausted);
+    assert_eq!(tiny_body, body_before_overflow);
+    assert_eq!(tiny_body.capacity(), capacity);
 }
 
 #[tokio::test]
@@ -173,10 +216,9 @@ async fn truncated_body_keeps_response_metadata() {
 }
 
 #[tokio::test]
-async fn operation_deadline_covers_body_reading() {
+async fn body_deadline_preserves_response_metadata() {
     let listener = net::TcpListener::bind("127.0.0.1:0").await.expect("bind local HTTP server");
     let address = listener.local_addr().expect("read local listener address");
-    let (headers_sent, headers_received) = tokio::sync::oneshot::channel();
     let (release_body, body_released) = tokio::sync::oneshot::channel();
     let server: JoinHandle<()> = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept HTTP request");
@@ -192,8 +234,10 @@ async fn operation_deadline_covers_body_reading() {
                 break;
             }
         }
-        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").await.expect("write headers");
-        headers_sent.send(()).expect("request should await response headers");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nRetry-After: 2\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write headers");
         body_released.await.expect("allow body deadline to expire");
         if let Err(error) = stream.write_all(b"data").await {
             std::assert_matches!(
@@ -203,15 +247,29 @@ async fn operation_deadline_covers_body_reading() {
             );
         }
     });
-    let client = Client::new(Some(Duration::from_millis(250)), false, None).expect("build HTTP client");
+    let timeout = Duration::from_secs(20);
+    let client = Client::new(Some(timeout), false, None).expect("build HTTP client");
     let url = Url::parse(&format!("http://{address}/body")).expect("local HTTP URL");
-    let request = tokio::spawn(async move { client.get("test", &url, 16).await });
-    headers_received.await.expect("server sent response headers");
-    let error = request.await.expect("request task should finish").expect_err("body read must hit its deadline");
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let request = client.client.get(url).timeout(deadline.saturating_duration_since(Instant::now())).send();
+    let response =
+        send_with_deadline(request, Some(deadline), started).await.expect("HTTP client should consume response headers before the body");
+    assert_eq!(response.status(), StatusCode::OK);
+    let retry_after = parse_response_retry_after(response.headers());
+    assert_eq!(retry_after, Some(Duration::from_secs(2)));
+
+    let mut body = Box::pin(read_bounded_body(response, 16, Some(deadline), started));
+    let body_read_pending = std::future::poll_fn(|context| Poll::Ready(body.as_mut().poll(context).is_pending())).await;
+    assert!(body_read_pending, "body read should be pending with response metadata available");
+    time::pause();
+    time::advance(deadline.saturating_duration_since(Instant::now())).await;
+    let error = body.await.expect_err("body read must hit its deadline");
 
     assert_eq!(error.kind, ErrorKind::Timeout);
     assert_eq!(error.status, Some(StatusCode::OK));
-    assert!(!error.is_timeout_after(Duration::from_millis(250)), "a body timeout has response metadata");
+    assert_eq!(error.retry_after, retry_after);
+    assert!(!error.is_timeout_after(timeout), "a body timeout has response metadata");
     release_body.send(()).expect("release held response body");
     server.await.expect("server should finish");
 }
