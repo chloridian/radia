@@ -365,6 +365,7 @@ impl RouteState {
 
 struct WorkLife {
     maintenance: Arc<AtomicBool>,
+    transport_pending: AtomicBool,
 }
 
 impl Drop for WorkLife {
@@ -428,6 +429,9 @@ impl AssetEntry {
 
     fn has_active_demand(&self) -> bool {
         self.views.values().any(|view| view.count() > 0)
+    }
+    fn has_live_demand(&self, now: Instant) -> bool {
+        self.views.values().any(|view| view.count() > 0 && now < view.deadline)
     }
     fn broadcast_status(&self, status: Status) {
         let ready = self.ready();
@@ -532,6 +536,8 @@ impl FetchJob {
 
     pub fn complete_response(self, response: Result<FetchResponse, Failure>) -> Result<DecodeInput, FetchFailure> {
         let Self { mut job } = self;
+        job._life.transport_pending.store(false, Ordering::Release);
+        job._life.maintenance.store(true, Ordering::Release);
         let response = match response {
             Ok(response) if !job.is_cancelled() => response,
             Ok(_) => return Err(FetchFailure::new(job, Failure::Cancelled)),
@@ -808,8 +814,9 @@ impl Store {
             if let Some(view) = entry.views.remove(&route) {
                 view.publish_status(Status::Failed { failure: Failure::RouteClosed, retry_at: None });
             }
-            if let LoadPhase::Running { route: running, cancelled, .. } = &entry.phase
-                && *running == route
+            if let LoadPhase::Running { route: running, life, cancelled, .. } = &entry.phase
+                && (!entry.has_active_demand()
+                    || *running == route && life.upgrade().is_some_and(|life| life.transport_pending.load(Ordering::Acquire)))
             {
                 cancelled.send_replace(true);
             }
@@ -964,7 +971,8 @@ impl Store {
                 entry.broadcast_status(Status::Ready((*content).clone()));
             }
             if let LoadPhase::Running { life, cancelled, route, stage, .. } = &entry.phase {
-                if !entry.has_active_demand() || entry.views.get(route).is_none_or(|view| now >= view.deadline) {
+                let transport_pending = life.upgrade().is_some_and(|life| life.transport_pending.load(Ordering::Acquire));
+                if !entry.has_live_demand(now) || transport_pending && entry.views.get(route).is_none_or(|view| now >= view.deadline) {
                     cancelled.send_replace(true);
                 }
                 if life.upgrade().is_none() {
@@ -1077,7 +1085,7 @@ impl Store {
         let key = candidate.key;
         let route = candidate.route;
         let resource = key.resource;
-        let life = Arc::new(WorkLife { maintenance: Arc::clone(&self.maintenance_dirty) });
+        let life = Arc::new(WorkLife { maintenance: Arc::clone(&self.maintenance_dirty), transport_pending: AtomicBool::new(false) });
         let (cancelled, receiver) = watch::channel(false);
         let entry = self.entries.get_mut(&key).expect("selected demanded entry");
         if entry.cache_retry_at.is_some_and(|retry_at| retry_at <= now) {
@@ -1138,6 +1146,7 @@ impl Store {
         entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::Fetching };
         start_fetch(resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
         entry.broadcast_status(Status::Fetching);
+        job._life.transport_pending.store(true, Ordering::Release);
         Some(LoadJob::Fetch(FetchJob { job }))
     }
 
@@ -1207,11 +1216,7 @@ impl Store {
         if job.resource.kind != Kind::Mesh {
             finish_cache_read(&mut self.running_non_mesh_cache_reads);
         }
-        if !self.routes.contains(&job.route)
-            || job.is_cancelled()
-            || !entry.has_active_demand()
-            || entry.views.get(&job.route).is_none_or(|view| now >= view.deadline)
-        {
+        if job.is_cancelled() || !entry.has_live_demand(now) {
             entry.phase = LoadPhase::Queued;
             return None;
         }
@@ -1238,6 +1243,11 @@ impl Store {
                 None
             }
             _ => {
+                if entry.views.get(&job.route).is_none_or(|view| view.count() == 0 || now >= view.deadline) {
+                    entry.phase = LoadPhase::Queued;
+                    entry.broadcast_status(Status::Queued);
+                    return None;
+                }
                 let fetch = Self::cache_read_fallback(entry, job, now)?;
                 start_fetch(fetch.resource().kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
                 Some(LoadJob::Fetch(fetch))
@@ -1263,6 +1273,7 @@ impl Store {
         if let LoadPhase::Running { stage, .. } = &mut entry.phase {
             *stage = Stage::Fetching;
         }
+        job._life.transport_pending.store(true, Ordering::Release);
         Some(FetchJob { job })
     }
 
@@ -1301,11 +1312,7 @@ impl Store {
         }
         entry.phase = LoadPhase::Queued;
         self.maintenance_dirty.store(true, Ordering::Release);
-        if !self.routes.contains(&job.route)
-            || job.is_cancelled()
-            || !entry.has_active_demand()
-            || entry.views.get(&job.route).is_none_or(|view| now >= view.deadline)
-        {
+        if job.is_cancelled() || !entry.has_live_demand(now) {
             return writes;
         }
         if origin == DecodeOrigin::Disk && result.as_ref().is_err_and(|failure| *failure == Failure::MemoryPressure) {
@@ -1370,7 +1377,7 @@ impl Store {
                     return writes;
                 }
                 let ready = entry.ready();
-                let view = entry.views.get_mut(&job.route).expect("active job route");
+                let Some(view) = entry.views.get_mut(&job.route) else { return writes };
                 let retry_at = match failure {
                     Failure::Transient { retry_after } if view.attempts < MAX_ATTEMPTS => {
                         let delay = retry_after.max(Duration::from_secs(u64::from(view.attempts.max(1))));
