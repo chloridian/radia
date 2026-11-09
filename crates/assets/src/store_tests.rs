@@ -1813,7 +1813,8 @@ fn resize_preserves_pending_fetch() {
 
 #[test]
 fn obsolete_decode_refines_after_resize() {
-    let StoreHarness { now, mut store, route, .. } = StoreHarness::new();
+    let budget = Budget::default();
+    let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(budget.clone());
     let id = resource(903).id;
     let demand = store.request(route, Request::Texture { id, size: TextureSize::new(64) }, Priority::Visible, now).unwrap();
     let handle = demand._lease._texture.as_ref().expect("texture lease owns a handle").clone();
@@ -1824,16 +1825,29 @@ fn obsolete_decode_refines_after_resize() {
     store.maintain(now);
     assert!(!decoding.is_cancelled(), "a target resize does not cancel in-progress decode work");
     store.complete(decoding.run(), now);
-    let Status::Ready(Content::Texture(low_detail)) = demand.status() else { panic!("obsolete decode remains usable") };
+    let Status::Refining(Content::Texture(low_detail)) = demand.status() else {
+        panic!("obsolete decode stays usable while refinement is pending")
+    };
     assert_eq!(low_detail.info().expect("decoded image info").size, [64; 2]);
     assert_eq!(low_detail, handle);
 
+    let pressure = budget.reserve(ASSET_WORK_BYTES).expect("hold refinement work admission");
+    assert!(store.next_job(now).is_none(), "refinement waits for work admission");
+    assert_matches!(demand.status(), Status::Refining(Content::Texture(image)) if image == handle);
+    drop(pressure);
+
     let input = cached(&mut store, now);
     assert_eq!(input.job.size, TextureSize::new(512), "the follow-up decode uses the current target");
-    let refined = store.start_decode(input).expect("refinement decode admission").run();
+    let obsolete = store.start_decode(input).expect("refinement decode admission");
+    demand.update_size(TextureSize::new(1024));
+    store.maintain(now);
+    store.complete(obsolete.run(), now);
+    assert_matches!(demand.status(), Status::Refining(Content::Texture(image)) if image.info().expect("fallback metadata").size == [64; 2]);
+    let input = cached(&mut store, now);
+    let refined = store.start_decode(input).expect("current refinement admission").run();
     store.complete(refined, now);
     let Status::Ready(Content::Texture(refined)) = demand.status() else { panic!("refined texture becomes ready") };
-    assert_eq!(refined.info().expect("refined image info").size, [512; 2]);
+    assert_eq!(refined.info().expect("refined image info").size, [1024; 2]);
     assert_eq!(refined, handle, "refinement updates the existing texture handle");
     assert!(store.next_job(now).is_none());
 }
