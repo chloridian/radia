@@ -56,7 +56,13 @@ For each compatibility decision, record the behavior Radia must preserve, the so
 
 The [official Inventory API v2 contract](https://wiki.secondlife.com/wiki/Linden_Lab_Official%3AInventory_API), consulted on 2026-11-09, describes item and folder request arrays without stating a ten-entry wire limit. The [pinned Firestorm background fetch](https://github.com/FirestormViewer/phoenix-firestorm/blob/10bd3c9f930c76e1427ddd4ecece6cdf36b4406d/indra/newview/llinventorymodelbackgroundfetch.cpp), revision `10bd3c9f930c76e1427ddd4ecece6cdf36b4406d`, chooses ten as a local batch size shared by folder and item requests. Radia keeps batching in the viewer and lets Protocol decode larger matching responses within its wire-data limits. This separation is an inference from the documented contract and observed client policy, rather than a claim about an undocumented server maximum.
 
-The decoder regressions use hand-constructed legacy records with eleven distinct IDs, reverse-ordered folder responses, and duplicate returned IDs. The viewer's current batch size remains ten. Descendant-count equality needs separate compatibility investigation because the API also describes link targets appearing with folder listings.
+The decoder regressions use hand-constructed legacy records with eleven distinct IDs, reverse-ordered folder responses, and duplicate returned IDs. The viewer's current batch size remains ten.
+
+### Folder listings and link targets
+
+The official Inventory API's Item Links section says folder listings include both a link and its target. The same page's LLIDL describes `descendents` as the combined array length. This does not establish that every returned record belongs directly to the requested folder. The pinned [legacy response handler](https://github.com/FirestormViewer/phoenix-firestorm/blob/10bd3c9f930c76e1427ddd4ecece6cdf36b4406d/indra/newview/llinventorymodelbackgroundfetch.cpp#L1519-L1535) accepts item records under their supplied parents and reads the reported count separately.
+
+A hand-constructed decoder reproduction on 2026-11-09 includes one link, its same-owner target in another folder, and a count of two matching the array length. Radia rejects it as `InvalidResponse` because the legacy decoder enforces the requested parent on every item. The viewer adapter also treats all decoded items as direct children. This is an unresolved compatibility gap. Keep auxiliary target records separate from the child set used for folder replacement; accepting arbitrary foreign-parent items or reparenting targets would corrupt the normalized model. Do not add count equality as a substitute for resolving this distinction. A captured simulator response is still needed to establish how counts behave when auxiliary targets are present.
 
 ## Verified rendering baseline
 
