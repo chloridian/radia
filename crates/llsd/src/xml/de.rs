@@ -234,7 +234,7 @@ impl<'input> Deserializer<'input> {
                 return Err(Error::LimitExceeded("binary bytes"));
             }
             if output.len() == output.capacity() {
-                let capacity = output.capacity().saturating_mul(2).clamp(1, max_encoded_len);
+                let capacity = output.capacity().saturating_mul(2).clamp(max_encoded_len.min(8), max_encoded_len);
                 output.try_reserve_exact(capacity - output.len()).map_err(|_| Error::InvalidValue("LLSD allocation failed".into()))?;
             }
             output.push(byte);
