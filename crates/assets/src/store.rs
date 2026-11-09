@@ -409,6 +409,10 @@ impl AssetEntry {
     fn texture(&self) -> Option<TextureHandle> {
         self.texture.as_ref().and_then(WeakTexture::upgrade)
     }
+    fn publish_content(&self, content: Content) {
+        let status = if content_satisfies(&content, self.requested_size()) { Status::Ready(content) } else { Status::Refining(content) };
+        self.broadcast_status(status);
+    }
     fn effective_priority(&self) -> Priority {
         self.views
             .values()
@@ -1343,7 +1347,7 @@ impl Store {
                     && entry.requested_size().is_some_and(|size| size != job.size)
                     && let Some(ready) = entry.ready()
                 {
-                    entry.broadcast_status(Status::Ready(ready));
+                    entry.publish_content(ready);
                     return writes;
                 }
                 let content = match content {
@@ -1358,7 +1362,7 @@ impl Store {
                 if satisfied {
                     entry.phase = LoadPhase::Idle;
                 }
-                entry.broadcast_status(Status::Ready(content.clone()));
+                entry.publish_content(content.clone());
                 entry.ready = Some(content.downgrade());
             }
             Err(failure) => {

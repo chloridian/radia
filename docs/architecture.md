@@ -61,6 +61,8 @@ The persistent cache covers textures, PBR materials, legacy materials, environme
 
 Owns LLSD values, Serde integration, and XML, binary, and notation codecs. Decode limits bound document size, nesting, value counts, and scalar or container sizes; callers can tighten them for their own admission budgets. Simulator messages and domain semantics belong to higher layers.
 
+Texture completion publishes ready status only when the available image satisfies current demand. Lower-detail results and retained fallbacks remain usable while refinement is pending, including when work admission delays the next decode.
+
 Value construction can enforce a caller's limit using the same conservative heap estimate exposed for retained-data accounting. The budget applies while building values, including intermediate duplicate-field values; it does not bound upstream deserializer buffers or process memory. Binary-element attributes have a fixed count ceiling, and encoding references are matched without a normalization buffer.
 
 The binary codec can decode one value from a prefix and report its consumed byte count. Whole-document decoding still rejects trailing bytes.
