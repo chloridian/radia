@@ -93,17 +93,57 @@ struct Entry {
     ticket: AssetTicket,
     request: Request,
     users: HashMap<AssetUser, UserDemand>,
+    extrema: DemandExtrema,
     size: TextureSize,
     priority: Priority,
     importance: u16,
     status: Option<Status>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 struct UserDemand {
     size: TextureSize,
     priority: Priority,
     importance: u16,
+}
+
+#[derive(Default)]
+struct DemandExtrema {
+    sizes: BTreeMap<TextureSize, usize>,
+    priorities: BTreeMap<Priority, usize>,
+    importances: BTreeMap<u16, usize>,
+    #[cfg(test)]
+    work: usize,
+}
+
+impl DemandExtrema {
+    fn add(&mut self, demand: UserDemand) {
+        increment(&mut self.sizes, demand.size);
+        increment(&mut self.priorities, demand.priority);
+        increment(&mut self.importances, demand.importance);
+        #[cfg(test)]
+        {
+            self.work += 3;
+        }
+    }
+
+    fn remove(&mut self, demand: UserDemand) {
+        decrement(&mut self.sizes, demand.size);
+        decrement(&mut self.priorities, demand.priority);
+        decrement(&mut self.importances, demand.importance);
+        #[cfg(test)]
+        {
+            self.work += 3;
+        }
+    }
+
+    fn maxima(&self) -> Option<UserDemand> {
+        Some(UserDemand {
+            size: *self.sizes.last_key_value()?.0,
+            priority: *self.priorities.last_key_value()?.0,
+            importance: *self.importances.last_key_value()?.0,
+        })
+    }
 }
 
 struct ObjectDemand {
@@ -341,7 +381,7 @@ impl AssetDemand {
 
     fn remove_user(&mut self, user: AssetUser, key: AssetKey) {
         if let Some(entry) = self.entries.get_mut(&key) {
-            entry.users.remove(&user);
+            remove_entry_user(entry, user);
         }
     }
 
@@ -367,9 +407,10 @@ impl AssetDemand {
 
     fn refresh(&mut self, key: AssetKey) {
         let Some(entry) = self.entries.get_mut(&key) else { return };
-        let Some(size) = entry.users.values().map(|demand| demand.size).max() else { return };
-        let priority = entry.users.values().map(|demand| demand.priority).max().unwrap_or(Priority::Background);
-        let importance = entry.users.values().map(|demand| demand.importance).max().unwrap_or_default();
+        let Some(maxima) = entry.extrema.maxima() else { return };
+        let size = maxima.size;
+        let priority = maxima.priority;
+        let importance = maxima.importance;
         let size_changed = key.unit == AssetUnit::Whole && key.resource.kind == Kind::Texture && entry.size != size;
         let priority_changed = entry.priority != priority;
         let importance_changed = entry.importance != importance;
@@ -424,7 +465,7 @@ impl AssetDemand {
         if let Some(target) = self.terrain_targets.get(&region) {
             for key in &target.keys {
                 if let Some(entry) = self.entries.get_mut(key) {
-                    entry.users.remove(&user);
+                    remove_entry_user(entry, user);
                 }
             }
         }
@@ -778,17 +819,24 @@ impl AssetDemand {
             self.tickets.insert(ticket, key);
             let request = request_with_size(request, size);
             self.events.push_back(AssetChange::Request(AssetRequest { ticket, region, request, priority, importance }));
-            Entry { ticket, request, users: HashMap::new(), size, priority, importance, status: None }
+            Entry { ticket, request, users: HashMap::new(), extrema: DemandExtrema::default(), size, priority, importance, status: None }
         });
-        entry
-            .users
-            .entry(user)
-            .and_modify(|old| {
-                old.size = old.size.max(size);
-                old.priority = old.priority.max(priority);
-                old.importance = old.importance.max(importance);
-            })
-            .or_insert(UserDemand { size, priority, importance });
+        let demand = UserDemand { size, priority, importance };
+        if let Some(previous) = entry.users.get(&user).copied() {
+            let demand = UserDemand {
+                size: previous.size.max(demand.size),
+                priority: previous.priority.max(demand.priority),
+                importance: previous.importance.max(demand.importance),
+            };
+            if demand != previous {
+                entry.extrema.remove(previous);
+                entry.extrema.add(demand);
+                entry.users.insert(user, demand);
+            }
+        } else {
+            entry.users.insert(user, demand);
+            entry.extrema.add(demand);
+        }
         key
     }
 
@@ -864,6 +912,29 @@ impl AssetDemand {
             face.resolve_base_color(AssetState { asset: id, resolution }, image);
         }
         face
+    }
+}
+
+fn increment<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) {
+    *counts.entry(value).or_default() += 1;
+}
+
+fn decrement<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) {
+    match counts.entry(value) {
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            if *entry.get() == 1 {
+                entry.remove();
+            } else {
+                *entry.get_mut() -= 1;
+            }
+        }
+        std::collections::btree_map::Entry::Vacant(_) => unreachable!("every user demand has an aggregate count"),
+    }
+}
+
+fn remove_entry_user(entry: &mut Entry, user: AssetUser) {
+    if let Some(demand) = entry.users.remove(&user) {
+        entry.extrema.remove(demand);
     }
 }
 
