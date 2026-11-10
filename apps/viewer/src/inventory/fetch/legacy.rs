@@ -54,17 +54,18 @@ pub(crate) async fn fetch_items(
 }
 
 fn to_folder_fetch(folder: protocol::inventory::FolderDescendents, key: CategoryKey) -> Result<FolderFetch, InventoryFetchError> {
-    let mut children = Vec::with_capacity(folder.categories.len().saturating_add(folder.items.len()));
-    for category in &folder.categories {
+    let mut children = Vec::with_capacity(folder.direct_categories.len().saturating_add(folder.direct_items.len()));
+    for category in &folder.direct_categories {
         children.push(InventoryChild::Category(to_category(category, key.owner(), Some(key))?));
     }
-    for item in &folder.items {
+    for item in &folder.direct_items {
         children.push(InventoryChild::Item(to_item(item, key.owner(), key)?));
     }
+    let descendent_count = (folder.auxiliary_categories.is_empty() && folder.auxiliary_items.is_empty()).then_some(folder.descendent_count);
     Ok(FolderFetch {
         folder: key,
         version: ::inventory::ServerVersion::from_raw(folder.version),
-        descendent_count: Some(folder.descendent_count),
+        descendent_count,
         children,
         provenance: FolderFetchProvenance::Untracked,
     })

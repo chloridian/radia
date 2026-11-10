@@ -1,8 +1,8 @@
 use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Instant};
 
 use ::inventory::{
-    Category, CategoryKey, FolderType, Inventory, InventoryDelta, InventoryLimits, InventoryOwner, MAX_FOLDER_FETCH_CHILDREN,
-    MAX_INVENTORY_ITEMS, ServerVersion,
+    Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryDelta, InventoryLimits, InventoryOwner, ItemKey, LinkResolution,
+    MAX_FOLDER_FETCH_CHILDREN, MAX_INVENTORY_ITEMS, ServerVersion,
 };
 use futures::{
     FutureExt,
@@ -23,7 +23,7 @@ use super::{
     REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, run_scheduler,
 };
 use crate::inventory::fetch::{
-    FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais,
+    FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais, legacy,
 };
 use crate::inventory::test_support::{LoopbackPeer, TEST_TIMEOUT};
 use crate::session::{FolderFetchApply, apply_inventory_fetch};
@@ -201,6 +201,18 @@ fn llsd_folder_with_children(folder: CategoryKey, children: &[CategoryKey]) -> V
         ("descendents".into(), Value::Integer(children.len() as i32)),
         ("categories".into(), Value::Array(children.iter().map(|child| llsd_category(*child, folder)).collect())),
         ("items".into(), Value::Array(Vec::new())),
+    ]))
+}
+
+fn llsd_item(id: Uuid, parent: Uuid, owner: Uuid, asset_id: Uuid, asset_type: i32, inventory_type: i32) -> Value {
+    Value::Map(Map::from([
+        ("item_id".into(), Value::Uuid(id)),
+        ("owner_id".into(), Value::Uuid(owner)),
+        ("parent_id".into(), Value::Uuid(parent)),
+        ("asset_id".into(), Value::Uuid(asset_id)),
+        ("type".into(), Value::Integer(asset_type)),
+        ("inv_type".into(), Value::Integer(inventory_type)),
+        ("name".into(), Value::String(format!("item-{}", id.as_u128()))),
     ]))
 }
 
@@ -454,6 +466,69 @@ async fn fallback_uses_personal_and_library_descendents_capabilities() {
     drop(requests);
     stop.send(()).expect("stop fallback scheduler");
     task.await.expect("scheduler stopped");
+}
+
+#[tokio::test]
+async fn legacy_mapping_omits_auxiliary_targets() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let capability = CapabilityUrl::parse(peer.url("/legacy").as_str()).expect("valid legacy capability URL");
+    let owner = InventoryOwner::new(Uuid::from_u128(1));
+    let source = key(owner, 10);
+    let target_parent = key(owner, 11);
+    let link_id = Uuid::from_u128(12);
+    let target_id = Uuid::from_u128(13);
+    let response = Value::Map(Map::from([(
+        "folders".into(),
+        Value::Array(vec![Value::Map(Map::from([
+            ("folder_id".into(), Value::Uuid(source.id().uuid())),
+            ("owner_id".into(), Value::Uuid(owner.id())),
+            ("version".into(), Value::Integer(4)),
+            ("descendents".into(), Value::Integer(2)),
+            ("categories".into(), Value::Array(Vec::new())),
+            (
+                "items".into(),
+                Value::Array(vec![
+                    llsd_item(link_id, source.id().uuid(), owner.id(), target_id, 24, 24),
+                    llsd_item(target_id, target_parent.id().uuid(), owner.id(), Uuid::from_u128(14), 7, 7),
+                ]),
+            ),
+        ]))]),
+    )]));
+    let responder = tokio::spawn(async move {
+        let request = peer.next().await;
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/legacy");
+        request.respond(200, xml::to_vec(&response).expect("encode legacy link response")).await;
+    });
+
+    let mut fetched = legacy::fetch_batch(&client, &capability, &[source]).await.expect("decode legacy link response");
+    responder.await.expect("legacy response sent");
+
+    assert_eq!(fetched.len(), 1);
+    let fetch = fetched.pop().expect("one requested folder");
+    assert_eq!(fetch.folder, source);
+    assert_eq!(fetch.children.len(), 1);
+    assert_eq!(fetch.descendent_count, None);
+    let InventoryChild::Item(link) = &fetch.children[0] else { panic!("expected the direct link item") };
+    assert_eq!(link.key.id().uuid(), link_id);
+    assert_eq!(link.parent, source);
+    assert_eq!(link.asset_id.uuid(), target_id);
+
+    let root = key(owner, 9);
+    let mut inventory = Inventory::new(category(root, None), None, InventoryLimits::default()).expect("valid inventory root");
+    inventory.upsert_category(category(source, Some(root))).expect("add source folder");
+    inventory.upsert_category(category(target_parent, Some(root))).expect("add target parent");
+    let FolderFetchApply::Applied(_) = apply_inventory_fetch(&mut inventory, fetch).expect("apply direct folder children") else {
+        panic!("current source fetch should apply");
+    };
+    let snapshot = inventory.snapshot();
+    let link_key = ItemKey::new(owner, utils::ItemId::new(link_id));
+    let target_key = ItemKey::new(owner, utils::ItemId::new(target_id));
+    assert_eq!(snapshot.item(link_key).map(|item| item.parent), Some(source));
+    assert_eq!(snapshot.link_resolution(link_key), Some(LinkResolution::NotLoaded(target_id)));
+    assert!(snapshot.item(target_key).is_none());
+    assert!(snapshot.category(target_parent).is_some());
 }
 
 #[tokio::test]
