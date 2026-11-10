@@ -24,7 +24,7 @@ use world::UpdateSource;
 use super::{
     WriteLock,
     events::{MovementCompleteOutcome, SimulatorScope, WorldHandoff, handle_simulator_message, order_evidence, route_recovery_targets},
-    input::{Input, select_drain_input},
+    input::{Input, OrdinaryInputTurn, select_drain_input_fair},
     inventory_bootstrap::{InventoryBootstrapReport, InventoryWorkerError, spawn_inventory_build},
     inventory_cache::{InventoryCacheEvent, InventoryCacheSession},
     media::ObjectMediaIntake,
@@ -129,6 +129,7 @@ struct SessionDriver {
     credentials: CredentialPersistence,
     session_world: SessionWorld,
     reads: WorldReadHost,
+    ordinary_input_turn: OrdinaryInputTurn,
     terrain: TerrainDecodeQueue,
     environments: EnvironmentIntake,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -216,6 +217,7 @@ impl SessionDriver {
             credentials,
             session_world,
             reads,
+            ordinary_input_turn: OrdinaryInputTurn::default(),
             terrain,
             environments,
             #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -285,7 +287,7 @@ impl SessionDriver {
                 }
             };
             let input = tokio::select! {
-                input = select_drain_input(
+                input = select_drain_input_fair(
                     &mut self.reads,
                     event,
                     self.media.next_result(),
@@ -295,6 +297,7 @@ impl SessionDriver {
                     self.camera.next_tick(),
                     self.recovery.next_completion(),
                     self.inventory_fetch.next_event(),
+                    &mut self.ordinary_input_turn,
                 ) => DriverInput::Session(input),
                 cache_event = self.inventory_cache.next_event() => DriverInput::InventoryCache(cache_event),
                 cache_event = self.object_cache.next_event() => DriverInput::ObjectCache(cache_event),
