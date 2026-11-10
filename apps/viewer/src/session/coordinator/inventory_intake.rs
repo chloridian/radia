@@ -197,11 +197,9 @@ fn add_category_updates(
         candidates.insert(key, category);
         ordered_keys.push(key);
     }
-    let mut accepted = HashSet::with_capacity(ordered_keys.len());
-    for key in ordered_keys.iter().copied() {
-        if category_chain_is_valid(key, &candidates, snapshot) {
-            accepted.insert(key);
-        } else {
+    let accepted = valid_category_chains(&ordered_keys, &candidates, snapshot);
+    for key in &ordered_keys {
+        if !accepted.contains(key) {
             *rejected_blocks = rejected_blocks.saturating_add(1);
         }
     }
@@ -219,26 +217,53 @@ fn add_category_updates(
     accepted
 }
 
-fn category_chain_is_valid(start: CategoryKey, candidates: &HashMap<CategoryKey, Category>, snapshot: &InventorySnapshot) -> bool {
-    let mut visited = HashSet::new();
-    let mut current = start;
-    loop {
-        if !visited.insert(current) {
-            return false;
+fn valid_category_chains(
+    ordered_keys: &[CategoryKey],
+    candidates: &HashMap<CategoryKey, Category>,
+    snapshot: &InventorySnapshot,
+) -> HashSet<CategoryKey> {
+    let mut valid = HashSet::with_capacity(ordered_keys.len());
+    let mut invalid = HashSet::with_capacity(ordered_keys.len());
+    let mut active = HashSet::with_capacity(ordered_keys.len());
+    let mut path = Vec::with_capacity(ordered_keys.len());
+    for start in ordered_keys {
+        if valid.contains(start) || invalid.contains(start) {
+            continue;
         }
-        let parent = candidates
-            .get(&current)
-            .map(|category| category.parent)
-            .unwrap_or_else(|| snapshot.category(current).and_then(|category| category.parent));
-        let Some(parent) = parent else { return snapshot.roots().contains(current) };
-        if candidates.get(&current).is_none() && snapshot.category(current).is_none() {
-            return false;
+        active.clear();
+        path.clear();
+        let mut current = *start;
+        let mut reaches_root = false;
+        loop {
+            if valid.contains(&current) {
+                reaches_root = true;
+                break;
+            }
+            if invalid.contains(&current) || !active.insert(current) {
+                break;
+            }
+            path.push(current);
+            let Some(category) = candidates.get(&current).or_else(|| snapshot.category(current)) else { break };
+            match category.parent {
+                Some(parent) => {
+                    if candidates.get(&parent).is_none() && snapshot.category(parent).is_none() {
+                        break;
+                    }
+                    current = parent;
+                }
+                None => {
+                    reaches_root = snapshot.roots().contains(current);
+                    break;
+                }
+            }
         }
-        if candidates.get(&parent).is_none() && snapshot.category(parent).is_none() {
-            return false;
+        if reaches_root {
+            valid.extend(path.drain(..));
+        } else {
+            invalid.extend(path.drain(..));
         }
-        current = parent;
     }
+    valid
 }
 
 fn add_item_updates(

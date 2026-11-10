@@ -11,6 +11,66 @@ use crate::{
     state::validate_category,
 };
 
+struct CategoryAncestry<'a> {
+    proposed: &'a HashMap<CategoryKey, Category>,
+    state: &'a InventoryState,
+    resolved: HashSet<CategoryKey>,
+    active: HashSet<CategoryKey>,
+    path: Vec<CategoryKey>,
+    #[cfg(test)]
+    visited_nodes: usize,
+}
+
+impl<'a> CategoryAncestry<'a> {
+    fn new(proposed: &'a HashMap<CategoryKey, Category>, state: &'a InventoryState, capacity: usize) -> Self {
+        Self {
+            proposed,
+            state,
+            resolved: HashSet::with_capacity(capacity),
+            active: HashSet::with_capacity(capacity),
+            path: Vec::with_capacity(capacity),
+            #[cfg(test)]
+            visited_nodes: 0,
+        }
+    }
+
+    fn validate_all(&mut self, ordered_keys: &[CategoryKey]) -> Result<(), InventoryError> {
+        for start in ordered_keys {
+            self.active.clear();
+            self.path.clear();
+            let mut current = *start;
+            loop {
+                if self.resolved.contains(&current) {
+                    break;
+                }
+                if !self.active.insert(current) {
+                    return Err(InventoryError::Cycle);
+                }
+                #[cfg(test)]
+                {
+                    self.visited_nodes += 1;
+                }
+                let category = self
+                    .proposed
+                    .get(&current)
+                    .or_else(|| self.state.categories.get(&current).map(Arc::as_ref))
+                    .ok_or(InventoryError::MissingParent)?;
+                self.path.push(current);
+                match category.parent {
+                    Some(parent) => current = parent,
+                    None if self.state.roots.contains(current) => {
+                        self.resolved.insert(current);
+                        break;
+                    }
+                    None => return Err(InventoryError::InvalidParent),
+                }
+            }
+            self.resolved.extend(self.path.drain(..));
+        }
+        Ok(())
+    }
+}
+
 impl Inventory {
     pub fn apply_delta(&mut self, delta: InventoryDelta) -> Result<ChangeSet, InventoryError> {
         validate_delta_size(&delta, self.limits.max_categories, self.limits.max_items)?;
@@ -138,24 +198,7 @@ fn apply_categories(
         }
     }
 
-    for key in &ordered_keys {
-        let mut current = *key;
-        let mut visited = HashSet::new();
-        loop {
-            if !visited.insert(current) {
-                return Err(InventoryError::Cycle);
-            }
-            let category = categories
-                .get(&current)
-                .or_else(|| state.categories.get(&current).map(Arc::as_ref))
-                .ok_or(InventoryError::MissingParent)?;
-            match category.parent {
-                Some(parent) => current = parent,
-                None if state.roots.contains(current) => break,
-                None => return Err(InventoryError::InvalidParent),
-            }
-        }
-    }
+    CategoryAncestry::new(&categories, state, ordered_keys.len()).validate_all(&ordered_keys)?;
 
     let categories = ordered_keys
         .into_iter()
@@ -354,4 +397,73 @@ fn replace_folder_metadata(
     }
     changes.push(InventoryChange::CategoryUpserted(updated));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use utils::FolderId;
+    use uuid::Uuid;
+
+    use super::CategoryAncestry;
+    use crate::{Category, CategoryKey, FolderType, Inventory, InventoryLimits, InventoryOwner, ServerVersion};
+
+    fn category(owner: InventoryOwner, id: u128, parent: Option<u128>) -> Category {
+        Category {
+            key: CategoryKey::new(owner, FolderId::new(Uuid::from_u128(id))),
+            parent: parent.map(|parent| CategoryKey::new(owner, FolderId::new(Uuid::from_u128(parent)))),
+            preferred_folder_type: FolderType::None,
+            name: Arc::from("folder"),
+            server_version: ServerVersion::UNKNOWN,
+            server_descendent_count: None,
+        }
+    }
+
+    fn chain(owner: InventoryOwner, first_id: u128, count: u128, root_id: u128) -> Vec<Category> {
+        (0..count)
+            .map(|index| {
+                let id = first_id + index;
+                let parent = if index == 0 { root_id } else { id - 1 };
+                category(owner, id, Some(parent))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn chain_validation_is_linear() {
+        let owner = InventoryOwner::new(Uuid::from_u128(1));
+        let root = category(owner, 10, None);
+        let inventory = Inventory::new(root, None, InventoryLimits::default()).expect("root is valid");
+        let proposed = chain(owner, 1_000, 1_024, 10);
+        let proposed_by_key = proposed.iter().cloned().map(|category| (category.key, category)).collect::<HashMap<_, _>>();
+        let parent_first = proposed.iter().map(|category| category.key).collect::<Vec<_>>();
+        let reverse = parent_first.iter().rev().copied().collect::<Vec<_>>();
+        let graph_nodes = proposed.len() + 1;
+
+        for ordered_keys in [parent_first, reverse] {
+            let mut ancestry = CategoryAncestry::new(&proposed_by_key, &inventory.state, ordered_keys.len());
+            ancestry.validate_all(&ordered_keys).expect("chain reaches its root");
+            assert!(ancestry.visited_nodes <= graph_nodes * 2, "visited {} nodes for {graph_nodes} graph nodes", ancestry.visited_nodes);
+        }
+    }
+
+    #[test]
+    fn shared_ancestry_is_reused() {
+        let owner = InventoryOwner::new(Uuid::from_u128(1));
+        let root = category(owner, 10, None);
+        let existing = chain(owner, 100_000, 512, 10);
+        let parent_id = 100_511;
+        let inventory =
+            Inventory::from_categories(root, None, existing.clone(), InventoryLimits::default()).expect("existing chain is valid");
+        let proposed = (0..512_u128).map(|index| category(owner, 200_000 + index, Some(parent_id))).collect::<Vec<_>>();
+        let proposed_by_key = proposed.iter().cloned().map(|category| (category.key, category)).collect::<HashMap<_, _>>();
+        let ordered_keys = proposed.iter().map(|category| category.key).collect::<Vec<_>>();
+        let graph_nodes = existing.len() + proposed.len() + 1;
+        let mut ancestry = CategoryAncestry::new(&proposed_by_key, &inventory.state, ordered_keys.len());
+
+        ancestry.validate_all(&ordered_keys).expect("each candidate reaches the shared root");
+
+        assert!(ancestry.visited_nodes <= graph_nodes * 2, "visited {} nodes for {graph_nodes} graph nodes", ancestry.visited_nodes);
+    }
 }

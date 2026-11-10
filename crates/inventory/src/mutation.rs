@@ -314,6 +314,7 @@ pub(crate) fn upsert_category_state(
 ) -> Result<(), InventoryError> {
     validate_category(&category)?;
     let key = category.key;
+    let previous = state.categories.get(&key).cloned();
     if state.roots.contains(key) {
         if category.parent.is_some() {
             return Err(InventoryError::InvalidRoot);
@@ -323,9 +324,10 @@ pub(crate) fn upsert_category_state(
         if parent.owner() != key.owner() || !state.categories.contains_key(&parent) {
             return Err(InventoryError::MissingParent);
         }
-        ensure_no_cycle(state, key, parent)?;
+        if previous.as_ref().is_some_and(|previous| previous.parent != category.parent) {
+            ensure_no_cycle(state, key, parent)?;
+        }
     }
-    let previous = state.categories.get(&key).cloned();
     if previous.as_deref() == Some(&category) {
         return Ok(());
     }
