@@ -29,6 +29,7 @@ use crate::inventory::InventoryEditHandle;
 const REQUEST_CAPACITY: usize = 1024;
 const RESULT_CAPACITY: usize = 2;
 const BACKGROUND_CONCURRENCY: usize = 2;
+const OWNER_REFRESH_SCAN_CHUNK: usize = 512;
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(2);
 
@@ -79,9 +80,15 @@ impl ForegroundRequest {
 
 #[derive(Clone)]
 pub struct InventoryFetchHandle {
-    requests: mpsc::Sender<ForegroundRequest>,
+    requests: InventoryFetchRequests,
     status: watch::Receiver<InventoryLoadingStatus>,
     edits: InventoryEditHandle,
+}
+
+#[derive(Clone)]
+pub(crate) struct InventoryFetchRequests {
+    sender: mpsc::Sender<ForegroundRequest>,
+    refresh_incomplete: watch::Sender<u64>,
 }
 
 impl InventoryFetchHandle {
@@ -96,10 +103,18 @@ impl InventoryFetchHandle {
     }
 
     fn send_request(&self, request: ForegroundRequest) -> Result<(), InventoryFetchRequestError> {
-        self.requests.try_send(request).map_err(|error| match error {
+        self.requests.sender.try_send(request).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => InventoryFetchRequestError::QueueFull,
             mpsc::error::TrySendError::Closed(_) => InventoryFetchRequestError::SessionEnded,
         })
+    }
+
+    pub(crate) fn refetch_incomplete(&self) -> Result<(), InventoryFetchRequestError> {
+        if self.requests.sender.is_closed() {
+            return Err(InventoryFetchRequestError::SessionEnded);
+        }
+        self.requests.refresh_incomplete.send_modify(|generation| *generation = generation.wrapping_add(1));
+        Ok(())
     }
 
     pub fn status(&self) -> watch::Receiver<InventoryLoadingStatus> {
@@ -117,21 +132,25 @@ pub(crate) struct InventoryFetchController {
     events_tx: mpsc::Sender<InventoryFetchEvent>,
     events_rx: mpsc::Receiver<InventoryFetchEvent>,
     status_tx: watch::Sender<InventoryLoadingStatus>,
+    refresh_receiver: Option<watch::Receiver<u64>>,
     stop_tx: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }
 
 impl InventoryFetchController {
     pub(crate) fn new(edits: InventoryEditHandle) -> Self {
-        let (requests_tx, requests_rx) = mpsc::channel(REQUEST_CAPACITY);
+        let (request_sender, requests_rx) = mpsc::channel(REQUEST_CAPACITY);
         let (events_tx, events_rx) = mpsc::channel(RESULT_CAPACITY);
         let (status_tx, status_rx) = watch::channel(InventoryLoadingStatus::default());
+        let (refresh_incomplete, refresh_receiver) = watch::channel(0);
+        let requests = InventoryFetchRequests { sender: request_sender, refresh_incomplete };
         Self {
-            handle: InventoryFetchHandle { requests: requests_tx, status: status_rx, edits },
+            handle: InventoryFetchHandle { requests, status: status_rx, edits },
             requests: Some(requests_rx),
             events_tx,
             events_rx,
             status_tx,
+            refresh_receiver: Some(refresh_receiver),
             stop_tx: None,
             task: None,
         }
@@ -157,9 +176,19 @@ impl InventoryFetchController {
             return;
         }
         let Some(requests) = self.requests.take() else { return };
+        let Some(refresh_receiver) = self.refresh_receiver.take() else { return };
         let (stop_tx, stop_rx) = oneshot::channel();
         self.stop_tx = Some(stop_tx);
-        self.task = Some(runtime.spawn(run_scheduler(client, snapshot, model, requests, self.events_tx.clone(), cancellation, stop_rx)));
+        self.task = Some(runtime.spawn(run_scheduler(
+            client,
+            snapshot,
+            model,
+            requests,
+            self.events_tx.clone(),
+            refresh_receiver,
+            cancellation,
+            stop_rx,
+        )));
     }
 
     pub(crate) async fn next_event(&mut self) -> Option<InventoryFetchEvent> {
@@ -221,6 +250,7 @@ async fn run_scheduler(
     model: watch::Receiver<Option<InventorySnapshot>>,
     mut requests: mpsc::Receiver<ForegroundRequest>,
     events: mpsc::Sender<InventoryFetchEvent>,
+    mut refresh_incomplete: watch::Receiver<u64>,
     cancellation: Cancellation,
     mut stop: oneshot::Receiver<()>,
 ) {
@@ -265,6 +295,23 @@ async fn run_scheduler(
     loop {
         while let Ok(request) = requests.try_recv() {
             queue_foreground_request(request, &mut foreground, &mut foreground_queued, &mut foreground_completions);
+        }
+        if refresh_incomplete.has_changed().unwrap_or(false) {
+            refresh_incomplete.borrow_and_update();
+            let current = latest_snapshot(&model, &snapshot);
+            if !enqueue_incomplete_folders(
+                &current,
+                &mut background,
+                &mut queued,
+                &mut failed,
+                &mut background_done,
+                &cancellation,
+                &mut stop,
+            )
+            .await
+            {
+                return;
+            }
         }
         if requests.is_closed() {
             requests_open = false;
@@ -329,6 +376,23 @@ async fn run_scheduler(
                             &mut foreground_completions,
                         ),
                             None => requests_open = false,
+                        }
+                    }
+                    _ = refresh_incomplete.changed() => {
+                        refresh_incomplete.borrow_and_update();
+                        let current = latest_snapshot(&model, &snapshot);
+                        if !enqueue_incomplete_folders(
+                            &current,
+                            &mut background,
+                            &mut queued,
+                            &mut failed,
+                            &mut background_done,
+                            &cancellation,
+                            &mut stop,
+                        )
+                        .await
+                        {
+                            return;
                         }
                     }
                     result = &mut fetch => break result,
@@ -425,6 +489,23 @@ async fn run_scheduler(
                     None => requests_open = false,
                 }
             }
+            _ = refresh_incomplete.changed() => {
+                refresh_incomplete.borrow_and_update();
+                let current = latest_snapshot(&model, &snapshot);
+                if !enqueue_incomplete_folders(
+                    &current,
+                    &mut background,
+                    &mut queued,
+                    &mut failed,
+                    &mut background_done,
+                    &cancellation,
+                    &mut stop,
+                )
+                .await
+                {
+                    return;
+                }
+            }
             Some(completion) = jobs.next(), if !active.is_empty() => {
                 active.remove(&completion.job.id);
                 for folder in &completion.job.folders {
@@ -448,6 +529,39 @@ async fn run_scheduler(
             }
         }
     }
+}
+
+async fn enqueue_incomplete_folders(
+    current: &InventorySnapshot,
+    background: &mut VecDeque<BackgroundRequest>,
+    queued: &mut HashSet<CategoryKey>,
+    failed: &mut HashSet<CategoryKey>,
+    background_done: &mut bool,
+    cancellation: &Cancellation,
+    stop: &mut oneshot::Receiver<()>,
+) -> bool {
+    for (index, category) in current.categories().enumerate() {
+        let folder = category.key;
+        if !current.is_complete(folder) {
+            failed.remove(&folder);
+            let was_queued = queued.contains(&folder);
+            enqueue_background(BackgroundRequest { folder, depth: 0 }, current, failed, background, queued);
+            if !was_queued && queued.contains(&folder) {
+                *background_done = false;
+            }
+        }
+        if (index + 1).is_multiple_of(OWNER_REFRESH_SCAN_CHUNK)
+            && tokio::select! {
+                biased;
+                _ = cancellation.clone() => true,
+                _ = &mut *stop => true,
+                _ = tokio::task::yield_now() => false,
+            }
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn queue_foreground_request(
@@ -675,7 +789,10 @@ async fn fetch_legacy_with_provenance(
 fn stamp_request_provenance(folders: &mut [FolderFetch], snapshot: Option<&InventorySnapshot>) {
     let Some(snapshot) = snapshot else { return };
     for fetch in folders {
-        fetch.provenance = FolderFetchProvenance::StartedAt(snapshot.folder_generation(fetch.folder));
+        fetch.provenance = FolderFetchProvenance::StartedAt {
+            folder: snapshot.folder_generation(fetch.folder),
+            owner: snapshot.owner_refresh_generation(fetch.folder.owner()),
+        };
     }
 }
 

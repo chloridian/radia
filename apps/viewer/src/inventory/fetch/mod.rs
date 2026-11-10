@@ -93,7 +93,7 @@ pub(crate) struct FolderFetch {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FolderFetchProvenance {
     Untracked,
-    StartedAt(Option<InventoryRevision>),
+    StartedAt { folder: Option<InventoryRevision>, owner: u64 },
 }
 
 #[derive(Debug)]

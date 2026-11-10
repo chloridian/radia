@@ -96,6 +96,7 @@ pub(super) fn start_at(credentials: LoginCredentials, options: SessionOptions, l
         pending_event: None,
         surfaced_coverage: HashMap::new(),
         surfaced_overflow_generation: 0,
+        last_event_watermark: None,
     })
 }
 

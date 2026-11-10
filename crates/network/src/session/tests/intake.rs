@@ -183,6 +183,47 @@ async fn coverage_loss_precedes_event_and_awaits_ack() {
     );
 }
 
+#[tokio::test]
+async fn reported_inventory_loss_gates_later_source_event() {
+    let (commands, _) = mpsc::channel(COMMAND_CAPACITY);
+    let (disconnect, _) = watch::channel(false);
+    let ledger = CoverageLossLedger::new();
+    let simulator_id = test_simulator_id(79);
+    let coverage_source = CoverageSource::EventQueue { incarnation: 8 };
+    let (events, event_receiver) = mpsc::channel(2);
+    events
+        .try_send(event_with_coverage_watermark(
+            Event::CapabilityEvent {
+                simulator_id,
+                source: "127.0.0.1:13000".parse().expect("simulator endpoint"),
+                message: "BulkUpdateInventory".into(),
+                body: Value::Undefined,
+            },
+            ledger.watermark(simulator_id, coverage_source),
+        ))
+        .expect("queue the accepted inventory event");
+    let mut session = test_session_with_coverage(targeted_send_handle(commands, disconnect), event_receiver, ledger.clone());
+
+    assert!(matches!(session.recv_event().await, Some(Event::CapabilityEvent { message, .. }) if message == "BulkUpdateInventory"));
+    assert!(session.report_current_event_loss(CoverageLossReason::InventoryAdmission).is_some());
+    let next_watermark = ledger.watermark(simulator_id, coverage_source);
+    events
+        .try_send(event_with_coverage_watermark(Event::Failed("later source event".into()), next_watermark))
+        .expect("queue event after the inventory loss");
+
+    let Some(Event::CoverageLost { loss: CoverageLoss::Source(loss) }) = session.recv_event().await else {
+        panic!("inventory admission loss must be surfaced before later events from its source");
+    };
+    assert_eq!(loss.reason, CoverageLossReason::InventoryAdmission);
+    assert_eq!(loss.watermark, next_watermark);
+    {
+        let mut receive = pin!(session.recv_event());
+        assert!(receive.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+    }
+    session.acknowledge_coverage_loss(loss.watermark);
+    assert!(matches!(session.recv_event().await, Some(Event::Failed(message)) if message == "later source event"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn preflight_loss_gates_later_event() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");

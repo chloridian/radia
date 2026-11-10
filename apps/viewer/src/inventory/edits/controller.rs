@@ -505,7 +505,7 @@ async fn execute_edit(
     }
 }
 
-fn affected_folders(operation: &EditOperation, snapshot: &InventorySnapshot, owner: InventoryOwner) -> Vec<CategoryKey> {
+pub(super) fn affected_folders(operation: &EditOperation, snapshot: &InventorySnapshot, owner: InventoryOwner) -> Vec<CategoryKey> {
     match operation {
         EditOperation::CreateFolder { parent, .. } => vec![*parent],
         EditOperation::RenameCategory { category, .. } => {

@@ -65,6 +65,87 @@ fn inventory_with_limits(owner: InventoryOwner, limits: InventoryLimits) -> Inve
     Inventory::new(category(owner, 1, None, "root"), None, limits).expect("valid root")
 }
 
+fn apply_fetch(
+    inventory: &mut Inventory,
+    folder: CategoryKey,
+    version: ServerVersion,
+    descendent_count: Option<u32>,
+    children: Vec<InventoryChild>,
+) -> Result<inventory::ChangeSet, InventoryError> {
+    let prepared = inventory.snapshot().prepare_folder_fetch(folder, version, descendent_count, children)?;
+    let inventory::FolderFetchCommit::Applied(changes) = inventory.commit_folder_fetch(prepared)? else {
+        panic!("single-owner fetch preparation became stale before commit");
+    };
+    Ok(changes)
+}
+
+#[test]
+fn owner_refresh_invalidates_nested_completeness() {
+    let personal = owner(100);
+    let library = owner(200);
+    let personal_root = CategoryKey::new(personal, FolderId::new(uuid(1)));
+    let library_root = CategoryKey::new(library, FolderId::new(uuid(101)));
+    let mut personal_root_category = category(personal, 1, None, "personal");
+    personal_root_category.server_version = ServerVersion::from_raw(1);
+    personal_root_category.server_descendent_count = Some(1);
+    let mut library_root_category = category(library, 101, None, "library");
+    library_root_category.server_version = ServerVersion::from_raw(1);
+    library_root_category.server_descendent_count = Some(0);
+    let mut inventory = Inventory::new(personal_root_category, Some(library_root_category), InventoryLimits::default())
+        .expect("valid personal and Library roots");
+    let mut child = category(personal, 2, Some(1), "child");
+    child.server_version = ServerVersion::from_raw(1);
+    child.server_descendent_count = Some(1);
+    inventory.upsert_category(child).expect("add child folder");
+    let mut grandchild = category(personal, 3, Some(2), "grandchild");
+    grandchild.server_version = ServerVersion::from_raw(1);
+    grandchild.server_descendent_count = Some(1);
+    inventory.upsert_category(grandchild).expect("add grandchild folder");
+    let mut deepest = category(personal, 4, Some(3), "deepest");
+    deepest.server_version = ServerVersion::from_raw(1);
+    deepest.server_descendent_count = Some(0);
+    let deepest_key = deepest.key;
+    inventory.upsert_category(deepest).expect("add deepest folder");
+
+    let complete = inventory.snapshot();
+    let child_key = CategoryKey::new(personal, FolderId::new(uuid(2)));
+    let grandchild_key = CategoryKey::new(personal, FolderId::new(uuid(3)));
+    assert!([personal_root, child_key, grandchild_key, deepest_key].into_iter().all(|folder| complete.is_complete(folder)));
+    assert!(complete.is_complete(library_root));
+    let stale = complete
+        .prepare_folder_fetch(
+            personal_root,
+            ServerVersion::from_raw(2),
+            Some(1),
+            vec![InventoryChild::Category(complete.category(child_key).expect("child remains present").clone())],
+        )
+        .expect("prepare root response before loss");
+
+    inventory.invalidate_owner(personal).expect("advance personal refresh generation");
+    let invalidated = inventory.snapshot();
+    assert_eq!(invalidated.owner_refresh_generation(personal), complete.owner_refresh_generation(personal) + 1);
+    assert!([personal_root, child_key, grandchild_key, deepest_key].into_iter().all(|folder| !invalidated.is_complete(folder)));
+    assert!(invalidated.is_complete(library_root));
+    assert_eq!(invalidated.incomplete_category_count(personal), 4);
+    assert_eq!(invalidated.incomplete_category_count(library), 0);
+    assert!(invariant(&invalidated).is_none());
+    std::assert_matches!(inventory.commit_folder_fetch(stale), Ok(inventory::FolderFetchCommit::StaleBase(_)));
+
+    let mut newer_metadata = invalidated.category(deepest_key).expect("deep folder remains present").clone();
+    newer_metadata.server_version = ServerVersion::from_raw(2);
+    inventory.upsert_category(newer_metadata).expect("apply newer metadata after coverage loss");
+    assert!(!inventory.snapshot().is_complete(deepest_key));
+
+    apply_fetch(&mut inventory, deepest_key, ServerVersion::from_raw(3), Some(0), Vec::new()).expect("reconcile deepest folder");
+    let reconciled = inventory.snapshot();
+    assert!(reconciled.is_complete(deepest_key));
+    assert!([personal_root, child_key, grandchild_key].into_iter().all(|folder| !reconciled.is_complete(folder)));
+    assert_eq!(reconciled.incomplete_category_count(personal), 3);
+    inventory.invalidate_owner(library).expect("advance Library refresh generation");
+    assert!(!inventory.snapshot().is_complete(library_root));
+    assert!(invariant(&inventory.snapshot()).is_none());
+}
+
 fn invariant(snapshot: &inventory::InventorySnapshot) -> Option<&'static str> {
     let roots = snapshot.roots();
     let categories = snapshot.categories().collect::<Vec<_>>();
@@ -102,8 +183,8 @@ fn invariant(snapshot: &inventory::InventorySnapshot) -> Option<&'static str> {
         }
         let expected_complete = category.server_version.is_known()
             && category.server_descendent_count.and_then(|count| usize::try_from(count).ok()) == Some(snapshot.child_count(category.key));
-        if snapshot.is_complete(category.key) != expected_complete {
-            return Some("category completeness disagrees with its fields");
+        if snapshot.is_complete(category.key) && !expected_complete {
+            return Some("complete category has inconsistent version or child count");
         }
     }
     for item in snapshot.items() {
@@ -215,7 +296,8 @@ fn failed_and_noop_changes_keep_folder_generations() {
     let before = inventory.snapshot();
 
     assert_eq!(
-        inventory.apply_folder_fetch(
+        apply_fetch(
+            &mut inventory,
             root,
             ServerVersion::UNKNOWN,
             None,
@@ -239,7 +321,7 @@ fn folder_fetch_and_version_updates_stamp_the_folder() {
     let root = inventory.snapshot().roots().personal();
     let before_fetch = inventory.snapshot();
 
-    let changes = inventory.apply_folder_fetch(root, ServerVersion::UNKNOWN, None, Vec::new()).expect("empty folder fetch is valid");
+    let changes = apply_fetch(&mut inventory, root, ServerVersion::UNKNOWN, None, Vec::new()).expect("empty folder fetch is valid");
     let after_fetch = inventory.snapshot();
     assert_eq!(changes.revision, after_fetch.revision());
     assert_eq!(after_fetch.folder_generation(root), Some(after_fetch.revision()));
@@ -312,17 +394,17 @@ fn fetch_replaces_direct_children() {
     inventory.upsert_item(item(owner, 3, 2, AssetType::Notecard, 30)).expect("add retained item");
     inventory.upsert_item(item(owner, 4, 2, AssetType::Notecard, 40)).expect("add stale item");
 
-    let changes = inventory
-        .apply_folder_fetch(
-            folder,
-            ServerVersion::from_raw(8),
-            Some(2),
-            vec![
-                InventoryChild::Item(item(owner, 3, 2, AssetType::Notecard, 31)),
-                InventoryChild::Category(category(owner, 5, Some(2), "added")),
-            ],
-        )
-        .expect("apply folder result");
+    let changes = apply_fetch(
+        &mut inventory,
+        folder,
+        ServerVersion::from_raw(8),
+        Some(2),
+        vec![
+            InventoryChild::Item(item(owner, 3, 2, AssetType::Notecard, 31)),
+            InventoryChild::Category(category(owner, 5, Some(2), "added")),
+        ],
+    )
+    .expect("apply folder result");
 
     let snapshot = inventory.snapshot();
     assert!(changes.changes.len() >= 3);
@@ -332,6 +414,77 @@ fn fetch_replaces_direct_children() {
     assert!(!snapshot.is_complete(root));
     assert!(snapshot.is_complete(folder));
     assert_eq!(invariant(&snapshot), None);
+}
+
+#[test]
+fn prepared_delete_rejects_live_revision() {
+    let owner = owner(27);
+    let root = category(owner, 1, None, "root");
+    let mut target = category(owner, 2, Some(1), "target");
+    target.server_version = ServerVersion::from_raw(7);
+    target.server_descendent_count = Some(1);
+    let folder = target.key;
+    let mut descendants = vec![target];
+    let mut parent = 2;
+    for id in 3..=4_098 {
+        descendants.push(category(owner, id, Some(parent), "nested"));
+        parent = id;
+    }
+    let mut inventory = Inventory::from_categories(root, None, descendants, InventoryLimits::default()).expect("large subtree is valid");
+    let snapshot = inventory.snapshot();
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+    let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).expect("test is waiting for the worker");
+        continue_rx.recv().expect("test releases the worker");
+        snapshot.prepare_folder_fetch(folder, ServerVersion::from_raw(8), Some(0), Vec::new())
+    });
+    started_rx.recv().expect("worker reached the controlled delay");
+
+    inventory
+        .apply_delta(InventoryDelta { updated_category_versions: vec![(folder, ServerVersion::from_raw(9))], ..InventoryDelta::default() })
+        .expect("live version update applies");
+    continue_tx.send(()).expect("worker is waiting to prepare");
+    let prepared = worker.join().expect("worker completes preparation").expect("fetch transaction prepares");
+
+    std::assert_matches!(inventory.commit_folder_fetch(prepared), Ok(inventory::FolderFetchCommit::StaleBase(_)));
+    let snapshot = inventory.snapshot();
+    assert_eq!(snapshot.category(folder).map(|category| category.server_version), Some(ServerVersion::from_raw(9)));
+    assert_eq!(snapshot.categories().count(), 4_098);
+    assert_eq!(invariant(&snapshot), None);
+
+    let prepared = snapshot
+        .prepare_folder_fetch(folder, ServerVersion::from_raw(10), Some(0), Vec::new())
+        .expect("next fetch prepares against the latest revision");
+    let inventory::FolderFetchCommit::Applied(_) = inventory.commit_folder_fetch(prepared).expect("next fetch commits") else {
+        panic!("latest-base transaction was rejected");
+    };
+    assert_eq!(inventory.snapshot().categories().count(), 2);
+    assert_eq!(invariant(&inventory.snapshot()), None);
+}
+
+#[test]
+fn cancelled_folder_preparation_leaves_the_next_fetch_admissible() {
+    let owner = owner(28);
+    let root = category(owner, 1, None, "root");
+    let mut target = category(owner, 2, Some(1), "target");
+    target.server_version = ServerVersion::from_raw(7);
+    target.server_descendent_count = Some(1);
+    let folder = target.key;
+    let mut inventory = Inventory::from_categories(root, None, vec![target], InventoryLimits::default()).expect("valid subtree");
+    let before = inventory.snapshot();
+    let cancellation = inventory::InventoryPreparationCancellation::default();
+    cancellation.cancel();
+
+    let result = before.prepare_folder_fetch_cancellable(folder, ServerVersion::from_raw(8), Some(0), Vec::new(), &cancellation);
+    assert_eq!(result.err(), Some(InventoryError::Cancelled));
+    assert_eq!(inventory.snapshot().revision(), before.revision());
+    assert_eq!(inventory.snapshot().category_count(), 2);
+
+    let changes = apply_fetch(&mut inventory, folder, ServerVersion::from_raw(9), Some(0), Vec::new()).expect("later fetch can commit");
+    assert!(!changes.is_empty());
+    assert_eq!(inventory.snapshot().category_count(), 2);
+    assert!(inventory.snapshot().is_complete(folder));
 }
 
 #[test]
@@ -350,8 +503,7 @@ fn folder_fetch_preserves_other_parent_items() {
     let mut linked_item = item(owner, 6, 2, AssetType::Link, 4);
     linked_item.inventory_type = InventoryType::Unknown(24);
 
-    inventory
-        .apply_folder_fetch(source, ServerVersion::from_raw(8), None, vec![InventoryChild::Item(linked_item)])
+    apply_fetch(&mut inventory, source, ServerVersion::from_raw(8), None, vec![InventoryChild::Item(linked_item)])
         .expect("apply direct source child");
 
     let snapshot = inventory.snapshot();
@@ -373,18 +525,23 @@ fn fetch_replaces_items_at_capacity() {
     let mut inventory = inventory_with_limits(owner, limits);
     let folder = CategoryKey::new(owner, FolderId::new(uuid(2)));
     inventory.upsert_category(category(owner, 2, Some(1), "folder")).expect("add folder");
-    inventory
-        .apply_folder_fetch(folder, ServerVersion::UNKNOWN, Some(1), vec![InventoryChild::Item(item(owner, 3, 2, AssetType::Notecard, 30))])
-        .expect("fill item capacity");
+    apply_fetch(
+        &mut inventory,
+        folder,
+        ServerVersion::UNKNOWN,
+        Some(1),
+        vec![InventoryChild::Item(item(owner, 3, 2, AssetType::Notecard, 30))],
+    )
+    .expect("fill item capacity");
 
-    inventory
-        .apply_folder_fetch(
-            folder,
-            ServerVersion::from_raw(1),
-            Some(1),
-            vec![InventoryChild::Item(item(owner, 5, 2, AssetType::Notecard, 50))],
-        )
-        .expect("replace item at capacity");
+    apply_fetch(
+        &mut inventory,
+        folder,
+        ServerVersion::from_raw(1),
+        Some(1),
+        vec![InventoryChild::Item(item(owner, 5, 2, AssetType::Notecard, 50))],
+    )
+    .expect("replace item at capacity");
     let snapshot = inventory.snapshot();
     assert_eq!(snapshot.items().count(), limits.max_items);
     assert!(snapshot.item(ItemKey::new(owner, ItemId::new(uuid(3)))).is_none());
@@ -399,13 +556,17 @@ fn fetch_replaces_categories_at_capacity() {
     let limits = InventoryLimits { max_categories: 2, max_items: 0, max_folder_fetch_children: 1 };
     let mut inventory = inventory_with_limits(owner, limits);
     let root = inventory.roots().personal();
-    inventory
-        .apply_folder_fetch(root, ServerVersion::UNKNOWN, Some(1), vec![InventoryChild::Category(category(owner, 2, Some(1), "old"))])
+    apply_fetch(&mut inventory, root, ServerVersion::UNKNOWN, Some(1), vec![InventoryChild::Category(category(owner, 2, Some(1), "old"))])
         .expect("fill category capacity");
 
-    inventory
-        .apply_folder_fetch(root, ServerVersion::from_raw(1), Some(1), vec![InventoryChild::Category(category(owner, 3, Some(1), "new"))])
-        .expect("replace category at capacity");
+    apply_fetch(
+        &mut inventory,
+        root,
+        ServerVersion::from_raw(1),
+        Some(1),
+        vec![InventoryChild::Category(category(owner, 3, Some(1), "new"))],
+    )
+    .expect("replace category at capacity");
     let snapshot = inventory.snapshot();
     assert_eq!(snapshot.categories().count(), limits.max_categories);
     assert!(snapshot.category(CategoryKey::new(owner, FolderId::new(uuid(2)))).is_none());
@@ -426,14 +587,14 @@ fn fetch_keeps_incoming_category_moved_out_of_stale_subtree() {
     inventory.upsert_category(category(owner, 4, Some(3), "moved")).expect("add nested incoming folder");
     inventory.upsert_item(item(owner, 5, 4, AssetType::Notecard, 50)).expect("add descendant item");
 
-    inventory
-        .apply_folder_fetch(
-            target,
-            ServerVersion::from_raw(1),
-            Some(1),
-            vec![InventoryChild::Category(category(owner, 4, Some(2), "moved"))],
-        )
-        .expect("move incoming folder out before removing the stale subtree");
+    apply_fetch(
+        &mut inventory,
+        target,
+        ServerVersion::from_raw(1),
+        Some(1),
+        vec![InventoryChild::Category(category(owner, 4, Some(2), "moved"))],
+    )
+    .expect("move incoming folder out before removing the stale subtree");
 
     let snapshot = inventory.snapshot();
     assert!(snapshot.category(CategoryKey::new(owner, FolderId::new(uuid(3)))).is_none());
@@ -467,7 +628,7 @@ fn links_distinguish_unloaded_and_broken() {
     inventory.upsert_item(link.clone()).expect("add link");
     assert_eq!(inventory.snapshot().link_resolution(link_key), Some(LinkResolution::NotLoaded(uuid(99))));
 
-    inventory.apply_folder_fetch(root, ServerVersion::from_raw(1), Some(1), vec![InventoryChild::Item(link)]).expect("complete root fetch");
+    apply_fetch(&mut inventory, root, ServerVersion::from_raw(1), Some(1), vec![InventoryChild::Item(link)]).expect("complete root fetch");
 
     assert_eq!(inventory.snapshot().link_resolution(link_key), Some(LinkResolution::Broken(uuid(99))));
 }
@@ -497,23 +658,24 @@ fn asset_type_query_spans_roots() {
     let other_type = item(personal_owner, 5, 1, AssetType::Sound, 50);
     let personal_key = personal_texture.key;
     let library_key = library_texture.key;
+    let roots = inventory.snapshot().roots();
 
-    inventory
-        .apply_folder_fetch(
-            inventory.snapshot().roots().personal(),
-            ServerVersion::from_raw(1),
-            Some(2),
-            vec![InventoryChild::Item(personal_texture), InventoryChild::Item(other_type)],
-        )
-        .expect("personal children");
-    inventory
-        .apply_folder_fetch(
-            inventory.snapshot().roots().library().expect("Library root"),
-            ServerVersion::from_raw(1),
-            Some(1),
-            vec![InventoryChild::Item(library_texture)],
-        )
-        .expect("Library children");
+    apply_fetch(
+        &mut inventory,
+        roots.personal(),
+        ServerVersion::from_raw(1),
+        Some(2),
+        vec![InventoryChild::Item(personal_texture), InventoryChild::Item(other_type)],
+    )
+    .expect("personal children");
+    apply_fetch(
+        &mut inventory,
+        roots.library().expect("Library root"),
+        ServerVersion::from_raw(1),
+        Some(1),
+        vec![InventoryChild::Item(library_texture)],
+    )
+    .expect("Library children");
 
     let mut matching = inventory.snapshot().items_of_asset_type(AssetType::Texture).map(|item| item.key).collect::<Vec<_>>();
     matching.sort_unstable();
@@ -629,7 +791,7 @@ proptest! {
                 4 => inventory.remove_subtree(owner, FolderId::new(uuid(category_id))),
                 5 => {
                     let folder = CategoryKey::new(owner, FolderId::new(uuid(category_id)));
-                    inventory.apply_folder_fetch(
+                    apply_fetch(&mut inventory,
                         folder,
                         ServerVersion::from_raw(i32::from(c)),
                         Some(2),

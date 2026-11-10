@@ -61,6 +61,7 @@ pub(super) fn test_session_with_coverage(
         pending_event: None,
         surfaced_coverage: HashMap::new(),
         surfaced_overflow_generation: 0,
+        last_event_watermark: None,
     }
 }
 
@@ -238,6 +239,7 @@ pub(super) fn spawn_session_client_with_event_probe(
         pending_event: None,
         surfaced_coverage: HashMap::new(),
         surfaced_overflow_generation: 0,
+        last_event_watermark: None,
     };
     let worker = spawn(async move {
         let result = run_client(
@@ -288,6 +290,7 @@ pub(super) fn spawn_network_thread_session(
         pending_event: None,
         surfaced_coverage: HashMap::new(),
         surfaced_overflow_generation: 0,
+        last_event_watermark: None,
     };
     let network_thread = thread::Builder::new()
         .name("network".into())

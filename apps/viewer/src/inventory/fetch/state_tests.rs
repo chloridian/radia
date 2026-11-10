@@ -13,6 +13,20 @@ fn key(owner: InventoryOwner, id: u128) -> CategoryKey {
     CategoryKey::new(owner, FolderId::new(Uuid::from_u128(id)))
 }
 
+fn apply_fetch(
+    inventory: &mut Inventory,
+    folder: CategoryKey,
+    version: ServerVersion,
+    descendent_count: Option<u32>,
+    children: Vec<InventoryChild>,
+) -> Result<::inventory::ChangeSet, ::inventory::InventoryError> {
+    let prepared = inventory.snapshot().prepare_folder_fetch(folder, version, descendent_count, children)?;
+    let ::inventory::FolderFetchCommit::Applied(changes) = inventory.commit_folder_fetch(prepared)? else {
+        panic!("single-owner fetch preparation became stale before commit");
+    };
+    Ok(changes)
+}
+
 fn category(key: CategoryKey, parent: Option<CategoryKey>) -> Category {
     Category {
         key,
@@ -95,8 +109,7 @@ fn latest_snapshot_requeues_child_made_incomplete_by_parent_metadata() {
     let mut updated_child = category(child, Some(root));
     updated_child.server_version = ServerVersion::from_raw(11);
     updated_child.server_descendent_count = Some(1);
-    inventory
-        .apply_folder_fetch(root, ServerVersion::from_raw(2), Some(1), vec![InventoryChild::Category(updated_child)])
+    apply_fetch(&mut inventory, root, ServerVersion::from_raw(2), Some(1), vec![InventoryChild::Category(updated_child)])
         .expect("accept newer parent metadata");
     let latest_snapshot = inventory.snapshot();
     assert!(!latest_snapshot.is_complete(child));
