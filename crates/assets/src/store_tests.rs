@@ -264,7 +264,7 @@ fn disk_hit_uses_decode_admission_and_does_not_count_as_a_fetch_attempt() {
     let input = store.complete_cache_read(read.run(), now).expect("cache hit supplies input");
     let LoadJob::Decode(input) = input else { panic!("cache hit follows decode admission") };
     assert_eq!(
-        store.entries.get(&LoadKey { resource, lod: None }).and_then(|entry| entry.views.get(&route)).map(|view| view.attempts),
+        store.entries.get(&LoadKey { resource, lod: None }).and_then(|entry| entry.views.get(&route)).map(RouteState::attempts),
         Some(0)
     );
     let decode = store.start_decode(input).expect("decode admission");
@@ -1186,6 +1186,7 @@ fn mesh_cache_pressure_keeps_entry() {
     assert_eq!(completion.failure(), Some(Failure::MemoryPressure));
     assert!(store.complete(completion, now).is_empty());
     assert_matches!(demand.status(), Status::Queued);
+    store.maintain(now);
     assert_eq!(store.next_deadline(now), Some(now + Duration::from_secs(1)));
     assert_eq!(cache.stats().corrupt_entries, 0);
     assert_matches!(cache.lookup(Request::MeshLod(request)), crate::cache::AssetLookup::Hit(_));
@@ -1637,6 +1638,125 @@ fn shared_demand_controls_cancellation() {
 }
 
 #[test]
+fn shared_priority_keeps_visible_peer() {
+    let StoreHarness { now, mut store, route, .. } = StoreHarness::new();
+    let first = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
+    let second = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
+    let input = fetch(&mut store, now, RGBA_J2C.to_vec());
+
+    first.update_priority(Priority::Background);
+    store.maintain(now);
+    assert_eq!(store.priority(&input), Priority::Visible, "lowering one lease preserves its visible peer");
+
+    second.update_priority(Priority::Background);
+    store.maintain(now);
+    assert_eq!(store.priority(&input), Priority::Background, "priority falls after the last visible lease changes");
+}
+
+#[test]
+fn work_progresses_during_churn() {
+    const ELIGIBLE: usize = MAX_NON_MESH_FETCHES / 2;
+    let StoreHarness { now, mut store, route, .. } = StoreHarness::new();
+    let eligible: Vec<_> = (1..=ELIGIBLE)
+        .map(|id| {
+            let resource = resource(id as u128);
+            let demand = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
+            (resource, demand)
+        })
+        .collect();
+    let churn: Vec<_> = (0..MAX_DIRTY_PER_TURN * 4)
+        .map(|index| {
+            store.request_with_importance(route, Request::new(resource(1_000 + index as u128)), Priority::Visible, u16::MAX, now).unwrap()
+        })
+        .collect();
+    while store.maintain(now) {}
+
+    let mut jobs = Vec::with_capacity(ELIGIBLE);
+    for (expected, _) in &eligible {
+        let mut attempts = 0;
+        let job = loop {
+            for demand in &churn {
+                demand.update_priority(Priority::Visible);
+                demand.update_priority(Priority::Background);
+            }
+            if let Some(job) = store.next_job(now) {
+                break job;
+            }
+            attempts += 1;
+            assert!(attempts < 8, "bounded candidate search reaches stable work while churn continues");
+        };
+        let LoadJob::Fetch(fetch) = job else {
+            panic!("eligible request produces a network fetch");
+        };
+        assert_eq!(fetch.resource(), *expected, "dirty candidates cannot mask or outrank stable visible work");
+        jobs.push(fetch);
+    }
+    assert!(store.maintain(now), "the dirty backlog remains after useful work has been admitted");
+}
+
+#[test]
+fn saturated_dirty_drop_releases_fetches() {
+    let StoreHarness { now, mut store, route, .. } = StoreHarness::new();
+    let mut running_demands = Vec::with_capacity(MAX_NON_MESH_FETCHES);
+    let mut running_fetches = Vec::with_capacity(MAX_NON_MESH_FETCHES);
+    for index in 0..MAX_NON_MESH_FETCHES {
+        let id = u128::MAX - u128::try_from(index).unwrap();
+        running_demands.push(store.request(route, Request::new(resource(id)), Priority::Visible, now).unwrap());
+        let LoadJob::Fetch(fetch) = store.next_job(now).expect("visible fetch fills the pool") else { panic!("network fetch") };
+        running_fetches.push(fetch);
+    }
+
+    let demands: Vec<_> = (1..=DIRTY_QUEUE_CAPACITY + 1)
+        .map(|id| store.request(route, Request::new(resource(id as u128)), Priority::Background, now).unwrap())
+        .collect();
+    drop(running_demands);
+
+    let mut turns = 0;
+    while store.maintain(now) {
+        turns += 1;
+        assert!(turns < 100, "overflow cleanup remains bounded across turns");
+    }
+    assert!(running_fetches.iter().all(FetchJob::is_cancelled), "dropped leases cancel every in-flight fetch");
+
+    drop(running_fetches);
+    let mut turns = 0;
+    while store.maintain(now) {
+        turns += 1;
+        assert!(turns < 100, "abandoned fetch permits release across bounded turns");
+    }
+    let admitted: Vec<_> = (0..MAX_NON_MESH_FETCHES).map(|_| store.next_job(now).expect("released fetch admission")).collect();
+    assert!(admitted.iter().all(|job| matches!(job, LoadJob::Fetch(_))));
+    assert_eq!(demands.len(), DIRTY_QUEUE_CAPACITY + 1);
+}
+
+#[test]
+fn key_reuse_survives_stale_signal() {
+    let StoreHarness { now, mut store, route, .. } = StoreHarness::new();
+    let mut demands: Vec<_> = (1..=DIRTY_QUEUE_CAPACITY + 1)
+        .rev()
+        .map(|id| (id as u128, store.request(route, Request::new(resource(id as u128)), Priority::Background, now).unwrap()))
+        .collect();
+    let removed = demands.iter().position(|(id, _)| *id == 2).expect("queued resource exists");
+    drop(demands.remove(removed));
+
+    assert!(store.maintain(now), "the full queue starts a bounded fallback scan");
+    assert!(!store.entries.contains_key(&LoadKey { resource: resource(2), lod: None }), "fallback removes the dropped resource");
+    let replacement = store.request(route, Request::new(resource(2)), Priority::Visible, now).unwrap();
+
+    let mut turns = 0;
+    while store.maintain(now) {
+        turns += 1;
+        assert!(turns < 100, "stale queue entries do not leave maintenance pending forever");
+    }
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("reused key remains schedulable after its stale signal") else {
+        panic!("replacement demand produces a fetch");
+    };
+    assert_eq!(fetch.resource(), resource(2));
+    assert_matches!(replacement.status(), Status::Fetching);
+    assert_eq!(demands.len(), DIRTY_QUEUE_CAPACITY);
+}
+
+#[test]
 fn route_failures_share_success() {
     let StoreHarness { now, mut store, route: first, .. } = StoreHarness::new();
     let a = store.request(first, Request::new(resource(1)), Priority::Visible, now).unwrap();
@@ -1768,6 +1888,7 @@ async fn retired_routes_reject_late_results() {
     assert_eq!(budget.stats().charged_bytes, 0);
     let replacement = store.register_route().unwrap();
     let waiting = store.request(replacement, Request::new(resource(1)), Priority::Visible, now).unwrap();
+    store.maintain(now);
     let deadline = store.next_deadline(now).expect("live demand has a deadline");
     store.maintain(deadline);
     assert_matches!(waiting.status(), Status::Failed { failure: Failure::Deadline, retry_at: None });
@@ -1804,6 +1925,8 @@ fn shutdown_retains_running_work() {
     store.complete(result, now);
     assert_eq!(budget.stats().charged_bytes, 0);
     assert_matches!(demand.status(), Status::StaleSession);
+    drop(demand);
+    assert!(!store.maintain(now), "closed stores have no reconciliation work");
 }
 
 #[test]
@@ -1812,7 +1935,12 @@ fn demand_has_no_cache_cap() {
     let demands: Vec<_> = (1..=4097).map(|id| store.request(route, Request::new(resource(id)), Priority::Visible, now).unwrap()).collect();
     assert_eq!(demands.len(), 4097, "live handles are not rejected by the former 4096-entry cache limit");
     drop(demands);
-    store.maintain(now);
+    let mut turns = 0;
+    while store.maintain(now) {
+        turns += 1;
+        assert!(turns < 100, "dropped demand cleanup remains bounded across turns");
+    }
+    assert!(turns > 0, "demand changes are reconciled in bounded turns");
     assert!(store.next_job(now).is_none());
     let demand = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
     let job = fetch(&mut store, now, RGBA_J2C.to_vec());
@@ -2433,4 +2561,60 @@ fn completion_preserves_store_identity() {
     assert_matches!(demand.status(), Status::Failed { failure: Failure::Cancelled, retry_at: None });
     drop(other_job);
     assert_eq!(budget.stats().charged_bytes, 0);
+}
+
+fn retired_material_demand() -> (Instant, Store, Demand) {
+    let now = Instant::now();
+    let mut store = Store::new(Budget::default());
+    let route = store.register_route().unwrap();
+    let demand = store.request(route, Request::PbrMaterial(AssetId::new(Uuid::from_u128(4_001))), Priority::Visible, now).unwrap();
+    store.retire_route(route);
+    (now, store, demand)
+}
+
+fn settle_maintenance(store: &mut Store, now: Instant) {
+    for _ in 0..4 {
+        if !store.maintain(now) {
+            return;
+        }
+    }
+    panic!("maintenance settles after stale lease notifications");
+}
+
+#[test]
+fn retired_lease_drop_clears_work() {
+    let (now, mut store, demand) = retired_material_demand();
+    settle_maintenance(&mut store, now);
+
+    drop(demand);
+
+    settle_maintenance(&mut store, now);
+}
+
+#[test]
+fn retired_lease_update_clears_work() {
+    let (now, mut store, demand) = retired_material_demand();
+    settle_maintenance(&mut store, now);
+
+    demand.update_priority(Priority::Background);
+
+    settle_maintenance(&mut store, now);
+}
+
+#[test]
+fn reused_key_ignores_stale_lease() {
+    let (now, mut store, old_demand) = retired_material_demand();
+    settle_maintenance(&mut store, now);
+    let route = store.register_route().unwrap();
+    let request = Request::PbrMaterial(AssetId::new(Uuid::from_u128(4_001)));
+    let replacement = store.request(route, request, Priority::Visible, now).unwrap();
+
+    drop(old_demand);
+
+    settle_maintenance(&mut store, now);
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("replacement demand remains schedulable") else {
+        panic!("replacement demand uses a network fetch");
+    };
+    assert_eq!(fetch.request(), request);
+    assert_matches!(replacement.status(), Status::Fetching);
 }
