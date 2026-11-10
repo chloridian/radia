@@ -140,7 +140,11 @@ mod inventory_intake_progress {
         FutureExt,
         future::{BoxFuture, Shared},
     };
-    use network::Event;
+    use network::{Event, PacketOrder};
+    use protocol::{
+        lludp::Message,
+        messages::region::region_handshake::{RegionHandshake, RegionInfo1},
+    };
     use tokio::{
         runtime::Handle,
         sync::{mpsc, oneshot},
@@ -148,6 +152,8 @@ mod inventory_intake_progress {
 
     use crate::{
         inventory::InventoryFetchEvent,
+        session::coordinator::driver::{MAX_DEFERRED_INVENTORY_EVENTS, inventory_queue_is_full},
+        session::coordinator::events::WorldHandoff,
         session::world::{SessionWorld, viewer_world_limits},
         test_helpers::simulator_id,
         world_reader::{MAX_INTAKE_TURNS, WorldReadHost},
@@ -227,6 +233,57 @@ mod inventory_intake_progress {
         }
 
         assert!(inventory_turn.is_some(), "inventory must progress within two turns after becoming ready");
+    }
+
+    #[tokio::test]
+    async fn world_progresses_while_inventory_intake_is_full() {
+        let mut world = SessionWorld::new(viewer_world_limits());
+        let mut reads = WorldReadHost::new(world.world(), Handle::current());
+        let mut handoff = WorldHandoff::default();
+        let mut turn = OrdinaryInputTurn::default();
+        let simulator = simulator_id();
+        world.register_simulator(simulator, None).expect("register simulator region");
+        let event = ready(Some(Event::SimulatorMessage {
+            simulator_id: simulator,
+            source: "127.0.0.1:13000".parse().expect("test endpoint"),
+            sequence: 1,
+            packet_order: PacketOrder::Ordered(1),
+            received_at: std::time::Instant::now(),
+            ping_delay: None,
+            message: Message::RegionHandshake(RegionHandshake {
+                region_info1: RegionInfo1 { sim_name: "inventory-pressure".into(), ..RegionInfo1::default() },
+                region_info2: None,
+                region_info3: None,
+                region_info4: Vec::new(),
+            }),
+        }));
+        let inventory_full = inventory_queue_is_full(MAX_DEFERRED_INVENTORY_EVENTS, 0);
+        assert!(inventory_full, "the setup must hit the same event-count admission limit used by SessionDriver");
+        let inventory_queue = async move {
+            if inventory_full { pending::<Option<InventoryFetchEvent>>().await } else { Some(InventoryFetchEvent::BackgroundDone) }
+        };
+
+        let input = select_drain_input_fair(
+            &mut reads,
+            event,
+            pending(),
+            pending(),
+            pending(),
+            idle_cancellation(),
+            pending(),
+            pending(),
+            inventory_queue,
+            &mut turn,
+        )
+        .await;
+
+        let Input::Event(Some(event @ Event::SimulatorMessage { .. })) = input else {
+            panic!("a ready simulator world update must pass the full inventory gate");
+        };
+        let before = world.world().revision();
+        handoff.apply_event(&mut world, &event, None);
+        assert!(world.world().revision() > before, "the delivered world update must advance World state");
+        reads.finish();
     }
 
     #[tokio::test]

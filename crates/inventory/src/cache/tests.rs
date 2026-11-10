@@ -24,6 +24,20 @@ use crate::{
     SaleInfo, SaleType, ServerVersion,
 };
 
+fn apply_fetch(
+    inventory: &mut Inventory,
+    folder: CategoryKey,
+    version: ServerVersion,
+    descendent_count: Option<u32>,
+    children: Vec<InventoryChild>,
+) -> Result<crate::ChangeSet, crate::InventoryError> {
+    let prepared = inventory.snapshot().prepare_folder_fetch(folder, version, descendent_count, children)?;
+    let crate::FolderFetchCommit::Applied(changes) = inventory.commit_folder_fetch(prepared)? else {
+        panic!("single-owner fetch preparation became stale before commit");
+    };
+    Ok(changes)
+}
+
 trait RestoreAll {
     fn apply_to(
         self,
@@ -106,12 +120,7 @@ fn fixture(folder_version: i32) -> Result<Fixture, Box<dyn Error>> {
     };
     let item = item(owner, agent, folder, 3, 4, "Object", "Cached object");
     let mut inventory = Inventory::new(root.clone(), None, InventoryLimits::default())?;
-    inventory.apply_folder_fetch(
-        root.key,
-        root.server_version,
-        root.server_descendent_count,
-        vec![InventoryChild::Category(child_folder)],
-    )?;
+    apply_fetch(&mut inventory, root.key, root.server_version, root.server_descendent_count, vec![InventoryChild::Category(child_folder)])?;
     Ok(Fixture { inventory, agent, folder, item })
 }
 
@@ -128,7 +137,8 @@ fn two_folder_fixture() -> Result<TwoFolderFixture, Box<dyn Error>> {
         server_version: ServerVersion::from_raw(7),
         server_descendent_count: None,
     };
-    base.inventory.apply_folder_fetch(
+    apply_fetch(
+        &mut base.inventory,
         root,
         ServerVersion::from_raw(1),
         Some(2),
@@ -206,7 +216,7 @@ fn library_fixture(agent: Uuid, library_owner: Uuid, folder_version: i32, item_n
         server_descendent_count: None,
     };
     let mut inventory = Inventory::new(personal_root, Some(library_root.clone()), InventoryLimits::default())?;
-    inventory.apply_folder_fetch(library_root.key, ServerVersion::from_raw(1), Some(1), vec![InventoryChild::Category(library_folder)])?;
+    apply_fetch(&mut inventory, library_root.key, ServerVersion::from_raw(1), Some(1), vec![InventoryChild::Category(library_folder)])?;
     let object = item(library, library_owner, folder, 9_002, 9_003, item_name, "Shared library item");
     Ok(LibraryFixture { inventory, agent, folder, item: object })
 }
@@ -242,7 +252,8 @@ fn seed_cache(root: &std::path::Path, folder_version: i32) -> Result<(), Box<dyn
     let (cache, _) = InventoryCache::open_at_root(root, "agni", fixture.agent, None)?;
     block_on(cache.submit_bootstrap(&fixture.inventory.snapshot())?.wait())?;
     let before = fixture.inventory.snapshot();
-    let changes = fixture.inventory.apply_folder_fetch(
+    let changes = apply_fetch(
+        &mut fixture.inventory,
         fixture.folder,
         ServerVersion::from_raw(folder_version),
         Some(1),
@@ -287,7 +298,7 @@ fn persist_fetch(
     children: Vec<InventoryChild>,
 ) -> Result<(), Box<dyn Error>> {
     let before = inventory.snapshot();
-    let changes = inventory.apply_folder_fetch(folder, version, Some(descendent_count), children)?;
+    let changes = apply_fetch(inventory, folder, version, Some(descendent_count), children)?;
     let after = inventory.snapshot();
     block_on(cache.submit_changeset(&changes, &before, &after)?.wait())?;
     Ok(())
@@ -346,7 +357,7 @@ fn mismatched_version_restores_children_incomplete_until_fetch_reconciles() -> R
     assert_eq!(current.inventory.snapshot().item(current.item.key), Some(&current.item));
     assert!(!current.inventory.snapshot().is_complete(current.folder));
 
-    current.inventory.apply_folder_fetch(current.folder, ServerVersion::from_raw(8), Some(0), Vec::new())?;
+    apply_fetch(&mut current.inventory, current.folder, ServerVersion::from_raw(8), Some(0), Vec::new())?;
     assert_eq!(current.inventory.snapshot().item(current.item.key), None);
     block_on(cache.close())?;
     Ok(())
@@ -372,7 +383,8 @@ fn completed_fetch_wins_while_other_cached_folders_restore() -> Result<(), Box<d
         "Authoritative fetch value",
     );
     let before = current.inventory.snapshot();
-    let changes = current.inventory.apply_folder_fetch(
+    let changes = apply_fetch(
+        &mut current.inventory,
         current.first_folder,
         ServerVersion::from_raw(8),
         Some(1),
@@ -558,7 +570,8 @@ fn unchanged_parent_does_not_restore_a_changed_child() -> Result<(), Box<dyn Err
     assert_eq!(restored.item(current.new_item.key), None);
 
     let before = current.inventory.snapshot();
-    let changes = current.inventory.apply_folder_fetch(
+    let changes = apply_fetch(
+        &mut current.inventory,
         current.child,
         ServerVersion::from_raw(21),
         Some(1),
@@ -869,13 +882,13 @@ fn cold_and_warm_restore_measurement_at_one_hundred_thousand_items() -> Result<(
     let mut cold = fixture(7)?;
     let cold_children = children.clone();
     let cold_started = Instant::now();
-    cold.inventory.apply_folder_fetch(cold.folder, ServerVersion::from_raw(7), Some(ITEM_COUNT as u32), cold_children)?;
+    apply_fetch(&mut cold.inventory, cold.folder, ServerVersion::from_raw(7), Some(ITEM_COUNT as u32), cold_children)?;
     let cold_elapsed = cold_started.elapsed();
 
     let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", seed.agent, None)?;
     let before = seed.inventory.snapshot();
     block_on(cache.submit_bootstrap(&before)?.wait())?;
-    let changes = seed.inventory.apply_folder_fetch(seed.folder, ServerVersion::from_raw(7), Some(ITEM_COUNT as u32), children)?;
+    let changes = apply_fetch(&mut seed.inventory, seed.folder, ServerVersion::from_raw(7), Some(ITEM_COUNT as u32), children)?;
     let after = seed.inventory.snapshot();
     block_on(cache.submit_changeset(&changes, &before, &after)?.wait())?;
     let path = cache.path().to_owned();
@@ -895,7 +908,8 @@ fn cold_and_warm_restore_measurement_at_one_hundred_thousand_items() -> Result<(
         server_version: ServerVersion::from_raw(8),
         server_descendent_count: None,
     };
-    warm.inventory.apply_folder_fetch(
+    apply_fetch(
+        &mut warm.inventory,
         root,
         ServerVersion::from_raw(1),
         Some(2),
@@ -917,7 +931,7 @@ fn cold_and_warm_restore_measurement_at_one_hundred_thousand_items() -> Result<(
             first_visible = Some(warm_started.elapsed());
         }
         let fetch_version = ServerVersion::from_raw(100 + i32::try_from(turns)?);
-        warm.inventory.apply_folder_fetch(fetch_folder, fetch_version, None, Vec::new())?;
+        apply_fetch(&mut warm.inventory, fetch_folder, fetch_version, None, Vec::new())?;
         excluded.insert(fetch_folder);
         if progress.finished {
             break;
@@ -983,7 +997,8 @@ fn two_processes_write_shared_library_scope() -> Result<(), Box<dyn Error>> {
     let mut parent = library_fixture(Uuid::from_u128(706), owner, 5, "Shared library item")?;
     let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", parent.agent, Some(owner))?;
     let before = parent.inventory.snapshot();
-    let changes = parent.inventory.apply_folder_fetch(
+    let changes = apply_fetch(
+        &mut parent.inventory,
         parent.folder,
         ServerVersion::from_raw(5),
         Some(1),
@@ -1003,7 +1018,7 @@ fn two_processes_write_shared_library_scope() -> Result<(), Box<dyn Error>> {
     child.wait_for_stdout("write-lock-held")?;
 
     let write = cache.submit_changeset(&changes, &before, &after)?;
-    let InventoryCacheWrite { result, control, identity, owners } = write;
+    let InventoryCacheWrite { result, control, identity, owners, affected_categories } = write;
     let busy = match result {
         Ok(receipt) => block_on(receipt.wait()),
         Err(error) => Err(error),
@@ -1012,7 +1027,7 @@ fn two_processes_write_shared_library_scope() -> Result<(), Box<dyn Error>> {
     child.write_stdin(b"go\n")?;
     assert!(child.wait()?.success(), "child process failed; stdout: {}", child.stdout());
 
-    let failed_write = InventoryCacheWrite { result: Err(SqliteError::Busy), control, identity, owners };
+    let failed_write = InventoryCacheWrite { result: Err(SqliteError::Busy), control, identity, owners, affected_categories };
     std::assert_matches!(block_on(failed_write.wait()), Err(InventoryCacheError::Sqlite(SqliteError::Busy)));
     block_on(cache.close())?;
 

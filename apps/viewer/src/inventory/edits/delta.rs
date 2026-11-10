@@ -7,12 +7,16 @@ use uuid::Uuid;
 
 use crate::inventory::fetch::{category_from_wire, item_from_wire};
 
+use super::controller::affected_folders;
 use super::types::EditOperation;
 
 pub(crate) struct AisDelta {
     pub(super) delta: InventoryDelta,
     pub(super) created: Option<CategoryKey>,
     confirmed_name: Option<ConfirmedName>,
+    owner: InventoryOwner,
+    owner_refresh_generation: u64,
+    refetch_folders: Vec<CategoryKey>,
 }
 
 enum ConfirmedName {
@@ -21,6 +25,27 @@ enum ConfirmedName {
 }
 
 impl AisDelta {
+    pub(crate) fn estimated_heap_bytes(&self) -> usize {
+        let confirmed_name_bytes = match &self.confirmed_name {
+            Some(ConfirmedName::Category { name, .. } | ConfirmedName::Item { name, .. }) => {
+                name.capacity().saturating_add(std::mem::size_of::<usize>())
+            }
+            None => 0,
+        };
+        std::mem::size_of::<Self>()
+            .saturating_add(self.delta.estimated_heap_bytes())
+            .saturating_add(confirmed_name_bytes)
+            .saturating_add(self.refetch_folders.capacity().saturating_mul(std::mem::size_of::<CategoryKey>()))
+    }
+
+    pub(crate) fn is_current(&self, current: &InventorySnapshot) -> bool {
+        current.owner_refresh_generation(self.owner) == self.owner_refresh_generation
+    }
+
+    pub(crate) fn refetch_folders(&self) -> &[CategoryKey] {
+        &self.refetch_folders
+    }
+
     pub(crate) fn into_delta(mut self, current: &InventorySnapshot) -> InventoryDelta {
         match self.confirmed_name {
             Some(ConfirmedName::Category { key, name }) => {
@@ -211,7 +236,23 @@ pub(super) fn delta_from_ais_response(
             .map(|(id, version)| (CategoryKey::new(owner, FolderId::new(*id)), ServerVersion::from_raw(*version))),
     );
 
-    Ok(AisDelta { delta, created, confirmed_name })
+    let mut refetch_folders = HashSet::new();
+    refetch_folders.extend(affected_folders(operation, snapshot, owner));
+    refetch_folders.extend(delta.created_categories.iter().chain(&delta.updated_categories).filter_map(|category| category.parent));
+    refetch_folders.extend(delta.removed_categories.iter().filter_map(|key| snapshot.category(*key).and_then(|category| category.parent)));
+    refetch_folders.extend(delta.created_items.iter().chain(&delta.updated_items).map(|item| item.parent));
+    refetch_folders.extend(delta.removed_items.iter().filter_map(|key| snapshot.item(*key).map(|item| item.parent)));
+    refetch_folders.extend(delta.updated_category_versions.iter().map(|(folder, _)| *folder));
+    let mut refetch_folders = refetch_folders.into_iter().collect::<Vec<_>>();
+    refetch_folders.sort_unstable();
+    Ok(AisDelta {
+        delta,
+        created,
+        confirmed_name,
+        owner,
+        owner_refresh_generation: snapshot.owner_refresh_generation(owner),
+        refetch_folders,
+    })
 }
 
 fn append_category(
@@ -302,8 +343,8 @@ mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
     use ::inventory::{
-        AssetType, Inventory, InventoryLimits, InventoryNodeId, InventoryNodeKey, InventoryType, PermissionMask, Permissions, SaleInfo,
-        SaleType,
+        AssetType, Inventory, InventoryChild, InventoryDelta, InventoryLimits, InventoryNodeId, InventoryNodeKey, InventoryType,
+        PermissionMask, Permissions, SaleInfo, SaleType,
     };
     use utils::{AssetId, AvatarId, GroupId};
 
@@ -476,5 +517,91 @@ mod tests {
         let current = inventory.snapshot();
         inventory.apply_delta(missing_confirmation.into_delta(&current)).expect("apply stale name confirmation");
         assert!(inventory.snapshot().item(item).is_none());
+    }
+
+    #[test]
+    fn stale_edit_confirmation_reloads_its_folder() {
+        let owner = InventoryOwner::new(Uuid::from_u128(21));
+        let root = key(owner, 22);
+        let item_key = ItemKey::new(owner, ItemId::new(Uuid::from_u128(23)));
+        let mut root_category = category(root, None, "root");
+        root_category.server_version = ServerVersion::from_raw(1);
+        root_category.server_descendent_count = Some(1);
+        let mut inventory = Inventory::new(root_category, None, InventoryLimits::default()).expect("valid root");
+        let item = Item {
+            key: item_key,
+            parent: root,
+            asset_id: AssetId::new(Uuid::from_u128(24)),
+            asset_type: AssetType::Notecard,
+            inventory_type: InventoryType::Notecard,
+            flags: 0,
+            name: Arc::from("before edit"),
+            description: Arc::from("description"),
+            created_at: 0,
+            permissions: Permissions {
+                creator: AvatarId::new(Uuid::nil()),
+                owner: AvatarId::new(owner.id()),
+                group: GroupId::new(Uuid::nil()),
+                last_owner: AvatarId::new(Uuid::nil()),
+                base: PermissionMask::new(0),
+                owner_mask: PermissionMask::new(0),
+                group_mask: PermissionMask::new(0),
+                everyone: PermissionMask::new(0),
+                next_owner: PermissionMask::new(0),
+            },
+            sale: SaleInfo { sale_type: SaleType::NotForSale, price: 0 },
+        };
+        inventory.upsert_item(item.clone()).expect("insert item");
+        let initial = inventory.snapshot();
+        assert!(initial.is_complete(root));
+        let response = AisEditResponse {
+            category: None,
+            item: None,
+            created_categories: Vec::new(),
+            created_items: Vec::new(),
+            updated_categories: Vec::new(),
+            updated_items: vec![item_key.id().uuid()],
+            removed_items: Vec::new(),
+            categories_removed: Vec::new(),
+            category_items_removed: Vec::new(),
+            broken_links_removed: Vec::new(),
+            updated_category_versions: BTreeMap::new(),
+        };
+        let confirmation = delta_from_ais_response(
+            &response,
+            &EditOperation::RenameItem { item: item_key, name: "confirmed name".to_owned() },
+            &initial,
+            owner,
+        )
+        .expect("convert edit confirmation");
+
+        inventory.invalidate_owner(owner).expect("advance owner refresh generation");
+        let mut refreshed_item = item;
+        refreshed_item.name = Arc::from("newer server name");
+        inventory.upsert_item(refreshed_item.clone()).expect("apply current item state");
+        let current = inventory.snapshot();
+        let prepared = current
+            .prepare_folder_fetch(root, ServerVersion::from_raw(2), Some(1), vec![InventoryChild::Item(refreshed_item)])
+            .expect("prepare refreshed folder");
+        std::assert_matches!(inventory.commit_folder_fetch(prepared), Ok(::inventory::FolderFetchCommit::Applied(_)));
+        let current = inventory.snapshot();
+
+        assert!(!confirmation.is_current(&current));
+        assert_eq!(confirmation.refetch_folders(), [root]);
+        let refetch_folders = confirmation.refetch_folders().to_vec();
+        let mut stale_model = inventory.clone();
+        stale_model.apply_delta(confirmation.into_delta(&current)).expect("apply stale confirmation to independent oracle");
+        assert_eq!(stale_model.snapshot().item(item_key).map(|item| item.name.as_ref()), Some("confirmed name"));
+        assert_eq!(current.item(item_key).map(|item| item.name.as_ref()), Some("newer server name"));
+
+        let changes = inventory
+            .apply_delta(InventoryDelta {
+                updated_category_versions: refetch_folders.into_iter().map(|folder| (folder, ServerVersion::UNKNOWN)).collect(),
+                ..InventoryDelta::default()
+            })
+            .expect("mark stale confirmation folder incomplete");
+        assert!(changes.refetch_categories.contains(&root));
+        assert!(!inventory.snapshot().is_complete(root));
+        assert_eq!(inventory.snapshot().item(item_key).map(|item| item.name.as_ref()), Some("newer server name"));
     }
 }

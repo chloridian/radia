@@ -1,13 +1,13 @@
 pub(super) mod inventory;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, VecDeque},
     future::pending,
     ops::ControlFlow,
     sync::{Arc, Mutex},
 };
 
-use ::inventory::{CategoryKey, Inventory, InventoryNodeKey, InventorySnapshot};
+use ::inventory::{CategoryKey, Inventory, InventoryChild, InventoryNodeKey, InventoryPreparationCancellation, InventorySnapshot};
 use futures::{
     FutureExt,
     channel::oneshot,
@@ -15,7 +15,8 @@ use futures::{
     future::{BoxFuture, Shared},
 };
 use network::{
-    AgentSession, CircuitMotionStatus, CoverageLoss, CoverageSource, Event, Grid, PacketOrder, SimulatorId, capabilities::Client,
+    AgentSession, CircuitMotionStatus, CoverageLoss, CoverageLossReason, CoverageSource, Event, Grid, PacketOrder, SimulatorId,
+    capabilities::Client,
 };
 use protocol::{lludp::Message, login::ResponseData, messages::RequestAgentData};
 use tokio::{runtime::Handle, sync::watch};
@@ -26,13 +27,16 @@ use super::{
     events::{MovementCompleteOutcome, SimulatorScope, WorldHandoff, handle_simulator_message, order_evidence, route_recovery_targets},
     input::{Input, OrdinaryInputTurn, select_drain_input_fair},
     inventory_bootstrap::{InventoryBootstrapReport, InventoryWorkerError, spawn_inventory_build},
-    inventory_cache::{InventoryCacheEvent, InventoryCacheSession},
+    inventory_cache::{InventoryCacheEvent, InventoryCacheEventOutcome, InventoryCacheSession, InventoryDisposalPermit},
     media::ObjectMediaIntake,
     presentation::{AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, SessionEnd, SessionReadyUpdate, ViewerUpdate},
 };
 use crate::{
     asset_coordinator::AssetCoordinator,
-    inventory::{InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError, MoveExpectation},
+    inventory::{
+        FolderApplyOutcome, FolderFetch, InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError,
+        InventoryFetchEvent, MoveExpectation,
+    },
     remembered_login::{self, RememberedLogin},
     session::{
         AgentMotionPublisher, CameraUplink, RegionLookup, Session, SessionHandle,
@@ -69,9 +73,44 @@ enum DriverInput {
     InventoryCache(Option<InventoryCacheEvent>),
     ObjectCache(Option<ObjectCacheEvent>),
     InventoryEdit(Option<InventoryEditEvent>),
+    InventoryPreparation(Result<Result<self::inventory::PreparedInventoryFetch, ::inventory::InventoryError>, tokio::task::JoinError>),
+    InventoryOwnerRefresh(Result<Result<Inventory, ::inventory::InventoryError>, tokio::task::JoinError>),
+    InventoryDisposal(Option<InventoryDisposalPermit>),
     InventoryBootstrap(Result<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>, tokio::task::JoinError>),
     Favorites(Result<FavoritesUpdate, tokio::task::JoinError>),
     Relationships,
+}
+
+pub(super) const MAX_DEFERRED_INVENTORY_EVENTS: usize = 128;
+const MAX_DEFERRED_INVENTORY_BYTES: usize = 96 * 1024 * 1024;
+pub(super) const MAX_DEFERRED_NETWORK_EVENT_BYTES: usize = 9 * 1024 * 1024;
+
+pub(super) fn inventory_queue_is_full(count: usize, bytes: usize) -> bool {
+    count >= MAX_DEFERRED_INVENTORY_EVENTS || bytes > 0
+}
+
+enum DeferredInventoryEvent {
+    Udp(Message),
+    EventQueue { name: String, body: llsd::Value },
+    Fetch(InventoryFetchEvent),
+    Edit(InventoryEditEvent),
+    RefreshFolders(Vec<CategoryKey>),
+    Cache(InventoryCacheEvent),
+}
+
+struct PendingFolderPreparation {
+    folder: CategoryKey,
+    before: InventorySnapshot,
+    applied: tokio::sync::oneshot::Sender<FolderApplyOutcome>,
+    cancellation: InventoryPreparationCancellation,
+    disposal: InventoryDisposalPermit,
+    task: tokio::task::JoinHandle<Result<self::inventory::PreparedInventoryFetch, ::inventory::InventoryError>>,
+}
+
+struct PendingOwnerRefresh {
+    before: InventorySnapshot,
+    disposal: InventoryDisposalPermit,
+    task: tokio::task::JoinHandle<Result<Inventory, ::inventory::InventoryError>>,
 }
 
 #[derive(Default)]
@@ -156,10 +195,14 @@ struct SessionDriver {
     inventory_fetch: InventoryFetchController,
     inventory_edits: InventoryEditController,
     inventory_pending_moves: HashMap<InventoryNodeKey, (MoveExpectation, tokio::sync::oneshot::Sender<()>)>,
-    inventory_known: HashSet<CategoryKey>,
-    inventory_complete: HashSet<CategoryKey>,
-    inventory_failed: HashSet<CategoryKey>,
+    inventory_failed: std::collections::HashSet<CategoryKey>,
+    pending_folder_preparation: Option<PendingFolderPreparation>,
+    pending_owner_refresh: Option<PendingOwnerRefresh>,
+    deferred_inventory: VecDeque<(DeferredInventoryEvent, usize)>,
+    deferred_inventory_bytes: usize,
     inventory_background_done: bool,
+    inventory_overload_recovery_pending: bool,
+    pending_lifecycle_barrier: Option<Event>,
     inventory_last_failure: Option<(CategoryKey, InventoryFetchError)>,
     camera: CameraUplink,
     agent_motion: AgentMotionPublisher,
@@ -172,6 +215,149 @@ struct SessionDriver {
 }
 
 impl SessionDriver {
+    fn inventory_observations_deferred(&self) -> bool {
+        self.pending_folder_preparation.is_some()
+            || self.pending_owner_refresh.is_some()
+            || !self.deferred_inventory.is_empty()
+            || self.inventory_overload_recovery_pending
+    }
+
+    fn defer_inventory(&mut self, event: DeferredInventoryEvent) {
+        debug_assert!(self.deferred_inventory.len() < MAX_DEFERRED_INVENTORY_EVENTS);
+        let bytes = deferred_inventory_event_bytes(&event);
+        debug_assert!(self.can_defer_network_inventory(1, bytes));
+        self.deferred_inventory_bytes = self.deferred_inventory_bytes.saturating_add(bytes);
+        self.deferred_inventory.push_back((event, bytes));
+    }
+
+    fn can_defer_network_inventory(&self, count: usize, bytes: usize) -> bool {
+        self.deferred_inventory.len().checked_add(count).is_some_and(|len| len <= MAX_DEFERRED_INVENTORY_EVENTS)
+            && bytes <= MAX_DEFERRED_INVENTORY_BYTES.saturating_sub(self.deferred_inventory_bytes)
+    }
+
+    fn defer_network_inventory(&mut self, bytes: usize, event: impl FnOnce() -> DeferredInventoryEvent) -> bool {
+        if bytes > MAX_DEFERRED_NETWORK_EVENT_BYTES || !self.can_defer_network_inventory(1, bytes) {
+            return false;
+        }
+        self.deferred_inventory_bytes = self.deferred_inventory_bytes.saturating_add(bytes);
+        self.deferred_inventory.push_back((event(), bytes));
+        true
+    }
+
+    fn handle_deferred_inventory(&mut self, (event, bytes): (DeferredInventoryEvent, usize), disposal: InventoryDisposalPermit) {
+        self.deferred_inventory_bytes = self.deferred_inventory_bytes.saturating_sub(bytes);
+        match event {
+            DeferredInventoryEvent::Udp(message) => self.handle_inventory_udp_now(&message, disposal),
+            DeferredInventoryEvent::EventQueue { name, body } => self.handle_inventory_event_queue_now(&name, &body, disposal),
+            DeferredInventoryEvent::Fetch(event) => self.handle_inventory_fetch_now(event, disposal),
+            DeferredInventoryEvent::Edit(event) => self.handle_inventory_edit_event_now(event, disposal),
+            DeferredInventoryEvent::RefreshFolders(folders) => {
+                if !self.mark_inventory_folders_incomplete(folders, disposal) {
+                    tracing::debug!("inventory folder refresh could not be queued after a stale edit confirmation");
+                }
+            }
+            DeferredInventoryEvent::Cache(event) => {
+                drop(disposal);
+                self.handle_inventory_cache_event_now(event);
+            }
+        }
+    }
+
+    async fn reject_deferred_inventory(&mut self) {
+        if self.deferred_inventory.is_empty() {
+            return;
+        }
+        let disposal = self.inventory_cache.reserve_disposal().await.expect("inventory reclaimer remains open until session close");
+        let deferred_inventory = std::mem::take(&mut self.deferred_inventory);
+        let mut payloads: Vec<Box<dyn Send>> = Vec::new();
+        for (event, _) in deferred_inventory {
+            match event {
+                DeferredInventoryEvent::Fetch(InventoryFetchEvent::Folder { fetch, applied }) => {
+                    if applied.send(FolderApplyOutcome::Rejected).is_err() {
+                        tracing::trace!(folder = %fetch.folder.id().uuid(), "inventory fetch worker stopped before shutdown acknowledgement");
+                    }
+                    payloads.push(Box::new(fetch));
+                }
+                DeferredInventoryEvent::Edit(InventoryEditEvent::Apply { confirmation, applied }) => {
+                    if applied.send(false).is_err() {
+                        tracing::trace!("inventory edit worker stopped before shutdown acknowledgement");
+                    }
+                    payloads.push(Box::new(confirmation));
+                }
+                DeferredInventoryEvent::Edit(InventoryEditEvent::RefreshFolders { folders, refreshed }) => {
+                    if refreshed.send(false).is_err() {
+                        tracing::trace!("inventory refresh worker stopped before shutdown acknowledgement");
+                    }
+                    payloads.push(Box::new(folders));
+                }
+                DeferredInventoryEvent::Edit(InventoryEditEvent::MoveTimedOut { refreshed, .. }) => {
+                    if refreshed.send(false).is_err() {
+                        tracing::trace!("inventory move worker stopped before shutdown acknowledgement");
+                    }
+                }
+                DeferredInventoryEvent::Edit(InventoryEditEvent::MoveAborted { removed, .. }) => {
+                    if removed.send(()).is_err() {
+                        tracing::trace!("inventory move worker stopped before shutdown acknowledgement");
+                    }
+                }
+                DeferredInventoryEvent::Edit(InventoryEditEvent::MoveStarted { expectation, confirmed, registered }) => {
+                    payloads.push(Box::new((expectation, confirmed, registered)));
+                }
+                DeferredInventoryEvent::RefreshFolders(folders) => payloads.push(Box::new(folders)),
+                DeferredInventoryEvent::Udp(message) => payloads.push(Box::new(message)),
+                DeferredInventoryEvent::EventQueue { name, body } => payloads.push(Box::new((name, body))),
+                DeferredInventoryEvent::Fetch(InventoryFetchEvent::Failed { .. }) => {}
+                DeferredInventoryEvent::Fetch(InventoryFetchEvent::BackgroundDone) | DeferredInventoryEvent::Cache(_) => {}
+            }
+        }
+        self.deferred_inventory_bytes = 0;
+        disposal.reclaim(payloads);
+    }
+
+    fn handle_inventory_cache_event(&mut self, event: InventoryCacheEvent) {
+        if self.inventory_observations_deferred() && matches!(&event, InventoryCacheEvent::RestoreBatch(_)) {
+            self.defer_inventory(DeferredInventoryEvent::Cache(event));
+        } else {
+            self.handle_inventory_cache_event_now(event);
+        }
+    }
+
+    fn handle_inventory_cache_event_now(&mut self, event: InventoryCacheEvent) {
+        let outcome = self.inventory.as_mut().map(|inventory| self.inventory_cache.handle_event(&self.runtime, event, inventory));
+        if let Some(InventoryCacheEventOutcome::Changed { before, after, disposal }) = outcome {
+            self.process_inventory_changes(&before, &after);
+            disposal.reclaim(before);
+            self.inventory_changes.send_replace(Some(after));
+        }
+    }
+
+    fn handle_inventory_edit_event(&mut self, event: InventoryEditEvent) {
+        if self.inventory_observations_deferred() {
+            self.defer_inventory(DeferredInventoryEvent::Edit(event));
+        } else if let Some(disposal) = self.inventory_cache.try_reserve_disposal() {
+            self.handle_inventory_edit_event_now(event, disposal);
+        } else {
+            self.defer_inventory(DeferredInventoryEvent::Edit(event));
+        }
+    }
+
+    fn handle_inventory_fetch(&mut self, event: InventoryFetchEvent) {
+        if self.inventory_observations_deferred() {
+            self.defer_inventory(DeferredInventoryEvent::Fetch(event));
+        } else if let Some(disposal) = self.inventory_cache.try_reserve_disposal() {
+            self.handle_inventory_fetch_now(event, disposal);
+        } else {
+            self.defer_inventory(DeferredInventoryEvent::Fetch(event));
+        }
+    }
+
+    fn finish_inventory_fetch_preparation(
+        &mut self,
+        result: Result<Result<self::inventory::PreparedInventoryFetch, ::inventory::InventoryError>, tokio::task::JoinError>,
+    ) {
+        self::inventory::finish_inventory_fetch_preparation(self, result);
+    }
+
     fn new(
         session: Session,
         session_handle: SessionHandle,
@@ -202,6 +388,7 @@ impl SessionDriver {
         let (inventory_changes, _) = watch::channel(None);
         let inventory_edits = InventoryEditController::new();
         let inventory_fetch = InventoryFetchController::new(inventory_edits.handle());
+        let inventory_cache = InventoryCacheSession::new(&runtime);
         let mut object_cache = ObjectCacheSession::new(credentials.grid);
         object_cache.start(&runtime);
         let pending_handshake_replies = Arc::new(Mutex::new(PendingHandshakeReplies::default()));
@@ -236,7 +423,7 @@ impl SessionDriver {
             inventory_bootstrap: None,
             inventory_bootstrap_dirty: false,
             inventory: None,
-            inventory_cache: InventoryCacheSession::new(),
+            inventory_cache,
             object_cache,
             pending_handshake_replies,
             inventory_changes,
@@ -244,10 +431,14 @@ impl SessionDriver {
             inventory_fetch,
             inventory_edits,
             inventory_pending_moves: HashMap::new(),
-            inventory_known: HashSet::new(),
-            inventory_complete: HashSet::new(),
-            inventory_failed: HashSet::new(),
+            inventory_failed: std::collections::HashSet::new(),
+            pending_folder_preparation: None,
+            pending_owner_refresh: None,
+            deferred_inventory: VecDeque::new(),
+            deferred_inventory_bytes: 0,
             inventory_background_done: false,
+            inventory_overload_recovery_pending: false,
+            pending_lifecycle_barrier: None,
             inventory_last_failure: None,
             camera,
             agent_motion: AgentMotionPublisher::new(),
@@ -262,6 +453,15 @@ impl SessionDriver {
 
     async fn run(mut self) {
         loop {
+            if self.pending_folder_preparation.is_none()
+                && self.pending_owner_refresh.is_none()
+                && self.deferred_inventory.is_empty()
+                && !self.inventory_overload_recovery_pending
+                && let Some(event) = self.pending_lifecycle_barrier.take()
+                && self.handle_network_event(Some(event)).await.is_break()
+            {
+                break;
+            }
             if self.session_world.world().has_pending_relationships() {
                 tokio::task::yield_now().await;
                 if self.resolve_relationships().is_break() {
@@ -272,8 +472,33 @@ impl SessionDriver {
             self.object_cache.persist_overrides(&self.session_world);
             self.media.flush(&self.session_world);
             let terrain_full = self.terrain.is_full();
+            let inventory_queue_full = inventory_queue_is_full(self.deferred_inventory.len(), self.deferred_inventory_bytes);
+            let inventory_disposal_pending = self.pending_folder_preparation.is_none()
+                && self.pending_owner_refresh.is_none()
+                && (!self.deferred_inventory.is_empty() || self.inventory_overload_recovery_pending);
+            let disposal_sender = inventory_disposal_pending.then(|| self.inventory_cache.reclaimer()).flatten();
+            let inventory_disposal = async move {
+                let sender = disposal_sender?;
+                sender.reserve_owned().await.ok().map(InventoryDisposalPermit::from_owned)
+            };
+            let inventory_disposal =
+                if inventory_disposal_pending { inventory_disposal.boxed() } else { pending::<Option<InventoryDisposalPermit>>().boxed() };
             let relationships_pending = self.session_world.world().has_pending_relationships();
-            let event = async { if terrain_full { pending::<Option<Event>>().await } else { self.session.recv_event().await } };
+            let allow_restore_batch = !self.inventory_observations_deferred();
+            let event = async {
+                if terrain_full || self.pending_lifecycle_barrier.is_some() {
+                    pending::<Option<Event>>().await
+                } else {
+                    self.session.recv_event().await
+                }
+            };
+            let inventory_fetch = async {
+                if inventory_queue_full { pending::<Option<InventoryFetchEvent>>().await } else { self.inventory_fetch.next_event().await }
+            };
+            let inventory_cache = async { self.inventory_cache.next_event(allow_restore_batch).await };
+            let inventory_edit = async {
+                if inventory_queue_full { pending::<Option<InventoryEditEvent>>().await } else { self.inventory_edits.next_event().await }
+            };
             let inventory_bootstrap = async {
                 match self.inventory_bootstrap.as_mut() {
                     Some(task) => Some(task.await),
@@ -283,6 +508,18 @@ impl SessionDriver {
             let favorites_load = async {
                 match self.favorites_load.as_mut() {
                     Some(task) => Some(task.await),
+                    None => pending().await,
+                }
+            };
+            let folder_preparation = async {
+                match self.pending_folder_preparation.as_mut() {
+                    Some(preparation) => Some((&mut preparation.task).await),
+                    None => pending().await,
+                }
+            };
+            let owner_refresh = async {
+                match self.pending_owner_refresh.as_mut() {
+                    Some(refresh) => Some((&mut refresh.task).await),
                     None => pending().await,
                 }
             };
@@ -296,12 +533,15 @@ impl SessionDriver {
                     self.cancellation.clone(),
                     self.camera.next_tick(),
                     self.recovery.next_completion(),
-                    self.inventory_fetch.next_event(),
+                    inventory_fetch,
                     &mut self.ordinary_input_turn,
                 ) => DriverInput::Session(input),
-                cache_event = self.inventory_cache.next_event() => DriverInput::InventoryCache(cache_event),
+                cache_event = inventory_cache => DriverInput::InventoryCache(cache_event),
                 cache_event = self.object_cache.next_event() => DriverInput::ObjectCache(cache_event),
-                edit_event = self.inventory_edits.next_event() => DriverInput::InventoryEdit(edit_event),
+                edit_event = inventory_edit => DriverInput::InventoryEdit(edit_event),
+                result = folder_preparation => DriverInput::InventoryPreparation(result.expect("preparation task must be pending")),
+                result = owner_refresh => DriverInput::InventoryOwnerRefresh(result.expect("owner refresh task must be pending")),
+                disposal = inventory_disposal => DriverInput::InventoryDisposal(disposal),
                 bootstrap = inventory_bootstrap => DriverInput::InventoryBootstrap(bootstrap.expect("bootstrap task must be pending")),
                 favorites = favorites_load => DriverInput::Favorites(favorites.expect("favorites task must be pending")),
                 () = tokio::task::yield_now(), if relationships_pending => DriverInput::Relationships,
@@ -312,6 +552,27 @@ impl SessionDriver {
                     self::inventory::publish_favorites_refresh(&mut self.favorites_load, &self.mailbox, result);
                     ControlFlow::Continue(())
                 }
+                DriverInput::InventoryPreparation(result) => {
+                    self.finish_inventory_fetch_preparation(result);
+                    ControlFlow::Continue(())
+                }
+                DriverInput::InventoryOwnerRefresh(result) => {
+                    if self.finish_inventory_owner_refresh(result) {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                }
+                DriverInput::InventoryDisposal(Some(disposal)) => {
+                    let recovery_failed = if let Some(event) = self.deferred_inventory.pop_front() {
+                        self.handle_deferred_inventory(event, disposal);
+                        false
+                    } else {
+                        self.recover_inventory_after_overload(disposal)
+                    };
+                    if recovery_failed { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+                }
+                DriverInput::InventoryDisposal(None) => ControlFlow::Continue(()),
                 DriverInput::InventoryBootstrap(result) => {
                     self.inventory_bootstrap = None;
                     match result {
@@ -328,18 +589,7 @@ impl SessionDriver {
                     ControlFlow::Continue(())
                 }
                 DriverInput::InventoryCache(Some(event)) => {
-                    let before = self.inventory.as_ref().map(Inventory::snapshot);
-                    let outcome =
-                        self.inventory.as_mut().map(|inventory| self.inventory_cache.handle_event(&self.runtime, event, inventory));
-                    if let Some(outcome) = outcome
-                        && let Some(snapshot) = outcome.snapshot
-                    {
-                        if let Some(before) = before {
-                            let changes = self::inventory::cache_restore_move_changes(&self.inventory_pending_moves, &before, &snapshot);
-                            self.process_inventory_changes(&changes, &snapshot);
-                        }
-                        self.inventory_changes.send_replace(Some(snapshot));
-                    }
+                    self.handle_inventory_cache_event(event);
                     ControlFlow::Continue(())
                 }
                 DriverInput::InventoryCache(None) => ControlFlow::Continue(()),
@@ -365,6 +615,10 @@ impl SessionDriver {
                     Input::Cancelled => {
                         self.mailbox.publish(ViewerUpdate::Ended);
                         ControlFlow::Break(())
+                    }
+                    Input::Event(Some(event)) if is_inventory_lifecycle_barrier(&event) && self.inventory_observations_deferred() => {
+                        self.pending_lifecycle_barrier = Some(event);
+                        ControlFlow::Continue(())
                     }
                     Input::Event(event) => self.handle_network_event(event).await,
                     Input::InventoryFetch(Some(event)) => {
@@ -550,8 +804,12 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             SimulatorMessage { simulator_id, sequence, packet_order, source, received_at, ping_delay, message } => {
-                self.handle_inventory_udp(&message);
+                let terminal_inventory_overload = self.handle_inventory_udp(&message);
                 self.handle_simulator_message(simulator_id, sequence, packet_order, source, received_at, ping_delay, message).await;
+                if terminal_inventory_overload {
+                    self.fail_inventory_overload();
+                    return ControlFlow::Break(());
+                }
                 ControlFlow::Continue(())
             }
             SendFailed(error) => {
@@ -570,20 +828,26 @@ impl SessionDriver {
             SimulatorDisconnected { simulator_id, .. } => self.handle_simulator_disconnect(simulator_id, None),
             SimulatorFailed { simulator_id, reason, .. } => self.handle_simulator_disconnect(simulator_id, Some(reason)),
             CapabilityEvent { simulator_id, message, body, .. } => {
-                self.handle_inventory_event_queue(&message, &body);
+                let terminal_inventory_overload = self.handle_inventory_event_queue(&message, &body);
                 self.environments.capability(&mut self.session_world, simulator_id, &message, &body, self.primary_simulator);
+                if terminal_inventory_overload {
+                    self.fail_inventory_overload();
+                    return ControlFlow::Break(());
+                }
                 ControlFlow::Continue(())
             }
             CapabilityEventBatch { simulator_id, events, .. } => {
-                for event in &events {
-                    self.handle_inventory_event_queue(&event.message, &event.body);
-                }
+                let terminal_inventory_overload = self.handle_inventory_event_queue_batch(&events);
                 self.environments.capability_batch(
                     &mut self.session_world,
                     simulator_id,
                     events.iter().map(|event| (event.message.as_str(), &event.body)),
                     self.primary_simulator,
                 );
+                if terminal_inventory_overload {
+                    self.fail_inventory_overload();
+                    return ControlFlow::Break(());
+                }
                 ControlFlow::Continue(())
             }
             CapabilityError { .. } | SimulatorConnectFailed { .. } => ControlFlow::Continue(()),
@@ -607,7 +871,14 @@ impl SessionDriver {
                     CoverageSource::Lludp => "lludp",
                     CoverageSource::EventQueue { .. } => "event_queue",
                 };
-                tracing::warn!(simulator = simulator_id.get(), region, source, reason = ?record.reason, "world data may be incomplete");
+                if record.reason == CoverageLossReason::InventoryAdmission {
+                    tracing::warn!(simulator = simulator_id.get(), source, "inventory data may be incomplete after intake overload");
+                } else {
+                    tracing::warn!(simulator = simulator_id.get(), region, source, reason = ?record.reason, "world data may be incomplete");
+                }
+                if record.reason == CoverageLossReason::InventoryAdmission {
+                    self.inventory_overload_recovery_pending = true;
+                }
                 self.session.acknowledge_coverage_loss(record.watermark);
             }
             CoverageLoss::SessionOverflow { generation } => {
@@ -615,6 +886,90 @@ impl SessionDriver {
                 self.session.acknowledge_coverage_overflow(*generation);
             }
         }
+    }
+
+    fn recover_inventory_after_overload(&mut self, disposal: InventoryDisposalPermit) -> bool {
+        if !self.inventory_overload_recovery_pending {
+            drop(disposal);
+            return false;
+        }
+        let Some(before) = self.inventory.as_ref().map(Inventory::snapshot) else {
+            self.inventory_overload_recovery_pending = false;
+            self.inventory_bootstrap_dirty = true;
+            self.inventory_cache.invalidate_for_recovery(&self.runtime);
+            drop(disposal);
+            return false;
+        };
+        self.inventory_cache.invalidate_for_recovery(&self.runtime);
+        let Some(mut inventory) = self.inventory.clone() else {
+            disposal.reclaim(before);
+            self.inventory_overload_recovery_pending = false;
+            self.fail_inventory_overload();
+            return true;
+        };
+        let task = self.runtime.spawn_blocking(move || {
+            inventory.invalidate_all_owners()?;
+            Ok(inventory)
+        });
+        self.pending_owner_refresh = Some(PendingOwnerRefresh { before, disposal, task });
+        self.inventory_overload_recovery_pending = false;
+        false
+    }
+
+    fn finish_inventory_owner_refresh(
+        &mut self,
+        result: Result<Result<Inventory, ::inventory::InventoryError>, tokio::task::JoinError>,
+    ) -> bool {
+        let Some(refresh) = self.pending_owner_refresh.take() else { return false };
+        let PendingOwnerRefresh { before, disposal, .. } = refresh;
+        let inventory = match result {
+            Ok(Ok(inventory)) => inventory,
+            Ok(Err(error)) => {
+                disposal.reclaim(before);
+                tracing::error!(%error, "inventory owner could not be invalidated after coverage loss");
+                self.fail_inventory_overload();
+                return true;
+            }
+            Err(error) => {
+                disposal.reclaim(before);
+                tracing::error!(%error, "inventory owner refresh worker failed");
+                self.fail_inventory_overload();
+                return true;
+            }
+        };
+        if self.inventory.as_ref().is_none_or(|current| current.revision() != before.revision()) {
+            disposal.reclaim((inventory, before));
+            tracing::error!("inventory changed during owner refresh preparation");
+            self.fail_inventory_overload();
+            return true;
+        }
+        let after = inventory.snapshot();
+        self.process_inventory_changes(&before, &after);
+        self.inventory = Some(inventory);
+        self.inventory_changes.send_replace(Some(after));
+        disposal.reclaim(before);
+        self.inventory_failed.clear();
+        self.inventory_background_done = false;
+        self.inventory_last_failure = None;
+        if let Err(error) = self.inventory_fetch.handle().refetch_incomplete() {
+            tracing::error!(%error, "inventory folder refetch could not be scheduled after coverage loss");
+            self.fail_inventory_overload();
+            return true;
+        }
+        self.publish_inventory_status();
+        false
+    }
+
+    fn note_inventory_overload(&mut self) -> bool {
+        let covered = self.session.report_current_event_loss(CoverageLossReason::InventoryAdmission).is_some();
+        if covered {
+            self.inventory_overload_recovery_pending = true;
+        }
+        !covered
+    }
+
+    fn fail_inventory_overload(&self) {
+        self.mailbox.publish(ViewerUpdate::Failed("Inventory updates exceeded the bounded intake capacity.".into()));
     }
 
     fn handle_login_accepted(&self, mfa_hash: Option<String>) {
@@ -955,6 +1310,24 @@ impl SessionDriver {
     }
 
     async fn finish(mut self) {
+        if let Some(preparation) = self.pending_folder_preparation.take() {
+            cancel_pending_folder_preparation(preparation).await;
+        }
+        if let Some(refresh) = self.pending_owner_refresh.take() {
+            let PendingOwnerRefresh { before, disposal, task } = refresh;
+            match task.await {
+                Ok(Ok(inventory)) => disposal.reclaim((inventory, before)),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "inventory owner refresh failed during shutdown");
+                    disposal.reclaim(before);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "inventory owner refresh worker failed during shutdown");
+                    disposal.reclaim(before);
+                }
+            }
+        }
+        self.reject_deferred_inventory().await;
         self::inventory::stop_favorites_refresh(&mut self.favorites_load).await;
         if let Some(inventory_bootstrap) = self.inventory_bootstrap.take() {
             inventory_bootstrap.abort();
@@ -967,7 +1340,9 @@ impl SessionDriver {
         drop(self.environments);
         drop(self.terrain);
         self.assets.stop().await;
-        self.inventory_cache.close().await;
+        let inventory = self.inventory.take();
+        let inventory_snapshot = self.inventory_changes.send_replace(None);
+        self.inventory_cache.close_with_payload((inventory, inventory_snapshot)).await;
         self.object_cache.close().await;
         for (simulator_id, error) in self.session_world.retire_all() {
             let region = self.session_world.region_for(simulator_id).map(|region| region.get());
@@ -1024,6 +1399,69 @@ fn reply_region_handshake(
             }
         }
     }));
+}
+
+fn cancel_pending_folder_preparation(preparation: PendingFolderPreparation) -> impl std::future::Future<Output = ()> {
+    preparation.cancellation.cancel();
+    async move {
+        match preparation.task.await {
+            Ok(Ok(self::inventory::PreparedInventoryFetch::Prepared(prepared))) => {
+                preparation.disposal.reclaim((prepared, preparation.before));
+            }
+            Ok(Ok(self::inventory::PreparedInventoryFetch::Stale)) | Ok(Err(_)) | Err(_) => {
+                preparation.disposal.reclaim(preparation.before);
+            }
+        }
+        if preparation.applied.send(FolderApplyOutcome::Rejected).is_err() {
+            tracing::trace!(folder = %preparation.folder.id().uuid(), "inventory fetch worker stopped before shutdown acknowledgement");
+        }
+    }
+}
+
+fn is_inventory_lifecycle_barrier(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::SessionReady { .. }
+            | Event::SimulatorConnected { .. }
+            | Event::SimulatorDisconnected { .. }
+            | Event::SimulatorFailed { .. }
+            | Event::SimulatorConnectFailed { .. }
+            | Event::SimulatorPromoted { .. }
+            | Event::Failed(_)
+            | Event::SimulatorMessage { message: Message::AgentMovementComplete(_), .. }
+    )
+}
+
+fn deferred_inventory_event_bytes(event: &DeferredInventoryEvent) -> usize {
+    std::mem::size_of::<DeferredInventoryEvent>().saturating_add(match event {
+        DeferredInventoryEvent::Udp(_) => MAX_DEFERRED_NETWORK_EVENT_BYTES,
+        DeferredInventoryEvent::EventQueue { name, body } => name.capacity().saturating_add(body.estimated_heap_bytes()),
+        DeferredInventoryEvent::Fetch(InventoryFetchEvent::Folder { fetch, .. }) => estimate_folder_fetch(fetch),
+        DeferredInventoryEvent::Edit(InventoryEditEvent::Apply { confirmation, .. }) => confirmation.estimated_heap_bytes(),
+        DeferredInventoryEvent::Fetch(InventoryFetchEvent::Failed { .. })
+        | DeferredInventoryEvent::Fetch(InventoryFetchEvent::BackgroundDone) => 0,
+        DeferredInventoryEvent::Edit(InventoryEditEvent::MoveStarted { .. })
+        | DeferredInventoryEvent::Edit(InventoryEditEvent::MoveAborted { .. })
+        | DeferredInventoryEvent::Edit(InventoryEditEvent::MoveTimedOut { .. }) => 0,
+        DeferredInventoryEvent::RefreshFolders(folders) => folders.capacity().saturating_mul(std::mem::size_of::<CategoryKey>()),
+        DeferredInventoryEvent::Edit(InventoryEditEvent::RefreshFolders { folders, .. }) => {
+            folders.capacity().saturating_mul(std::mem::size_of::<CategoryKey>())
+        }
+        DeferredInventoryEvent::Cache(_) => 0,
+    })
+}
+
+fn estimate_folder_fetch(fetch: &FolderFetch) -> usize {
+    let children_bytes = fetch.children.capacity().saturating_mul(std::mem::size_of::<InventoryChild>());
+    fetch.children.iter().fold(std::mem::size_of::<FolderFetch>().saturating_add(children_bytes), |bytes, child| {
+        let child_bytes = match child {
+            InventoryChild::Category(category) => category.name.len().saturating_add(2 * std::mem::size_of::<usize>()),
+            InventoryChild::Item(item) => {
+                item.name.len().saturating_add(item.description.len()).saturating_add(4 * std::mem::size_of::<usize>())
+            }
+        };
+        bytes.saturating_add(child_bytes)
+    })
 }
 
 #[tracing::instrument(name = "viewer.session", level = "info", skip_all)]
