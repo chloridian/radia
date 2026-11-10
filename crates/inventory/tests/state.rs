@@ -335,6 +335,38 @@ fn fetch_replaces_direct_children() {
 }
 
 #[test]
+fn folder_fetch_preserves_other_parent_items() {
+    let owner = owner(26);
+    let mut inventory = inventory(owner);
+    let source = CategoryKey::new(owner, FolderId::new(uuid(2)));
+    let target_parent = CategoryKey::new(owner, FolderId::new(uuid(3)));
+    let target = ItemKey::new(owner, ItemId::new(uuid(4)));
+    let sibling = ItemKey::new(owner, ItemId::new(uuid(5)));
+    let link = ItemKey::new(owner, ItemId::new(uuid(6)));
+    inventory.upsert_category(category(owner, 2, Some(1), "source")).expect("add source folder");
+    inventory.upsert_category(category(owner, 3, Some(1), "target parent")).expect("add target parent");
+    inventory.upsert_item(item(owner, 4, 3, AssetType::Notecard, 40)).expect("add target");
+    inventory.upsert_item(item(owner, 5, 3, AssetType::Notecard, 50)).expect("add target sibling");
+    let mut linked_item = item(owner, 6, 2, AssetType::Link, 4);
+    linked_item.inventory_type = InventoryType::Unknown(24);
+
+    inventory
+        .apply_folder_fetch(source, ServerVersion::from_raw(8), None, vec![InventoryChild::Item(linked_item)])
+        .expect("apply direct source child");
+
+    let snapshot = inventory.snapshot();
+    assert_eq!(snapshot.item(target).map(|item| item.parent), Some(target_parent));
+    assert_eq!(snapshot.item(sibling).map(|item| item.parent), Some(target_parent));
+    assert_eq!(
+        snapshot.link_resolution(link),
+        Some(LinkResolution::Resolved(InventoryNodeKey::new(owner, InventoryNodeId::Item(target.id()))))
+    );
+    assert_eq!(snapshot.child_count(target_parent), 2);
+    assert!(!snapshot.is_complete(source));
+    assert_eq!(invariant(&snapshot), None);
+}
+
+#[test]
 fn fetch_replaces_items_at_capacity() {
     let owner = owner(16);
     let limits = InventoryLimits { max_categories: 2, max_items: 1, max_folder_fetch_children: 1 };

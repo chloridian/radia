@@ -93,8 +93,10 @@ pub struct FolderDescendents {
     pub owner_id: Option<Uuid>,
     pub version: i32,
     pub descendent_count: u32,
-    pub categories: Vec<Category>,
-    pub items: Vec<Item>,
+    pub direct_categories: Vec<Category>,
+    pub direct_items: Vec<Item>,
+    pub auxiliary_categories: Vec<Category>,
+    pub auxiliary_items: Vec<Item>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -295,26 +297,47 @@ fn parse_folder_descendents(value: &Value, requested: RequestedFolder) -> Result
     }
     let raw_categories = optional_array(fields, "categories", descendent_count)?;
     let raw_items = optional_array(fields, "items", descendent_count)?;
-    let direct_count = raw_categories.len().checked_add(raw_items.len()).ok_or(DecodeError::TooLarge)?;
-    if direct_count > MAX_FOLDER_CHILDREN {
+    let record_count = raw_categories.len().checked_add(raw_items.len()).ok_or(DecodeError::TooLarge)?;
+    if record_count > MAX_FOLDER_CHILDREN {
         return Err(DecodeError::TooLarge);
     }
-    let mut categories = Vec::with_capacity(raw_categories.len());
+    let mut identities = std::collections::HashSet::with_capacity(record_count);
+    let mut direct_categories = Vec::with_capacity(raw_categories.len());
+    let mut auxiliary_categories = Vec::new();
     for category in raw_categories {
-        categories.push(parse_category(
-            category,
-            requested.owner_id,
-            Some(id),
-            0,
-            &mut ParseCounts::default(),
-            InventoryWireFormat::Legacy,
-        )?);
+        let category = parse_category(category, requested.owner_id, None, 0, &mut ParseCounts::default(), InventoryWireFormat::Legacy)?;
+        if !identities.insert(category.id) || category.parent_id.is_some_and(|parent| parent.is_nil()) {
+            return Err(DecodeError::InvalidResponse);
+        }
+        if category.parent_id.is_none_or(|parent| parent == id) {
+            direct_categories.push(category);
+        } else {
+            auxiliary_categories.push(category);
+        }
     }
-    let mut items = Vec::with_capacity(raw_items.len());
+    let mut direct_items = Vec::with_capacity(raw_items.len());
+    let mut auxiliary_items = Vec::new();
     for item in raw_items {
-        items.push(parse_item(item, requested.owner_id, Some(id), false, InventoryWireFormat::Legacy)?);
+        let item = parse_item(item, requested.owner_id, None, false, InventoryWireFormat::Legacy)?;
+        if !identities.insert(item.id) || item.parent_id.is_some_and(|parent| parent.is_nil()) {
+            return Err(DecodeError::InvalidResponse);
+        }
+        if item.parent_id.is_none_or(|parent| parent == id) {
+            direct_items.push(item);
+        } else {
+            auxiliary_items.push(item);
+        }
     }
-    Ok(FolderDescendents { id, owner_id, version, descendent_count, categories, items })
+    Ok(FolderDescendents {
+        id,
+        owner_id,
+        version,
+        descendent_count,
+        direct_categories,
+        direct_items,
+        auxiliary_categories,
+        auxiliary_items,
+    })
 }
 
 fn parse_category(
@@ -1285,7 +1308,7 @@ mod tests {
         let decoded = decode_fetch_inventory_descendents2(&encode(&response), &[RequestedFolder { id: folder, owner_id: owner }])
             .expect("valid legacy response");
         assert_eq!(decoded[0].version, 8);
-        assert_eq!(decoded[0].categories[0].id, child);
+        assert_eq!(decoded[0].direct_categories[0].id, child);
     }
 
     #[test]
@@ -1383,7 +1406,13 @@ mod tests {
             decoded.iter().map(|folder| folder.id).collect::<Vec<_>>(),
             requested.iter().map(|folder| folder.id).collect::<Vec<_>>()
         );
-        assert!(decoded.iter().all(|folder| folder.version == 8 && folder.categories.is_empty() && folder.items.is_empty()));
+        assert!(decoded.iter().all(|folder| {
+            folder.version == 8
+                && folder.direct_categories.is_empty()
+                && folder.direct_items.is_empty()
+                && folder.auxiliary_categories.is_empty()
+                && folder.auxiliary_items.is_empty()
+        }));
         folders[10] = folders[0].clone();
         let response = map_value([("folders".into(), Value::Array(folders))]);
         assert_eq!(decode_fetch_inventory_descendents2(&encode(&response), &requested), Err(DecodeError::InvalidResponse));
