@@ -454,7 +454,6 @@ async fn run(
             break;
         }
         let now = Instant::now();
-        store.maintain(now);
         while let Some(job) = fetches.pop_front() {
             spawn_fetch(job, &transports, &runtime, &mut jobs);
         }

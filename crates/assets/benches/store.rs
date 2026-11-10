@@ -8,11 +8,16 @@ use assets::{
     TextureSize,
 };
 use criterion::{BatchSize, BenchmarkId, Criterion};
+use test_support::allocation::{self, CountingAllocator};
 use test_support::texture::GRAY_4096_J2C;
 use utils::AssetId;
 use uuid::Uuid;
 
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
 type Fixture = (Store, Vec<Demand>, Vec<Route>, Instant, Vec<assets::DecodeJob>);
+const DIRTY_BACKLOG: usize = 512;
 
 fn fixture(count: usize) -> Fixture {
     let now = Instant::now();
@@ -60,7 +65,8 @@ fn fixture(count: usize) -> Fixture {
     }
 
     for _ in 0..MAX_NON_MESH_FETCHES / 2 {
-        let job = store.next_job(now).expect("benchmark retry seed");
+        let attempts = count.div_ceil(128).saturating_add(4);
+        let job = (0..attempts).find_map(|_| store.next_job(now)).expect("benchmark retry seed");
         store.complete(job.fail(Failure::Transient { retry_after: Duration::from_secs(20) }), now);
     }
 
@@ -70,14 +76,188 @@ fn fixture(count: usize) -> Fixture {
 fn saturated_fixture(count: usize) -> (Fixture, Vec<LoadJob>) {
     let mut fixture = fixture(count);
     let mut jobs = Vec::with_capacity(MAX_NON_MESH_FETCHES);
-    while jobs.len() < MAX_NON_MESH_FETCHES {
-        let Some(job) = fixture.0.next_job(fixture.3) else { break };
-        jobs.push(job);
+    let turns = count.div_ceil(128).saturating_add(4);
+    for _ in 0..turns {
+        while jobs.len() < MAX_NON_MESH_FETCHES {
+            let Some(job) = fixture.0.next_job(fixture.3) else { break };
+            jobs.push(job);
+        }
+        if jobs.len() == MAX_NON_MESH_FETCHES {
+            break;
+        }
     }
     (fixture, jobs)
 }
 
+fn settle(fixture: &mut Fixture, count: usize) {
+    maintain_until_idle(&mut fixture.0, fixture.3, count.div_ceil(128).saturating_add(2));
+}
+
+fn maintain_until_idle(store: &mut Store, now: Instant, max_turns: usize) -> usize {
+    let mut turns = 0;
+    loop {
+        turns += 1;
+        if !store.maintain(now) {
+            return turns;
+        }
+        assert!(turns < max_turns, "benchmark maintenance remains bounded");
+    }
+}
+
+fn dirty_progress_fixture(count: usize) -> (Fixture, Vec<Demand>, Vec<Demand>) {
+    let mut fixture = fixture(count);
+    settle(&mut fixture, count);
+    let eligible: Vec<_> = (0..MAX_NON_MESH_FETCHES / 2)
+        .map(|index| {
+            let resource = Resource { id: AssetId::new(Uuid::from_u128(u128::MAX / 2 + index as u128)), kind: Kind::Texture };
+            fixture.0.request(fixture.2[0], Request::new(resource), Priority::Visible, fixture.3).expect("benchmark eligible demand")
+        })
+        .collect();
+    let churn: Vec<_> = (0..DIRTY_BACKLOG)
+        .map(|index| {
+            let resource = Resource { id: AssetId::new(Uuid::from_u128(u128::MAX / 3 + index as u128)), kind: Kind::Texture };
+            fixture
+                .0
+                .request_with_importance(fixture.2[0], Request::new(resource), Priority::Visible, u16::MAX, fixture.3)
+                .expect("benchmark churn demand")
+        })
+        .collect();
+    settle(&mut fixture, count + eligible.len() + churn.len());
+    (fixture, eligible, churn)
+}
+
+fn demand_reconcile(c: &mut Criterion) {
+    let mut group = c.benchmark_group("store/demand_reconcile");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(1));
+
+    for count in [1_000usize, 65_000] {
+        let (sample, allocations) = allocation::measure(|| {
+            let mut fixture = fixture(count);
+            settle(&mut fixture, count);
+            fixture
+        });
+        eprintln!(
+            "store/demand_reconcile/memory/{count}: resources={}, leases={}, retained_bytes={}, peak_bytes={}",
+            count + MAX_TEXTURE_DECODES,
+            sample.1.len(),
+            allocations.live_bytes,
+            allocations.peak_bytes
+        );
+        drop(sample);
+
+        group.bench_function(BenchmarkId::new("turn", count), |b| {
+            b.iter_batched_ref(
+                || {
+                    let mut fixture = fixture(count);
+                    settle(&mut fixture, count);
+                    fixture.1.last().expect("benchmark demand").update_priority(Priority::Visible);
+                    fixture
+                },
+                |(store, demands, _, now, decodes)| {
+                    store.maintain(*now);
+                    black_box((demands.len(), decodes.len()));
+                },
+                BatchSize::PerIteration,
+            );
+        });
+
+        group.bench_function(BenchmarkId::new("admission_during_churn", count), |b| {
+            b.iter_batched_ref(
+                || dirty_progress_fixture(count),
+                |((store, _, _, now, _), eligible, churn)| {
+                    let mut turns = 0;
+                    let job = loop {
+                        for demand in churn.iter() {
+                            demand.update_priority(Priority::Visible);
+                            demand.update_priority(Priority::Background);
+                        }
+                        turns += 1;
+                        if let Some(job) = store.next_job(*now) {
+                            break job;
+                        }
+                        assert!(turns < 8, "bounded turns admit work during sustained dirty churn");
+                    };
+                    assert!(matches!(&job, LoadJob::Fetch(_)), "admission includes a network fetch");
+                    assert!(store.maintain(*now), "dirty work remains after useful admission");
+                    black_box((turns, eligible.len()));
+                },
+                BatchSize::PerIteration,
+            );
+        });
+
+        group.bench_function(BenchmarkId::new("zero_interest_drain", count), |b| {
+            b.iter_batched_ref(
+                || {
+                    let mut fixture = fixture(count);
+                    settle(&mut fixture, count);
+                    fixture
+                },
+                |(store, demands, _, now, decodes)| {
+                    drop(std::mem::take(demands));
+                    drop(std::mem::take(decodes));
+                    black_box(maintain_until_idle(store, *now, count.div_ceil(128).saturating_add(2)));
+                },
+                BatchSize::PerIteration,
+            );
+        });
+
+        group.bench_function(BenchmarkId::new("zero_interest_turn", count), |b| {
+            b.iter_batched_ref(
+                || {
+                    let mut fixture = fixture(count);
+                    settle(&mut fixture, count);
+                    drop(std::mem::take(&mut fixture.1));
+                    drop(std::mem::take(&mut fixture.4));
+                    fixture
+                },
+                |(store, _, _, now, _)| black_box(store.maintain(*now)),
+                BatchSize::PerIteration,
+            );
+        });
+
+        group.bench_function(BenchmarkId::new("priority_churn_drain", count), |b| {
+            b.iter_batched_ref(
+                || {
+                    let (mut fixture, jobs) = saturated_fixture(count);
+                    settle(&mut fixture, count);
+                    (fixture, jobs)
+                },
+                |((store, demands, _, now, decodes), jobs)| {
+                    for demand in demands.iter() {
+                        demand.update_priority(Priority::Visible);
+                        demand.update_priority(Priority::Background);
+                    }
+                    let turns = maintain_until_idle(store, *now, count.div_ceil(128).saturating_add(2));
+                    black_box((turns, decodes.len(), jobs.len()));
+                },
+                BatchSize::PerIteration,
+            );
+        });
+
+        group.bench_function(BenchmarkId::new("priority_churn_turn", count), |b| {
+            b.iter_batched_ref(
+                || {
+                    let (mut fixture, jobs) = saturated_fixture(count);
+                    settle(&mut fixture, count);
+                    for demand in &fixture.1 {
+                        demand.update_priority(Priority::Visible);
+                        demand.update_priority(Priority::Background);
+                    }
+                    (fixture, jobs)
+                },
+                |((store, _, _, now, decodes), jobs)| black_box((store.maintain(*now), decodes.len(), jobs.len())),
+                BatchSize::PerIteration,
+            );
+        });
+    }
+
+    group.finish();
+}
+
 pub(crate) fn bench(c: &mut Criterion) {
+    demand_reconcile(c);
+
     let mut group = c.benchmark_group("store");
     for count in [1_000usize, 10_000, 50_000] {
         group.bench_function(BenchmarkId::new("drain", count), |b| {
@@ -85,8 +265,12 @@ pub(crate) fn bench(c: &mut Criterion) {
                 || fixture(count),
                 |(store, demands, _, now, decodes)| {
                     let mut jobs = Vec::with_capacity(MAX_NON_MESH_FETCHES);
-                    while let Some(job) = store.next_job(*now) {
-                        jobs.push(job);
+                    loop {
+                        if let Some(job) = store.next_job(*now) {
+                            jobs.push(job);
+                        } else if !store.maintain(*now) {
+                            break;
+                        }
                     }
                     for decode in std::mem::take(decodes) {
                         store.complete(decode.fail(Failure::NotFound), *now);
