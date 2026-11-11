@@ -41,6 +41,73 @@ enum LoginPhase {
     VerifyingMfa,
 }
 
+impl LoginPhase {
+    fn allows_grid_selection(&self) -> bool {
+        matches!(self, Self::Idle)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CredentialLoadRequest {
+    grid: Grid,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CredentialLoad {
+    Loading { grid: Grid, generation: u64 },
+    Ready { grid: Grid, generation: u64 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CredentialLoadCompletion {
+    Applied,
+    Superseded(CredentialLoadRequest),
+    Stale,
+}
+
+impl CredentialLoad {
+    fn begin(grid: Grid) -> (Self, CredentialLoadRequest) {
+        let request = CredentialLoadRequest { grid, generation: 0 };
+        (Self::Loading { grid, generation: request.generation }, request)
+    }
+
+    fn grid(self) -> Grid {
+        match self {
+            Self::Loading { grid, .. } | Self::Ready { grid, .. } => grid,
+        }
+    }
+
+    fn is_loading(self) -> bool {
+        matches!(self, Self::Loading { .. })
+    }
+
+    fn select(&mut self, grid: Grid) -> Option<CredentialLoadRequest> {
+        if self.grid() == grid {
+            return None;
+        }
+
+        let generation = match *self {
+            Self::Loading { generation, .. } | Self::Ready { generation, .. } => generation.wrapping_add(1),
+        };
+        let request = CredentialLoadRequest { grid, generation };
+        let start = matches!(self, Self::Ready { .. });
+        *self = Self::Loading { grid, generation };
+        start.then_some(request)
+    }
+
+    fn complete(&mut self, request: CredentialLoadRequest) -> CredentialLoadCompletion {
+        match *self {
+            Self::Loading { grid, generation } if request == (CredentialLoadRequest { grid, generation }) => {
+                *self = Self::Ready { grid, generation };
+                CredentialLoadCompletion::Applied
+            }
+            Self::Loading { grid, generation } => CredentialLoadCompletion::Superseded(CredentialLoadRequest { grid, generation }),
+            Self::Ready { .. } => CredentialLoadCompletion::Stale,
+        }
+    }
+}
+
 enum LoginMessage {
     LoadingSavedLogin,
     EnterUsername,
@@ -116,6 +183,7 @@ impl LoginStatus {
             SessionEnd::Requested => None,
             SessionEnd::Failed(error) => Some(error),
         };
+        self.reveal_credential_warning();
     }
 
     fn begin_grid_change(&mut self) {
@@ -149,8 +217,7 @@ pub struct LoginScreen {
     spawn_location: gpui::Entity<SelectState<Vec<SpawnOption>>>,
     spawn_choice: SpawnChoice,
     favorites: Favorites,
-    storage_loading: bool,
-    grid: Grid,
+    credential_load: CredentialLoad,
     remember_login: bool,
     remembered_login: Option<RememberedLogin>,
     chat_screen: gpui::Entity<ChatScreen>,
@@ -158,7 +225,6 @@ pub struct LoginScreen {
     status: LoginStatus,
     login_phase: LoginPhase,
     session_generation: u64,
-    credential_load_generation: u64,
     credential_write_lock: WriteLock,
     session_lifecycle: Arc<SessionLifecycle>,
     _spawn_subscription: gpui::Subscription,
@@ -202,6 +268,7 @@ impl LoginScreen {
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>, session_lifecycle: Arc<SessionLifecycle>) -> Self {
         let grid = Grid::default();
+        let (credential_load, initial_request) = CredentialLoad::begin(grid);
         let favorite_locations = Vec::new();
         let username = cx.new(|cx| InputState::new(window, cx).placeholder("Username"));
         let password = cx.new(|cx| InputState::new(window, cx).masked(true));
@@ -223,7 +290,7 @@ impl LoginScreen {
         let window_geometry_subscription = observe("login", window, cx);
         let chat_screen = cx.new(|cx| ChatScreen::new(window, cx));
 
-        let screen = Self {
+        let mut screen = Self {
             username,
             password,
             mfa_code,
@@ -231,8 +298,7 @@ impl LoginScreen {
             spawn_location,
             spawn_choice: SpawnChoice::Last,
             favorites: Favorites::new(),
-            storage_loading: true,
-            grid,
+            credential_load,
             remember_login: false,
             remembered_login: None,
             chat_screen,
@@ -240,7 +306,6 @@ impl LoginScreen {
             status: LoginStatus { message: Some(LoginMessage::LoadingSavedLogin), ..LoginStatus::default() },
             login_phase: LoginPhase::Idle,
             session_generation: 0,
-            credential_load_generation: 0,
             credential_write_lock: write_lock(),
             session_lifecycle,
             _spawn_subscription: spawn_subscription,
@@ -248,22 +313,22 @@ impl LoginScreen {
             _window_geometry_subscription: window_geometry_subscription,
         };
 
+        screen.load_credentials(initial_request, true, window, cx);
+
+        screen
+    }
+
+    fn load_credentials(&mut self, request: CredentialLoadRequest, load_favorites: bool, window: &mut Window, cx: &mut Context<Self>) {
         let background = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
-            let (login, favorite_store) = background.spawn(async move { (remembered_login::load(grid), favorite_store::load()) }).await;
+            let (login, favorite_store) =
+                background.spawn(async move { (remembered_login::load(request.grid), load_favorites.then(favorite_store::load)) }).await;
             if this
                 .update_in(cx, |screen, window, cx| {
-                    let (login, login_warning) = match login {
-                        Ok(login) => (login, None),
-                        Err(error) => (None, Some(error)),
-                    };
-                    screen.favorites.load(favorite_store);
-                    let username = login.as_ref().map(|login| login.username.as_str()).unwrap_or("");
-                    let favorites = screen.favorites.for_username(grid, username);
-                    screen.set_remembered_login(login, favorites, window, cx);
-                    screen.storage_loading = false;
-                    screen.status.finish_credential_load(login_warning);
-                    cx.notify();
+                    if let Some(favorite_store) = favorite_store {
+                        screen.favorites.load(favorite_store);
+                    }
+                    screen.finish_credential_load(request, login, window, cx);
                 })
                 .is_err()
             {
@@ -271,53 +336,49 @@ impl LoginScreen {
             }
         })
         .detach();
+    }
 
-        screen
+    fn finish_credential_load(
+        &mut self,
+        request: CredentialLoadRequest,
+        login: Result<Option<RememberedLogin>, CredentialStoreError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.credential_load.complete(request) {
+            CredentialLoadCompletion::Applied => {
+                let (login, login_warning) = match login {
+                    Ok(login) => (login, None),
+                    Err(error) => (None, Some(error)),
+                };
+                let username = login.as_ref().map(|login| login.username.as_str()).unwrap_or("");
+                let favorites = self.favorites.for_username(request.grid, username);
+                self.set_remembered_login(login, favorites, window, cx);
+                self.status.finish_credential_load(login_warning);
+                cx.notify();
+            }
+            CredentialLoadCompletion::Superseded(next) => self.load_credentials(next, false, window, cx),
+            CredentialLoadCompletion::Stale => {}
+        }
     }
 
     fn select_grid(&mut self, grid: Grid, window: &mut Window, cx: &mut Context<Self>) {
-        if self.storage_loading || self.grid == grid {
+        if !self.login_phase.allows_grid_selection() || self.credential_load.grid() == grid {
             return;
         }
 
-        self.grid = grid;
-        self.credential_load_generation = self.credential_load_generation.wrapping_add(1);
-        let generation = self.credential_load_generation;
-        self.storage_loading = true;
+        let request = self.credential_load.select(grid);
         self.status.begin_grid_change();
         cx.notify();
 
-        let background = cx.background_executor().clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let login = background.spawn(async move { remembered_login::load(grid) }).await;
-            if this
-                .update_in(cx, |screen, window, cx| {
-                    if screen.grid != grid || screen.credential_load_generation != generation {
-                        return;
-                    }
-
-                    let (login, login_warning) = match login {
-                        Ok(login) => (login, None),
-                        Err(error) => (None, Some(error)),
-                    };
-                    let username = login.as_ref().map(|login| login.username.as_str()).unwrap_or("");
-                    let favorites = screen.favorites.for_username(grid, username);
-                    screen.set_remembered_login(login, favorites, window, cx);
-                    screen.storage_loading = false;
-                    screen.status.finish_credential_load(login_warning);
-                    cx.notify();
-                })
-                .is_err()
-            {
-                tracing::trace!("login screen was already unavailable after changing grids");
-            }
-        })
-        .detach();
+        if let Some(request) = request {
+            self.load_credentials(request, false, window, cx);
+        }
     }
 
     fn refresh_favorites(&mut self, cx: &mut Context<Self>) {
         let username = self.username.read(cx).value();
-        if self.favorites.refresh_for_username(self.grid, &username) {
+        if self.favorites.refresh_for_username(self.credential_load.grid(), &username) {
             cx.notify();
         }
     }
@@ -346,7 +407,7 @@ impl LoginScreen {
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.storage_loading {
+        if self.credential_load.is_loading() {
             return;
         }
 
@@ -387,7 +448,7 @@ impl LoginScreen {
             first_name,
             last_name,
             password: password.to_string(),
-            grid: self.grid,
+            grid: self.credential_load.grid(),
             start_location,
             mfa_hash: remembered_for_user.as_ref().map(|saved| saved.mfa_hash.clone()).unwrap_or_default(),
         };
@@ -456,21 +517,14 @@ impl LoginScreen {
         let background = crate::gui::service_runtime(cx);
         let asset_cache = crate::gui::asset_cache(cx);
         let credential_write_lock = self.credential_write_lock.clone();
-        let grid = self.grid;
+        let grid = self.credential_load.grid();
 
         cx.spawn(async move |this, cx| {
             while let Some(snapshot) = presentation.next().await {
                 if snapshot.is_empty() {
                     continue;
                 }
-                if this
-                    .update(cx, |view, cx| {
-                        if view.session_generation == snapshot.generation {
-                            view.apply_presentation(snapshot, cx);
-                        }
-                    })
-                    .is_err()
-                {
+                if this.update(cx, |view, cx| view.apply_presentation(snapshot, cx)).is_err() {
                     break;
                 }
             }
@@ -497,6 +551,10 @@ impl LoginScreen {
     }
 
     fn apply_presentation(&mut self, snapshot: PresentationSnapshot, cx: &mut Context<Self>) {
+        if snapshot.generation != self.session_generation {
+            return;
+        }
+
         let PresentationSnapshot {
             authentication,
             session_ready,
@@ -507,6 +565,15 @@ impl LoginScreen {
             favorite_store_saved,
             ..
         } = snapshot;
+
+        if let Some(end) = session_end {
+            if let Some(update @ AuthenticationUpdate::CredentialsUpdated { .. }) = authentication {
+                self.apply_authentication(Some(update));
+            }
+            self.favorites.apply_saved(favorite_store_saved);
+            self.end_session(end, cx);
+            return;
+        }
 
         self.apply_authentication(authentication);
         if let Some(ready) = session_ready {
@@ -526,10 +593,6 @@ impl LoginScreen {
         }
 
         self.favorites.apply_saved(favorite_store_saved);
-
-        if let Some(end) = session_end {
-            self.end_session(end, cx);
-        }
 
         cx.notify();
     }
@@ -673,12 +736,98 @@ fn split_username(username: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::LoginStatus;
+    use std::{collections::VecDeque, sync::Arc};
+
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use network::Grid;
+
+    use super::{CredentialLoad, CredentialLoadCompletion, LoginMessage, LoginPhase, LoginScreen, LoginStatus};
+    use crate::gui::views::chat::ChatScreen;
     use crate::remembered_login::CredentialStoreError;
-    use crate::session::{PresentationMailbox, ViewerUpdate};
+    use crate::session::{ChatMessage, PresentationMailbox, PresentationSnapshot, SessionEnd, ViewerUpdate};
 
     fn credential_error(detail: &str) -> CredentialStoreError {
         CredentialStoreError::Open(detail.to_owned())
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+    }
+
+    #[test]
+    fn latest_grid_wins_while_loading() {
+        let (mut load, first) = CredentialLoad::begin(Grid::Agni);
+
+        assert!(load.is_loading());
+        assert!(LoginPhase::Idle.allows_grid_selection());
+        assert!(!LoginPhase::Connecting.allows_grid_selection());
+        assert_eq!(load.select(Grid::Aditi), None, "grid changes must not start a concurrent credential read");
+        assert_eq!(load.grid(), Grid::Aditi);
+
+        let next = match load.complete(first) {
+            CredentialLoadCompletion::Superseded(next) => next,
+            other => panic!("expected stale credentials to queue the selected grid, got {other:?}"),
+        };
+        assert_eq!(next.grid, Grid::Aditi);
+        assert_eq!(next.generation, first.generation.wrapping_add(1));
+        assert!(load.is_loading(), "the form stays blocked until the selected grid finishes loading");
+
+        assert_eq!(load.complete(next), CredentialLoadCompletion::Applied);
+        assert_eq!(load.grid(), Grid::Aditi);
+        assert!(!load.is_loading());
+        assert_eq!(load.complete(first), CredentialLoadCompletion::Stale);
+    }
+
+    #[gpui::test]
+    fn stale_presentation_cannot_end_relogin(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let session_lifecycle = Arc::new(crate::gui::SessionLifecycle::default());
+        let (screen, visual) = cx.add_window_view(|window, cx| LoginScreen::new(window, cx, session_lifecycle));
+        let snapshot = PresentationSnapshot {
+            generation: 1,
+            authentication: None,
+            session_ready: None,
+            region_name: Some("Old region".into()),
+            chat_messages: VecDeque::from([ChatMessage { from_name: "Old agent".into(), message: "stale message".into() }]),
+            session_end: Some(SessionEnd::Failed("old session failed".into())),
+            favorites: None,
+            favorite_store_saved: None,
+        };
+
+        let (generation, message) = visual.update(|_, app| {
+            screen.update(app, |login, cx| {
+                login.session_generation = 2;
+                login.login_phase = LoginPhase::Connecting;
+                login.status.message = Some(LoginMessage::Detail("Connecting to the new session".into()));
+                login.apply_presentation(snapshot, cx);
+                (login.session_generation, login.status.displayed(Vec::new(), false))
+            })
+        });
+
+        assert_eq!(generation, 2);
+        assert_eq!(message.as_deref(), Some("Connecting to the new session"));
+    }
+
+    #[gpui::test]
+    fn clear_session_preserves_chat_draft(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (chat, visual) = cx.add_window_view(ChatScreen::new);
+        draw(visual);
+
+        let input = visual.debug_bounds("chat-input").expect("chat input is visible");
+        visual.simulate_click(input.center(), Modifiers::default());
+        visual.simulate_input("draft survives end");
+        draw(visual);
+
+        visual.update(|_, app| chat.update(app, |chat, cx| chat.clear_session(cx)));
+        draw(visual);
+
+        let send = visual.debug_bounds("chat-send-button").expect("send action is visible");
+        visual.simulate_click(send.center(), Modifiers::default());
+        draw(visual);
+
+        assert!(visual.debug_bounds("chat-send-error").is_some(), "a retained draft produces the expected disconnected-session error");
     }
 
     #[test]
@@ -690,6 +839,19 @@ mod tests {
         status.reveal_credential_warning();
 
         assert_eq!(status.displayed(Vec::new(), true), Some(warning.to_string()));
+    }
+
+    #[test]
+    fn session_end_reveals_deferred_credential_warning() {
+        let warning = credential_error("credential save failed");
+        let mut status = LoginStatus::default();
+        status.show_credential_warning(Some(warning.clone()), false);
+
+        assert_eq!(status.displayed(Vec::new(), false), None);
+
+        status.end_session(crate::session::SessionEnd::Requested);
+
+        assert_eq!(status.displayed(Vec::new(), false), Some(warning.to_string()));
     }
 
     #[test]
