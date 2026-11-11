@@ -111,6 +111,7 @@ impl RequestedScene {
 struct SharedWindowState {
     requested: Mutex<RequestedScene>,
     feed: Mutex<Option<(u64, SceneFeed)>>,
+    runtime: Mutex<Option<Handle>>,
     proxy: Mutex<Option<EventLoopProxy<()>>>,
     wake_pending: AtomicBool,
     chat_pending: AtomicBool,
@@ -150,7 +151,8 @@ impl Viewport {
                 }
             };
             *worker_shared.proxy.lock().unwrap_or_else(PoisonError::into_inner) = Some(event_loop.create_proxy());
-            let mut app = WindowApp { shared: Arc::clone(&worker_shared), events, active: None, retired: Vec::new(), generation: 0 };
+            let mut app =
+                WindowApp { shared: Arc::clone(&worker_shared), events, active: None, retired: Vec::new(), generation: 0, runtime: None };
             if let Err(error) = event_loop.run_app(&mut app) {
                 tracing::error!(%error, "scene event loop failed");
             }
@@ -201,6 +203,7 @@ impl Viewport {
         agent_motion: watch::Receiver<Option<AgentMotionSample>>,
         runtime: Handle,
     ) {
+        *self.shared.runtime.lock().unwrap_or_else(PoisonError::into_inner) = Some(runtime.clone());
         let requested = self.shared.requested.lock().unwrap_or_else(PoisonError::into_inner);
         if requested.generation == generation && requested.visible {
             let shared = Arc::clone(&self.shared);
@@ -238,12 +241,13 @@ struct WindowApp {
     active: Option<SceneWindow>,
     retired: Vec<Retirement>,
     generation: u64,
+    runtime: Option<Handle>,
 }
 
 impl WindowApp {
     fn retire_active(&mut self) {
         if let Some(mut active) = self.active.take() {
-            self.retired.extend(active.take_retirements().into_iter().flatten());
+            self.retired.extend(active.take_retirements());
         }
     }
 
@@ -264,6 +268,9 @@ impl WindowApp {
     }
 
     fn synchronize(&mut self, event_loop: &ActiveEventLoop) {
+        if self.runtime.is_none() {
+            self.runtime = self.shared.runtime.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        }
         if self.shared.stop.load(Ordering::Acquire) {
             self.retire_active();
             *self.shared.feed.lock().unwrap_or_else(PoisonError::into_inner) = None;
@@ -277,12 +284,15 @@ impl WindowApp {
             return;
         }
         if requested.generation > self.generation {
+            let Some(runtime) = self.runtime.clone() else {
+                return;
+            };
             self.retire_active();
             if self.retired.len() >= MAX_RECOVERIES as usize {
                 return;
             }
             self.generation = requested.generation;
-            match SceneWindow::new(event_loop, requested.generation, requested.activate, Arc::clone(&self.shared)) {
+            match SceneWindow::new(event_loop, requested.generation, requested.activate, Arc::clone(&self.shared), runtime) {
                 Ok(window) => self.active = Some(window),
                 Err(error) => self.publish(ViewportEvent::Failed(requested.generation, ViewportError::SceneWindow(error)), event_loop),
             }
@@ -332,20 +342,34 @@ impl WindowApp {
     }
 
     fn schedule_redraw(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(active) = &mut self.active else {
+        if self.active.is_none() {
             event_loop.set_control_flow(if self.retired.is_empty() {
                 ControlFlow::Wait
             } else {
                 ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL)
             });
             return;
-        };
-        if let Some(retired) = active.take_retired() {
-            self.retired.push(retired);
         }
-        let renderer_pending = active.poll_renderer(Instant::now());
+        let now = Instant::now();
+        if let Some(active) = &mut self.active {
+            self.retired.extend(active.take_retired());
+        }
+        let Some((generation, renderer_result)) = self.active.as_mut().map(|active| (active.generation(), active.poll_renderer(now)))
+        else {
+            return;
+        };
+        let renderer_pending = match renderer_result {
+            Ok(pending) => pending,
+            Err(error) => {
+                self.retire_active();
+                self.publish(ViewportEvent::Failed(generation, ViewportError::SceneWindow(error)), event_loop);
+                return;
+            }
+        };
         let pending = !self.retired.is_empty() || renderer_pending;
-        active.schedule_redraw(event_loop, pending, self.retired.len() < MAX_RECOVERIES as usize);
+        if let Some(active) = &mut self.active {
+            active.schedule_redraw(event_loop, pending, self.retired.len() < MAX_RECOVERIES as usize);
+        }
     }
 }
 
@@ -439,8 +463,14 @@ mod tests {
     #[test]
     fn rejected_chat_requests_can_retry() {
         let (events, mut incoming) = channel(0);
-        let mut app =
-            WindowApp { shared: Arc::new(SharedWindowState::default()), events, active: None, retired: Vec::new(), generation: 1 };
+        let mut app = WindowApp {
+            shared: Arc::new(SharedWindowState::default()),
+            events,
+            active: None,
+            retired: Vec::new(),
+            generation: 1,
+            runtime: None,
+        };
         app.events.try_send(ViewportEvent::Ready(1)).unwrap();
         app.request_chat(1);
         std::assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Ready(1)));
