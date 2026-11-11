@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 use super::SessionError;
 use super::send::chat_message_with_text;
+use super::send_logout_reply;
 use super::{COMMAND_CAPACITY, Channels, NETWORK_THREAD_STACK_SIZE, Session, SessionHandle, SessionOptions, run_client};
 use crate::coverage::{CoverageLoss, CoverageLossLedger, CoverageSource};
 use crate::event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY};
@@ -452,6 +453,7 @@ async fn network_thread_login() {
 
     let (_, logout) = receive_client_message(&simulator, peer, |message| matches!(message, Message::LogoutRequest(_))).await;
     assert!(logout.is_reliable());
+    send_logout_reply(&simulator, peer, &logout, 22).await;
     assert!(worker.await.expect("network thread should join").is_ok());
     assert!(*retained_handle.worker_finished.borrow());
     let requests = http_task.await.expect("fake HTTP server should stop");
@@ -505,10 +507,7 @@ pub(super) async fn event_queue_coverage_loss_keeps_viewer_session_connected() {
     let (_, chat_packet) =
         receive_client_message(&simulator, peer, |message| matches!(message, Message::ChatFromViewer(_) | Message::LogoutRequest(_))).await;
     if matches!(chat_packet.message(), Message::LogoutRequest(_)) {
-        let mut logout_reply = test_fixture("logout_reply.hex");
-        logout_reply[0] |= 0x40;
-        set_sequence(&mut logout_reply, 26);
-        simulator.send_to(&logout_reply, peer).await.expect("reply to unexpected session logout");
+        send_logout_reply(&simulator, peer, &chat_packet, 26).await;
         let result =
             timeout(Duration::from_secs(2), worker).await.expect("failed session worker should stop").expect("network thread should join");
         assert!(result.is_err(), "the pre-fix runtime ends with an EventQueueGet failure");
@@ -521,10 +520,7 @@ pub(super) async fn event_queue_coverage_loss_keeps_viewer_session_connected() {
 
     drop(session);
     let (_, logout) = receive_client_message(&simulator, peer, |message| matches!(message, Message::LogoutRequest(_))).await;
-    let mut logout_reply = test_fixture("logout_reply.hex");
-    logout_reply[0] |= 0x40;
-    set_sequence(&mut logout_reply, 26);
-    simulator.send_to(&logout_reply, peer).await.expect("reply to session logout");
+    send_logout_reply(&simulator, peer, &logout, 27).await;
     assert!(
         timeout(Duration::from_secs(2), worker)
             .await

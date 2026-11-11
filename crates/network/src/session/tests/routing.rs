@@ -1,6 +1,5 @@
 use super::*;
-use crate::capabilities::EventQueueRoleHandle;
-use crate::fixtures::{event_with_retained_bytes, test_simulator_id};
+use crate::fixtures::test_simulator_id;
 
 async fn run_queued_target_does_not_follow_neighbor_replacement() {
     let mut harness = Box::pin(connected_neighbor()).await;
@@ -107,24 +106,143 @@ async fn run_neighbor_targets_and_replacements() {
     harness.shutdown().await;
 }
 
-#[test]
-fn neighbor_disconnect_removes_preconnect_packet_memory() {
-    let simulator_id = test_simulator_id(54);
-    let source = "127.0.0.1:13004".parse().expect("parse neighbor endpoint");
-    let budget = SimulatorMemoryBudget::new().for_neighbor();
-    let wire = test_fixture("chat_from_simulator.hex");
-    let mut preconnect_events = PreconnectEvents::default();
+async fn run_same_endpoint_teleport_retry_promotes_replacement() {
+    let mut harness = Box::pin(connected_neighbor()).await;
+    let endpoint = harness.neighbor.local_addr().expect("neighbor endpoint");
+    let region_handle = 0x1000_0000_0000_1000;
+    let session = login_session(harness.primary.local_addr().expect("primary endpoint"));
+    let first_finish = Packet::new(50, teleport_finish_to(session.agent_id, endpoint, region_handle, session.seed_capability.as_str()))
+        .with_reliable()
+        .encode()
+        .expect("encode first handoff attempt");
+    harness.primary.send_to(&first_finish, harness.primary_peer).await.expect("announce first handoff attempt");
+    receive_ack(&harness.primary, 50).await;
 
-    assert!(preconnect_events.push(simulator_id, retained_packet_event(&budget, simulator_id, source, &wire)));
-    assert!(budget.global_available_bytes() < MAX_QUEUED_SIMULATOR_EVENT_BYTES);
-    assert!(budget.neighbor_available_bytes() < MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
-    assert!(budget.connection_available_bytes() < MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);
+    timeout(WAIT, async {
+        loop {
+            if matches!(
+                next_raw_event(&mut harness.events).await,
+                Event::SimulatorMessage { simulator_id, message: Message::TeleportFinish(_), .. }
+                    if simulator_id == harness.primary_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("session admits the first handoff attempt");
 
-    drop(preconnect_events.remove(simulator_id));
+    let (completed, cancellation_result) = oneshot::channel();
+    harness
+        .commands
+        .send(Command::SendTo {
+            simulator_id: harness.primary_id,
+            message: Message::TeleportCancel(protocol::messages::TeleportCancel {
+                agent_id: session.agent_id,
+                session_id: session.session_id,
+            }),
+            delivery: Delivery::Reliable,
+            completed,
+        })
+        .await
+        .expect("send handoff cancellation");
+    let cancellation = timeout(WAIT, receive_message(&harness.primary, |message| matches!(message, Message::TeleportCancel(_))))
+        .await
+        .expect("cancellation reaches the primary simulator");
+    harness.primary.send_to(&ack(51, cancellation.sequence()), harness.primary_peer).await.expect("ack cancellation");
+    timeout(WAIT, cancellation_result)
+        .await
+        .expect("cancellation send completes")
+        .expect("cancellation completion reply")
+        .expect("cancellation reaches the local socket");
 
-    assert_eq!(budget.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
-    assert_eq!(budget.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
-    assert_eq!(budget.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);
+    let retry = Packet::new(52, teleport_finish_to(session.agent_id, endpoint, region_handle, session.seed_capability.as_str()))
+        .with_reliable()
+        .encode()
+        .expect("encode replacement handoff attempt");
+    harness.primary.send_to(&retry, harness.primary_peer).await.expect("retry the same region and endpoint");
+    receive_ack(&harness.primary, 52).await;
+    let (circuit, replacement_peer) =
+        timeout(WAIT, receive_message_with_peer(&harness.neighbor, |message| matches!(message, Message::UseCircuitCode(_))))
+            .await
+            .expect("replacement attempt opens a new simulator circuit");
+    harness.neighbor.send_to(&ack(60, circuit.sequence()), replacement_peer).await.expect("ack replacement circuit");
+
+    let mut old_disconnected = false;
+    let replacement_id = timeout(WAIT, async {
+        loop {
+            match next_raw_event(&mut harness.events).await {
+                Event::SimulatorDisconnected { simulator_id, region_handle: Some(handle), .. }
+                    if simulator_id == harness.neighbor_id && handle == region_handle =>
+                {
+                    old_disconnected = true;
+                }
+                Event::SimulatorConnected { simulator_id, region_handle: Some(handle), endpoint: connected_endpoint }
+                    if handle == region_handle && connected_endpoint == endpoint && simulator_id != harness.neighbor_id =>
+                {
+                    break simulator_id;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("replacement connection becomes available");
+    assert_ne!(replacement_id, harness.neighbor_id);
+
+    let mut handshake = test_fixture("region_handshake.hex");
+    handshake[0] |= 0x40;
+    set_sequence(&mut handshake, 70);
+    harness.neighbor.send_to(&handshake, replacement_peer).await.expect("handshake replacement circuit");
+    let reply = timeout(WAIT, receive_message(&harness.neighbor, |message| matches!(message, Message::RegionHandshakeReply(_))))
+        .await
+        .expect("replacement handshake reply");
+    let movement = timeout(WAIT, receive_message(&harness.neighbor, |message| matches!(message, Message::CompleteAgentMovement(_))))
+        .await
+        .expect("replacement movement request");
+    harness.neighbor.send_to(&ack(71, reply.sequence()), replacement_peer).await.expect("ack replacement handshake reply");
+    harness.neighbor.send_to(&ack(72, movement.sequence()), replacement_peer).await.expect("ack replacement movement request");
+    harness
+        .neighbor
+        .send_to(&movement_complete_packet(73, session.agent_id, session.session_id, region_handle), replacement_peer)
+        .await
+        .expect("complete movement on replacement circuit");
+
+    let mut promoted = false;
+    timeout(WAIT, async {
+        while !promoted || !old_disconnected {
+            match next_raw_event(&mut harness.events).await {
+                Event::SimulatorPromoted { simulator_id, .. } if simulator_id == replacement_id => promoted = true,
+                Event::SimulatorDisconnected { simulator_id, region_handle: Some(handle), .. }
+                    if simulator_id == harness.neighbor_id && handle == region_handle =>
+                {
+                    old_disconnected = true;
+                }
+                Event::Failed(reason) => panic!("same-endpoint retry failed: {reason}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the replacement promotes and the old completion is absorbed");
+
+    harness
+        .commands
+        .send(Command::SendMessage { message: object_request(), delivery: Delivery::Unreliable })
+        .await
+        .expect("send through the replacement primary");
+    let (_, sent_peer) =
+        timeout(WAIT, receive_message_with_peer(&harness.neighbor, |message| matches!(message, Message::RequestMultipleObjects(_))))
+            .await
+            .expect("replacement route remains active after the old completion");
+    assert_eq!(sent_peer, replacement_peer);
+
+    harness.disconnect.send_replace(true);
+    let logout = timeout(WAIT, receive_message(&harness.neighbor, |message| matches!(message, Message::LogoutRequest(_))))
+        .await
+        .expect("replacement primary receives logout");
+    send_logout_reply(&harness.neighbor, replacement_peer, &logout, 74).await;
+    timeout(WAIT, harness.client).await.expect("same-endpoint session shutdown").expect("session task").expect("clean shutdown");
 }
 
 #[tokio::test]
@@ -164,51 +282,10 @@ async fn primary_intro_precedes_early_udp_data() {
     );
 
     disconnect.send_replace(true);
-    receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
+    let logout = receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
+    send_logout_reply(&simulator, peer, &logout, 21).await;
     assert!(timeout(WAIT, client).await.expect("disconnect should finish").expect("client task").is_ok());
     drop(commands);
-}
-
-#[test]
-fn preconnect_buffer_is_bounded() {
-    let simulator_id = test_simulator_id(51);
-    let mut pending = PreconnectEvents::default();
-    for _ in 0..MAX_PRECONNECT_EVENTS {
-        match queue_until_connected(&HashSet::new(), &mut pending, simulator_id, EventEnvelope::new(Event::Failed("pending".into()))) {
-            PreconnectOutcome::Buffered => {}
-            _ => panic!("event should be buffered before overflow"),
-        }
-    }
-    let overflow = queue_until_connected(&HashSet::new(), &mut pending, simulator_id, EventEnvelope::new(Event::Failed("overflow".into())));
-    match overflow {
-        PreconnectOutcome::Full => {}
-        _ => panic!("preconnect event queue should report full"),
-    }
-    assert_eq!(pending.take(simulator_id).len(), MAX_PRECONNECT_EVENTS);
-}
-
-#[tokio::test]
-async fn simulator_removal_releases_preconnect_bytes() {
-    let simulator_id = test_simulator_id(52);
-    let budget = Arc::new(Semaphore::new(10));
-    let permit = budget.clone().acquire_many_owned(7).await.expect("reserve event bytes");
-    let mut pending = PreconnectEvents::default();
-    assert!(pending.push(
-        simulator_id,
-        event_with_retained_bytes(
-            Event::CapabilityEvent {
-                simulator_id,
-                source: "127.0.0.1:13001".parse().expect("simulator address"),
-                message: "Pending".into(),
-                body: Value::Undefined,
-            },
-            permit,
-        ),
-    ));
-    assert_eq!(budget.available_permits(), 3);
-
-    assert_eq!(pending.remove(simulator_id).len(), 1);
-    assert_eq!(budget.available_permits(), 10);
 }
 
 #[tokio::test]
@@ -239,23 +316,27 @@ async fn replacing_neighbor_releases_queued_state() {
         .await
         .expect("start initial neighbor");
     let _ = receive(&old_neighbor).await;
-    let old_id = setup.state.neighbor_connections.get(&region_handle).expect("old neighbor is tracked").simulator_id;
-
-    let packet_memory = SimulatorMemoryBudget::new().for_neighbor();
+    let old_id = connection
+        .state
+        .simulators
+        .iter()
+        .find_map(|(id, record)| (record.region_handle == Some(region_handle) && record.endpoint == old_endpoint).then_some(*id))
+        .expect("old neighbor is tracked");
+    let packet_memory = connection.state.simulators.get(&old_id).expect("old simulator record").packet_memory.clone();
     let packet = test_fixture("chat_from_simulator.hex");
-    assert!(setup.state.preconnect_events.push(old_id, retained_packet_event(&packet_memory, old_id, old_endpoint, &packet),));
-    let seed_capability = Url::parse("http://127.0.0.1:1/seed").expect("seed URL");
-    setup.state.simulator_capabilities.insert(
+    connection.state.simulators.get_mut(&old_id).expect("old simulator record").preconnect_events.push_back(retained_packet_event(
+        &packet_memory,
         old_id,
-        SimulatorCapabilitySession {
-            endpoint: old_endpoint,
-            seed_capability: seed_capability.clone(),
-            client: Client::new_with_budget(seed_capability, CapabilityBudget::new()).expect("create old capability client"),
-            event_queue_role: EventQueueRoleHandle::channel(false).0,
-            event_queue_task: None,
-            event_queue_running: false,
-        },
-    );
+        old_endpoint,
+        &packet,
+    ));
+    setup.state.preconnect_events_len += 1;
+    let seed_capability = Url::parse("http://127.0.0.1:1/seed").expect("seed URL");
+    connection.state.simulators.get_mut(&old_id).expect("old simulator record").capabilities = Some(SimulatorCapabilitySession {
+        seed_capability: seed_capability.clone(),
+        client: Client::new_with_budget(seed_capability, CapabilityBudget::new()).expect("create old capability client"),
+        event_queue: EventQueueLifecycle::NotStarted,
+    });
     assert!(packet_memory.global_available_bytes() < MAX_QUEUED_SIMULATOR_EVENT_BYTES);
 
     connection
@@ -265,16 +346,25 @@ async fn replacing_neighbor_releases_queued_state() {
         .expect("replace unannounced neighbor");
     let _ = receive(&new_neighbor).await;
 
-    assert_ne!(setup.state.neighbor_connections.get(&region_handle).expect("replacement remains tracked").simulator_id, old_id);
-    assert!(setup.state.retiring_simulators.contains(&old_id));
-    assert!(setup.state.preconnect_events.take(old_id).is_empty(), "replacement drops old pre-connect events immediately");
+    let replacement_id = connection
+        .state
+        .simulators
+        .iter()
+        .find_map(|(id, record)| {
+            (record.is_current() && record.region_handle == Some(region_handle) && record.endpoint == new_endpoint).then_some(*id)
+        })
+        .expect("replacement remains tracked");
+    assert_ne!(replacement_id, old_id);
+    let old_record = connection.state.simulators.get(&old_id).expect("retired record remains until task completion");
+    assert!(old_record.is_retiring());
+    assert!(old_record.preconnect_events.is_empty(), "replacement drops old pre-connect events immediately");
     assert_eq!(packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
     assert_eq!(packet_memory.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
     assert_eq!(packet_memory.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);
-    assert!(!setup.state.simulator_capabilities.contains_key(&old_id), "replacement stops the old capability session immediately");
+    assert!(old_record.capabilities.is_none(), "replacement stops the old capability session immediately");
 
-    setup.state.neighbors.abort_all();
-    while setup.state.neighbors.join_next().await.is_some() {}
+    drop(setup);
+    run_state.connections.shutdown().await;
 }
 
 #[tokio::test]
@@ -288,23 +378,18 @@ async fn preconnect_overflow_reports_coverage_without_disconnect() {
     let neighbor_task = spawn(pending::<()>());
     let (neighbor_commands, _neighbor_command_receiver) = mpsc::channel(1);
     let mut run_state = RunState::new();
-    run_state.neighbor_connections.insert(
-        region_handle,
-        SimulatorConnectionState {
-            simulator_id,
-            endpoint: neighbor_endpoint,
-            abort: neighbor_task.abort_handle(),
-            commands: neighbor_commands,
-            logout: mpsc::channel(1).0,
-            pending_handoff_command: None,
-            primary_state: None,
-            packet_memory: SimulatorMemoryBudget::new().for_neighbor(),
-        },
+    connection.state.simulators.insert(
+        simulator_id,
+        test_simulator_record(neighbor_endpoint, Some(region_handle), neighbor_task.abort_handle(), neighbor_commands),
     );
-    for _ in 0..MAX_PRECONNECT_EVENTS {
-        assert!(run_state.preconnect_events.push(simulator_id, EventEnvelope::new(Event::Failed("buffered".into()))));
-    }
     let (events, mut received) = mpsc::channel(1);
+    for _ in 0..MAX_PRECONNECT_EVENTS {
+        connection
+            .state
+            .publish_simulator_event(simulator_id, Event::Failed("buffered".into()).into(), &events, &mut run_state)
+            .await
+            .expect("buffer pre-connect event");
+    }
     let source = CoverageSource::EventQueue { incarnation: 54 };
     let watermark = connection.state.coverage_losses.watermark(simulator_id, source);
 
@@ -327,9 +412,10 @@ async fn preconnect_overflow_reports_coverage_without_disconnect() {
         .await
         .expect("a full pre-connect buffer should report coverage loss without ending the session");
 
-    assert!(run_state.neighbor_connections.contains_key(&region_handle), "queue pressure must keep the neighbor connected");
-    assert_eq!(run_state.preconnect_events.take(simulator_id).len(), MAX_PRECONNECT_EVENTS);
-    assert!(!run_state.connected_simulators.contains(&simulator_id));
+    let record = connection.state.simulators.get(&simulator_id).expect("queue pressure must keep the neighbor connected");
+    assert_eq!(record.preconnect_events.len(), MAX_PRECONNECT_EVENTS);
+    assert_eq!(run_state.preconnect_events_len, MAX_PRECONNECT_EVENTS);
+    assert_eq!(record.connection, SimulatorConnectionLifecycle::Connecting);
     assert!(received.try_recv().is_err(), "the pre-connect event remains buffered until connection ordering is established");
     std::assert_matches!(
         connection.state.coverage_losses.snapshot().losses.as_slice(),
@@ -454,6 +540,11 @@ fn neighbor_targets_and_replacements() {
 #[test]
 fn queued_target_does_not_follow_neighbor_replacement() {
     run_large_stack_test(run_queued_target_does_not_follow_neighbor_replacement);
+}
+
+#[test]
+fn same_endpoint_teleport_retry_promotes_replacement() {
+    run_large_stack_test(run_same_endpoint_teleport_retry_promotes_replacement);
 }
 
 #[tokio::test]

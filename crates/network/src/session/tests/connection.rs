@@ -1,4 +1,4 @@
-use std::net::SocketAddrV4;
+use std::{net::SocketAddrV4, sync};
 
 use llsd::{Map, Value, xml};
 use reqwest::Url;
@@ -347,8 +347,8 @@ async fn neighbor_task_limit_preserves_current() {
         sockets.push(socket);
     }
 
-    assert_eq!(setup.state.neighbor_connections.len(), MAX_NEIGHBOR_SIMULATORS);
-    assert_eq!(setup.state.neighbors.len(), MAX_NEIGHBOR_SIMULATORS);
+    assert_eq!(current_neighbor_count(&connection.state), MAX_NEIGHBOR_SIMULATORS);
+    assert_eq!(neighbor_connection_task_count(&connection.state), MAX_NEIGHBOR_SIMULATORS);
     let mut current_peer = None;
     for _ in 0..MAX_NEIGHBOR_SIMULATORS {
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind replacement simulator");
@@ -364,9 +364,9 @@ async fn neighbor_task_limit_preserves_current() {
         sockets.push(socket);
     }
 
-    assert_eq!(setup.state.neighbor_connections.len(), MAX_NEIGHBOR_SIMULATORS);
-    assert_eq!(setup.state.neighbors.len(), MAX_NEIGHBOR_CONNECTION_TASKS);
-    let current_id = setup.state.neighbor_connections.get(&target_region).expect("current target connection").simulator_id;
+    assert_eq!(current_neighbor_count(&connection.state), MAX_NEIGHBOR_SIMULATORS);
+    assert_eq!(neighbor_connection_task_count(&connection.state), MAX_NEIGHBOR_CONNECTION_TASKS);
+    let current_id = current_neighbor_for_region(&connection.state, target_region).expect("current target connection").0;
     let rejected = UdpSocket::bind("127.0.0.1:0").await.expect("bind rejected simulator");
     let rejected_endpoint = rejected.local_addr().expect("rejected endpoint");
     connection
@@ -375,8 +375,8 @@ async fn neighbor_task_limit_preserves_current() {
         .await
         .expect("reject a replacement at the task cap");
 
-    assert_eq!(setup.state.neighbor_connections.get(&target_region).expect("current target remains").simulator_id, current_id);
-    assert_eq!(setup.state.neighbors.len(), MAX_NEIGHBOR_CONNECTION_TASKS);
+    assert_eq!(current_neighbor_for_region(&connection.state, target_region).expect("current target remains").0, current_id);
+    assert_eq!(neighbor_connection_task_count(&connection.state), MAX_NEIGHBOR_CONNECTION_TASKS);
     let failure = loop {
         if let Event::SimulatorConnectFailed { simulator_id, region_handle, endpoint } =
             received_events.recv().await.expect("event channel remains open").into_event()
@@ -401,12 +401,13 @@ async fn neighbor_task_limit_preserves_current() {
     std::assert_matches!(rejected.try_recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
 
     for _ in 0..MAX_NEIGHBOR_SIMULATORS {
-        let Some(Err(error)) = setup.state.neighbors.join_next().await else {
+        let Some(Err(error)) = setup.state.connections.join_next().await else {
             panic!("replaced neighbor task should be joined as canceled");
         };
         assert!(error.is_cancelled());
+        assert!(connection.state.mark_connection_task_joined(error.id()).is_some());
     }
-    assert_eq!(setup.state.neighbors.len(), MAX_NEIGHBOR_SIMULATORS);
+    assert_eq!(neighbor_connection_task_count(&connection.state), MAX_NEIGHBOR_SIMULATORS);
 
     let recovered = UdpSocket::bind("127.0.0.1:0").await.expect("bind recovered simulator");
     let recovered_endpoint = recovered.local_addr().expect("recovered endpoint");
@@ -417,8 +418,8 @@ async fn neighbor_task_limit_preserves_current() {
         .expect("task capacity should recover after canceled workers are joined");
     let (bytes, _) = receive(&recovered).await;
     std::assert_matches!(Packet::decode(&bytes).expect("decode recovered neighbor").message(), Message::UseCircuitCode(_));
-    assert_eq!(setup.state.neighbor_connections.len(), MAX_NEIGHBOR_SIMULATORS);
-    assert_eq!(setup.state.neighbors.len(), MAX_NEIGHBOR_SIMULATORS + 1);
+    assert_eq!(current_neighbor_count(&connection.state), MAX_NEIGHBOR_SIMULATORS);
+    assert_eq!(neighbor_connection_task_count(&connection.state), MAX_NEIGHBOR_SIMULATORS + 1);
 }
 
 #[tokio::test]
@@ -460,8 +461,8 @@ async fn neighbor_simulator_limit_is_bounded() {
             std::assert_matches!(Packet::decode(&bytes).expect("decode neighbor bootstrap").message(), Message::UseCircuitCode(_));
             sockets.push(socket);
         } else {
-            assert_eq!(setup.state.neighbor_connections.len(), MAX_NEIGHBOR_SIMULATORS);
-            assert_eq!(setup.state.neighbors.len(), MAX_NEIGHBOR_SIMULATORS);
+            assert_eq!(current_neighbor_count(&connection.state), MAX_NEIGHBOR_SIMULATORS);
+            assert_eq!(neighbor_connection_task_count(&connection.state), MAX_NEIGHBOR_SIMULATORS);
             let rejected_endpoint = endpoint;
             let failure = timeout(WAIT, async {
                 loop {
@@ -476,15 +477,15 @@ async fn neighbor_simulator_limit_is_bounded() {
             .await
             .expect("the 33rd unique simulator should be rejected");
             assert_eq!(failure.1, rejected_endpoint);
-            assert!(!setup.state.neighbor_connections.contains_key(&region_handle));
-            assert_eq!(setup.state.neighbor_connections.len(), MAX_NEIGHBOR_SIMULATORS);
-            assert_eq!(setup.state.neighbors.len(), MAX_NEIGHBOR_SIMULATORS);
+            assert!(current_neighbor_for_region(&connection.state, region_handle).is_none());
+            assert_eq!(current_neighbor_count(&connection.state), MAX_NEIGHBOR_SIMULATORS);
+            assert_eq!(neighbor_connection_task_count(&connection.state), MAX_NEIGHBOR_SIMULATORS);
             sockets.push(socket);
         }
     }
 
-    setup.state.neighbors.abort_all();
-    while setup.state.neighbors.join_next().await.is_some() {}
+    setup.state.connections.abort_all();
+    while setup.state.connections.join_next().await.is_some() {}
 }
 
 #[tokio::test]
@@ -610,7 +611,8 @@ async fn neighbor_backpressure_controls() {
     assert!(replies.is_ok(), "neighbor must ACK reliable traffic and answer ping checks while event delivery is blocked");
 
     disconnect_signal.send_replace(true);
-    receive_message(&primary, |message| matches!(message, Message::LogoutRequest(_))).await;
+    let logout = receive_message(&primary, |message| matches!(message, Message::LogoutRequest(_))).await;
+    send_logout_reply(&primary, primary_peer, &logout, 31).await;
     assert!(timeout(TEST_TIMEOUT, client).await.expect("disconnect should finish").expect("client task").is_ok());
 }
 
@@ -805,7 +807,9 @@ async fn event_queue_starts_neighbor() {
 
     disconnect.send_replace(true);
     let (logout, _) = receive_udp(&primary).await;
-    std::assert_matches!(Packet::decode(&logout).expect("decode logout").message(), Message::LogoutRequest(_));
+    let logout = Packet::decode(&logout).expect("decode logout");
+    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+    send_logout_reply(&primary, primary_peer, &logout, 41).await;
     timeout(TEST_TIMEOUT, worker).await.expect("network worker shutdown").expect("network task").expect("clean shutdown");
     server.stop();
     let requests = server.finish();
@@ -813,6 +817,159 @@ async fn event_queue_starts_neighbor() {
     neighbor_seed_server.stop();
     let _ = neighbor_seed_server.finish();
     assert_ne!(primary_peer, neighbor_peer);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatcher_shutdown_cancels_a_held_event_queue_poll() {
+    let mut server = EventQueueTestServer::start(|base| {
+        let mut event_url = base.clone();
+        event_url.set_path("/event-queue");
+        vec![EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))), hold_response()]
+    });
+    let harness = Box::pin(connected_neighbor_with_seed(server.url("/seed"))).await;
+    let seed = timeout(TEST_TIMEOUT, server.next_request_async()).await.expect("primary seed request reaches HTTP worker");
+    assert!(request_line(&seed).starts_with("POST /seed HTTP/1.1"));
+    let poll = timeout(TEST_TIMEOUT, server.next_request_async()).await.expect("primary EventQueue poll reaches HTTP worker");
+    assert!(request_line(&poll).starts_with("POST /event-queue HTTP/1.1"));
+
+    harness.disconnect.send_replace(true);
+    let logout = timeout(TEST_TIMEOUT, receive_message(&harness.primary, |message| matches!(message, Message::LogoutRequest(_))))
+        .await
+        .expect("session sends logout before shutting down its held poll");
+    send_logout_reply(&harness.primary, harness.primary_peer, &logout, 24).await;
+    timeout(TEST_TIMEOUT, harness.client)
+        .await
+        .expect("session waits for shutdown workers")
+        .expect("session task")
+        .expect("clean shutdown");
+
+    assert_eq!(server.finish().len(), 2, "shutdown must close the held poll without starting another request");
+}
+
+#[test]
+fn stale_event_queue_completion_after_capability_replacement_preserves_promoted_primary() {
+    run_large_stack_test(run_stale_event_queue_completion_after_capability_replacement_preserves_promoted_primary);
+}
+
+async fn run_stale_event_queue_completion_after_capability_replacement_preserves_promoted_primary() {
+    let region_handle = 0x1000_0000_0000_1000;
+    let agent_id = Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("agent UUID");
+    let mut old_capability_server = EventQueueTestServer::start(|base| {
+        let mut event_url = base.clone();
+        event_url.set_path("/event-queue");
+        vec![EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))), hold_response()]
+    });
+    let mut new_capability_server = EventQueueTestServer::start(|base| {
+        let mut event_url = base.clone();
+        event_url.set_path("/event-queue");
+        vec![EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))), hold_response()]
+    });
+    let old_seed = old_capability_server.url("/old-seed");
+    let (release, poll_response) = sync::mpsc::channel();
+    let mut root_server = EventQueueTestServer::start(move |base| {
+        let mut event_url = base.clone();
+        event_url.set_path("/event-queue");
+        vec![
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))),
+            EventServerResponse::Controlled(poll_response),
+            hold_response(),
+            hold_response(),
+        ]
+    });
+
+    let mut harness =
+        timeout(TEST_TIMEOUT, connected_neighbor_with_seed(root_server.url("/primary-seed"))).await.expect("connected neighbor setup");
+    let neighbor_endpoint = harness.neighbor.local_addr().expect("neighbor endpoint");
+    let SocketAddr::V4(neighbor_endpoint_v4) = neighbor_endpoint else { panic!("neighbor endpoint must use IPv4") };
+    let request = timeout(TEST_TIMEOUT, root_server.next_request_async()).await.expect("root seed request");
+    assert!(request_line(&request).starts_with("POST /primary-seed HTTP/1.1"));
+    let request = timeout(TEST_TIMEOUT, root_server.next_request_async()).await.expect("root EventQueue request");
+    assert!(request_line(&request).starts_with("POST /event-queue HTTP/1.1"));
+    let event = simulator_events(neighbor_endpoint_v4.ip().octets(), neighbor_endpoint_v4.port(), agent_id, &old_seed);
+    release.send(response(200, "OK", "application/llsd+xml", None, &event)).expect("release agent communication event");
+    timeout(TEST_TIMEOUT, async {
+        let mut saw_batch = false;
+        let mut saw_capabilities = false;
+        while !saw_batch || !saw_capabilities {
+            match next_raw_event(&mut harness.events).await {
+                Event::CapabilityEventBatch { events, .. } => {
+                    saw_batch |= events.iter().any(|event| event.message == "EstablishAgentCommunication");
+                }
+                Event::SimulatorCapabilities { source, .. } if source == neighbor_endpoint => saw_capabilities = true,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("agent communication event reaches the session and starts neighbor capabilities");
+    let request = timeout(TEST_TIMEOUT, old_capability_server.next_request_async()).await.expect("old seed request");
+    assert!(request_line(&request).starts_with("POST /old-seed HTTP/1.1"));
+    let request = timeout(TEST_TIMEOUT, old_capability_server.next_request_async()).await.expect("old EventQueue poll");
+    assert!(request_line(&request).starts_with("POST /event-queue HTTP/1.1"));
+
+    let new_seed = new_capability_server.url("/new-seed");
+    let session = login_session(harness.primary.local_addr().expect("primary endpoint"));
+    let finish = Packet::new(50, teleport_finish_to(session.agent_id, neighbor_endpoint, region_handle, new_seed.as_str()))
+        .with_reliable()
+        .encode()
+        .expect("encode capability replacement handoff");
+    harness.primary.send_to(&finish, harness.primary_peer).await.expect("replace neighbor EventQueue capability");
+    receive_ack(&harness.primary, 50).await;
+    let request = timeout(TEST_TIMEOUT, new_capability_server.next_request_async()).await.expect("replacement seed request");
+    assert!(request_line(&request).starts_with("POST /new-seed HTTP/1.1"));
+    let request = timeout(TEST_TIMEOUT, new_capability_server.next_request_async()).await.expect("replacement EventQueue poll");
+    assert!(request_line(&request).starts_with("POST /event-queue HTTP/1.1"));
+    let mut handshake = test_fixture("region_handshake.hex");
+    handshake[0] |= 0x40;
+    set_sequence(&mut handshake, 60);
+    harness.neighbor.send_to(&handshake, harness.neighbor_peer).await.expect("handshake replacement simulator");
+    let reply = timeout(TEST_TIMEOUT, receive_message(&harness.neighbor, |message| matches!(message, Message::RegionHandshakeReply(_))))
+        .await
+        .expect("replacement handshake reply");
+    let movement =
+        timeout(TEST_TIMEOUT, receive_message(&harness.neighbor, |message| matches!(message, Message::CompleteAgentMovement(_))))
+            .await
+            .expect("replacement movement request");
+    harness.neighbor.send_to(&ack(61, reply.sequence()), harness.neighbor_peer).await.expect("ack replacement handshake");
+    harness.neighbor.send_to(&ack(62, movement.sequence()), harness.neighbor_peer).await.expect("ack replacement movement request");
+    harness
+        .neighbor
+        .send_to(&movement_complete_packet(63, session.agent_id, session.session_id, region_handle), harness.neighbor_peer)
+        .await
+        .expect("complete movement to replacement simulator");
+    timeout(TEST_TIMEOUT, async {
+        loop {
+            if matches!(next_raw_event(&mut harness.events).await, Event::SimulatorPromoted { simulator_id, .. } if simulator_id == harness.neighbor_id) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("replacement simulator becomes primary after stale EventQueue completion");
+
+    harness
+        .commands
+        .send(Command::SendMessage { message: object_request(), delivery: Delivery::Unreliable })
+        .await
+        .expect("send through replacement primary");
+    let (_, route_peer) = timeout(
+        TEST_TIMEOUT,
+        receive_message_with_peer(&harness.neighbor, |message| matches!(message, Message::RequestMultipleObjects(_))),
+    )
+    .await
+    .expect("request routes through replacement primary");
+    assert_eq!(route_peer, harness.neighbor_peer);
+
+    harness.disconnect.send_replace(true);
+    let logout = timeout(TEST_TIMEOUT, receive_message(&harness.neighbor, |message| matches!(message, Message::LogoutRequest(_))))
+        .await
+        .expect("replacement primary receives shutdown logout");
+    send_logout_reply(&harness.neighbor, harness.neighbor_peer, &logout, 64).await;
+    timeout(TEST_TIMEOUT, harness.client).await.expect("session shutdown").expect("session task").expect("clean shutdown");
+    assert_eq!(old_capability_server.finish().len(), 2, "replacement cancels the old held poll");
+    assert!(new_capability_server.finish().len() >= 2, "replacement EventQueue worker sent seed and poll requests");
+    root_server.stop();
+    assert!(root_server.finish().len() >= 2, "root EventQueue worker sent its seed and event requests");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -907,6 +1064,7 @@ async fn crossed_region_promotes_after_matching_movement() {
     drop(commands);
     let logout = receive_message(&neighbor, |message| matches!(message, Message::LogoutRequest(_))).await;
     std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+    send_logout_reply(&neighbor, neighbor_peer, &logout, 47).await;
     timeout(TEST_TIMEOUT, worker).await.expect("network worker shutdown").expect("network task").expect("clean shutdown");
     primary_seed_server.stop();
     let primary_requests = primary_seed_server.finish();

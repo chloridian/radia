@@ -55,7 +55,8 @@ async fn ping_reacks_recent_duplicate() {
     assert_eq!(events.try_recv().err(), Some(mpsc::error::TryRecvError::Empty));
 
     disconnect_signal.send_replace(true);
-    receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
+    let logout = receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
+    send_logout_reply(&simulator, peer, &logout, 103).await;
     assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("disconnect should finish").expect("session task").is_ok());
 }
 
@@ -111,10 +112,11 @@ async fn shutdown_preempts_chat() {
     .expect("shutdown should send a logout request");
     assert!(logout.is_reliable());
     assert_eq!(logout.message(), &logout_message());
+    send_logout_reply(&simulator, peer, &logout, 24).await;
     assert!(
         timeout(SIMULATOR_TIMEOUT, client)
             .await
-            .expect("shutdown should not wait for a simulator reply")
+            .expect("shutdown should complete after a simulator reply")
             .expect("session task should not panic")
             .is_ok()
     );
@@ -155,11 +157,13 @@ async fn backpressure_keeps_acks() {
     simulator.send_to(&server_ack_many(24, &[throttle.sequence()]), peer).await.expect("ack AgentThrottle");
 
     disconnect_signal.send_replace(true);
-    assert_eq!(receive(&simulator).await.0, expected_fixture("logout_request.hex", 5, true));
+    let logout = Packet::decode(&receive(&simulator).await.0).expect("decode LogoutRequest");
+    assert_eq!(logout, Packet::decode(&expected_fixture("logout_request.hex", 5, true)).expect("decode expected LogoutRequest"));
+    send_logout_reply(&simulator, peer, &logout, 25).await;
     assert!(
         timeout(SIMULATOR_TIMEOUT, client)
             .await
-            .expect("disconnect should not wait for a simulator reply")
+            .expect("disconnect should complete after a simulator reply")
             .expect("session task should not panic")
             .is_ok()
     );
@@ -233,10 +237,11 @@ async fn ping_survives_backpressure() {
     .await
     .expect("disconnect should be handled while events are queued");
     std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+    send_logout_reply(&simulator, peer, &logout, 28).await;
     assert!(
         timeout(SIMULATOR_TIMEOUT, client)
             .await
-            .expect("disconnect should not wait for a simulator reply")
+            .expect("disconnect should complete after a simulator reply")
             .expect("session task should not panic")
             .is_ok()
     );
@@ -359,7 +364,8 @@ async fn region_arrival_object_burst_survives_slow_consumer() {
     wait_for_acknowledgement(&simulator, last_pending_sequence, SIMULATOR_TIMEOUT).await;
 
     disconnect_signal.send_replace(true);
-    receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
+    let logout = receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
+    send_logout_reply(&simulator, peer, &logout, last_pending_sequence + 1).await;
     assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("session should stop").expect("session task should not panic").is_ok());
 }
 
@@ -422,6 +428,7 @@ async fn sustained_application_pressure_disconnects() {
     .expect("sustained pressure should send logout after the grace period");
     std::assert_matches!(logout.message(), Message::LogoutRequest(_));
     assert!(!acknowledged.contains(&rejected_sequence), "the rejected reliable packet must stay unacknowledged");
+    send_logout_reply(&simulator, peer, &logout, rejected_sequence + 3).await;
     std::assert_matches!(
         timeout(SIMULATOR_TIMEOUT, client).await.expect("pressure disconnect should finish").expect("session task should not panic"),
         Err(crate::session::SessionError::SustainedApplicationEventPressure)
@@ -488,6 +495,7 @@ async fn lost_packet_retries() {
     assert!((3..=4).contains(&logout.sequence()));
     assert!(logout.is_reliable());
     assert_eq!(logout.message(), &logout_message());
+    send_logout_reply(&simulator, peer, &logout, 22).await;
     assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("session should stop").expect("session task should not panic").is_ok());
 }
 
@@ -582,7 +590,12 @@ async fn timer_acks_recover_loss() {
     assert_eq!(acknowledged, [55, 56]);
 
     disconnect_signal.send_replace(true);
-    assert_eq!(receive(&simulator).await.0, expected_fixture("logout_request.hex", next_sequence, true));
+    let logout = Packet::decode(&receive(&simulator).await.0).expect("decode LogoutRequest");
+    assert_eq!(
+        logout,
+        Packet::decode(&expected_fixture("logout_request.hex", next_sequence, true)).expect("decode expected LogoutRequest")
+    );
+    send_logout_reply(&simulator, peer, &logout, 57).await;
     assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("session should stop").expect("session task should not panic").is_ok());
 }
 

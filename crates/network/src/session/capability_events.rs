@@ -6,7 +6,7 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{
-    NeighborEventQueueJoin, RuntimeAction, SessionDispatcher, SessionError,
+    RuntimeAction, SessionDispatcher, SessionError,
     handoff::{HandoffOrder, PromotionSetup},
     is_current_simulator,
     neighbors::neighbor_event_queue_failure,
@@ -27,7 +27,7 @@ impl SessionDispatcher<'_> {
         let (event, retained_bytes, coverage_watermark) = envelope.into_parts();
         match event {
             Event::CapabilityEvent { simulator_id, source, message, mut body } => {
-                if !is_current_simulator(simulator_id, self.state.simulator_id, &self.run_state.neighbor_connections) {
+                if !is_current_simulator(simulator_id, &self.state.simulators) {
                     return Ok(RuntimeAction::Continue);
                 }
                 let mut setup = PromotionSetup {
@@ -54,7 +54,7 @@ impl SessionDispatcher<'_> {
                     .await?;
             }
             Event::CapabilityEventBatch { simulator_id, source, order, events: mut batch } => {
-                if !is_current_simulator(simulator_id, self.state.simulator_id, &self.run_state.neighbor_connections) {
+                if !is_current_simulator(simulator_id, &self.state.simulators) {
                     return Ok(RuntimeAction::Continue);
                 }
                 let mut setup = PromotionSetup {
@@ -94,7 +94,7 @@ impl SessionDispatcher<'_> {
                     .await?;
             }
             Event::CapabilityError { simulator_id, source, capability, reason }
-                if is_current_simulator(simulator_id, self.state.simulator_id, &self.run_state.neighbor_connections) =>
+                if is_current_simulator(simulator_id, &self.state.simulators) =>
             {
                 self.state
                     .publish_simulator_event(
@@ -119,72 +119,55 @@ impl SessionDispatcher<'_> {
         Ok(RuntimeAction::Continue)
     }
 
-    pub(super) async fn handle_neighbor_event_queue_join(&mut self, joined: NeighborEventQueueJoin) -> Result<RuntimeAction, SessionError> {
+    pub(super) async fn handle_event_queue_join(
+        &mut self,
+        joined: super::simulators::EventQueueTaskJoin,
+    ) -> Result<RuntimeAction, SessionError> {
         match joined {
             Some(Ok((task_id, (simulator_id, source, exit)))) => {
-                self.run_state.neighbor_event_queue_owners.remove(&task_id);
-                let current_queue = self.run_state.simulator_capabilities.get_mut(&simulator_id).is_some_and(|capability| {
-                    if capability.endpoint == source && capability.event_queue_task == Some(task_id) {
-                        capability.event_queue_running = false;
-                        true
-                    } else {
-                        false
-                    }
-                });
-                if !current_queue {
+                let Some((owner_id, owner_source, exit)) = self.state.finish_event_queue_task(task_id, exit) else {
+                    return Ok(RuntimeAction::Continue);
+                };
+                if simulator_id != owner_id || source != owner_source {
+                    tracing::error!(
+                        simulator = simulator_id.get(),
+                        owner = owner_id.get(),
+                        "event queue task completed with a mismatched simulator identity"
+                    );
                     return Ok(RuntimeAction::Continue);
                 }
-                if simulator_id == self.state.primary.simulator_id
+                if simulator_id == self.state.primary_id
                     && exit != EventQueueExit::Stopped
                     && !*self.disconnect_requested.borrow()
-                    && self.run_state.logout_deadline.is_none()
+                    && self.state.logout.deadline().is_none()
                 {
-                    self.state.note_primary_event_queue_exit(exit);
+                    self.state.note_primary_event_queue_exit(simulator_id, exit);
                 }
-                if simulator_id != self.state.primary.simulator_id
-                    && let Some(event) = neighbor_event_queue_failure(
-                        simulator_id,
-                        source,
-                        exit,
-                        self.state.simulator_id,
-                        &self.run_state.neighbor_connections,
-                    )
+                if simulator_id != self.state.primary_id && simulator_id == self.state.simulator_id {
+                    if matches!(exit, EventQueueExit::TaskFailed | EventQueueExit::RetryLimitReached | EventQueueExit::Unavailable) {
+                        tracing::warn!(simulator = simulator_id.get(), "former primary simulator EventQueueGet ended after promotion");
+                    }
+                } else if simulator_id != self.state.primary_id
+                    && let Some(event) = neighbor_event_queue_failure(simulator_id, source, exit, &self.state.simulators)
                 {
                     self.state.publish_event(&self.events, &mut self.run_state, event).await?;
                 }
             }
             Some(Err(error)) => {
                 let task_id = error.id();
-                let current_queue =
-                    self.run_state.neighbor_event_queue_owners.get(&task_id).copied().is_some_and(|(simulator_id, source)| {
-                        self.run_state.simulator_capabilities.get_mut(&simulator_id).is_some_and(|capability| {
-                            if capability.endpoint == source && capability.event_queue_task == Some(task_id) {
-                                capability.event_queue_running = false;
-                                true
-                            } else {
-                                false
-                            }
-                        })
-                    });
-                if !current_queue {
-                    self.run_state.neighbor_event_queue_owners.remove(&task_id);
-                    return Ok(RuntimeAction::Continue);
-                }
-                let Some((simulator_id, source)) = self.run_state.neighbor_event_queue_owners.remove(&task_id) else {
+                let Some((simulator_id, source, _)) = self.state.finish_event_queue_task(task_id, EventQueueExit::TaskFailed) else {
                     return Ok(RuntimeAction::Continue);
                 };
-                let active_primary_queue = simulator_id == self.state.primary.simulator_id;
-                if active_primary_queue && !*self.disconnect_requested.borrow() && self.run_state.logout_deadline.is_none() {
-                    self.state.note_primary_event_queue_exit(EventQueueExit::TaskFailed);
+                let active_primary_queue = simulator_id == self.state.primary_id;
+                if active_primary_queue && !*self.disconnect_requested.borrow() && self.state.logout.deadline().is_none() {
+                    self.state.note_primary_event_queue_exit(simulator_id, EventQueueExit::TaskFailed);
+                } else if !active_primary_queue && simulator_id == self.state.simulator_id {
+                    tracing::warn!(simulator = simulator_id.get(), "former primary simulator EventQueueGet ended after promotion");
                 }
                 if !active_primary_queue
-                    && let Some(event) = neighbor_event_queue_failure(
-                        simulator_id,
-                        source,
-                        EventQueueExit::TaskFailed,
-                        self.state.simulator_id,
-                        &self.run_state.neighbor_connections,
-                    )
+                    && simulator_id != self.state.simulator_id
+                    && let Some(event) =
+                        neighbor_event_queue_failure(simulator_id, source, EventQueueExit::TaskFailed, &self.state.simulators)
                 {
                     self.state.publish_event(&self.events, &mut self.run_state, event).await?;
                 }
@@ -192,33 +175,6 @@ impl SessionDispatcher<'_> {
             None => {}
         }
         Ok(RuntimeAction::Continue)
-    }
-
-    pub(super) fn handle_primary_event_queue_completion(&mut self, exit: EventQueueExit) -> RuntimeAction {
-        self.event_queue_finished = true;
-        let initial_queue_current = self.run_state.simulator_capabilities.get_mut(&self.state.simulator_id).is_some_and(|capability| {
-            if capability.endpoint == self.state.session.simulator_address
-                && capability.seed_capability == self.state.session.seed_capability
-                && capability.event_queue_task.is_none()
-            {
-                capability.event_queue_running = false;
-                true
-            } else {
-                false
-            }
-        });
-        if self.state.primary.simulator_id == self.state.simulator_id
-            && initial_queue_current
-            && !*self.disconnect_requested.borrow()
-            && self.run_state.logout_deadline.is_none()
-        {
-            self.state.note_primary_event_queue_exit(exit);
-        } else if initial_queue_current
-            && matches!(exit, EventQueueExit::TaskFailed | EventQueueExit::RetryLimitReached | EventQueueExit::Unavailable)
-        {
-            tracing::warn!(simulator = self.state.simulator_id.get(), "former primary simulator EventQueueGet ended after promotion");
-        }
-        RuntimeAction::Continue
     }
 
     pub(super) fn handle_capability_request_join(&mut self, joined: Option<Result<(), JoinError>>) -> RuntimeAction {

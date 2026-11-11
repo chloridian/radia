@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     net::SocketAddr,
     num::NonZeroU64,
 };
@@ -18,10 +18,10 @@ use uuid::Uuid;
 
 use super::capability_events::{decode_agent_communication, decode_enable_simulators};
 use super::handoff::{HandoffAnnouncement, HandoffOrder, HandoffState, PromotionSetup, cancel_pending_handoff, teleport_failure_matches};
-use super::logout::{LogoutUnavailable, PendingLogout};
+use super::logout::{LogoutUnavailable, PendingLogout, SessionLogout};
 use super::routing::{
-    EventQueueOutcome, MAX_PENDING_REGION_HANDSHAKE_REPLIES, MAX_PENDING_SESSION_EVENTS, PreconnectEvents, PreconnectOutcome,
-    PrimaryEventBacklog, primary_event_queue_size, queue_simulator_event, queue_until_connected,
+    EventQueueOutcome, MAX_PENDING_REGION_HANDSHAKE_REPLIES, MAX_PENDING_SESSION_EVENTS, PrimaryEventBacklog, primary_event_queue_size,
+    queue_simulator_event,
 };
 use super::runtime::SessionDispatcher;
 use super::teleport::{decode_crossed_region, decode_event_teleport_failed, decode_event_teleport_finish, is_teleport_cancel};
@@ -30,8 +30,8 @@ use crate::{
     AgentSession,
     capabilities::{CapabilityBudget, Client, EventQueueExit, EventQueueRoleHandle},
     circuit::{
-        HandoffCancellation, HandoffGeneration, HandoffTarget, LOGOUT_TIMEOUT, MAX_SIMULATOR_CONNECTIONS, PrimaryState, SimulatorCommand,
-        SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome, UdpTransport,
+        HandoffCancellation, HandoffGeneration, HandoffTarget, LogoutCommand, MAX_PRECONNECT_EVENTS, MAX_SIMULATOR_CONNECTIONS,
+        PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome, UdpTransport,
         admission::{ConnectionRole, SimulatorMemoryBudget},
         lludp::Delivery,
         pacing::OutboundBudget,
@@ -48,32 +48,68 @@ pub(super) const MAX_TRACKED_CAPABILITY_CLIENTS: usize = MAX_SIMULATOR_CONNECTIO
 pub(super) const NEIGHBOR_COMMAND_CAPACITY: usize = 8;
 
 pub(super) type ConnectionTaskResult = (SimulatorId, Option<u64>, SocketAddr, SimulatorTaskOutcome);
-pub(super) type NeighborEventQueueJoin = Option<Result<(Id, (SimulatorId, SocketAddr, EventQueueExit)), JoinError>>;
+pub(super) type EventQueueTaskResult = (SimulatorId, SocketAddr, EventQueueExit);
+pub(super) type EventQueueTaskJoin = Option<Result<(Id, EventQueueTaskResult), JoinError>>;
 
 pub(super) struct ConnectionQueueFailure {
     pub(super) error: Error,
     pub(super) completion: Option<oneshot::Sender<Result<(), Error>>>,
 }
 
-pub(super) struct SimulatorConnectionState {
-    pub(super) simulator_id: SimulatorId,
+pub(super) struct SimulatorRecord {
     pub(super) endpoint: SocketAddr,
-    pub(super) abort: AbortHandle,
+    pub(super) region_handle: Option<u64>,
+    pub(super) connection_task: Option<AbortHandle>,
     pub(super) commands: mpsc::Sender<SimulatorCommand>,
-    pub(super) logout: mpsc::Sender<oneshot::Sender<Result<(), Error>>>,
+    pub(super) logout: mpsc::Sender<LogoutCommand>,
     pub(super) pending_handoff_command: Option<HandoffCommand>,
-    pub(super) primary_state: Option<watch::Sender<PrimaryState>>,
+    pub(super) primary_state: watch::Sender<PrimaryState>,
     pub(super) packet_memory: SimulatorMemoryBudget,
+    pub(super) connection: SimulatorConnectionLifecycle,
+    pub(super) capabilities: Option<SimulatorCapabilitySession>,
+    pub(super) preconnect_events: VecDeque<EventEnvelope>,
 }
 
-impl SimulatorConnectionState {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SimulatorConnectionLifecycle {
+    Connecting,
+    Connected,
+    Retiring,
+    Closed,
+}
+
+impl SimulatorRecord {
     pub(super) fn connection_role(&self) -> ConnectionRole {
-        self.primary_state.as_ref().map_or(ConnectionRole::Neighbor, |state| state.borrow().connection_role())
+        self.primary_state.borrow().connection_role()
     }
 
-    pub(super) fn log_disconnected(&self, region_handle: u64) {
+    pub(super) fn is_current(&self) -> bool {
+        matches!(self.connection, SimulatorConnectionLifecycle::Connecting | SimulatorConnectionLifecycle::Connected)
+    }
+
+    pub(super) fn is_retiring(&self) -> bool {
+        matches!(self.connection, SimulatorConnectionLifecycle::Retiring)
+    }
+
+    pub(super) fn mark_connected(&mut self) {
+        if matches!(self.connection, SimulatorConnectionLifecycle::Connecting) {
+            self.connection = SimulatorConnectionLifecycle::Connected;
+        }
+    }
+
+    pub(super) fn abort_connection(&self) {
+        if let Some(task) = &self.connection_task {
+            task.abort();
+        }
+    }
+
+    pub(super) fn connection_task_id(&self) -> Option<Id> {
+        self.connection_task.as_ref().map(AbortHandle::id)
+    }
+
+    pub(super) fn log_disconnected(&self, simulator_id: SimulatorId, region_handle: u64) {
         tracing::info!(
-            simulator = self.simulator_id.get(),
+            simulator = simulator_id.get(),
             region = region_handle,
             role = ?self.connection_role(),
             "simulator disconnected"
@@ -104,30 +140,6 @@ impl SimulatorConnectionState {
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {}
         }
-    }
-}
-
-pub(super) struct PrimaryRoute {
-    pub(super) simulator_id: SimulatorId,
-    pub(super) memory: SimulatorMemoryBudget,
-    pub(super) endpoint: SocketAddr,
-    pub(super) region_handle: Option<u64>,
-    pub(super) commands: mpsc::Sender<SimulatorCommand>,
-    pub(super) state: watch::Sender<PrimaryState>,
-    pub(super) logout: mpsc::Sender<oneshot::Sender<Result<(), Error>>>,
-}
-
-impl PrimaryRoute {
-    pub(super) fn from_neighbor(region_handle: u64, connection: &SimulatorConnectionState) -> Option<Self> {
-        Some(Self {
-            simulator_id: connection.simulator_id,
-            memory: connection.packet_memory.clone(),
-            endpoint: connection.endpoint,
-            region_handle: Some(region_handle),
-            commands: connection.commands.clone(),
-            state: connection.primary_state.clone()?,
-            logout: connection.logout.clone(),
-        })
     }
 }
 
@@ -165,18 +177,13 @@ pub(super) struct SessionRuntime {
 
 pub(super) struct SessionState {
     pub(super) simulator_id: SimulatorId,
-    pub(super) primary: PrimaryRoute,
-    pub(super) root_connection_abort: Option<AbortHandle>,
+    pub(super) primary_id: SimulatorId,
+    pub(super) simulators: HashMap<SimulatorId, SimulatorRecord>,
     pub(super) neighbor_events: mpsc::Sender<SimulatorEvent>,
     pub(super) neighbor_requests: mpsc::Sender<SimulatorRequest>,
     pub(super) neighbor_cancellation: watch::Sender<bool>,
-    pub(super) root_connection_failed: bool,
-    pub(super) logout_request_sent: bool,
-    pub(super) logout_attempted: bool,
-    pub(super) logout_unavailable: Option<LogoutUnavailable>,
-    pub(super) pending_primary_logout: Option<PendingLogout>,
+    pub(super) logout: SessionLogout,
     pub(super) session: AgentSession,
-    pub(super) capabilities: Client,
     pub(super) capability_budget: CapabilityBudget,
     pub(super) capability_request_waiters: JoinSet<()>,
     pub(super) login_data: ResponseData,
@@ -196,24 +203,88 @@ pub(super) struct RuntimeInputs {
 impl Drop for SessionState {
     fn drop(&mut self) {
         self.neighbor_cancellation.send_replace(true);
-        self.coverage_losses.retire(self.simulator_id, CoverageSource::Lludp);
-        self.capabilities.close_session();
+        for (simulator_id, simulator) in &self.simulators {
+            self.coverage_losses.retire(*simulator_id, CoverageSource::Lludp);
+            if let Some(capabilities) = &simulator.capabilities {
+                capabilities.client.close_session();
+            }
+        }
     }
 }
 
 impl SessionState {
-    pub(super) fn promote_primary(&mut self, next: PrimaryRoute, role_generation: u64) {
-        self.primary.memory.promote_to(&next.memory);
-        self.primary.state.send_replace(PrimaryState::Neighbor { generation: role_generation });
-        next.state.send_replace(PrimaryState::Ready { generation: role_generation });
-        self.primary = next;
+    pub(super) fn primary(&self) -> &SimulatorRecord {
+        self.simulators.get(&self.primary_id).expect("primary simulator record exists")
+    }
+
+    #[cfg(test)]
+    pub(super) fn primary_mut(&mut self) -> &mut SimulatorRecord {
+        self.simulators.get_mut(&self.primary_id).expect("primary simulator record exists")
+    }
+
+    pub(super) fn mark_connection_task_joined(
+        &mut self,
+        task_id: Id,
+    ) -> Option<(SimulatorId, Option<u64>, SocketAddr, SimulatorConnectionLifecycle)> {
+        let simulator_id = self
+            .simulators
+            .iter()
+            .find_map(|(simulator_id, simulator)| (simulator.connection_task_id() == Some(task_id)).then_some(*simulator_id))?;
+        let simulator = self.simulators.get_mut(&simulator_id)?;
+        simulator.connection_task.take()?;
+        let joined = (simulator_id, simulator.region_handle, simulator.endpoint, simulator.connection);
+        if simulator.connection == SimulatorConnectionLifecycle::Closed {
+            self.simulators.remove(&simulator_id);
+        }
+        Some(joined)
+    }
+
+    pub(super) fn finish_event_queue_task(
+        &mut self,
+        task_id: Id,
+        exit: EventQueueExit,
+    ) -> Option<(SimulatorId, SocketAddr, EventQueueExit)> {
+        let simulator_id = self.simulators.iter().find_map(|(simulator_id, simulator)| {
+            simulator
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.event_queue.task_id() == Some(task_id))
+                .then_some(*simulator_id)
+        })?;
+        let simulator = self.simulators.get_mut(&simulator_id)?;
+        let capabilities = simulator.capabilities.as_mut()?;
+        if !capabilities.event_queue.finish(task_id, exit) {
+            return None;
+        }
+        Some((simulator_id, simulator.endpoint, capabilities.event_queue.exit()?))
+    }
+
+    pub(super) fn promote_primary(&mut self, simulator_id: SimulatorId, role_generation: u64) {
+        let old_id = self.primary_id;
+        let old_memory = self.simulators.get(&old_id).map(|record| record.packet_memory.clone());
+        if let Some(old) = self.simulators.get_mut(&old_id) {
+            old.primary_state.send_replace(PrimaryState::Neighbor { generation: role_generation });
+        }
+        let Some(next) = self.simulators.get_mut(&simulator_id) else { return };
+        if let Some(memory) = old_memory {
+            memory.promote_to(&next.packet_memory);
+        }
+        next.primary_state.send_replace(PrimaryState::Ready { generation: role_generation });
+        self.primary_id = simulator_id;
+    }
+
+    pub(super) fn neighbor_connection_tasks(&self) -> usize {
+        self.simulators
+            .iter()
+            .filter(|(simulator_id, simulator)| **simulator_id != self.simulator_id && simulator.connection_task.is_some())
+            .count()
     }
 
     pub(super) fn next_handoff_generation(&mut self) -> Option<HandoffGeneration> {
         let Some(generation) = self.handoff_generation.and_then(|generation| generation.checked_add(1)) else {
             if self.handoff_generation.is_some() {
                 self.handoff_generation = None;
-                tracing::error!(simulator = self.simulator_id.get(), "simulator handoff generation space is exhausted");
+                tracing::error!(simulator = self.primary_id.get(), "simulator handoff generation space is exhausted");
             }
             return None;
         };
@@ -231,7 +302,6 @@ impl SessionRuntime {
         terminal_event_permit: mpsc::OwnedPermit<EventEnvelope>,
     ) -> Result<(), SessionError> {
         let Self { mut state, runtime_inputs } = self;
-        let simulator_id = state.simulator_id;
         let result = match SessionDispatcher::start(&mut state, runtime_inputs, commands, events, disconnect_requested).await {
             Ok(mut runtime) => {
                 let result = runtime.run().await;
@@ -244,15 +314,14 @@ impl SessionRuntime {
             outbound_budget.shutdown().await;
         }
         state.finish_capability_request_waiters().await;
-        if !state.root_connection_failed || state.primary.simulator_id != simulator_id {
-            SessionState::publish_primary_terminal_event(
-                terminal_event_permit,
-                state.primary.simulator_id,
-                state.primary.region_handle,
-                state.primary.endpoint,
-                &result,
-            );
-        }
+        let primary = state.primary();
+        SessionState::publish_primary_terminal_event(
+            terminal_event_permit,
+            state.primary_id,
+            primary.region_handle,
+            primary.endpoint,
+            &result,
+        );
         result
     }
 }
@@ -268,7 +337,11 @@ impl SessionState {
     }
 
     pub(super) async fn finish_capability_request_waiters(&mut self) {
-        self.capabilities.close_session();
+        for simulator in self.simulators.values() {
+            if let Some(capabilities) = &simulator.capabilities {
+                capabilities.client.close_session();
+            }
+        }
         while let Some(result) = self.capability_request_waiters.join_next().await {
             if result.is_err() {
                 tracing::error!("Capability request waiter task failed");
@@ -296,9 +369,9 @@ impl SessionState {
         state: &mut RunState,
         event: impl Into<EventEnvelope>,
     ) -> Result<(), SessionError> {
-        let RunState { pending_events, pending_lifecycle_events, logout_deadline, .. } = state;
+        let RunState { pending_events, pending_lifecycle_events, .. } = state;
         let mut event = event.into();
-        if logout_deadline.is_some() && event.event.is_application() {
+        if self.logout.deadline().is_some() && event.event.is_application() {
             if let Some(watermark) = event.coverage_watermark() {
                 record_coverage_loss(&self.coverage_losses, watermark.simulator_id, watermark.source, CoverageLossReason::EventAdmission);
             }
@@ -373,15 +446,19 @@ impl SessionState {
             );
         }
 
-        if should_logout && logout_deadline.is_none() {
-            let deadline = Instant::now() + LOGOUT_TIMEOUT;
-            *logout_deadline = Some(deadline);
-            self.logout_attempted = true;
-            let (completed, response) = oneshot::channel();
-            match self.primary.logout.try_send(completed) {
-                Ok(()) => self.pending_primary_logout = Some(PendingLogout { completion: response, deadline }),
-                Err(mpsc::error::TrySendError::Full(_)) => self.record_logout_unavailable(LogoutUnavailable::QueueFull),
-                Err(mpsc::error::TrySendError::Closed(_)) => self.record_logout_unavailable(LogoutUnavailable::ConnectionClosed),
+        if should_logout && self.logout.deadline().is_none() {
+            let (command, pending) = PendingLogout::new();
+            let deadline = Some(pending.deadline());
+            match self.primary().logout.try_send(command) {
+                Ok(()) => {
+                    self.logout = SessionLogout::Sending { pending };
+                }
+                Err(mpsc::error::TrySendError::Full(_command)) => {
+                    self.record_logout_unavailable(LogoutUnavailable::QueueFull, deadline);
+                }
+                Err(mpsc::error::TrySendError::Closed(_command)) => {
+                    self.record_logout_unavailable(LogoutUnavailable::ConnectionClosed, deadline);
+                }
             }
         }
         Ok(())
@@ -395,20 +472,20 @@ impl SessionState {
         state: &mut RunState,
     ) -> Result<(), SessionError> {
         let watermark = event.coverage_watermark();
-        match queue_until_connected(&state.connected_simulators, &mut state.preconnect_events, simulator_id, event) {
-            PreconnectOutcome::Ready(event) => self.publish_event(events, state, event).await,
-            PreconnectOutcome::Buffered => Ok(()),
-            PreconnectOutcome::Full => {
-                if let Some(watermark) = watermark {
-                    record_coverage_loss(
-                        &self.coverage_losses,
-                        watermark.simulator_id,
-                        watermark.source,
-                        CoverageLossReason::EventAdmission,
-                    );
-                }
-                Ok(())
+        let Some(simulator) = self.simulators.get_mut(&simulator_id) else { return Ok(()) };
+        if matches!(simulator.connection, SimulatorConnectionLifecycle::Connected) {
+            self.publish_event(events, state, event).await
+        } else if matches!(simulator.connection, SimulatorConnectionLifecycle::Connecting)
+            && state.preconnect_events_len < MAX_PRECONNECT_EVENTS
+        {
+            simulator.preconnect_events.push_back(event);
+            state.preconnect_events_len += 1;
+            Ok(())
+        } else {
+            if let Some(watermark) = watermark {
+                record_coverage_loss(&self.coverage_losses, watermark.simulator_id, watermark.source, CoverageLossReason::EventAdmission);
             }
+            Ok(())
         }
     }
 
@@ -419,9 +496,17 @@ impl SessionState {
         events: &mpsc::Sender<EventEnvelope>,
         state: &mut RunState,
     ) -> Result<(), SessionError> {
+        if let Some(simulator) = self.simulators.get_mut(&simulator_id) {
+            simulator.mark_connected();
+        }
         self.publish_event(events, state, event).await?;
-        state.connected_simulators.insert(simulator_id);
-        for event in state.preconnect_events.take(simulator_id) {
+        let queued = if let Some(simulator) = self.simulators.get_mut(&simulator_id) {
+            std::mem::take(&mut simulator.preconnect_events)
+        } else {
+            VecDeque::new()
+        };
+        state.preconnect_events_len = state.preconnect_events_len.saturating_sub(queued.len());
+        for event in queued {
             self.publish_event(events, state, event).await?;
         }
         Ok(())
@@ -438,7 +523,13 @@ impl SessionState {
             Event::SessionReady {
                 simulator_id: self.simulator_id,
                 session: Box::new(self.session.clone()),
-                capabilities: self.capabilities.clone(),
+                capabilities: self
+                    .simulators
+                    .get(&self.simulator_id)
+                    .and_then(|simulator| simulator.capabilities.as_ref())
+                    .expect("initial simulator capabilities exist")
+                    .client
+                    .clone(),
                 login_data: self.login_data.clone(),
             },
         )
@@ -454,7 +545,7 @@ impl SessionState {
         setup: &mut PromotionSetup<'_>,
         handoff_state: &mut HandoffState,
     ) -> Result<(), SessionError> {
-        if setup.state.logout_deadline.is_some() {
+        if self.logout.deadline().is_some() {
             return Ok(());
         }
         match message {
@@ -476,7 +567,7 @@ impl SessionState {
         match decode_enable_simulators(body) {
             Ok(simulators) => {
                 for (region_handle, endpoint) in simulators {
-                    if setup.state.logout_deadline.is_some() {
+                    if self.logout.deadline().is_some() {
                         break;
                     }
                     self.start_neighbor(simulator_id, region_handle, endpoint, None, setup).await?;
@@ -537,11 +628,8 @@ impl SessionState {
                         pending,
                         "teleport failed",
                         self.simulator_id,
-                        &mut setup.state.neighbor_connections,
-                        &mut setup.state.retiring_simulators,
-                        &mut setup.state.preconnect_events,
-                        &mut setup.state.connected_simulators,
-                        &mut setup.state.simulator_capabilities,
+                        &mut self.simulators,
+                        setup.state,
                         &self.coverage_losses,
                     );
                 }
@@ -559,21 +647,23 @@ impl SessionState {
                 return Ok(());
             }
         };
-        if endpoint == self.primary.endpoint {
+        if endpoint == self.primary().endpoint {
             return Ok(());
         }
-        let Some(target_id) =
-            setup.state.neighbor_connections.values().find(|active| active.endpoint == endpoint).map(|active| active.simulator_id)
+        let Some(target_id) = self
+            .simulators
+            .iter()
+            .find_map(|(simulator_id, record)| (record.endpoint == endpoint && record.is_current()).then_some(*simulator_id))
         else {
             return Ok(());
         };
-        if setup.state.simulator_capabilities.contains_key(&target_id) {
+        if self.simulators.get(&target_id).is_some_and(|record| record.capabilities.is_some()) {
             return Ok(());
         }
         self.start_neighbor_capabilities(target_id, endpoint, seed, setup).await
     }
 
-    pub(super) fn note_primary_event_queue_exit(&self, exit: EventQueueExit) {
+    pub(super) fn note_primary_event_queue_exit(&self, simulator_id: SimulatorId, exit: EventQueueExit) {
         let reason = match exit {
             EventQueueExit::Stopped => return,
             EventQueueExit::StoppedWithCoverageLoss => "The primary simulator EventQueueGet stopped after losing event coverage.",
@@ -583,7 +673,7 @@ impl SessionState {
         };
 
         tracing::warn!(
-            simulator = self.primary.simulator_id.get(),
+            simulator = simulator_id.get(),
             ?exit,
             reason,
             "primary simulator event queue stopped; keeping the authenticated session active"
@@ -592,12 +682,59 @@ impl SessionState {
 }
 
 pub(super) struct SimulatorCapabilitySession {
-    pub(super) endpoint: SocketAddr,
     pub(super) seed_capability: Url,
     pub(super) client: Client,
-    pub(super) event_queue_role: EventQueueRoleHandle,
-    pub(super) event_queue_task: Option<Id>,
-    pub(super) event_queue_running: bool,
+    pub(super) event_queue: EventQueueLifecycle,
+}
+
+pub(super) enum EventQueueLifecycle {
+    NotStarted,
+    Running { role: EventQueueRoleHandle, task: AbortHandle },
+    Finished { role: EventQueueRoleHandle, exit: EventQueueExit },
+}
+
+impl EventQueueLifecycle {
+    pub(super) fn is_running(&self) -> bool {
+        matches!(self, Self::Running { .. })
+    }
+
+    pub(super) fn role(&self) -> Option<&EventQueueRoleHandle> {
+        match self {
+            Self::NotStarted => None,
+            Self::Running { role, .. } | Self::Finished { role, .. } => Some(role),
+        }
+    }
+
+    pub(super) fn task(&self) -> Option<AbortHandle> {
+        match self {
+            Self::Running { task, .. } => Some(task.clone()),
+            Self::NotStarted | Self::Finished { .. } => None,
+        }
+    }
+
+    pub(super) fn task_id(&self) -> Option<Id> {
+        match self {
+            Self::Running { task, .. } => Some(task.id()),
+            Self::NotStarted | Self::Finished { .. } => None,
+        }
+    }
+
+    pub(super) fn exit(&self) -> Option<EventQueueExit> {
+        match self {
+            Self::Finished { exit, .. } => Some(*exit),
+            Self::NotStarted | Self::Running { .. } => None,
+        }
+    }
+
+    pub(super) fn finish(&mut self, task: Id, exit: EventQueueExit) -> bool {
+        let Self::Running { role, task: current_task } = self else { return false };
+        if current_task.id() != task {
+            return false;
+        }
+        let role = role.clone();
+        *self = Self::Finished { role, exit };
+        true
+    }
 }
 
 impl Drop for SimulatorCapabilitySession {
@@ -607,43 +744,29 @@ impl Drop for SimulatorCapabilitySession {
 }
 
 pub(super) struct RunState {
-    pub(super) neighbors: JoinSet<(SimulatorId, Option<u64>, SocketAddr, SimulatorTaskOutcome)>,
-    pub(super) neighbor_event_queues: JoinSet<(SimulatorId, SocketAddr, EventQueueExit)>,
-    pub(super) neighbor_event_queue_owners: HashMap<Id, (SimulatorId, SocketAddr)>,
-    pub(super) neighbor_connections: HashMap<u64, SimulatorConnectionState>,
-    pub(super) retiring_simulators: HashSet<SimulatorId>,
-    pub(super) neighbor_task_owners: HashMap<Id, (SimulatorId, Option<u64>, SocketAddr)>,
-    pub(super) simulator_capabilities: HashMap<SimulatorId, SimulatorCapabilitySession>,
-    pub(super) connected_simulators: HashSet<SimulatorId>,
-    pub(super) preconnect_events: PreconnectEvents,
+    pub(super) connections: JoinSet<ConnectionTaskResult>,
+    pub(super) event_queues: JoinSet<EventQueueTaskResult>,
+    pub(super) preconnect_events_len: usize,
     pub(super) pending_events: VecDeque<EventEnvelope>,
     pub(super) pending_lifecycle_events: usize,
     pub(super) pending_region_handshake_replies: VecDeque<(SimulatorId, SimulatorCommand)>,
-    pub(super) logout_deadline: Option<Instant>,
 }
 
 impl RunState {
     pub(super) fn new() -> Self {
         Self {
-            neighbors: JoinSet::new(),
-            neighbor_event_queues: JoinSet::new(),
-            neighbor_event_queue_owners: HashMap::new(),
-            neighbor_connections: HashMap::new(),
-            retiring_simulators: HashSet::new(),
-            neighbor_task_owners: HashMap::new(),
-            simulator_capabilities: HashMap::new(),
-            connected_simulators: HashSet::new(),
-            preconnect_events: PreconnectEvents::default(),
+            connections: JoinSet::new(),
+            event_queues: JoinSet::new(),
+            preconnect_events_len: 0,
             pending_events: VecDeque::with_capacity(MAX_PENDING_SESSION_EVENTS),
             pending_lifecycle_events: 0,
             pending_region_handshake_replies: VecDeque::with_capacity(MAX_PENDING_REGION_HANDSHAKE_REPLIES),
-            logout_deadline: None,
         }
     }
 }
 
 #[cfg(test)]
-pub(super) async fn retry_pending_handoff_commands(retry: &mut time::Interval, connections: &mut HashMap<u64, SimulatorConnectionState>) {
+pub(super) async fn retry_pending_handoff_commands(retry: &mut time::Interval, connections: &mut HashMap<SimulatorId, SimulatorRecord>) {
     retry.tick().await;
     for connection in connections.values_mut() {
         connection.flush_handoff_command();
@@ -691,16 +814,14 @@ pub(super) fn track_capability_requests(workers: &mut JoinSet<()>, client: &Clie
     workers.spawn(async move { client.wait_for_requests().await });
 }
 
-pub(super) fn remove_simulator_capability(capabilities: &mut HashMap<SimulatorId, SimulatorCapabilitySession>, simulator_id: SimulatorId) {
-    capabilities.remove(&simulator_id);
+pub(super) fn remove_simulator_capability(simulators: &mut HashMap<SimulatorId, SimulatorRecord>, simulator_id: SimulatorId) {
+    if let Some(simulator) = simulators.get_mut(&simulator_id) {
+        simulator.capabilities.take();
+    }
 }
 
-pub(super) fn is_current_simulator(
-    simulator_id: SimulatorId,
-    primary_id: SimulatorId,
-    connections: &HashMap<u64, SimulatorConnectionState>,
-) -> bool {
-    simulator_id == primary_id || connections.values().any(|current| current.simulator_id == simulator_id)
+pub(super) fn is_current_simulator(simulator_id: SimulatorId, connections: &HashMap<SimulatorId, SimulatorRecord>) -> bool {
+    connections.get(&simulator_id).is_some_and(SimulatorRecord::is_current)
 }
 
 #[cfg(test)]

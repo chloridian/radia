@@ -119,6 +119,7 @@ async fn receive_logout(destination: &UdpSocket, destination_peer: SocketAddr) {
         expected_logout = with_appended_ack(expected_logout, 34);
     }
     assert_eq!(logout_bytes, expected_logout);
+    send_logout_reply(destination, destination_peer, &logout, 36).await;
 }
 
 async fn assert_destination_disconnected(events: &mut mpsc::Receiver<EventEnvelope>, destination_id: SimulatorId) {
@@ -179,6 +180,7 @@ async fn session_drop_cancels_bootstrap() {
 
     let (_, logout) = receive_client_message(&simulator, peer, |message| matches!(message, Message::LogoutRequest(_))).await;
     assert!(logout.is_reliable());
+    send_logout_reply(&simulator, peer, &logout, 21).await;
     assert!(timeout(Duration::from_secs(2), worker).await.expect("bootstrap worker should stop").expect("client task").is_ok());
     assert!(*retained_handle.worker_finished.borrow());
 
@@ -288,6 +290,7 @@ async fn login_handoff() {
                 }
                 assert_eq!(bytes, expected);
                 assert!(movement_acknowledged, "logout must acknowledge AgentMovementComplete");
+                send_logout_reply(&simulator, peer, &packet, 26).await;
                 break;
             }
             message => panic!("unexpected simulator shutdown message: {message:?}"),
@@ -462,6 +465,7 @@ async fn mfa_continuation() {
     assert!(logout.is_reliable());
     assert!(logout.appended_acks().is_empty());
     assert_eq!(logout_bytes, expected_fixture("logout_request.hex", logout.sequence()));
+    send_logout_reply(&simulator, peer, &logout, 26).await;
     assert!(timeout(Duration::from_secs(2), client).await.expect("client should disconnect").expect("client task").is_ok());
 
     let requests = timeout(Duration::from_secs(2), http_task).await.expect("fake HTTP server should stop").expect("HTTP task");

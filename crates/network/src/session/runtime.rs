@@ -1,20 +1,12 @@
 use std::{collections::VecDeque, future::pending, pin::Pin, time::Duration};
 use tokio::{
     sync::{mpsc, watch},
-    task::JoinSet,
     time::{self, Instant, Interval, Sleep},
 };
 
 use super::handoff::HandoffState;
-use super::{
-    CLIENT_EVENT_CAPACITY, ConnectionTaskResult, LOGOUT_TIMEOUT, RunState, RuntimeInputs, SessionError, SessionStartup, SessionState,
-    SimulatorCapabilitySession, SimulatorEvent, SimulatorRequest,
-};
-use crate::{
-    capabilities::{EventQueueRoleHandle, EventQueueTask},
-    event::EventEnvelope,
-    session::Command,
-};
+use super::{CLIENT_EVENT_CAPACITY, RunState, RuntimeInputs, SessionError, SessionStartup, SessionState, SimulatorEvent, SimulatorRequest};
+use crate::{capabilities::EventQueueTask, event::EventEnvelope, session::Command};
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(40);
 pub(super) const APPLICATION_EVENT_PRESSURE_GRACE_PERIOD: Duration = Duration::from_secs(30);
@@ -31,10 +23,6 @@ pub(super) struct SessionDispatcher<'a> {
     pub(super) neighbor_event_rx: mpsc::Receiver<SimulatorEvent>,
     pub(super) neighbor_requests: mpsc::Sender<SimulatorRequest>,
     pub(super) neighbor_request_rx: mpsc::Receiver<SimulatorRequest>,
-    pub(super) root_connection_workers: JoinSet<ConnectionTaskResult>,
-    pub(super) event_queue: EventQueueTask,
-    pub(super) active_primary_event_queue: EventQueueRoleHandle,
-    pub(super) event_queue_finished: bool,
     pub(super) capability_events_closed: bool,
     pub(super) neighbor_events_closed: bool,
     pub(super) startup: SessionStartup,
@@ -62,8 +50,14 @@ impl<'a> SessionDispatcher<'a> {
         let RuntimeInputs { neighbor_event_receiver, neighbor_request_receiver, root_connection_workers } = runtime_inputs;
         let neighbor_events = state.neighbor_events.clone();
         let neighbor_requests = state.neighbor_requests.clone();
-        let mut root_connection_workers = root_connection_workers;
-        let event_queue = match state.capabilities.start_primary_event_queue(
+        let mut run_state = RunState::new();
+        run_state.connections = root_connection_workers;
+        let root_capability = state
+            .simulators
+            .get(&state.simulator_id)
+            .and_then(|simulator| simulator.capabilities.as_ref())
+            .expect("initial simulator capabilities exist");
+        let event_queue: EventQueueTask = match root_capability.client.start_primary_event_queue(
             state.simulator_id,
             state.session.simulator_address,
             capability_events.clone(),
@@ -73,23 +67,20 @@ impl<'a> SessionDispatcher<'a> {
             Ok(event_queue) => event_queue,
             Err(error) => {
                 state.neighbor_cancellation.send_replace(true);
-                root_connection_workers.shutdown().await;
+                run_state.connections.shutdown().await;
                 return Err(error.into());
             }
         };
-        let active_primary_event_queue = event_queue.role_handle();
-        let mut run_state = RunState::new();
-        run_state.simulator_capabilities.insert(
-            state.simulator_id,
-            SimulatorCapabilitySession {
-                endpoint: state.session.simulator_address,
-                seed_capability: state.session.seed_capability.clone(),
-                client: state.capabilities.clone(),
-                event_queue_role: active_primary_event_queue.clone(),
-                event_queue_task: None,
-                event_queue_running: true,
-            },
-        );
+        let event_queue_role = event_queue.role_handle();
+        let event_queue_endpoint = state.session.simulator_address;
+        let initial_simulator_id = state.simulator_id;
+        let task = run_state.event_queues.spawn(async move {
+            let exit = event_queue.wait().await;
+            (initial_simulator_id, event_queue_endpoint, exit)
+        });
+        if let Some(capability) = state.simulators.get_mut(&state.simulator_id).and_then(|simulator| simulator.capabilities.as_mut()) {
+            capability.event_queue = super::simulators::EventQueueLifecycle::Running { role: event_queue_role, task };
+        }
         let mut handoff_command_retry = time::interval(HANDOFF_COMMAND_RETRY_INTERVAL);
         handoff_command_retry.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
@@ -104,10 +95,6 @@ impl<'a> SessionDispatcher<'a> {
             neighbor_event_rx: neighbor_event_receiver,
             neighbor_requests,
             neighbor_request_rx: neighbor_request_receiver,
-            root_connection_workers,
-            event_queue,
-            active_primary_event_queue,
-            event_queue_finished: false,
             capability_events_closed: false,
             neighbor_events_closed: false,
             startup: SessionStartup::default(),
@@ -120,30 +107,32 @@ impl<'a> SessionDispatcher<'a> {
     }
 
     pub(super) async fn shutdown(mut self) {
-        self.state.capabilities.close_session();
-        for capability in self.run_state.simulator_capabilities.values() {
-            capability.client.close_session();
+        for simulator in self.state.simulators.values() {
+            if let Some(capability) = &simulator.capabilities {
+                capability.client.close_session();
+            }
         }
         self.state.neighbor_cancellation.send_replace(true);
-        self.root_connection_workers.shutdown().await;
-        self.run_state.neighbors.shutdown().await;
-        while self.run_state.neighbor_event_queues.join_next().await.is_some() {}
-        self.event_queue.wait().await;
-        self.state.capabilities.close_session_and_wait().await;
-        for capability in self.run_state.simulator_capabilities.values() {
-            capability.client.close_session_and_wait().await;
+        self.run_state.connections.shutdown().await;
+        self.run_state.event_queues.shutdown().await;
+        for simulator in self.state.simulators.values() {
+            if let Some(capability) = &simulator.capabilities {
+                capability.client.close_session_and_wait().await;
+            }
         }
     }
 
     #[tracing::instrument(name = "simulator.session", level = "info", skip_all)]
     pub(super) async fn run(&mut self) -> Result<(), SessionError> {
         if *self.disconnect_requested.borrow() {
-            self.state.graceful_disconnect(false).await?;
+            self.state.graceful_disconnect().await?;
             return Ok(());
         }
         let mut application_pressure_changed = self.state.packet_memory.application_events().subscribe_pressure();
         loop {
             self.flush_pending_handshake_replies();
+            let logout_deadline = self.state.logout.deadline();
+            let logout_pending = self.state.logout.pending_mut().is_some();
             let pressure_deadline = (*application_pressure_changed.borrow()).map(|since| since + APPLICATION_EVENT_PRESSURE_GRACE_PERIOD);
             let application_pressure = async {
                 if let Some(deadline) = pressure_deadline {
@@ -155,7 +144,7 @@ impl<'a> SessionDispatcher<'a> {
             let action = tokio::select! {
                 _ = application_pressure => {
                     if self.state.packet_memory.application_events().pressure_expired(Instant::now(), APPLICATION_EVENT_PRESSURE_GRACE_PERIOD) {
-                        self.state.graceful_disconnect(false).await?;
+                    self.state.graceful_disconnect().await?;
                         return Err(SessionError::SustainedApplicationEventPressure);
                     }
                     RuntimeAction::Continue
@@ -163,22 +152,18 @@ impl<'a> SessionDispatcher<'a> {
                 _ = application_pressure_changed.changed() => RuntimeAction::Continue,
                 _ = self.disconnect_requested.changed() => self.handle_disconnect_changed().await?,
                 result = async {
-                    self.state.pending_primary_logout
-                        .as_mut()
+                    self.state.logout.pending_mut()
                         .expect("pending logout branch requires an active request")
                         .wait()
                         .await
-                }, if self.state.pending_primary_logout.is_some() => self.handle_primary_logout_completed(result)?,
+                }, if logout_pending => self.handle_primary_logout_completed(result)?,
                 _ = &mut self.session_deadline, if !self.startup.is_ready() && !*self.disconnect_requested.borrow() => {
                     self.handle_session_startup_timeout()
                 }
-                _ = time::sleep_until(self.run_state.logout_deadline.unwrap_or_else(|| time::Instant::now() + LOGOUT_TIMEOUT)), if self.run_state.logout_deadline.is_some() => {
-                    self.handle_logout_deadline().await?
-                }
-                _ = self.events.closed(), if self.run_state.logout_deadline.is_none() => self.handle_event_receiver_closed().await?,
+                _ = self.events.closed(), if logout_deadline.is_none() => self.handle_event_receiver_closed().await?,
                 _ = self.handoff_command_retry.tick(),
                     if !self.run_state.pending_region_handshake_replies.is_empty()
-                        || self.run_state.neighbor_connections.values().any(|connection| connection.pending_handoff_command.is_some()) => {
+                        || self.state.simulators.values().any(|simulator| simulator.pending_handoff_command.is_some()) => {
                         self.handle_handoff_command_retry()
                     }
                 capability_event = self.capability_event_rx.recv(), if !self.capability_events_closed => self.handle_capability_event(capability_event).await?,
@@ -186,22 +171,20 @@ impl<'a> SessionDispatcher<'a> {
                 permit = self.neighbor_events.clone().reserve_owned(), if !self.pending_neighbor_finishes.is_empty() && !self.neighbor_events.is_closed() => {
                     self.handle_pending_neighbor_finish(permit)
                 }
-                joined = self.run_state.neighbor_event_queues.join_next_with_id(), if !self.run_state.neighbor_event_queues.is_empty() => {
-                    self.handle_neighbor_event_queue_join(joined).await?
+                joined = self.run_state.event_queues.join_next_with_id(), if !self.run_state.event_queues.is_empty() => {
+                    self.handle_event_queue_join(joined).await?
                 }
-                exit = self.event_queue.completion(), if !self.event_queue_finished => self.handle_primary_event_queue_completion(exit),
                 permit = self.events.clone().reserve_owned(), if !self.run_state.pending_events.is_empty() && !self.events.is_closed() => {
                     self.handle_pending_application_event(permit).await?
                 }
-                request = self.neighbor_request_rx.recv(), if self.run_state.logout_deadline.is_none() => self.handle_neighbor_request(request).await?,
+                request = self.neighbor_request_rx.recv(), if logout_deadline.is_none() => self.handle_neighbor_request(request).await?,
                 joined = self.state.capability_request_waiters.join_next(), if !self.state.capability_request_waiters.is_empty() => {
                     self.handle_capability_request_join(joined)
                 }
-                joined = self.root_connection_workers.join_next(), if !self.root_connection_workers.is_empty() => {
-                    self.handle_root_connection_join(joined).await?
+                joined = self.run_state.connections.join_next_with_id(), if !self.run_state.connections.is_empty() => {
+                    self.handle_connection_task_join(joined)
                 }
-                joined = self.run_state.neighbors.join_next(), if !self.run_state.neighbors.is_empty() => self.handle_neighbor_task_join(joined),
-                command = self.commands.recv(), if self.run_state.logout_deadline.is_none() => self.handle_command(command).await?,
+                command = self.commands.recv(), if logout_deadline.is_none() => self.handle_command(command).await?,
             };
             match action {
                 RuntimeAction::Continue => {}

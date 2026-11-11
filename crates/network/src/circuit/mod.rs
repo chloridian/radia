@@ -23,7 +23,7 @@ use protocol::{
     },
 };
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{mpsc, watch},
     time::{self, Instant},
 };
 
@@ -34,7 +34,6 @@ use crate::{
         pacing::{ConnectionPacer, OutboundBudget, OutboundBudgetHandle, TrafficClass},
     },
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
-    error::Error,
     event::{CircuitMotionStatus, EventEnvelope, SimulatorId},
 };
 use outbound::{
@@ -46,10 +45,10 @@ use outbound::{
 pub(crate) use admission::{ConnectionRole, SimulatorMemoryBudget};
 pub(crate) use error::ConnectionError;
 pub(crate) use link::{
-    ACK_INTERVAL, HandoffCancellation, HandoffGeneration, HandoffTarget, LOGOUT_TIMEOUT, MAX_CONNECTION_PRECONNECT_EVENTS,
-    MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS,
-    MAX_QUEUED_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS, NeighborEventQueueOutcome, PrimaryState, SimulatorCommand, SimulatorEvent,
-    SimulatorRequest, SimulatorTaskOutcome, connection_message_has_application_event,
+    ACK_INTERVAL, HandoffCancellation, HandoffGeneration, HandoffTarget, LOGOUT_REPLY_TIMEOUT, LOGOUT_TIMEOUT, LogoutCommand,
+    LogoutReceipt, MAX_CONNECTION_PRECONNECT_EVENTS, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PENDING_SIMULATOR_EVENTS,
+    MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS, NeighborEventQueueOutcome, PrimaryState,
+    SimulatorCommand, SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome, connection_message_has_application_event,
 };
 #[cfg(test)]
 pub(crate) use lludp::test_values::NEW_RELIABLE_ACK_CAPACITY;
@@ -99,10 +98,8 @@ pub(super) struct SimulatorConnection {
     socket: Arc<UdpTransport>,
     circuit: Circuit,
     use_circuit_sequence: u32,
-    handoff: Option<HandoffTarget>,
-    handoff_role_generation: Option<u64>,
+    handoff: CircuitHandoff,
     region_handshake_reply_sent: bool,
-    movement_requested: bool,
     initial_movement_sent: bool,
     primary_state: PrimaryState,
     agent_throttle_sent: bool,
@@ -112,13 +109,50 @@ pub(super) struct SimulatorConnection {
     primary_state_receiver: Option<watch::Receiver<PrimaryState>>,
 }
 
+enum CircuitHandoff {
+    Idle,
+    Preparing { target: HandoffTarget, role_generation: u64, movement: HandoffMovement },
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum HandoffMovement {
+    Unsent,
+    Sent,
+}
+
+impl CircuitHandoff {
+    fn target(&self) -> Option<&HandoffTarget> {
+        match self {
+            Self::Idle => None,
+            Self::Preparing { target, .. } => Some(target),
+        }
+    }
+
+    fn role_generation(&self) -> Option<u64> {
+        match self {
+            Self::Idle => None,
+            Self::Preparing { role_generation, .. } => Some(*role_generation),
+        }
+    }
+
+    fn movement_sent(&self) -> bool {
+        matches!(self, Self::Preparing { movement: HandoffMovement::Sent, .. })
+    }
+
+    fn mark_movement_sent(&mut self) {
+        if let Self::Preparing { movement, .. } = self {
+            *movement = HandoffMovement::Sent;
+        }
+    }
+}
+
 struct ConnectionTask {
     connection: SimulatorConnection,
     events: mpsc::Sender<SimulatorEvent>,
     shutdown: watch::Receiver<bool>,
     neighbor_requests: mpsc::Sender<SimulatorRequest>,
     commands: mpsc::Receiver<SimulatorCommand>,
-    logout_commands: Option<mpsc::Receiver<oneshot::Sender<Result<(), Error>>>>,
+    logout_commands: Option<mpsc::Receiver<LogoutCommand>>,
     packet_memory: SimulatorMemoryBudget,
     phase: lifecycle::Phase,
     preconnect_messages: VecDeque<EventEnvelope>,
@@ -142,6 +176,7 @@ struct ConnectionTask {
 
 impl Drop for ConnectionTask {
     fn drop(&mut self) {
+        self.phase.connection_ended();
         self.motion_status_sender.send_modify(|status| status.connected = false);
     }
 }
@@ -158,9 +193,7 @@ impl SimulatorConnection {
     }
 
     fn clear_handoff(&mut self, outbound: &mut OutboundQueue, pending_send: &mut Option<PendingSend>) {
-        self.handoff = None;
-        self.handoff_role_generation = None;
-        self.movement_requested = false;
+        self.handoff = CircuitHandoff::Idle;
         if pending_send
             .as_ref()
             .is_some_and(|pending| pending.queued_message.as_ref().is_some_and(|queued| queued.movement == MovementSend::Handoff))
@@ -171,7 +204,7 @@ impl SimulatorConnection {
     }
 
     fn invalidate_stale_handoff(&mut self, role_generation: u64, outbound: &mut OutboundQueue, pending_send: &mut Option<PendingSend>) {
-        if self.handoff_role_generation.is_some_and(|generation| generation != role_generation) {
+        if self.handoff.role_generation().is_some_and(|generation| generation != role_generation) {
             self.clear_handoff(outbound, pending_send);
         }
     }
@@ -206,10 +239,8 @@ impl SimulatorConnection {
             socket,
             circuit,
             use_circuit_sequence,
-            handoff: None,
-            handoff_role_generation: None,
+            handoff: CircuitHandoff::Idle,
             region_handshake_reply_sent: false,
-            movement_requested: false,
             initial_movement_sent: false,
             primary_state: if is_primary { PrimaryState::Connecting } else { PrimaryState::Neighbor { generation: 0 } },
             agent_throttle_sent: false,
@@ -227,14 +258,14 @@ impl SimulatorConnection {
         shutdown: watch::Receiver<bool>,
         neighbor_requests: mpsc::Sender<SimulatorRequest>,
         commands: mpsc::Receiver<SimulatorCommand>,
-        logout_commands: mpsc::Receiver<oneshot::Sender<Result<(), Error>>>,
+        logout_commands: mpsc::Receiver<LogoutCommand>,
         packet_memory: SimulatorMemoryBudget,
     ) -> Result<(), ConnectionError> {
         task::run(self, events, shutdown, neighbor_requests, commands, logout_commands, packet_memory).await
     }
     fn queue_handoff_movement(&mut self, outbound: &mut OutboundQueue, pending_send: Option<&PendingSend>) -> Result<(), ConnectionError> {
-        if self.movement_requested
-            || self.handoff.is_none()
+        if self.handoff.movement_sent()
+            || self.handoff.target().is_none()
             || outbound.has_handoff_movement()
             || pending_send
                 .is_some_and(|pending| pending.queued_message.as_ref().is_some_and(|queued| queued.movement == MovementSend::Handoff))
@@ -273,7 +304,7 @@ fn preflight_loss_reason(error: LLUdpError, message_id: MessageId) -> CoverageLo
 pub(crate) mod test_values {
     use std::sync::Arc;
 
-    use super::{HandoffTarget, SimulatorConnection, udp};
+    use super::{CircuitHandoff, HandoffMovement, HandoffTarget, SimulatorConnection, udp};
     use crate::fixtures::circuit::SendGate;
 
     pub(crate) fn set_send_gate(connection: &mut SimulatorConnection, send_gate: SendGate) {
@@ -281,7 +312,11 @@ pub(crate) mod test_values {
     }
 
     pub(crate) fn set_handoff(connection: &mut SimulatorConnection, handoff: HandoffTarget) {
-        connection.handoff = Some(handoff);
+        connection.handoff = CircuitHandoff::Preparing {
+            target: handoff,
+            role_generation: connection.current_primary_state().role_generation(),
+            movement: HandoffMovement::Unsent,
+        };
     }
 }
 

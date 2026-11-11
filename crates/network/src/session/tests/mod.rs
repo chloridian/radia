@@ -17,7 +17,7 @@ mod send;
 mod startup;
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::VecDeque,
     future::{Future, pending},
     io::ErrorKind,
     net::SocketAddr,
@@ -46,7 +46,7 @@ use tokio::{
     runtime as tokio_runtime, spawn,
     sync::{Notify, Semaphore, mpsc, oneshot, watch},
     task,
-    task::{Id, JoinError, JoinHandle},
+    task::JoinHandle,
     time::{advance, timeout},
 };
 use url::Url;
@@ -65,8 +65,8 @@ use crate::{
     AgentSession, Error, Grid, StartLocation,
     capabilities::{CapabilityBudget, Client, EventQueueExit},
     circuit::{
-        HandoffTarget, LOGOUT_TIMEOUT, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PRECONNECT_EVENTS,
-        NeighborEventQueueOutcome, SimulatorCommand, SimulatorEvent, UdpTransport,
+        HandoffTarget, LOGOUT_TIMEOUT, LogoutCommand, LogoutReceipt, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS,
+        MAX_PRECONNECT_EVENTS, NeighborEventQueueOutcome, SimulatorCommand, SimulatorEvent, UdpTransport,
         admission::{MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES},
         lludp::{
             Circuit, CircuitError, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, MAX_RETRIES, PING_INTERVAL, RESENT_FLAG, ReceiveError,
@@ -82,11 +82,11 @@ use crate::{
     session::{COMMAND_CAPACITY, Command, DEFAULT_UPSTREAM_BYTES_PER_SECOND, NETWORK_THREAD_STACK_SIZE},
 };
 
-use super::logout::{LogoutAttemptError, LogoutOutcome, PendingLogout, send_logout_with_deadline};
+use super::logout::{LogoutAttemptError, LogoutOutcome, PendingLogout, SessionLogout, send_logout_with_deadline};
 use super::*;
 use super::{
-    HandoffState, NEIGHBOR_COMMAND_CAPACITY, PreconnectEvents, PreconnectOutcome, SimulatorCapabilitySession, SimulatorConnection,
-    SimulatorConnectionState, queue_until_connected,
+    EventQueueLifecycle, HandoffState, NEIGHBOR_COMMAND_CAPACITY, SimulatorCapabilitySession, SimulatorConnection,
+    SimulatorConnectionLifecycle, SimulatorRecord,
 };
 use crate::session::handoff::{
     FinishOrder, HandoffAnnouncement, HandoffDecision, HandoffOrder, PromotionSetup, arbitrate_handoff, handoff_cancellation,
@@ -151,7 +151,8 @@ struct NeighborHarness {
 impl NeighborHarness {
     async fn shutdown(self) {
         self.disconnect.send_replace(true);
-        receive_message(&self.primary, |message| matches!(message, Message::LogoutRequest(_))).await;
+        let logout = receive_message(&self.primary, |message| matches!(message, Message::LogoutRequest(_))).await;
+        send_logout_reply(&self.primary, self.primary_peer, &logout, 1_000).await;
         assert!(timeout(WAIT, self.client).await.expect("disconnect should finish").expect("client task").is_ok());
     }
 }
@@ -202,24 +203,44 @@ pub(super) fn test_options() -> SessionRuntimeOptions {
     }
 }
 
-fn neighbor_event_queue_task_failure(
-    error: &JoinError,
-    owners: &mut HashMap<Id, (SimulatorId, SocketAddr)>,
-    primary_id: SimulatorId,
-    connections: &HashMap<u64, SimulatorConnectionState>,
-) -> Option<Event> {
-    let (simulator_id, source) = owners.remove(&error.id())?;
-    neighbor_event_queue_failure(simulator_id, source, EventQueueExit::TaskFailed, primary_id, connections)
+fn test_simulator_record(
+    endpoint: SocketAddr,
+    region_handle: Option<u64>,
+    abort: tokio::task::AbortHandle,
+    commands: mpsc::Sender<SimulatorCommand>,
+) -> SimulatorRecord {
+    let (primary_state, _) = watch::channel(PrimaryState::Neighbor { generation: 0 });
+    SimulatorRecord {
+        endpoint,
+        region_handle,
+        connection_task: Some(abort),
+        commands,
+        logout: mpsc::channel(1).0,
+        pending_handoff_command: None,
+        primary_state,
+        packet_memory: SimulatorMemoryBudget::new().for_neighbor(),
+        connection: SimulatorConnectionLifecycle::Connecting,
+        capabilities: None,
+        preconnect_events: VecDeque::new(),
+    }
 }
 
-fn remove_failed_neighbor(
-    error: &JoinError,
-    connections: &mut HashMap<u64, SimulatorConnectionState>,
-) -> Option<(u64, SimulatorId, SocketAddr)> {
-    let region_handle =
-        connections.iter().find(|(_, connection)| connection.abort.id() == error.id()).map(|(region_handle, _)| *region_handle)?;
-    let connection = connections.remove(&region_handle)?;
-    Some((region_handle, connection.simulator_id, connection.endpoint))
+fn current_neighbor_count(state: &SessionState) -> usize {
+    state.simulators.iter().filter(|(simulator_id, simulator)| **simulator_id != state.simulator_id && simulator.is_current()).count()
+}
+
+fn current_neighbor_for_region(state: &SessionState, region_handle: u64) -> Option<(SimulatorId, &SimulatorRecord)> {
+    state
+        .simulators
+        .iter()
+        .find(|(simulator_id, simulator)| {
+            **simulator_id != state.simulator_id && simulator.is_current() && simulator.region_handle == Some(region_handle)
+        })
+        .map(|(simulator_id, simulator)| (*simulator_id, simulator))
+}
+
+fn neighbor_connection_task_count(state: &SessionState) -> usize {
+    state.neighbor_connection_tasks()
 }
 
 fn runtime_options() -> SessionRuntimeOptions {
@@ -530,6 +551,15 @@ fn teleport_finish_to(agent_id: Uuid, endpoint: SocketAddr, region_handle: u64, 
         sim_access: Some(0),
         teleport_flags: Some(0),
     })
+}
+
+pub(super) async fn send_logout_reply(socket: &UdpSocket, peer: SocketAddr, request: &Packet, sequence: u32) {
+    let mut reply = test_fixture("logout_reply.hex");
+    reply[0] = (reply[0] & !0x40) | 0x10;
+    set_sequence(&mut reply, sequence);
+    reply.extend_from_slice(&request.sequence().to_be_bytes());
+    reply.push(1);
+    socket.send_to(&reply, peer).await.expect("send matching LogoutReply");
 }
 
 fn ack(sequence: u32, acknowledged: u32) -> Vec<u8> {
