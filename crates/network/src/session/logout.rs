@@ -1,17 +1,22 @@
-use std::{error::Error as StdError, fmt, future::Future};
+#[cfg(test)]
+use std::future::Future;
+use std::{error::Error as StdError, fmt};
 
 use tokio::{
     sync::oneshot,
     time::{self, Instant},
 };
 
-use super::{LOGOUT_TIMEOUT, RuntimeAction, SessionDispatcher, SessionError, SessionState};
-use crate::error::Error;
+use super::{RuntimeAction, SessionDispatcher, SessionError, SessionState};
+use crate::{
+    circuit::{LOGOUT_REPLY_TIMEOUT, LOGOUT_TIMEOUT, LogoutCommand, LogoutReceipt},
+    error::Error,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LogoutOutcome {
-    Sent,
-    AlreadySent,
+    Received,
+    AlreadyReceived,
     Unavailable(LogoutUnavailable),
 }
 
@@ -19,22 +24,93 @@ pub(super) enum LogoutOutcome {
 pub(crate) enum LogoutUnavailable {
     ConnectionClosed,
     ConnectionEnded,
-    Deadline,
+    SendDeadline,
+    ReplyDeadline,
     QueueFull,
 }
 
 pub(super) struct PendingLogout {
-    pub(super) completion: oneshot::Receiver<Result<(), Error>>,
-    pub(super) deadline: Instant,
+    completion: Option<oneshot::Receiver<Result<(), Error>>>,
+    receipt: oneshot::Receiver<LogoutReceipt>,
+    send_deadline: Instant,
+    reply_deadline: Option<Instant>,
+}
+
+pub(super) enum SessionLogout {
+    Active,
+    Sending { pending: PendingLogout },
+    Received { deadline: Option<Instant> },
+    Unavailable { reason: LogoutUnavailable, deadline: Option<Instant> },
+}
+
+impl SessionLogout {
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        match self {
+            Self::Active => None,
+            Self::Sending { pending } => Some(pending.deadline()),
+            Self::Received { deadline } | Self::Unavailable { deadline, .. } => *deadline,
+        }
+    }
+
+    pub(super) fn is_started(&self) -> bool {
+        !matches!(self, Self::Active)
+    }
+
+    pub(super) fn is_received(&self) -> bool {
+        matches!(self, Self::Received { .. })
+    }
+
+    pub(super) fn unavailable(&self) -> Option<LogoutUnavailable> {
+        match self {
+            Self::Unavailable { reason, .. } => Some(*reason),
+            Self::Active | Self::Sending { .. } | Self::Received { .. } => None,
+        }
+    }
+
+    pub(super) fn pending_mut(&mut self) -> Option<&mut PendingLogout> {
+        match self {
+            Self::Sending { pending } => Some(pending),
+            Self::Active | Self::Received { .. } | Self::Unavailable { .. } => None,
+        }
+    }
 }
 
 impl PendingLogout {
-    pub(super) async fn wait(&mut self) -> Result<(), LogoutAttemptError> {
-        match time::timeout_at(self.deadline, &mut self.completion).await {
-            Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(error))) => Err(logout_completion_error(error)),
-            Ok(Err(_)) => Err(LogoutAttemptError::Unavailable(LogoutUnavailable::ConnectionEnded)),
-            Err(_) => Err(LogoutAttemptError::Unavailable(LogoutUnavailable::Deadline)),
+    pub(super) fn new() -> (LogoutCommand, Self) {
+        let (sent, completion) = oneshot::channel();
+        let (receipt, receipt_receiver) = oneshot::channel();
+        (
+            LogoutCommand { sent, receipt },
+            Self {
+                completion: Some(completion),
+                receipt: receipt_receiver,
+                send_deadline: Instant::now() + LOGOUT_TIMEOUT,
+                reply_deadline: None,
+            },
+        )
+    }
+
+    pub(super) fn deadline(&self) -> Instant {
+        self.reply_deadline.unwrap_or(self.send_deadline)
+    }
+
+    pub(super) async fn wait(&mut self) -> Result<LogoutOutcome, LogoutAttemptError> {
+        if let Some(completion) = &mut self.completion {
+            match time::timeout_at(self.send_deadline, completion).await {
+                Ok(Ok(Ok(()))) => {
+                    self.completion = None;
+                    self.reply_deadline = Some(Instant::now() + LOGOUT_REPLY_TIMEOUT);
+                }
+                Ok(Ok(Err(error))) => return Err(logout_completion_error(error)),
+                Ok(Err(_)) => return Err(LogoutAttemptError::Unavailable(LogoutUnavailable::ConnectionEnded)),
+                Err(_) => return Err(LogoutAttemptError::Unavailable(LogoutUnavailable::SendDeadline)),
+            }
+        }
+        let deadline = self.reply_deadline.unwrap_or(self.send_deadline);
+        match time::timeout_at(deadline, &mut self.receipt).await {
+            Ok(Ok(LogoutReceipt::Received)) => Ok(LogoutOutcome::Received),
+            Ok(Ok(LogoutReceipt::Deadline)) | Err(_) => Err(LogoutAttemptError::Unavailable(LogoutUnavailable::ReplyDeadline)),
+            Ok(Ok(LogoutReceipt::ConnectionEnded)) | Ok(Err(_)) => Err(LogoutAttemptError::Unavailable(LogoutUnavailable::ConnectionEnded)),
         }
     }
 }
@@ -64,67 +140,79 @@ impl StdError for LogoutAttemptError {
 }
 
 impl SessionState {
-    pub(super) async fn disconnect_once(&mut self, logout_already_sent: bool) -> Result<LogoutOutcome, SessionError> {
-        tracing::info!(logout_already_sent, "simulator disconnect started");
-        self.finish_pending_logout().await?;
-        let outcome = if logout_already_sent || self.logout_request_sent {
-            LogoutOutcome::AlreadySent
-        } else if let Some(reason) = self.logout_unavailable {
+    pub(super) async fn disconnect_once(&mut self) -> Result<LogoutOutcome, SessionError> {
+        tracing::info!("simulator disconnect started");
+        let outcome = if self.logout.is_received() {
+            LogoutOutcome::AlreadyReceived
+        } else if let Some(reason) = self.logout.unavailable() {
             LogoutOutcome::Unavailable(reason)
-        } else if self.logout_attempted {
-            LogoutOutcome::Unavailable(LogoutUnavailable::ConnectionEnded)
-        } else if self.root_connection_failed && self.primary.simulator_id == self.simulator_id {
-            self.logout_attempted = true;
-            self.record_logout_unavailable(LogoutUnavailable::ConnectionClosed);
+        } else if self.logout.is_started() {
+            self.finish_pending_logout().await?;
+            if self.logout.is_received() {
+                LogoutOutcome::AlreadyReceived
+            } else {
+                LogoutOutcome::Unavailable(self.logout.unavailable().unwrap_or(LogoutUnavailable::ConnectionEnded))
+            }
+        } else if !self.primary().is_current() {
+            self.record_logout_unavailable(LogoutUnavailable::ConnectionClosed, None);
             LogoutOutcome::Unavailable(LogoutUnavailable::ConnectionClosed)
         } else {
-            self.logout_attempted = true;
-            let (completed, response) = oneshot::channel();
-            let result = send_logout_with_deadline(
-                async {
-                    self.primary
-                        .logout
-                        .send(completed)
-                        .await
-                        .map_err(|_| LogoutAttemptError::Unavailable(LogoutUnavailable::ConnectionClosed))?;
-                    response
-                        .await
-                        .map_err(|_| LogoutAttemptError::Unavailable(LogoutUnavailable::ConnectionEnded))?
-                        .map_err(logout_completion_error)
-                },
-                LogoutUnavailable::Deadline,
-            )
-            .await;
-            self.apply_logout_attempt_result(result)?;
-            if self.logout_request_sent {
-                LogoutOutcome::Sent
-            } else {
-                LogoutOutcome::Unavailable(self.logout_unavailable.unwrap_or(LogoutUnavailable::ConnectionEnded))
+            let (command, pending) = PendingLogout::new();
+            let deadline = Some(pending.deadline());
+            match time::timeout_at(pending.deadline(), self.primary().logout.send(command)).await {
+                Err(_) => {
+                    self.record_logout_unavailable(LogoutUnavailable::SendDeadline, deadline);
+                    LogoutOutcome::Unavailable(LogoutUnavailable::SendDeadline)
+                }
+                Ok(Err(_)) => {
+                    self.record_logout_unavailable(LogoutUnavailable::ConnectionClosed, deadline);
+                    LogoutOutcome::Unavailable(LogoutUnavailable::ConnectionClosed)
+                }
+                Ok(Ok(())) => {
+                    self.logout = SessionLogout::Sending { pending };
+                    self.finish_pending_logout().await?;
+                    if self.logout.is_received() {
+                        LogoutOutcome::Received
+                    } else {
+                        LogoutOutcome::Unavailable(self.logout.unavailable().unwrap_or(LogoutUnavailable::ConnectionEnded))
+                    }
+                }
             }
         };
         match outcome {
-            LogoutOutcome::Sent => {
-                tracing::debug!(local_send_completed = true, remote_receipt_confirmed = false, "simulator logout request sent");
+            LogoutOutcome::Received => {
+                tracing::debug!(local_send_completed = true, remote_receipt_confirmed = true, "simulator logout reply received");
             }
-            LogoutOutcome::AlreadySent => {
-                tracing::debug!(local_send_completed = true, remote_receipt_confirmed = false, "simulator logout request was already sent");
+            LogoutOutcome::AlreadyReceived => {
+                tracing::debug!(
+                    local_send_completed = true,
+                    remote_receipt_confirmed = true,
+                    "simulator logout reply was already received"
+                );
             }
             LogoutOutcome::Unavailable(reason) => {
-                self.record_logout_unavailable(reason);
+                self.record_logout_unavailable(reason, self.logout.deadline());
             }
         }
         Ok(outcome)
     }
 
-    pub(super) fn apply_logout_attempt_result(&mut self, result: Result<(), LogoutAttemptError>) -> Result<(), SessionError> {
+    pub(super) fn apply_logout_attempt_result(
+        &mut self,
+        result: Result<LogoutOutcome, LogoutAttemptError>,
+        deadline: Option<Instant>,
+    ) -> Result<(), SessionError> {
         match result {
-            Ok(()) => {
-                self.logout_request_sent = true;
-                self.logout_unavailable = None;
+            Ok(LogoutOutcome::Received) => {
+                self.logout = SessionLogout::Received { deadline };
                 Ok(())
             }
-            Err(LogoutAttemptError::Unavailable(reason)) => {
-                self.record_logout_unavailable(reason);
+            Ok(LogoutOutcome::AlreadyReceived) => {
+                self.logout = SessionLogout::Received { deadline };
+                Ok(())
+            }
+            Ok(LogoutOutcome::Unavailable(reason)) | Err(LogoutAttemptError::Unavailable(reason)) => {
+                self.record_logout_unavailable(reason, deadline);
                 Ok(())
             }
             Err(LogoutAttemptError::Unexpected(error)) => Err(error.into()),
@@ -132,23 +220,27 @@ impl SessionState {
     }
 
     pub(super) async fn finish_pending_logout(&mut self) -> Result<(), SessionError> {
-        if let Some(mut pending) = self.pending_primary_logout.take() {
-            let result = pending.wait().await;
-            self.apply_logout_attempt_result(result)?;
+        let state = std::mem::replace(&mut self.logout, SessionLogout::Active);
+        match state {
+            SessionLogout::Sending { mut pending } => {
+                let result = pending.wait().await;
+                self.apply_logout_attempt_result(result, Some(pending.deadline()))?;
+            }
+            state => self.logout = state,
         }
         Ok(())
     }
 
-    pub(super) fn record_logout_unavailable(&mut self, reason: LogoutUnavailable) {
-        if self.logout_unavailable == Some(reason) {
+    pub(super) fn record_logout_unavailable(&mut self, reason: LogoutUnavailable, deadline: Option<Instant>) {
+        if self.logout.unavailable() == Some(reason) && self.logout.deadline() == deadline {
             return;
         }
-        self.logout_unavailable = Some(reason);
-        tracing::warn!(simulator = self.primary.simulator_id.get(), ?reason, "simulator disconnect completed without sending logout");
+        self.logout = SessionLogout::Unavailable { reason, deadline };
+        tracing::warn!(simulator = self.primary_id.get(), ?reason, "simulator disconnect completed without a logout reply");
     }
 
-    pub(super) async fn graceful_disconnect(&mut self, logout_already_sent: bool) -> Result<(), SessionError> {
-        let result = self.disconnect_once(logout_already_sent).await;
+    pub(super) async fn graceful_disconnect(&mut self) -> Result<(), SessionError> {
+        let result = self.disconnect_once().await;
         self.neighbor_cancellation.send_replace(true);
         result.map(|_| ())
     }
@@ -156,41 +248,33 @@ impl SessionState {
 
 impl SessionDispatcher<'_> {
     pub(super) async fn handle_disconnect_changed(&mut self) -> Result<RuntimeAction, SessionError> {
-        self.state.graceful_disconnect(self.state.logout_request_sent).await?;
+        self.state.graceful_disconnect().await?;
         Ok(RuntimeAction::Exit(Ok(())))
     }
 
     pub(super) fn handle_primary_logout_completed(
         &mut self,
-        result: Result<(), LogoutAttemptError>,
+        result: Result<LogoutOutcome, LogoutAttemptError>,
     ) -> Result<RuntimeAction, SessionError> {
-        self.state.pending_primary_logout = None;
-        self.state.apply_logout_attempt_result(result)?;
-        Ok(RuntimeAction::Continue)
-    }
-
-    pub(super) async fn handle_logout_deadline(&mut self) -> Result<RuntimeAction, SessionError> {
-        self.state.finish_pending_logout().await?;
-        if *self.disconnect_requested.borrow() {
-            self.state.neighbor_cancellation.send_replace(true);
-            return Ok(RuntimeAction::Exit(Ok(())));
-        }
+        let deadline = self.state.logout.deadline();
+        self.state.apply_logout_attempt_result(result, deadline)?;
         Ok(RuntimeAction::Exit(Ok(())))
     }
 
     pub(super) async fn handle_event_receiver_closed(&mut self) -> Result<RuntimeAction, SessionError> {
-        self.state.graceful_disconnect(false).await?;
+        self.state.graceful_disconnect().await?;
         Ok(RuntimeAction::Exit(Ok(())))
     }
 }
 
 fn logout_completion_error(error: Error) -> LogoutAttemptError {
     match error {
-        Error::SimulatorLogoutSendAgeExpired => LogoutAttemptError::Unavailable(LogoutUnavailable::Deadline),
+        Error::SimulatorLogoutSendAgeExpired => LogoutAttemptError::Unavailable(LogoutUnavailable::SendDeadline),
         error => LogoutAttemptError::Unexpected(error),
     }
 }
 
+#[cfg(test)]
 pub(super) async fn send_logout_with_deadline(
     send: impl Future<Output = Result<(), LogoutAttemptError>>,
     deadline_reason: LogoutUnavailable,

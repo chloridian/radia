@@ -9,11 +9,11 @@ async fn retry_limit_keeps_primary_connected() {
     let connection = connect_runtime(login_session(endpoint), ResponseData::default()).await.expect("connect simulator circuit");
     let _ = receive(&simulator).await;
 
-    connection.state.note_primary_event_queue_exit(EventQueueExit::Stopped);
+    connection.state.note_primary_event_queue_exit(connection.state.primary_id, EventQueueExit::Stopped);
     let mut buffer = [0; 65_535];
     assert_eq!(simulator.try_recv_from(&mut buffer).expect_err("ordinary poll stop sends no logout").kind(), ErrorKind::WouldBlock);
 
-    connection.state.note_primary_event_queue_exit(EventQueueExit::RetryLimitReached);
+    connection.state.note_primary_event_queue_exit(connection.state.primary_id, EventQueueExit::RetryLimitReached);
     assert_eq!(
         simulator.try_recv_from(&mut buffer).expect_err("EventQueue failure must not log out the simulator").kind(),
         ErrorKind::WouldBlock
@@ -45,7 +45,7 @@ async fn primary_event_queue_coverage_loss_keeps_session_active() {
         .expect("connect simulator circuit");
     let _ = receive(&simulator).await;
 
-    connection.state.note_primary_event_queue_exit(EventQueueExit::StoppedWithCoverageLoss);
+    connection.state.note_primary_event_queue_exit(connection.state.primary_id, EventQueueExit::StoppedWithCoverageLoss);
     let mut buffer = [0; 65_535];
     assert_eq!(simulator.try_recv_from(&mut buffer).expect_err("coverage loss must not send logout").kind(), ErrorKind::WouldBlock);
 }
@@ -68,7 +68,7 @@ async fn primary_event_credit_exhaustion_reports_coverage_without_logout() {
         let permit =
             connection.state.packet_memory.application_events().try_acquire().expect("test backlog fits the session application capacity");
         let mut event = EventEnvelope::new(Event::CapabilityEvent {
-            simulator_id: connection.state.primary.simulator_id,
+            simulator_id: connection.state.primary_id,
             source: endpoint,
             message: "pending event".into(),
             body: llsd::Value::Integer(i32::try_from(index).expect("test event index fits")),
@@ -76,7 +76,7 @@ async fn primary_event_credit_exhaustion_reports_coverage_without_logout() {
         event.attach_application_credit(permit);
         run_state.pending_events.push_back(event);
     }
-    let simulator_id = connection.state.primary.simulator_id;
+    let simulator_id = connection.state.primary_id;
     let source = CoverageSource::EventQueue { incarnation: 42 };
     let watermark = coverage_losses.watermark(simulator_id, source);
 
@@ -94,7 +94,7 @@ async fn primary_event_credit_exhaustion_reports_coverage_without_logout() {
         .expect("a full event queue should report coverage loss without ending the session");
 
     assert!(received_events.try_recv().is_err(), "the full queue must not admit an extra event");
-    assert!(run_state.logout_deadline.is_none(), "queue pressure must not start simulator logout");
+    assert!(connection.state.logout.deadline().is_none(), "queue pressure must not start simulator logout");
     std::assert_matches!(
         coverage_losses.snapshot().losses.as_slice(),
         [CoverageLoss::Source(record)]
@@ -110,7 +110,7 @@ async fn primary_event_credit_exhaustion_reports_coverage_without_logout() {
         .await
         .expect("events should flow again after the consumer drains the backlog");
     std::assert_matches!(received_events.try_recv().map(|event| event.event), Ok(Event::SimulatorDisconnected { .. }));
-    assert!(run_state.logout_deadline.is_none());
+    assert!(connection.state.logout.deadline().is_none());
 }
 
 #[tokio::test]
@@ -125,7 +125,7 @@ async fn terminal_logout_skips_capability_events_that_start_neighbor_work() {
     let (application_events, _application_event_rx) = mpsc::channel(1);
     let (neighbor_events, _neighbor_event_rx) = mpsc::channel(1);
     let (_shutdown, shutdown) = watch::channel(false);
-    run_state.logout_deadline = Some(time::Instant::now() + LOGOUT_TIMEOUT);
+    connection.state.logout = SessionLogout::Received { deadline: Some(time::Instant::now() + LOGOUT_TIMEOUT) };
     let (capability_events, _capability_event_rx) = mpsc::channel(1);
     let mut setup =
         PromotionSetup { state: &mut run_state, neighbor_requests, application_events, neighbor_events, shutdown, capability_events };
@@ -138,7 +138,7 @@ async fn terminal_logout_skips_capability_events_that_start_neighbor_work() {
         ]))]),
     )]));
     let mut handoff_state = HandoffState::default();
-    let simulator_id = connection.state.primary.simulator_id;
+    let simulator_id = connection.state.primary_id;
 
     connection
         .state
@@ -147,8 +147,7 @@ async fn terminal_logout_skips_capability_events_that_start_neighbor_work() {
         .expect("terminal capability events are discarded without starting work");
 
     drop(setup);
-    assert!(run_state.neighbors.is_empty());
-    assert!(run_state.neighbor_connections.is_empty());
-    assert!(run_state.simulator_capabilities.is_empty());
+    assert!(run_state.connections.is_empty());
+    assert_eq!(connection.state.simulators.len(), 1);
     drop(connection);
 }

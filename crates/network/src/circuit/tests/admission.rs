@@ -399,7 +399,7 @@ async fn rejected_packet_retries() {
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
     let (_commands, commands) = mpsc::channel(1);
-    let (_logout, logout) = mpsc::channel::<oneshot::Sender<Result<(), Error>>>(1);
+    let (_logout, logout) = mpsc::channel::<LogoutCommand>(1);
     let task = spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory));
 
     let (use_circuit_code, peer) = receive_packet(&simulator).await;
@@ -460,7 +460,7 @@ async fn typed_decode_retries() {
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
     let (_commands, commands) = mpsc::channel(1);
-    let (_logout, logout) = mpsc::channel::<oneshot::Sender<Result<(), Error>>>(1);
+    let (_logout, logout) = mpsc::channel::<LogoutCommand>(1);
     let task = spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory));
 
     let (use_circuit_code, peer) = receive_packet(&simulator).await;
@@ -530,7 +530,7 @@ async fn ack_queue_full_retries() {
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
     let (_commands, commands) = mpsc::channel(1);
-    let (_logout, logout) = mpsc::channel::<oneshot::Sender<Result<(), Error>>>(1);
+    let (_logout, logout) = mpsc::channel::<LogoutCommand>(1);
     let task = spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory));
 
     let (use_circuit_code, peer) = receive_packet(&simulator).await;
@@ -652,7 +652,7 @@ async fn ack_control_survives_memory_pressure() {
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
     let (_commands, commands) = mpsc::channel(1);
-    let (_logout, logout) = mpsc::channel::<oneshot::Sender<Result<(), Error>>>(1);
+    let (_logout, logout) = mpsc::channel::<LogoutCommand>(1);
     let task: JoinHandle<Result<(), ConnectionError>> =
         spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory.clone()));
 

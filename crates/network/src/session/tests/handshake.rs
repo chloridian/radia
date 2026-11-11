@@ -106,10 +106,12 @@ async fn handshake_chat_logout() {
     let (logout, logout_peer) = receive(&simulator).await;
     assert_eq!(logout_peer, peer);
     assert_eq!(logout, expected_fixture("logout_request.hex", 8, true));
+    let logout = Packet::decode(&logout).expect("decode LogoutRequest");
+    send_logout_reply(&simulator, peer, &logout, 29).await;
     assert!(
         timeout(Duration::from_millis(200), client)
             .await
-            .expect("disconnect should not wait for a simulator reply")
+            .expect("disconnect should complete after a simulator reply")
             .expect("session task should not panic")
             .is_ok()
     );
@@ -161,7 +163,8 @@ async fn region_handshake_reply_is_explicit_and_preserves_application_flags() {
     }
 
     disconnect_signal.send_replace(true);
-    receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
+    let logout = receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
+    send_logout_reply(&simulator, peer, &logout, 28).await;
     timeout(SIMULATOR_TIMEOUT, client).await.expect("session task stops").expect("session task does not panic").expect("clean shutdown");
 }
 
@@ -238,10 +241,12 @@ async fn handshake_survives_application_backlog() {
     assert_eq!(received, (23..=39).collect());
 
     disconnect_signal.send_replace(true);
+    let logout = receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
+    send_logout_reply(&simulator, peer, &logout, 40).await;
     assert!(
         timeout(Duration::from_millis(200), client)
             .await
-            .expect("disconnect should finish")
+            .expect("disconnect should finish after a simulator reply")
             .expect("session task should not panic")
             .is_ok()
     );
@@ -284,6 +289,7 @@ async fn closed_receiver_logs_out() {
     assert_eq!(logout.sequence(), 5);
     assert!(logout.is_reliable());
     std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+    send_logout_reply(&simulator, peer, &logout, 24).await;
 
     assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("session should stop").expect("session task should not panic").is_ok());
     assert_no_datagram(&simulator);
@@ -303,8 +309,10 @@ async fn disconnect_blocks_movement() {
 
     simulator.try_send_to(&server_ack_many(20, &[1]), peer).expect("queue circuit ACK while disconnect is pending");
     disconnect_signal.send_replace(true);
-    let (logout, _) = receive(&simulator).await;
-    assert_eq!(logout, expected_fixture("logout_request.hex", 2, true));
+    let (logout_bytes, _) = receive(&simulator).await;
+    let logout = Packet::decode(&logout_bytes).expect("decode LogoutRequest");
+    assert_eq!(logout, Packet::decode(&expected_fixture("logout_request.hex", 2, true)).expect("decode expected LogoutRequest"));
+    send_logout_reply(&simulator, peer, &logout, 21).await;
 
     assert!(
         timeout(SIMULATOR_TIMEOUT, client)

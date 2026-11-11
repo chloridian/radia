@@ -1,28 +1,18 @@
-use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
-    mem::replace,
-    net::SocketAddr,
-};
+use std::{cmp::Ordering, collections::HashMap, mem::replace};
 
-use super::routing::PreconnectEvents;
 use super::{
-    ConnectionError, HandoffCommand, PrimaryRoute, RunState, RuntimeAction, SessionDispatcher, SessionError, SessionState,
-    SimulatorCapabilitySession, SimulatorConnectionState, SimulatorEvent, SimulatorRequest, record_event_envelope_loss,
-    remove_simulator_capability,
+    ConnectionError, EventQueueLifecycle, HandoffCommand, RunState, RuntimeAction, SessionDispatcher, SessionError, SessionState,
+    SimulatorEvent, SimulatorRecord, SimulatorRequest, record_event_envelope_loss, remove_simulator_capability,
 };
 use crate::{
-    capabilities::{Client, EventQueueExit},
+    capabilities::Client,
     circuit::{HandoffCancellation, HandoffGeneration, HandoffTarget},
     coverage::{CoverageLossLedger, CoverageLossReason},
     event::EventRetention,
     event::{Event, EventEnvelope, PacketOrder, SimulatorId},
 };
 use protocol::{lludp::Message, messages::AgentMovementComplete};
-use tokio::{
-    sync::{mpsc, watch},
-    task::{Id, JoinSet},
-};
+use tokio::sync::{mpsc, watch};
 
 #[derive(Clone)]
 pub(crate) struct PendingPromotion {
@@ -184,20 +174,16 @@ impl SessionState {
         handoff: &HandoffTarget,
         capability_events: mpsc::Sender<EventEnvelope>,
         shutdown: watch::Receiver<bool>,
-        neighbor_event_queues: &mut JoinSet<(SimulatorId, SocketAddr, EventQueueExit)>,
-        neighbor_event_queue_owners: &mut HashMap<Id, (SimulatorId, SocketAddr)>,
-        simulator_capabilities: &mut HashMap<SimulatorId, SimulatorCapabilitySession>,
+        run_state: &mut RunState,
     ) -> Result<Client, SessionError> {
-        if let Some(capability) = simulator_capabilities.get(&simulator_id)
-            && capability.endpoint == handoff.endpoint
+        if let Some(capability) = self.simulators.get(&simulator_id).and_then(|simulator| simulator.capabilities.as_ref())
+            && self.simulators.get(&simulator_id).is_some_and(|simulator| simulator.endpoint == handoff.endpoint)
             && capability.seed_capability == handoff.seed_capability
-            && capability.event_queue_running
+            && capability.event_queue.is_running()
         {
             return Ok(capability.client.clone());
         }
-        if let Some(capability) = simulator_capabilities.remove(&simulator_id) {
-            capability.client.close_session();
-        }
+        remove_simulator_capability(&mut self.simulators, simulator_id);
         let client = self.new_capability_client(handoff.seed_capability.clone())?;
         let event_queue =
             match client.start_event_queue(simulator_id, handoff.endpoint, capability_events, shutdown, self.coverage_losses.clone()) {
@@ -209,23 +195,17 @@ impl SessionState {
             };
         let endpoint = handoff.endpoint;
         let event_queue_role = event_queue.role_handle();
-        let task = neighbor_event_queues.spawn(async move {
+        let task = run_state.event_queues.spawn(async move {
             let exit = event_queue.wait().await;
             (simulator_id, endpoint, exit)
         });
-        let task_id = task.id();
-        neighbor_event_queue_owners.insert(task_id, (simulator_id, endpoint));
-        simulator_capabilities.insert(
-            simulator_id,
-            SimulatorCapabilitySession {
-                endpoint,
+        if let Some(simulator) = self.simulators.get_mut(&simulator_id) {
+            simulator.capabilities = Some(super::simulators::SimulatorCapabilitySession {
                 seed_capability: handoff.seed_capability.clone(),
                 client: client.clone(),
-                event_queue_role,
-                event_queue_task: Some(task_id),
-                event_queue_running: true,
-            },
-        );
+                event_queue: EventQueueLifecycle::Running { role: event_queue_role, task },
+            });
+        }
         Ok(client)
     }
 
@@ -237,10 +217,10 @@ impl SessionState {
         setup: &mut PromotionSetup<'_>,
         state: &mut HandoffState,
     ) -> Result<(), SessionError> {
-        if source != self.primary.simulator_id || state.is_conflicted() {
+        if source != self.primary_id || state.is_conflicted() {
             return Ok(());
         }
-        if self.primary.region_handle == Some(handoff.region_handle) && self.primary.endpoint == handoff.endpoint {
+        if self.primary().region_handle == Some(handoff.region_handle) && self.primary().endpoint == handoff.endpoint {
             return Ok(());
         }
 
@@ -253,34 +233,21 @@ impl SessionState {
             return Ok(());
         };
 
-        let source = self.primary.simulator_id;
-        let prepared = self.start_neighbor(source, handoff.region_handle, handoff.endpoint, Some(handoff.clone()), setup).await?;
-        if !prepared {
-            return Ok(());
-        }
-
-        let Some(connection) =
-            setup.state.neighbor_connections.get(&handoff.region_handle).filter(|connection| connection.endpoint == handoff.endpoint)
+        let source = self.primary_id;
+        let Some(simulator_id) = self.start_neighbor(source, handoff.region_handle, handoff.endpoint, Some(handoff.clone()), setup).await?
         else {
             return Ok(());
         };
-        let simulator_id = connection.simulator_id;
-        if let Err(_error) = self.ensure_handoff_capabilities(
-            simulator_id,
-            &handoff,
-            setup.capability_events.clone(),
-            setup.shutdown.clone(),
-            &mut setup.state.neighbor_event_queues,
-            &mut setup.state.neighbor_event_queue_owners,
-            &mut setup.state.simulator_capabilities,
-        ) {
+        if let Err(_error) =
+            self.ensure_handoff_capabilities(simulator_id, &handoff, setup.capability_events.clone(), setup.shutdown.clone(), setup.state)
+        {
             tracing::warn!(
                 simulator = simulator_id.get(),
                 region = handoff.region_handle,
                 reason = "destination capabilities failed",
                 "simulator handoff failed"
             );
-            if let Some(connection) = setup.state.neighbor_connections.get_mut(&handoff.region_handle) {
+            if let Some(connection) = self.simulators.get_mut(&simulator_id) {
                 connection.queue_handoff_command(HandoffCommand::Cancel);
             }
             return Ok(());
@@ -308,8 +275,10 @@ impl SessionState {
                 let Some(current) = state.pending_mut() else { unreachable!("a cloned pending handoff remains active") };
                 current.evidence.record(announcement);
                 let same_live_target = current.source == source
-                    && setup.state.neighbor_connections.get(&current.handoff.region_handle).is_some_and(|connection| {
-                        connection.simulator_id == current.target && connection.endpoint == current.handoff.endpoint
+                    && self.simulators.get(&current.target).is_some_and(|connection| {
+                        connection.is_current()
+                            && connection.region_handle == Some(current.handoff.region_handle)
+                            && connection.endpoint == current.handoff.endpoint
                     });
                 if same_live_target {
                     let Some(generation) = self.next_handoff_generation() else {
@@ -324,11 +293,8 @@ impl SessionState {
                     current,
                     "destination connection is no longer active",
                     self.simulator_id,
-                    &mut setup.state.neighbor_connections,
-                    &mut setup.state.retiring_simulators,
-                    &mut setup.state.preconnect_events,
-                    &mut setup.state.connected_simulators,
-                    &mut setup.state.simulator_capabilities,
+                    &mut self.simulators,
+                    setup.state,
                     &self.coverage_losses,
                 );
             }
@@ -338,11 +304,8 @@ impl SessionState {
                     current,
                     "newer teleport finish received",
                     self.simulator_id,
-                    &mut setup.state.neighbor_connections,
-                    &mut setup.state.retiring_simulators,
-                    &mut setup.state.preconnect_events,
-                    &mut setup.state.connected_simulators,
-                    &mut setup.state.simulator_capabilities,
+                    &mut self.simulators,
+                    setup.state,
                     &self.coverage_losses,
                 );
             }
@@ -353,15 +316,12 @@ impl SessionState {
                     current,
                     "conflicting handoff announcement",
                     self.simulator_id,
-                    &mut setup.state.neighbor_connections,
-                    &mut setup.state.retiring_simulators,
-                    &mut setup.state.preconnect_events,
-                    &mut setup.state.connected_simulators,
-                    &mut setup.state.simulator_capabilities,
+                    &mut self.simulators,
+                    setup.state,
                     &self.coverage_losses,
                 );
                 tracing::warn!(
-                    simulator = self.primary.simulator_id.get(),
+                    simulator = self.primary_id.get(),
                     region = handoff.region_handle,
                     "conflicting simulator handoff announcements; waiting for TeleportCancel"
                 );
@@ -379,7 +339,7 @@ impl SessionState {
         setup: &mut PromotionSetup<'_>,
         state: &mut HandoffState,
     ) -> Result<(), SessionError> {
-        if source != self.primary.simulator_id || state.is_conflicted() {
+        if source != self.primary_id || state.is_conflicted() {
             return Ok(());
         }
         match message {
@@ -406,11 +366,8 @@ impl SessionState {
                         pending,
                         "teleport failed",
                         self.simulator_id,
-                        &mut setup.state.neighbor_connections,
-                        &mut setup.state.retiring_simulators,
-                        &mut setup.state.preconnect_events,
-                        &mut setup.state.connected_simulators,
-                        &mut setup.state.simulator_capabilities,
+                        &mut self.simulators,
+                        setup.state,
                         &self.coverage_losses,
                     );
                 }
@@ -425,7 +382,7 @@ impl SessionState {
 impl SessionDispatcher<'_> {
     pub(super) fn handle_handoff_command_retry(&mut self) -> RuntimeAction {
         self.flush_pending_handshake_replies();
-        for connection in self.run_state.neighbor_connections.values_mut() {
+        for connection in self.state.simulators.values_mut() {
             connection.flush_handoff_command();
         }
         RuntimeAction::Continue
@@ -448,7 +405,7 @@ impl SessionDispatcher<'_> {
                     )
                     .await?;
             }
-        } else if simulator_id == self.state.primary.simulator_id
+        } else if simulator_id == self.state.primary_id
             && let Some(cancel) = cancel_target
         {
             if self.handoff_state.clear_conflict(cancel) {
@@ -461,11 +418,8 @@ impl SessionDispatcher<'_> {
                     pending,
                     "teleport cancelled",
                     self.state.simulator_id,
-                    &mut self.run_state.neighbor_connections,
-                    &mut self.run_state.retiring_simulators,
-                    &mut self.run_state.preconnect_events,
-                    &mut self.run_state.connected_simulators,
-                    &mut self.run_state.simulator_capabilities,
+                    &mut self.state.simulators,
+                    &mut self.run_state,
                     &self.state.coverage_losses,
                 );
             }
@@ -481,12 +435,11 @@ impl SessionDispatcher<'_> {
         coverage_watermark: Option<crate::coverage::CoverageWatermark>,
     ) -> Result<(), SessionError> {
         let promotion = self.handoff_state.take_pending().expect("matching promotion is pending");
-        let Some(connection) = self
-            .run_state
-            .neighbor_connections
-            .get(&promotion.handoff.region_handle)
-            .filter(|connection| connection.simulator_id == promotion.target && connection.endpoint == promotion.handoff.endpoint)
-        else {
+        let Some(_connection) = self.state.simulators.get(&promotion.target).filter(|connection| {
+            connection.is_current()
+                && connection.region_handle == Some(promotion.handoff.region_handle)
+                && connection.endpoint == promotion.handoff.endpoint
+        }) else {
             tracing::info!(
                 simulator = promotion.target.get(),
                 region = promotion.handoff.region_handle,
@@ -495,21 +448,13 @@ impl SessionDispatcher<'_> {
             );
             return Ok(());
         };
-        let Some(next_primary) = PrimaryRoute::from_neighbor(promotion.handoff.region_handle, connection) else {
-            tracing::error!(
-                simulator = promotion.target.get(),
-                region = promotion.handoff.region_handle,
-                reason = "destination primary route is unavailable",
-                "simulator handoff failed"
-            );
-            return Ok(());
-        };
         let Some((capabilities, promoted_event_queue)) = self
-            .run_state
-            .simulator_capabilities
+            .state
+            .simulators
             .get(&promotion.target)
-            .filter(|capabilities| capabilities.endpoint == promotion.handoff.endpoint)
-            .map(|capabilities| (capabilities.client.clone(), capabilities.event_queue_role.clone()))
+            .and_then(|simulator| simulator.capabilities.as_ref())
+            .filter(|capabilities| capabilities.seed_capability == promotion.handoff.seed_capability)
+            .and_then(|capabilities| capabilities.event_queue.role().cloned().map(|role| (capabilities.client.clone(), role)))
         else {
             tracing::warn!(
                 simulator = promotion.target.get(),
@@ -519,7 +464,7 @@ impl SessionDispatcher<'_> {
             );
             return Ok(());
         };
-        let previous_simulator_id = self.state.primary.simulator_id;
+        let previous_simulator_id = self.state.primary_id;
         self.state
             .publish_simulator_event(
                 simulator_id,
@@ -528,18 +473,25 @@ impl SessionDispatcher<'_> {
                 &mut self.run_state,
             )
             .await?;
-        if self.run_state.logout_deadline.is_some() {
+        if self.state.logout.deadline().is_some() {
             return Ok(());
         }
         let mut session = self.state.session.clone();
         session.simulator_address = promotion.handoff.endpoint;
         session.seed_capability = promotion.handoff.seed_capability;
         let role_generation = promotion.generation.get();
-        self.state.promote_primary(next_primary, role_generation);
+        self.state.promote_primary(promotion.target, role_generation);
         tracing::info!(simulator = promotion.target.get(), region = promotion.handoff.region_handle, "simulator promoted");
-        self.active_primary_event_queue.set_primary(false);
+        if let Some(previous_role) = self
+            .state
+            .simulators
+            .get(&previous_simulator_id)
+            .and_then(|simulator| simulator.capabilities.as_ref())
+            .and_then(|capabilities| capabilities.event_queue.role())
+        {
+            previous_role.set_primary(false);
+        }
         promoted_event_queue.set_primary(true);
-        self.active_primary_event_queue = promoted_event_queue;
         self.state
             .publish_event(
                 &self.events,
@@ -621,34 +573,36 @@ pub(super) fn cancel_pending_handoff(
     current: PendingPromotion,
     reason: &'static str,
     root_simulator_id: SimulatorId,
-    neighbor_connections: &mut HashMap<u64, SimulatorConnectionState>,
-    retiring_simulators: &mut HashSet<SimulatorId>,
-    preconnect_events: &mut PreconnectEvents,
-    connected_simulators: &mut HashSet<SimulatorId>,
-    simulator_capabilities: &mut HashMap<SimulatorId, SimulatorCapabilitySession>,
+    simulators: &mut HashMap<SimulatorId, SimulatorRecord>,
+    run_state: &mut RunState,
     coverage_losses: &CoverageLossLedger,
 ) {
     tracing::info!(simulator = current.target.get(), region = current.handoff.region_handle, reason, "simulator handoff cancelled");
+    let Some(connection) = simulators.get_mut(&current.target).filter(|connection| {
+        connection.region_handle == Some(current.handoff.region_handle) && connection.endpoint == current.handoff.endpoint
+    }) else {
+        return;
+    };
     if current.target == root_simulator_id {
-        if let Some(connection) =
-            neighbor_connections.get_mut(&current.handoff.region_handle).filter(|connection| connection.simulator_id == current.target)
-        {
-            connection.queue_handoff_command(HandoffCommand::Cancel);
-        }
+        connection.queue_handoff_command(HandoffCommand::Cancel);
         return;
     }
-    if neighbor_connections.get(&current.handoff.region_handle).is_some_and(|connection| connection.simulator_id == current.target)
-        && let Some(connection) = neighbor_connections.remove(&current.handoff.region_handle)
+    if connection.connection == super::simulators::SimulatorConnectionLifecycle::Connected
+        && connection.connection_task.as_ref().is_some_and(|task| !task.is_finished())
     {
-        retiring_simulators.insert(connection.simulator_id);
-        for event in preconnect_events.remove(connection.simulator_id) {
-            record_event_envelope_loss(coverage_losses, event, CoverageLossReason::EventAdmission);
-        }
-        if connected_simulators.remove(&connection.simulator_id) && !connection.abort.is_finished() {
-            connection.log_disconnected(current.handoff.region_handle);
-        }
-        remove_simulator_capability(simulator_capabilities, connection.simulator_id);
-        connection.abort.abort();
+        connection.log_disconnected(current.target, current.handoff.region_handle);
+    }
+    connection.connection = super::simulators::SimulatorConnectionLifecycle::Retiring;
+    connection.abort_connection();
+    let event_queue_task = connection.capabilities.as_ref().and_then(|capabilities| capabilities.event_queue.task());
+    let queued = std::mem::take(&mut connection.preconnect_events);
+    connection.capabilities.take();
+    run_state.preconnect_events_len = run_state.preconnect_events_len.saturating_sub(queued.len());
+    if let Some(task) = event_queue_task {
+        task.abort();
+    }
+    for event in queued {
+        record_event_envelope_loss(coverage_losses, event, CoverageLossReason::EventAdmission);
     }
 }
 
@@ -711,6 +665,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handoff_targets_the_admitted_id_with_a_retiring_duplicate() {
+        let root = UdpSocket::bind("127.0.0.1:0").await.expect("bind root simulator");
+        let destination = UdpSocket::bind("127.0.0.1:0").await.expect("bind destination simulator");
+        let session = login_session(root.local_addr().expect("root endpoint"));
+        let target = HandoffTarget {
+            agent_id: session.agent_id,
+            session_id: session.session_id,
+            region_handle: 42,
+            endpoint: destination.local_addr().expect("destination endpoint"),
+            seed_capability: session.seed_capability.clone(),
+        };
+        let mut connection = SessionRuntime::connect(session, ResponseData::default(), crate::session::tests::test_options())
+            .await
+            .expect("session startup")
+            .expect("primary connection starts");
+        let (application_events, _application_receiver) = mpsc::channel(4);
+        let (neighbor_events, _neighbor_event_receiver) = mpsc::channel(4);
+        let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(4);
+        let (capability_events, _capability_event_receiver) = mpsc::channel(4);
+        let (shutdown_signal, shutdown) = watch::channel(false);
+        let mut run_state = RunState::new();
+        let mut setup = PromotionSetup {
+            state: &mut run_state,
+            neighbor_requests,
+            application_events,
+            neighbor_events,
+            shutdown: shutdown.clone(),
+            capability_events,
+        };
+
+        let old_id = connection
+            .state
+            .start_neighbor(connection.state.primary_id, target.region_handle, target.endpoint, None, &mut setup)
+            .await
+            .expect("start first destination attempt")
+            .expect("first attempt is admitted");
+        let old = connection.state.simulators.get_mut(&old_id).expect("first attempt record");
+        old.connection = crate::session::simulators::SimulatorConnectionLifecycle::Retiring;
+        old.abort_connection();
+
+        let replacement_id = connection
+            .state
+            .start_neighbor(connection.state.primary_id, target.region_handle, target.endpoint, None, &mut setup)
+            .await
+            .expect("start retry before joining old attempt")
+            .expect("replacement is admitted");
+        assert_ne!(old_id, replacement_id);
+        assert!(connection.state.simulators.get(&old_id).is_some_and(|simulator| simulator.is_retiring()));
+        assert!(connection.state.simulators.get(&replacement_id).is_some_and(|simulator| simulator.is_current()));
+
+        let mut handoff_state = HandoffState::default();
+        connection
+            .state
+            .request_handoff(
+                connection.state.primary_id,
+                target.clone(),
+                HandoffAnnouncement::TeleportFinish(HandoffOrder::Packet(PacketOrder::Ordered(60))),
+                &mut setup,
+                &mut handoff_state,
+            )
+            .await
+            .expect("prepare replacement handoff");
+        assert_eq!(handoff_state.pending().map(|pending| pending.target), Some(replacement_id));
+
+        for simulator in connection.state.simulators.values() {
+            if let Some(capability) = &simulator.capabilities {
+                capability.client.close_session();
+            }
+        }
+        shutdown_signal.send_replace(true);
+        setup.state.connections.shutdown().await;
+        setup.state.event_queues.shutdown().await;
+        connection.state.finish_capability_request_waiters().await;
+    }
+
+    #[tokio::test]
     async fn handoff_capability_requests_are_waited_for_after_retirement() {
         let root = UdpSocket::bind("127.0.0.1:0").await.expect("bind root simulator");
         let destination = UdpSocket::bind("127.0.0.1:0").await.expect("bind destination");
@@ -726,24 +756,45 @@ mod tests {
             .await
             .expect("session startup")
             .expect("primary connection starts");
-        let id = SimulatorId::allocate().expect("destination ID");
-        let (events, _receiver) = mpsc::channel(4);
-        let (_shutdown, shutdown) = watch::channel(false);
-        let mut queues = JoinSet::new();
-        let mut owners = HashMap::new();
-        let mut capabilities = HashMap::new();
+        let (application_events, _application_receiver) = mpsc::channel(4);
+        let (neighbor_events, _neighbor_event_receiver) = mpsc::channel(4);
+        let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(4);
+        let (capability_events, _capability_event_receiver) = mpsc::channel(4);
+        let (_shutdown_signal, shutdown) = watch::channel(false);
+        let mut run_state = RunState::new();
+        let mut setup = PromotionSetup {
+            state: &mut run_state,
+            neighbor_requests,
+            application_events,
+            neighbor_events,
+            shutdown: shutdown.clone(),
+            capability_events: capability_events.clone(),
+        };
+        connection
+            .state
+            .start_neighbor(connection.state.primary_id, target.region_handle, target.endpoint, None, &mut setup)
+            .await
+            .expect("start destination connection");
+        let id = connection
+            .state
+            .simulators
+            .iter()
+            .find_map(|(id, simulator)| (simulator.region_handle == Some(target.region_handle)).then_some(*id))
+            .expect("destination simulator record");
         let client = connection
             .state
-            .ensure_handoff_capabilities(id, &target, events, shutdown, &mut queues, &mut owners, &mut capabilities)
+            .ensure_handoff_capabilities(id, &target, capability_events, shutdown, setup.state)
             .expect("start destination capability");
         assert_eq!(connection.state.capability_request_waiters.len(), 2);
-        remove_simulator_capability(&mut capabilities, id);
-        assert!(capabilities.is_empty());
+        remove_simulator_capability(&mut connection.state.simulators, id);
+        assert!(connection.state.simulators.get(&id).is_some_and(|simulator| simulator.capabilities.is_none()));
         timeout(Duration::from_secs(2), connection.state.finish_capability_request_waiters())
             .await
             .expect("wait for root and retired destination capability requests");
         assert!(connection.state.capability_request_waiters.is_empty());
-        while timeout(Duration::from_secs(2), queues.join_next()).await.expect("join retired EventQueue").is_some() {}
+        drop(setup);
+        while timeout(Duration::from_secs(2), run_state.event_queues.join_next()).await.expect("join retired EventQueue").is_some() {}
+        run_state.connections.shutdown().await;
         std::assert_matches!(client.request_capabilities(&["TestCapability"]).await, Err(Error::CapabilitySessionClosed));
     }
 }

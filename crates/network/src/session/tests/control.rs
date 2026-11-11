@@ -178,7 +178,8 @@ async fn neighbor_logout_bypasses_full_queues() {
     .await
     .expect("connection should process the command after the queued application message");
     let (logout_completed, logout_response) = oneshot::channel();
-    logout_sender.send(logout_completed).await.expect("queue priority logout control");
+    let (logout_receipt, mut logout_receipt_response) = oneshot::channel();
+    logout_sender.send(LogoutCommand { sent: logout_completed, receipt: logout_receipt }).await.expect("queue priority logout control");
 
     std::assert_matches!(queued_response.await, Ok(Err(Error::SimulatorConnectionClosed)));
     std::assert_matches!(queued_tail_response.await, Ok(Err(Error::SimulatorConnectionClosed)));
@@ -191,9 +192,11 @@ async fn neighbor_logout_bypasses_full_queues() {
     assert!(logout.is_reliable());
     std::assert_matches!(logout.message(), Message::LogoutRequest(_));
     assert!(timeout(WAIT, logout_response).await.expect("logout send should complete").expect("logout reply").is_ok());
+    assert!(matches!(logout_receipt_response.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
 
     shutdown_signal.send_replace(true);
     assert!(timeout(WAIT, worker).await.expect("neighbor should stop after shutdown").expect("neighbor task").is_ok());
+    assert_eq!(logout_receipt_response.await.expect("connection reports shutdown"), LogoutReceipt::ConnectionEnded);
 }
 
 #[tokio::test]

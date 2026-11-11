@@ -3,26 +3,30 @@ use std::{future::pending, io::ErrorKind, net::SocketAddr, time::Duration};
 use protocol::{
     lludp::{Message, Packet},
     login::ResponseData,
-    messages::{CompletePingCheck, LogoutRequest, PacketAck, PingId, agent::logout_request, circuit::packet_ack::Packets},
+    messages::{
+        CompletePingCheck, LogoutReply, LogoutRequest, PacketAck, PingId,
+        agent::{logout_reply, logout_request},
+        circuit::packet_ack::Packets,
+    },
 };
 use tokio::{
     net::UdpSocket,
     spawn,
-    sync::{mpsc, oneshot},
+    sync::mpsc,
     task::yield_now,
     time::{self, Instant, timeout},
 };
 use uuid::Uuid;
 
-use super::test_fixture;
 use super::{
-    AGENT_ID, LOGOUT_TIMEOUT, LogoutAttemptError, LogoutOutcome, PendingLogout, SESSION_ID, connect_runtime, login_session,
-    send_logout_with_deadline, set_sequence,
+    AGENT_ID, LOGOUT_TIMEOUT, LogoutAttemptError, LogoutOutcome, PendingLogout, SESSION_ID, SimulatorConnectionLifecycle, connect_runtime,
+    connect_with_send_gate, login_session, new_send_gate, send_logout_with_deadline, set_sequence,
 };
-use crate::session::logout::LogoutUnavailable;
+use super::{ack, send_logout_reply, test_fixture};
+use crate::session::{SessionError, logout::LogoutUnavailable};
 use crate::{
     Error,
-    circuit::lludp::Circuit,
+    circuit::{LOGOUT_REPLY_TIMEOUT, lludp::Circuit},
     event::{Event, EventEnvelope},
 };
 
@@ -160,7 +164,7 @@ pub(super) fn client_ack(sequence: u32, acknowledged: u32) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn root_disconnect_skips_remote_logout_wait() {
+async fn root_disconnect_waits_for_matching_logout_reply() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let mut connection = connect_runtime(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default())
         .await
@@ -168,27 +172,70 @@ async fn root_disconnect_skips_remote_logout_wait() {
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
-    let outcome = timeout(Duration::from_millis(200), connection.state.disconnect_once(false))
-        .await
-        .expect("root logout send should be bounded")
-        .expect("local logout send should succeed");
-    assert_eq!(outcome, LogoutOutcome::Sent);
+    simulator.send_to(&ack(20, 1), peer).await.expect("ack circuit establishment");
+    let (movement_bytes, movement_peer) = receive(&simulator).await;
+    assert_eq!(movement_peer, peer);
+    let movement = Packet::decode(&movement_bytes).expect("decode initial movement");
+    std::assert_matches!(movement.message(), Message::CompleteAgentMovement(_));
+    simulator.send_to(&ack(21, movement.sequence()), peer).await.expect("ack initial movement");
+    let mut disconnect = Box::pin(connection.state.disconnect_once());
 
-    let (logout, logout_peer) = receive(&simulator).await;
+    let (logout_bytes, logout_peer) = tokio::select! {
+        biased;
+        result = &mut disconnect => panic!("disconnect finished before the simulator received LogoutRequest: {result:?}"),
+        packet = timeout(SIMULATOR_TIMEOUT, receive(&simulator)) => packet.expect("send LogoutRequest"),
+    };
     assert_eq!(logout_peer, peer);
-    assert_eq!(logout, expected_fixture("logout_request.hex", 2, true));
+    let logout = Packet::decode(&logout_bytes).expect("decode LogoutRequest");
+    assert_eq!(logout.sequence(), 3);
+    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+
+    let agent_id = Uuid::parse_str(AGENT_ID).expect("agent UUID");
+    let session_id = Uuid::parse_str(SESSION_ID).expect("session UUID");
+    for (sequence, reply_agent, reply_session) in [(22, Uuid::nil(), session_id), (23, agent_id, Uuid::nil())] {
+        let reply = Packet::new(
+            sequence,
+            Message::LogoutReply(LogoutReply {
+                agent_data: logout_reply::AgentData { agent_id: reply_agent, session_id: reply_session },
+                inventory_data: Vec::new(),
+            }),
+        )
+        .with_reliable()
+        .encode()
+        .expect("encode mismatched LogoutReply");
+        simulator.send_to(&reply, peer).await.expect("send mismatched LogoutReply");
+        loop {
+            let bytes = tokio::select! {
+                biased;
+                result = &mut disconnect => panic!("mismatched LogoutReply ended disconnect: {result:?}"),
+                packet = timeout(SIMULATOR_TIMEOUT, receive(&simulator)) => packet.expect("ack mismatched LogoutReply").0,
+            };
+            let packet = Packet::decode(&bytes).expect("decode reply acknowledgement");
+            if packet_ack_contains(packet.message(), sequence) {
+                break;
+            }
+        }
+    }
+
+    send_logout_reply(&simulator, peer, &logout, 24).await;
+    assert_eq!(
+        timeout(SIMULATOR_TIMEOUT, &mut disconnect).await.expect("matching reply completes disconnect").expect("disconnect result"),
+        LogoutOutcome::Received
+    );
+    drop(disconnect);
+    assert_eq!(connection.state.disconnect_once().await.expect("duplicate disconnect is idempotent"), LogoutOutcome::AlreadyReceived);
     assert_no_datagram(&simulator);
 }
 
 #[tokio::test(start_paused = true)]
-async fn logout_deadline_reports_unsent() {
-    let send = spawn(send_logout_with_deadline(pending::<Result<(), LogoutAttemptError>>(), LogoutUnavailable::Deadline));
+async fn logout_send_deadline_reports_unsent() {
+    let send = spawn(send_logout_with_deadline(pending::<Result<(), LogoutAttemptError>>(), LogoutUnavailable::SendDeadline));
     yield_now().await;
     time::advance(LOGOUT_TIMEOUT).await;
 
     std::assert_matches!(
         send.await.expect("logout deadline task should not panic").expect_err("pending local send should time out"),
-        LogoutAttemptError::Unavailable(LogoutUnavailable::Deadline)
+        LogoutAttemptError::Unavailable(LogoutUnavailable::SendDeadline)
     );
 }
 
@@ -197,20 +244,78 @@ async fn logout_failure_preserves_unexpected_error() {
     let send = async { Err(LogoutAttemptError::Unexpected(Error::SimulatorSend("socket send failed".into()))) };
 
     std::assert_matches!(
-        send_logout_with_deadline(send, LogoutUnavailable::Deadline).await,
+        send_logout_with_deadline(send, LogoutUnavailable::SendDeadline).await,
         Err(LogoutAttemptError::Unexpected(Error::SimulatorSend(message))) if message == "socket send failed"
     );
 }
 
 #[tokio::test]
 async fn logout_transport_failure_is_unexpected() {
-    let (completion, response) = oneshot::channel();
-    completion.send(Err(Error::SimulatorSend("socket send failed".into()))).expect("deliver transport failure");
-    let mut pending = PendingLogout { completion: response, deadline: Instant::now() + LOGOUT_TIMEOUT };
+    let (command, mut pending) = PendingLogout::new();
+    command.sent.send(Err(Error::SimulatorSend("socket send failed".into()))).expect("deliver transport failure");
 
     std::assert_matches!(
         pending.wait().await,
         Err(LogoutAttemptError::Unexpected(Error::SimulatorSend(message))) if message == "socket send failed"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn disconnect_reply_deadline_is_bounded() {
+    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
+    let mut connection = connect_runtime(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default())
+        .await
+        .expect("connect root simulator circuit");
+    let (_, peer) = receive(&simulator).await;
+    simulator.send_to(&ack(20, 1), peer).await.expect("ack circuit establishment");
+    let (movement_bytes, _) = receive(&simulator).await;
+    let movement = Packet::decode(&movement_bytes).expect("decode initial movement");
+    std::assert_matches!(movement.message(), Message::CompleteAgentMovement(_));
+    simulator.send_to(&ack(21, movement.sequence()), peer).await.expect("ack initial movement");
+    let mut disconnect = Box::pin(connection.state.disconnect_once());
+    let (logout_bytes, _) = tokio::select! {
+        biased;
+        result = &mut disconnect => panic!("disconnect finished before the simulator received LogoutRequest: {result:?}"),
+        packet = timeout(SIMULATOR_TIMEOUT, receive(&simulator)) => packet.expect("send LogoutRequest"),
+    };
+    let logout = Packet::decode(&logout_bytes).expect("decode LogoutRequest");
+    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+
+    time::advance(LOGOUT_REPLY_TIMEOUT).await;
+    yield_now().await;
+
+    assert_eq!(
+        timeout(SIMULATOR_TIMEOUT, &mut disconnect).await.expect("reply deadline completes disconnect").expect("disconnect result"),
+        LogoutOutcome::Unavailable(LogoutUnavailable::ReplyDeadline)
+    );
+}
+
+#[tokio::test]
+async fn disconnect_send_failure_is_unexpected() {
+    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
+    let (send_gate, pause_sends, send_entered) = new_send_gate();
+    let mut connection =
+        connect_with_send_gate(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default(), send_gate)
+            .await
+            .expect("connect root simulator circuit");
+    let (_, peer) = receive(&simulator).await;
+    simulator.send_to(&ack(20, 1), peer).await.expect("ack circuit establishment");
+    let (movement_bytes, _) = receive(&simulator).await;
+    let movement = Packet::decode(&movement_bytes).expect("decode initial movement");
+    std::assert_matches!(movement.message(), Message::CompleteAgentMovement(_));
+    simulator.send_to(&ack(21, movement.sequence()), peer).await.expect("ack initial movement");
+    pause_sends.send_replace(true);
+    let mut disconnect = Box::pin(connection.state.disconnect_once());
+    tokio::select! {
+        biased;
+        result = &mut disconnect => panic!("disconnect ended before entering the local send: {result:?}"),
+        _ = timeout(SIMULATOR_TIMEOUT, send_entered.notified()) => {}
+    }
+    drop(pause_sends);
+
+    std::assert_matches!(
+        timeout(SIMULATOR_TIMEOUT, &mut disconnect).await.expect("send failure completes disconnect"),
+        Err(SessionError::Network(Error::SimulatorSend(_)))
     );
 }
 
@@ -223,10 +328,10 @@ async fn disconnect_reports_closed_primary() {
     receive(&simulator).await;
     let (logout, receiver) = mpsc::channel(1);
     drop(receiver);
-    connection.state.primary.logout = logout;
+    connection.state.primary_mut().logout = logout;
 
     assert_eq!(
-        connection.state.disconnect_once(false).await.expect("closed route is an unavailable logout"),
+        connection.state.disconnect_once().await.expect("closed route is an unavailable logout"),
         LogoutOutcome::Unavailable(LogoutUnavailable::ConnectionClosed)
     );
     assert_no_datagram(&simulator);
@@ -240,17 +345,17 @@ async fn disconnect_logout_respects_deadline() {
         .expect("connect root simulator circuit");
     receive(&simulator).await;
     let (logout, _logout_receiver) = mpsc::channel(1);
-    let (queued_logout, _queued_response) = oneshot::channel();
+    let (queued_logout, _queued_response) = PendingLogout::new();
     logout.try_send(queued_logout).expect("fill the destination logout queue");
-    connection.state.primary.logout = logout;
-    let disconnect = spawn(async move { connection.state.disconnect_once(false).await });
+    connection.state.primary_mut().logout = logout;
+    let disconnect = spawn(async move { connection.state.disconnect_once().await });
 
     yield_now().await;
     time::advance(LOGOUT_TIMEOUT).await;
 
     assert_eq!(
         disconnect.await.expect("disconnect task should not panic").expect("deadline is an unavailable logout"),
-        LogoutOutcome::Unavailable(LogoutUnavailable::Deadline)
+        LogoutOutcome::Unavailable(LogoutUnavailable::SendDeadline)
     );
 }
 
@@ -261,10 +366,10 @@ async fn failed_root_disconnect_reports_no_send() {
         .await
         .expect("connect root simulator circuit");
     receive(&simulator).await;
-    connection.state.root_connection_failed = true;
+    connection.state.primary_mut().connection = SimulatorConnectionLifecycle::Closed;
 
     assert_eq!(
-        connection.state.disconnect_once(false).await.expect("failed root connection is an unavailable logout"),
+        connection.state.disconnect_once().await.expect("failed root connection is an unavailable logout"),
         LogoutOutcome::Unavailable(LogoutUnavailable::ConnectionClosed)
     );
     assert_no_datagram(&simulator);

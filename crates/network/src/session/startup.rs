@@ -10,16 +10,15 @@ use uuid::Uuid;
 
 use super::routing::PrimaryEventBacklog;
 use super::{
-    ConnectionError, ConnectionTaskResult, NEIGHBOR_COMMAND_CAPACITY, PrimaryRoute, PrimaryState, RuntimeAction, RuntimeInputs,
-    SessionDispatcher, SessionError, SessionRuntime, SessionRuntimeOptions, SessionState, SimulatorCommand, SimulatorConnection,
-    SimulatorConnectionOptions, SimulatorConnectionState, SimulatorEvent, SimulatorMemoryBudget, SimulatorRequest, SimulatorTaskOutcome,
-    track_capability_requests,
+    ConnectionError, ConnectionTaskResult, EventQueueLifecycle, NEIGHBOR_COMMAND_CAPACITY, PrimaryState, RuntimeAction, RuntimeInputs,
+    SessionDispatcher, SessionError, SessionRuntime, SessionRuntimeOptions, SessionState, SimulatorCapabilitySession, SimulatorCommand,
+    SimulatorConnection, SimulatorConnectionLifecycle, SimulatorConnectionOptions, SimulatorEvent, SimulatorMemoryBudget, SimulatorRecord,
+    SimulatorRequest, SimulatorTaskOutcome, track_capability_requests,
 };
 use crate::{
     AgentSession,
     capabilities::{CapabilityBudget, Client},
-    circuit::pacing::OutboundBudget,
-    error::Error,
+    circuit::{LogoutCommand, pacing::OutboundBudget},
     event::{CLIENT_EVENT_CAPACITY, SimulatorId},
 };
 
@@ -84,7 +83,7 @@ struct RootConnectionStart {
     shutdown: watch::Receiver<bool>,
     memory: SimulatorMemoryBudget,
     commands: mpsc::Receiver<SimulatorCommand>,
-    logout: mpsc::Receiver<oneshot::Sender<Result<(), Error>>>,
+    logout: mpsc::Receiver<LogoutCommand>,
 }
 
 impl RootConnectionStart {
@@ -200,26 +199,32 @@ impl SessionRuntime {
         Ok(Some(Self {
             state: SessionState {
                 simulator_id,
-                primary: PrimaryRoute {
+                primary_id: simulator_id,
+                simulators: HashMap::from([(
                     simulator_id,
-                    memory: packet_memory.clone(),
-                    endpoint: session.simulator_address,
-                    region_handle: None,
-                    commands: root_commands,
-                    state: primary_state_sender,
-                    logout: root_logout,
-                },
-                root_connection_abort: Some(root_connection_abort),
+                    SimulatorRecord {
+                        endpoint: session.simulator_address,
+                        region_handle: None,
+                        connection_task: Some(root_connection_abort),
+                        commands: root_commands,
+                        logout: root_logout,
+                        pending_handoff_command: None,
+                        primary_state: primary_state_sender,
+                        packet_memory: packet_memory.clone(),
+                        connection: SimulatorConnectionLifecycle::Connecting,
+                        capabilities: Some(SimulatorCapabilitySession {
+                            seed_capability: session.seed_capability.clone(),
+                            client: capabilities,
+                            event_queue: EventQueueLifecycle::NotStarted,
+                        }),
+                        preconnect_events: Default::default(),
+                    },
+                )]),
                 neighbor_events,
                 neighbor_requests,
                 neighbor_cancellation,
-                root_connection_failed: false,
-                logout_request_sent: false,
-                logout_attempted: false,
-                logout_unavailable: None,
-                pending_primary_logout: None,
+                logout: super::logout::SessionLogout::Active,
                 session,
-                capabilities,
                 capability_budget,
                 capability_request_waiters,
                 login_data,
@@ -271,36 +276,9 @@ impl SessionRuntime {
 }
 
 impl SessionState {
-    pub(super) fn register_root_connection(&mut self, region_handle: u64, connections: &mut HashMap<u64, SimulatorConnectionState>) {
-        if let Some(current_region) = connections
-            .iter()
-            .find_map(|(current_region, connection)| (connection.simulator_id == self.simulator_id).then_some(*current_region))
-        {
-            if current_region != region_handle
-                && let Some(connection) = connections.remove(&current_region)
-            {
-                connections.insert(region_handle, connection);
-            }
-        } else {
-            let Some(abort) = self.root_connection_abort.take() else {
-                return;
-            };
-            connections.insert(
-                region_handle,
-                SimulatorConnectionState {
-                    simulator_id: self.simulator_id,
-                    endpoint: self.session.simulator_address,
-                    abort,
-                    commands: self.primary.commands.clone(),
-                    logout: self.primary.logout.clone(),
-                    pending_handoff_command: None,
-                    primary_state: Some(self.primary.state.clone()),
-                    packet_memory: self.packet_memory.clone(),
-                },
-            );
-        }
-        if self.primary.simulator_id == self.simulator_id {
-            self.primary.region_handle = Some(region_handle);
+    pub(super) fn register_root_connection(&mut self, region_handle: u64) {
+        if let Some(root) = self.simulators.get_mut(&self.simulator_id) {
+            root.region_handle = Some(region_handle);
         }
     }
 }

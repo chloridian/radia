@@ -497,6 +497,7 @@ impl TeleportFinishScenario {
         let logout = receive_message(&self.harness.neighbor, |message| matches!(message, Message::LogoutRequest(_))).await;
         assert!(logout.is_reliable());
         std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+        send_logout_reply(&self.harness.neighbor, self.harness.neighbor_peer, &logout, 51).await;
         assert!(timeout(WAIT, self.harness.client).await.expect("logout should finish").expect("manager task").is_ok());
         self.completion_latencies
     }
@@ -543,7 +544,8 @@ async fn run_repeated_promotions() {
         validate_repeated_target(&mut harness, &third, &session, &peers, &ids, step).await;
     }
     harness.disconnect.send_replace(true);
-    receive_message(&third, |message| matches!(message, Message::LogoutRequest(_))).await;
+    let logout = receive_message(&third, |message| matches!(message, Message::LogoutRequest(_))).await;
+    send_logout_reply(&third, peers[2], &logout, 128).await;
     assert!(timeout(WAIT, harness.client).await.expect("shutdown finishes").expect("runtime task").is_ok());
     drop(harness.events);
     assert_eq!(harness.packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
