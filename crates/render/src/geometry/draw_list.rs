@@ -23,7 +23,7 @@ use super::{
 };
 use crate::{
     pipeline::{INSTANCE_BYTES, Pipeline},
-    scene::{Camera, MeshId, SceneView},
+    scene::{Camera, MeshId, SceneView, VisibilityVersion},
     texture::TextureKey,
 };
 
@@ -349,7 +349,7 @@ struct LayoutBuild {
     selected_items: HashSet<ItemIndex>,
     phase: LayoutPhase,
     camera: Camera,
-    membership_sequence: u64,
+    visibility_version: VisibilityVersion,
     item_cursor: usize,
     face_cursor: usize,
     item_has_slot: bool,
@@ -400,7 +400,7 @@ impl LayoutBuild {
         previous: &[ItemIndex],
         visible: &[ItemIndex],
         camera: Camera,
-        membership_sequence: u64,
+        visibility_version: VisibilityVersion,
         retire_previous: bool,
         items: &ItemSlab,
     ) -> Self {
@@ -413,7 +413,7 @@ impl LayoutBuild {
             selected_items: HashSet::new(),
             phase: if retire_previous { LayoutPhase::RetirePrevious } else { LayoutPhase::CountVisible },
             camera,
-            membership_sequence,
+            visibility_version,
             item_cursor: 0,
             face_cursor: 0,
             item_has_slot: false,
@@ -625,7 +625,7 @@ impl DrawList {
         &mut self,
         visible: &[ItemIndex],
         camera: Camera,
-        membership_sequence: u64,
+        visibility_version: VisibilityVersion,
         retire_previous: bool,
         items: &ItemSlab,
     ) -> bool {
@@ -636,7 +636,7 @@ impl DrawList {
         if self.retired.is_some() {
             return false;
         }
-        self.pending = Some(LayoutBuild::new(&self.layout_items, visible, camera, membership_sequence, retire_previous, items));
+        self.pending = Some(LayoutBuild::new(&self.layout_items, visible, camera, visibility_version, retire_previous, items));
         true
     }
 
@@ -654,6 +654,10 @@ impl DrawList {
 
     pub(super) fn layout_pending(&self) -> bool {
         self.pending.is_some() || self.retired.is_some()
+    }
+
+    pub(super) fn layout_building(&self) -> bool {
+        self.pending.is_some()
     }
 
     pub(super) fn layout_patching_suspended(&self) -> bool {
@@ -678,7 +682,7 @@ impl DrawList {
             return None;
         }
         let mut build = self.pending.take()?;
-        if build.stale || build.membership_sequence != view.membership_sequence() {
+        if build.stale || build.visibility_version != view.visibility_version() {
             self.retired = Some(build);
             return Some(LayoutProgress { stats: LayoutStats::default(), complete: false, stale: true, commit_ms: 0.0 });
         }

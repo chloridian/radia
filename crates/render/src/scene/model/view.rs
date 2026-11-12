@@ -102,6 +102,12 @@ impl PartialEq for ViewVersion {
 
 impl Eq for ViewVersion {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct VisibilityVersion {
+    sequence: u64,
+    active: bool,
+}
+
 pub(crate) struct ObjectPage<'a> {
     pub(crate) entries: Vec<(Uuid, Option<&'a Object>)>,
     pub(crate) cursor: Option<Uuid>,
@@ -116,7 +122,7 @@ pub struct SceneView {
     status: Status,
     mirror: Mirror,
     object_order: BTreeMap<Uuid, Entity>,
-    membership_sequence: u64,
+    visibility_sequence: u64,
     change_history: VecDeque<(u64, SceneChanges)>,
     change_history_bytes: usize,
     reconcile_marker: SceneChanges,
@@ -138,7 +144,7 @@ impl SceneView {
             status: Status::Loading,
             mirror: Mirror::default(),
             object_order: BTreeMap::new(),
-            membership_sequence: 0,
+            visibility_sequence: 0,
             change_history: VecDeque::with_capacity(CHANGE_HISTORY),
             change_history_bytes: 0,
             reconcile_marker: SceneChanges { reconcile_all: true, ..SceneChanges::default() },
@@ -176,17 +182,29 @@ impl SceneView {
             self.object_order.clear();
         }
         let now = Instant::now();
-        let mut membership_changed = batch.replace;
+        let mut visibility_changed = batch.replace;
         for change in batch.changes {
             match change {
                 Change::Object(object) => {
                     let entity = object.detail().summary.entity;
+                    let incoming_id = object.detail().summary.id;
+                    let incoming_region = object.detail().summary.address.region();
+                    let reused_entity = (!self.mirror.is_retired(incoming_region))
+                        .then(|| self.object_order.get(&incoming_id).copied())
+                        .flatten()
+                        .filter(|previous| *previous != entity);
+                    if let Some(previous) = reused_entity {
+                        self.mirror.objects.remove(&previous);
+                        self.mirror.invalidations.remove(&previous);
+                        changes.reconcile_all = true;
+                        visibility_changed = true;
+                    }
                     let previous = self
                         .mirror
                         .objects
                         .get(&entity)
                         .map(|object| (object.detail().summary.id, object.detail().summary.address.region()));
-                    let was_visible = self.mirror.object_visible(entity);
+                    let was_visible = self.object(entity).is_some();
                     self.mirror.apply_at(Change::Object(object), now);
                     let Some(current) = self.mirror.objects.get(&entity) else { continue };
                     let current_id = current.detail().summary.id;
@@ -198,10 +216,10 @@ impl SceneView {
                             self.object_order.remove(&previous_id);
                         }
                         self.object_order.insert(current_id, entity);
-                        membership_changed = true;
                     }
-                    membership_changed |= previous.is_some_and(|(_, region)| region != current_region);
-                    membership_changed |= was_visible != self.mirror.object_visible(entity);
+                    let is_visible = self.object(entity).is_some();
+                    visibility_changed |=
+                        previous.is_some_and(|(id, region)| id != current_id || region != current_region) || (was_visible && !is_visible);
                 }
                 Change::Remove(entity) => {
                     if let Some(object) = self.mirror.objects.get(&entity) {
@@ -209,20 +227,20 @@ impl SceneView {
                         if self.object_order.get(&id) == Some(&entity) {
                             self.object_order.remove(&id);
                         }
-                        membership_changed = true;
+                        visibility_changed = true;
                     }
                     self.mirror.apply_at(Change::Remove(entity), now);
                 }
                 change @ Change::InvalidateSubtree(..) | change @ Change::Retire(_) => {
-                    membership_changed = true;
+                    visibility_changed = true;
                     self.mirror.apply_at(change, now);
                 }
                 change => self.mirror.apply_at(change, now),
             }
         }
         self.sequence = batch.sequence;
-        if membership_changed {
-            self.membership_sequence = self.membership_sequence.checked_add(1).expect("scene membership version space exhausted");
+        if visibility_changed {
+            self.visibility_sequence = self.visibility_sequence.checked_add(1).expect("scene visibility version space exhausted");
         }
         if geometry_changed {
             self.geometry_sequence = self.geometry_sequence.checked_add(1).expect("scene geometry version space exhausted");
@@ -263,10 +281,10 @@ impl SceneView {
             return 0;
         }
         if self.mirror.invalidations.is_empty() && self.mirror.retired_regions.is_empty() {
-            return self.mirror.objects.len();
+            return self.object_order.len();
         }
         let mut visibility = HashMap::new();
-        self.mirror.objects.keys().filter(|entity| self.mirror.visibility(**entity, &mut visibility).visible).count()
+        self.object_order.values().filter(|entity| self.mirror.visibility(**entity, &mut visibility).visible).count()
     }
     pub fn tracked_object_count(&self) -> usize {
         if self.session.is_active() { self.mirror.objects.len() } else { 0 }
@@ -292,11 +310,14 @@ impl SceneView {
         let active = self.session.is_active();
         let needs_filter = !self.mirror.invalidations.is_empty() || !self.mirror.retired_regions.is_empty();
         let mirror = &self.mirror;
+        let object_order = &self.object_order;
         let mut visibility = HashMap::new();
-        self.mirror
-            .objects
-            .values()
-            .filter(move |object| active && (!needs_filter || mirror.visibility(object.detail().summary.entity, &mut visibility).visible))
+        self.mirror.objects.values().filter(move |object| {
+            let summary = &object.detail().summary;
+            active
+                && object_order.get(&summary.id) == Some(&summary.entity)
+                && (!needs_filter || mirror.visibility(summary.entity, &mut visibility).visible)
+        })
     }
 
     pub(crate) fn object_page(&self, after: Option<Uuid>, limit: usize) -> ObjectPage<'_> {
@@ -331,16 +352,17 @@ impl SceneView {
     }
 
     pub fn object(&self, entity: Entity) -> Option<&Object> {
-        if !self.session.is_active() || !self.mirror.object_visible(entity) {
+        if !self.session.is_active() {
             return None;
         }
-        self.mirror.objects.get(&entity)
+        let object = self.mirror.objects.get(&entity)?;
+        (self.object_order.get(&object.detail().summary.id) == Some(&entity) && self.mirror.object_visible(entity)).then_some(object)
     }
     pub(crate) fn object_is_live(&self, entity: Entity) -> bool {
         self.object(entity).is_some()
     }
-    pub(crate) fn membership_sequence(&self) -> u64 {
-        self.membership_sequence
+    pub(crate) fn visibility_version(&self) -> VisibilityVersion {
+        VisibilityVersion { sequence: self.visibility_sequence, active: self.session.is_active() }
     }
     pub fn regions(&self) -> impl Iterator<Item = &RegionData> {
         self.mirror.regions.values().filter(|_| self.session.is_active())
@@ -575,9 +597,9 @@ mod tests {
         assert_eq!(page.cursor, Some(first_id));
         assert!(!page.done);
 
-        let membership = view.membership_sequence();
+        let visibility = view.visibility_version();
         apply_changes(&mut view, false, vec![Change::InvalidateSubtree(first, world::RemovalFence::new(region, 4, 0))]);
-        assert!(view.membership_sequence() > membership, "subtree invalidation advances membership");
+        assert_ne!(view.visibility_version(), visibility, "subtree invalidation changes drawable visibility");
         assert_eq!(view.object_count(), 1);
         assert_eq!(view.tracked_object_count(), 3);
         assert!(view.object(first).is_none());
@@ -596,9 +618,9 @@ mod tests {
         assert_eq!(page.cursor, Some(third_id));
         assert!(page.done);
 
-        let membership = view.membership_sequence();
+        let visibility = view.visibility_version();
         apply_changes(&mut view, false, vec![Change::Remove(third)]);
-        assert!(view.membership_sequence() > membership);
+        assert_ne!(view.visibility_version(), visibility);
         assert_eq!(view.object_count(), 0);
         assert_eq!(view.tracked_object_count(), 2);
         let page = object_page_state(&view, None, 1);
@@ -614,7 +636,9 @@ mod tests {
             .expect("fixture removal applies");
         let reused = membership_entity(&mut world, region, third_id, 4, 5, world::ParentUpdate::Root);
         assert_ne!(reused, third);
+        let visibility = view.visibility_version();
         apply_changes(&mut view, false, vec![Change::Object(scene_object(&world, reused, &budget))]);
+        assert_eq!(view.visibility_version(), visibility, "new membership does not invalidate visible drawables");
         assert_eq!(view.object_count(), 1);
         assert_eq!(view.tracked_object_count(), 3);
         assert_eq!(view.object(reused).map(|object| object.detail().summary.id), Some(third_id));
@@ -623,9 +647,9 @@ mod tests {
         assert_eq!(page.cursor, Some(third_id));
         assert!(page.done);
 
-        let membership = view.membership_sequence();
+        let visibility = view.visibility_version();
         apply_changes(&mut view, false, vec![Change::Retire(region)]);
-        assert!(view.membership_sequence() > membership);
+        assert_ne!(view.visibility_version(), visibility);
         assert_eq!(view.object_count(), 0);
         assert_eq!(view.tracked_object_count(), 3);
         assert!(view.objects().next().is_none());

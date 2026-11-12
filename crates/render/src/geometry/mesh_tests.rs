@@ -347,7 +347,7 @@ fn mesh_scene_with_alpha(
     textures: Option<(AssetId, AssetId)>,
     blended_alpha: u8,
 ) -> (world::World, Reconciler, SceneView, Camera, Vec<AssetRequest>) {
-    let count = objects.len();
+    let count = objects.len().max(1).next_power_of_two();
     let mut world = world::World::new(world::WorldLimits {
         max_regions: 1,
         max_entities: count,
@@ -804,19 +804,17 @@ fn gpu_retired_hidden_page_releases_for_visible_mesh() {
         .expect("fixture meshes fit the renderer budget");
     let blocker = geometry.memory.reserve(blocker_bytes, crate::geometry::Resource::Mesh).expect("fill the unused mesh budget");
 
-    drop(geometry.meshes.remove(&retired_id).expect("retired GPU mesh"));
     geometry.cache.items.get_mut(retired_index).expect("cached retired item").position = DVec3::new(-100.0, 0.0, 0.0);
     geometry.cache.items.get_mut(target_index).expect("cached target item").position = DVec3::new(14.0, 0.0, 0.0);
+    let hidden_camera = Camera::new(DVec3::new(1000.0, 0.0, 0.0), Vec3::X, 1.0, [128, 128]).unwrap();
+    prepare_until_current(&device, &queue, &mut geometry, &view, hidden_camera);
+    assert!(!geometry.draw_list.pins_mesh(retired_id), "the old drawable releases its mesh before cache eviction");
+    drop(geometry.meshes.remove(&retired_id).expect("unreferenced GPU mesh"));
     geometry.cache.camera = None;
-    let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, None, retired_camera, [128, 128], None);
-    if !geometry.meshes.contains_key(&target_id) {
-        assert!(geometry.needs_frame(Instant::now()), "a freed mesh page must schedule another preparation");
-        let mut encoder = device.create_command_encoder(&Default::default());
-        geometry.prepare(&device, &mut encoder, &view, None, retired_camera, [128, 128], None);
-    }
+    prepare_until_current(&device, &queue, &mut geometry, &view, retired_camera);
 
     assert!(geometry.meshes.contains_key(&target_id), "the newly visible mesh uploads after the hidden page is released");
+    assert!(!geometry.meshes.contains_key(&retired_id), "the hidden mesh retires after the replacement layout releases its pin");
     assert!(geometry.pending_meshes.is_empty());
     assert!(geometry.cache.items.get(retired_index).is_some(), "hidden face groups remain cached");
     assert!(!geometry.cache.candidates.contains(&retired_index));
@@ -849,8 +847,7 @@ fn gpu_appearance_replacement_rechecks_visibility() {
         .summary
         .entity;
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, None, camera, [128, 128], None);
+    prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     let index = geometry.cache.objects[&entity];
     let item_id = geometry.cache.items.get(index).expect("cached fixture object").id;
     assert!(geometry.cache.candidates.contains(&index));
@@ -859,8 +856,7 @@ fn gpu_appearance_replacement_rechecks_visibility() {
     move_object(&mut world, 1, 100, Vec3::new(10.0, 100.0, 0.0), [0, 0, 255, 255]);
     scene.notify_world_change();
     settle_scene(&world, &mut scene, &mut view, Instant::now());
-    let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, None, camera, [128, 128], None);
+    prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     let index = geometry.cache.objects[&entity];
     assert_eq!(geometry.cache.items.get(index).map(|item| item.id), Some(item_id));
     assert!(!geometry.cache.candidates.contains(&index));
@@ -870,8 +866,7 @@ fn gpu_appearance_replacement_rechecks_visibility() {
     move_object(&mut world, 1, 200, Vec3::new(10.0, -2.0, 0.0), [255, 255, 0, 255]);
     scene.notify_world_change();
     settle_scene(&world, &mut scene, &mut view, Instant::now());
-    let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, None, camera, [128, 128], None);
+    prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     let index = geometry.cache.objects[&entity];
     assert_eq!(geometry.cache.items.get(index).map(|item| item.id), Some(item_id));
     assert!(geometry.cache.candidates.contains(&index));
@@ -888,17 +883,26 @@ fn gpu_same_mesh_appearance_rebuilds_after_eviction() {
         view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("fixture object").detail().summary.entity;
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
     geometry.memory = Arc::new(crate::geometry::Accounting::default());
-    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     let index = geometry.cache.objects[&entity];
     let mesh_id = geometry.cache.items.get(index).expect("cached object").mesh.id();
+
+    move_object(&mut world, 1, 100, Vec3::new(10.0, 100.0, 0.0), [255, 0, 0, 255]);
+    move_object(&mut world, 2, 101, Vec3::new(10.0, -100.0, 0.0), [0, 255, 0, 255]);
+    scene.notify_world_change();
+    settle_scene(&world, &mut scene, &mut view, Instant::now());
+    prepare_until_current(&device, &queue, &mut geometry, &view, camera);
+    assert_eq!(geometry.draw_list.visible_items(), 0, "the committed layout releases both objects");
+    assert!(!geometry.draw_list.pins_mesh(mesh_id), "the committed layout releases its mesh pin before eviction");
     drop(geometry.meshes.remove(&mesh_id).expect("resident fixture mesh"));
 
     let color = [24, 96, 224, 255];
-    move_object(&mut world, 1, 100, Vec3::new(10.0, -2.0, 0.0), color);
+    move_object(&mut world, 1, 102, Vec3::new(10.0, -2.0, 0.0), color);
     scene.notify_world_change();
     settle_scene(&world, &mut scene, &mut view, Instant::now());
-    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    prepare_until_current(&device, &queue, &mut geometry, &view, camera);
 
+    let index = geometry.cache.objects.get(&entity).copied().expect("rebuilt object index");
     let item = geometry.cache.items.get(index).expect("rebuilt object");
     let object = view.object(entity).expect("updated scene object");
     let expected = FaceParams::new(Some(&object.materials().expect("updated material")[0]));
@@ -907,6 +911,18 @@ fn gpu_same_mesh_appearance_rebuilds_after_eviction() {
     assert!(geometry.meshes.contains_key(&mesh_id), "the evicted mesh is uploaded again");
     assert_eq!(item.faces.first().map(|face| face.base_params.color), Some(expected.color));
     assert_eq!(geometry.stats.pending_meshes, 0);
+
+    let depth = geometry.depth(&device, [128, 128]).expect("rebuilt depth target");
+    let actual = render_pixels(&device, &queue, [128, 128], &depth, |pass| geometry.draw(pass));
+    let blue = actual.iter().filter(|pixel| pixel[2] > pixel[0].saturating_add(32) && pixel[2] > pixel[1].saturating_add(32)).count();
+    assert!(blue > 100, "the updated material appears in the rendered pixels: {blue} blue pixels");
+
+    let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    clean.memory = Arc::new(crate::geometry::Accounting::default());
+    prepare_until_current(&device, &queue, &mut clean, &view, camera);
+    let clean_depth = clean.depth(&device, [128, 128]).expect("clean depth target");
+    let expected = render_pixels(&device, &queue, [128, 128], &clean_depth, |pass| clean.draw(pass));
+    assert_eq!(actual, expected, "eviction recovery renders the same pixels as a clean build");
 }
 
 #[test]
@@ -918,12 +934,13 @@ fn gpu_removed_pending_replacement_reconciles_snapshot() {
         view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("replacement target").detail().summary.entity;
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
     geometry.memory = Arc::new(crate::geometry::Accounting::default());
-    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     let original_mesh = geometry.cache.items.get(geometry.cache.objects[&entity]).expect("original item").mesh.id();
+    let target_index = geometry.cache.objects[&entity];
     move_object(&mut world, 2, 10, Vec3::new(1000.0, 0.0, 0.0), [0, 255, 0, 255]);
     scene.notify_world_change();
     settle_scene(&world, &mut scene, &mut view, Instant::now());
-    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     let stale_version = geometry.cache.version.clone().expect("prepared view version");
     let fillers = fill_mesh_pages(&device, &mut geometry);
     assert!(!fillers.is_empty(), "fixture mesh pages have spare capacity to reserve");
@@ -934,8 +951,7 @@ fn gpu_removed_pending_replacement_reconciles_snapshot() {
         UpdateSource::new(fixture_region(&world), 20, OrderEvidence::Ordered(20), 0),
         std::num::NonZeroU32::new(1).expect("target local id"),
     );
-    patch.shape =
-        FieldUpdate::Set(Shape::Prim(world::PrimShape { path_scale_x: 40, path_scale_y: 40, profile_hollow: 16, ..Default::default() }));
+    patch.shape = FieldUpdate::Set(Shape::Prim(world::PrimShape { path_scale_x: 40, ..Default::default() }));
     let _ = world.patch_object(patch).expect("replacement shape applies");
     scene.notify_world_change();
     settle_scene(&world, &mut scene, &mut view, Instant::now());
@@ -971,6 +987,11 @@ fn gpu_removed_pending_replacement_reconciles_snapshot() {
     assert_eq!(view.object_count(), 1, "the surviving scene snapshot contains the unrelated object");
 
     prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    assert!(!geometry.cache.visible.contains(&target_index), "the removed object leaves visibility immediately");
+    assert_eq!(geometry.stats.instances, 0, "the removed object is no longer drawn during bounded cleanup");
+    assert!(geometry.draw_list.draw_batches().is_empty(), "hidden instance slots have no executable draw batches");
+
+    prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     assert!(!geometry.cache.objects.contains_key(&entity));
     assert!(geometry.cache.objects.is_empty(), "the only remaining object is outside the view");
     assert!(geometry.cache.items.iter().all(|(_, item)| item.entity != Some(entity)));
@@ -1068,7 +1089,7 @@ fn gpu_history_repeated_overflow_converges_and_matches_clean_build() {
     settle_scene(&world, &mut scene, &mut view, Instant::now());
     assert_eq!(view.object_count(), object_count_usize - 1);
 
-    let membership_before_insert = view.membership_sequence();
+    let visibility_before_insert = view.visibility_version();
     let mut added = ObjectObservation::new(
         UpdateSource::new(fixture_region(&world), 1_103, OrderEvidence::Ordered(1_103), 0),
         Uuid::from_u128(200_902),
@@ -1085,7 +1106,7 @@ fn gpu_history_repeated_overflow_converges_and_matches_clean_build() {
     let world::ApplyOutcome::Introduced(added_entity) = introduced.outcome else { panic!("new UUID must create an entity") };
     scene.notify_world_change();
     settle_scene(&world, &mut scene, &mut view, Instant::now());
-    assert!(view.membership_sequence() > membership_before_insert, "new membership advances the scene visibility sequence");
+    assert_eq!(view.visibility_version(), visibility_before_insert, "new membership leaves existing drawables valid");
     assert_eq!(view.object_count(), object_count_usize);
     assert!(page_contains_object(&view, added_entity));
 
@@ -1106,17 +1127,13 @@ fn gpu_history_repeated_overflow_converges_and_matches_clean_build() {
     let deadline = Instant::now() + std::time::Duration::from_secs(60);
     for order in 10_000..10_130 {
         assert!(Instant::now() < deadline, "recovery did not stay responsive during updates");
-        assert!(geometry.cache.rebuild.is_some(), "the catch-up pass remains active while geometry changes");
         move_mesh_object(&mut world, 150, order, Vec3::new(10.0, 0.0, 0.0), [order as u8, 128, 64, 255]);
         scene.notify_world_change();
         settle_scene(&world, &mut scene, &mut view, Instant::now());
         prepare_frame(&device, &queue, &mut geometry, &view, camera);
-        assert!(geometry.cache.rebuild.is_some(), "recovery stays active while updates arrive between preparation turns");
-        assert_eq!(geometry.cache.version.as_ref(), Some(&checkpoint), "an active pass does not publish a partial checkpoint");
     }
     let changes = view.changes_since(&checkpoint).expect("same scene session").collect::<Vec<_>>();
     assert!(changes.iter().any(|change| change.reconcile_all), "the retained history no longer covers the original checkpoint");
-    assert!(geometry.cache.rebuild.is_some(), "quiet-source recovery continues from the latest checkpoint");
     prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     assert!(geometry.cache.rebuild.is_none(), "quiet-source recovery completes");
     assert_eq!(geometry.cache.version.as_ref(), Some(&view.version()));
@@ -1439,19 +1456,16 @@ fn gpu_hidden_items_leave_no_instances_in_draws() {
     let (_scene, view, _) = scene(128);
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
     let hidden = Camera::new(DVec3::new(13.0, 0.0, 0.0), Vec3::X, 1.0, [128, 128]).unwrap();
-    let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, None, hidden, [128, 128], None);
+    prepare_until_current(&device, &queue, &mut geometry, &view, hidden);
     assert_eq!(geometry.stats.instances, 1);
     assert!(geometry.draw_list.has_blended());
 
     let visible = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();
-    let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, None, visible, [128, 128], None);
+    prepare_until_current(&device, &queue, &mut geometry, &view, visible);
     assert_eq!(geometry.stats.instances, 2);
     assert_visible_draw_coverage(&geometry);
 
-    let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, None, hidden, [128, 128], None);
+    prepare_until_current(&device, &queue, &mut geometry, &view, hidden);
     assert_eq!(geometry.stats.instances, 1);
     assert_visible_draw_coverage(&geometry);
 }
@@ -3186,7 +3200,7 @@ fn gpu_pending_layout_pins_meshes() {
     let blocker = geometry.memory.reserve(blocker_bytes, crate::geometry::Resource::Mesh).expect("fill mesh budget");
     geometry.cache.clear_mesh_demands();
     crate::geometry::cache::add_mesh_demand_for_test(&mut geometry.cache, &mut geometry.stats, &new_mesh, (1.0, 0.0));
-    assert!(geometry.draw_list.request_layout(&geometry.cache.visible, camera, view.membership_sequence(), false, &geometry.cache.items,));
+    assert!(geometry.draw_list.request_layout(&geometry.cache.visible, camera, view.visibility_version(), false, &geometry.cache.items,));
 
     prepare_frame(&device, &queue, &mut geometry, &view, camera);
 
@@ -3341,4 +3355,146 @@ fn gpu_overbudget_visible_subset() {
     device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
     assert_eq!(actual_memory.mesh_state().bytes, 0);
     assert_eq!(clean_memory.mesh_state().bytes, 0);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(gpu_draws_during_scene_churn)'"]
+fn gpu_draws_during_scene_churn() {
+    draws_during_scene_churn(false, false);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter"]
+fn gpu_draws_during_history_churn() {
+    draws_during_scene_churn(true, false);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter"]
+fn gpu_draws_during_membership_churn() {
+    draws_during_scene_churn(false, true);
+}
+
+fn draws_during_scene_churn(overflow: bool, membership: bool) {
+    const OBJECTS: u32 = 1_100;
+    const UPDATES: u64 = 120;
+    let first_asset = AssetId::new(Uuid::from_u128(9_921));
+    let second_asset = AssetId::new(Uuid::from_u128(9_922));
+    let bytes = test_support::mesh::asset_with_lod_faces(&[(3, 1)]);
+    let objects = (1..=OBJECTS).map(|id| (id, first_asset, Vec3::new(10.0, 0.0, 0.0))).collect::<Vec<_>>();
+    let (mut world, mut scene, mut view, camera) = ready_mesh_scene(&objects, bytes.clone());
+    assert_eq!(view.object_count(), OBJECTS as usize);
+    assert!(view.objects().all(|object| object.mesh().is_some()), "every fixture object has valid geometry before churn");
+
+    let (device, queue) = vulkan_device();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    let depth = geometry.depth(&device, [128, 128]).expect("fixture depth target");
+    let assets = std::collections::HashMap::from([(first_asset, bytes.clone()), (second_asset, bytes)]);
+
+    for update in 0..UPDATES {
+        let order = 1_000_000 + update * 100;
+        let mut observation = ObjectObservation::new(
+            UpdateSource::new(
+                fixture_region(&world),
+                u32::try_from(order).expect("fixture update sequence"),
+                OrderEvidence::Ordered(order),
+                0,
+            ),
+            Uuid::from_u128(100_001),
+            std::num::NonZeroU32::new(1).expect("fixture object local ID"),
+            Kind::Object,
+            ParentUpdate::Root,
+        );
+        observation.pose = Some(Pose {
+            position: Some(Vec3::new(10.0, if update % 2 == 0 { 0.1 } else { -0.1 }, 0.0)),
+            rotation: Some(math::Quat::IDENTITY),
+        });
+        observation.scale = Some(Vec3::ONE);
+        if update == 0 || update == UPDATES / 2 {
+            let asset = if update == 0 { second_asset } else { first_asset };
+            observation.shape = FieldUpdate::Set(Shape::Mesh { asset_id: asset, flags: SculptFlags::default() });
+        }
+        assert_matches!(world.observe_object(observation).unwrap().outcome, world::ApplyOutcome::Updated(_));
+        if membership {
+            let mut added = ObjectObservation::new(
+                UpdateSource::new(fixture_region(&world), (order + 1) as u32, OrderEvidence::Ordered(order + 1), 0),
+                Uuid::from_u128(200_000 + u128::from(update)),
+                std::num::NonZeroU32::new(OBJECTS + update as u32 + 1).unwrap(),
+                Kind::Object,
+                ParentUpdate::Root,
+            );
+            added.pose = Some(Pose { position: Some(Vec3::new(10.0, 0.0, 0.0)), rotation: Some(math::Quat::IDENTITY) });
+            added.scale = Some(Vec3::ONE);
+            added.shape = FieldUpdate::Set(Shape::Mesh { asset_id: first_asset, flags: SculptFlags::default() });
+            assert_matches!(world.observe_object(added).unwrap().outcome, world::ApplyOutcome::Introduced(_));
+        }
+        scene.notify_world_change();
+        let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+        complete_mesh_requests(&world, &mut scene, &mut view, &assets, requests);
+        if overflow {
+            for extra in 1..=65 {
+                move_mesh_object(&mut world, 2, order + extra, Vec3::new(10.0, 0.0, 0.0), [extra as u8, 64, 192, 255]);
+                scene.notify_world_change();
+                settle_scene(&world, &mut scene, &mut view, Instant::now());
+            }
+        }
+        prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    }
+
+    let active = render_pixels(&device, &queue, [128, 128], &depth, |pass| geometry.draw(pass));
+    let lit = active.iter().filter(|pixel| pixel[0] > 16 || pixel[1] > 16 || pixel[2] > 16).count();
+    assert!(
+        lit > 100,
+        "valid object geometry renders while pose and mesh asset updates continue: {lit} pixels, instances={}, commands={}, rebuild_objects={}, cache_rebuild={}, version_current={}, layout_pending={}, layout_required={}, layout_items={}, mesh_admission={}",
+        geometry.stats.instances,
+        geometry.stats.draw_commands,
+        geometry.stats.rebuild_objects,
+        geometry.cache.rebuild.is_some(),
+        geometry.cache.version.as_ref() == Some(&view.version()),
+        geometry.draw_list.layout_pending(),
+        geometry.layout_required,
+        geometry.stats.layout_items_visited,
+        geometry.mesh_admission.active
+    );
+
+    prepare_until_current(&device, &queue, &mut geometry, &view, camera);
+    let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    clean.memory = Arc::new(crate::geometry::Accounting::default());
+    prepare_until_current(&device, &queue, &mut clean, &view, camera);
+    let signature = |renderer: &GeometryRenderer| {
+        let mut items = renderer
+            .cache
+            .items
+            .iter()
+            .map(|(_, item)| {
+                (
+                    item.id,
+                    item.entity,
+                    item.mesh.id(),
+                    item.position,
+                    item.rotation,
+                    item.scale,
+                    item.faces.iter().map(|face| (face.order, face.indices.clone())).collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        items.sort_unstable_by_key(|item| item.0);
+        items
+    };
+    assert_eq!(signature(&geometry), signature(&clean), "incremental preparation settles to the clean cache");
+    let incremental_depth = geometry.depth(&device, [128, 128]).expect("incremental depth target");
+    let clean_depth = clean.depth(&device, [128, 128]).expect("clean depth target");
+    let incremental = render_pixels(&device, &queue, [128, 128], &incremental_depth, |pass| geometry.draw(pass));
+    let expected = render_pixels(&device, &queue, [128, 128], &clean_depth, |pass| clean.draw(pass));
+    let mismatch_count = incremental.iter().zip(&expected).filter(|(actual, expected)| actual != expected).count();
+    let first_mismatch = incremental
+        .iter()
+        .zip(&expected)
+        .enumerate()
+        .find_map(|(index, (actual, expected))| (actual != expected).then_some((index, actual, expected)));
+    assert_eq!(
+        incremental, expected,
+        "quiet incremental rendering matches a clean build: {mismatch_count} pixels differ, first={first_mismatch:?}"
+    );
 }

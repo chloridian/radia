@@ -21,7 +21,7 @@ use crate::{
     },
     material::FaceParams,
     pipeline::Pipeline,
-    scene::{Camera, SharedMesh},
+    scene::{Camera, SharedMesh, VisibilityVersion},
     texture::TextureKey,
 };
 
@@ -34,7 +34,7 @@ fn canceled_layout_retires_in_bounded_chunks() {
     let active_commands = list.draws().len();
     let active_items = list.visible_items();
     let active_bytes = list.instance_bytes.len();
-    let staged = staged_layout(index, camera, view.membership_sequence(), &items.items);
+    let staged = staged_layout(index, camera, view.visibility_version(), &items.items);
     list.pending = Some(staged);
     let initial_entries = list.pending.as_ref().map(staged_entry_count).expect("pending staged build");
     let initial_allocation = list.pending.as_ref().map(staged_allocation_bytes).expect("pending staged build");
@@ -44,7 +44,7 @@ fn canceled_layout_retires_in_bounded_chunks() {
     assert!(list.pending.is_none());
     assert_eq!(staged_entry_count(list.retired.as_ref().expect("full staged build is retained")), initial_entries);
     for _ in 0..8 {
-        assert!(!list.request_layout(&[index], camera, view.membership_sequence(), false, &items.items));
+        assert!(!list.request_layout(&[index], camera, view.visibility_version(), false, &items.items));
         list.cancel_layout();
         assert!(list.pending.is_none());
         assert!(list.retired.is_some(), "repeated requests cannot add retired builds");
@@ -70,7 +70,7 @@ fn canceled_layout_retires_in_bounded_chunks() {
     }
     assert!(steps > 1, "large staged data requires multiple retirement turns");
     assert!(list.retired.is_none(), "completed retirement releases the whole staged allocation");
-    assert!(list.request_layout(&[index], camera, view.membership_sequence(), false, &items.items));
+    assert!(list.request_layout(&[index], camera, view.visibility_version(), false, &items.items));
 }
 
 #[test]
@@ -78,7 +78,8 @@ fn stale_layout_retires_the_whole_build() {
     let (_region_world, view, camera, mut items, mut list, index) = active_layout();
     let active_commands = list.draws().len();
     let active_items = list.visible_items();
-    list.pending = Some(staged_layout(index, camera, view.membership_sequence().wrapping_add(1), &items.items));
+    list.pending = Some(staged_layout(index, camera, view.visibility_version(), &items.items));
+    list.mark_layout_stale();
 
     let progress = list.advance_layout(&view, &mut items.items, &HashMap::new(), false).expect("stale build is observed");
     assert!(progress.stale);
@@ -385,9 +386,9 @@ fn active_layout() -> (world::World, crate::scene::SceneView, Camera, FrameCache
     (_region_world, view, camera, items, list, index)
 }
 
-fn staged_layout(index: ItemIndex, camera: Camera, membership_sequence: u64, items: &ItemSlab) -> super::LayoutBuild {
+fn staged_layout(index: ItemIndex, camera: Camera, visibility_version: VisibilityVersion, items: &ItemSlab) -> super::LayoutBuild {
     let input = vec![index; 2_047];
-    let mut build = super::LayoutBuild::new(&input, &input, camera, membership_sequence, true, items);
+    let mut build = super::LayoutBuild::new(&input, &input, camera, visibility_version, true, items);
     build.state.instance_bytes.resize(3 * super::RETIRED_LAYOUT_BYTES_PER_FRAME, 0);
     build.state.indirect_bytes.resize(2 * super::RETIRED_LAYOUT_BYTES_PER_FRAME, 0);
     build
