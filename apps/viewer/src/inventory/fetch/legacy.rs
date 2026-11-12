@@ -61,7 +61,7 @@ fn to_folder_fetch(folder: protocol::inventory::FolderDescendents, key: Category
     for item in &folder.direct_items {
         children.push(InventoryChild::Item(to_item(item, key.owner(), key)?));
     }
-    let descendent_count = (folder.auxiliary_categories.is_empty() && folder.auxiliary_items.is_empty()).then_some(folder.descendent_count);
+    let descendent_count = Some(folder.descendent_count);
     Ok(FolderFetch {
         folder: key,
         version: ::inventory::ServerVersion::from_raw(folder.version),

@@ -566,33 +566,16 @@ async fn legacy_mapping_omits_auxiliary_targets() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let capability = CapabilityUrl::parse(peer.url("/legacy").as_str()).expect("valid legacy capability URL");
-    let owner = InventoryOwner::new(Uuid::from_u128(1));
-    let source = key(owner, 10);
-    let target_parent = key(owner, 11);
-    let link_id = Uuid::from_u128(12);
-    let target_id = Uuid::from_u128(13);
-    let response = Value::Map(Map::from([(
-        "folders".into(),
-        Value::Array(vec![Value::Map(Map::from([
-            ("folder_id".into(), Value::Uuid(source.id().uuid())),
-            ("owner_id".into(), Value::Uuid(owner.id())),
-            ("version".into(), Value::Integer(4)),
-            ("descendents".into(), Value::Integer(2)),
-            ("categories".into(), Value::Array(Vec::new())),
-            (
-                "items".into(),
-                Value::Array(vec![
-                    llsd_item(link_id, source.id().uuid(), owner.id(), target_id, 24, 24),
-                    llsd_item(target_id, target_parent.id().uuid(), owner.id(), Uuid::from_u128(14), 7, 7),
-                ]),
-            ),
-        ]))]),
-    )]));
+    let owner = InventoryOwner::new(Uuid::from_u128(2));
+    let source = key(owner, 1);
+    let target_parent = key(owner, 4);
+    let link_id = Uuid::from_u128(6);
+    let target_id = Uuid::from_u128(3);
     let responder = tokio::spawn(async move {
         let request = peer.next().await;
         assert_eq!(request.method, "POST");
         assert_eq!(request.path, "/legacy");
-        request.respond(200, xml::to_vec(&response).expect("encode legacy link response")).await;
+        request.respond(200, include_bytes!("../../../../../crates/protocol/tests/fixtures/legacy_one_link.xml").to_vec()).await;
     });
 
     let mut fetched = legacy::fetch_batch(&client, &capability, &[source]).await.expect("decode legacy link response");
@@ -602,7 +585,7 @@ async fn legacy_mapping_omits_auxiliary_targets() {
     let fetch = fetched.pop().expect("one requested folder");
     assert_eq!(fetch.folder, source);
     assert_eq!(fetch.children.len(), 1);
-    assert_eq!(fetch.descendent_count, None);
+    assert_eq!(fetch.descendent_count, Some(1));
     let InventoryChild::Item(link) = &fetch.children[0] else { panic!("expected the direct link item") };
     assert_eq!(link.key.id().uuid(), link_id);
     assert_eq!(link.parent, source);
@@ -620,6 +603,7 @@ async fn legacy_mapping_omits_auxiliary_targets() {
         panic!("current source fetch should apply");
     };
     let snapshot = inventory.snapshot();
+    assert!(snapshot.is_complete(source));
     let link_key = ItemKey::new(owner, utils::ItemId::new(link_id));
     assert_eq!(snapshot.item(link_key).map(|item| item.parent), Some(source));
     assert_eq!(
@@ -630,6 +614,115 @@ async fn legacy_mapping_omits_auxiliary_targets() {
     assert_eq!(snapshot.item(target_key).map(|item| item.name.as_ref()), Some("existing target"));
     assert_eq!(snapshot.item(sibling_key).map(|item| item.parent), Some(target_parent));
     assert_eq!(snapshot.child_count(target_parent), 2);
+}
+
+#[tokio::test]
+async fn captured_listings_complete_foreground_fetches() {
+    let cases: [(&str, &[u8], u32, &[u128]); 2] = [
+        ("one-link", include_bytes!("../../../../../crates/protocol/tests/fixtures/legacy_one_link.xml"), 1, &[6]),
+        ("link-and-item", include_bytes!("../../../../../crates/protocol/tests/fixtures/legacy_link_and_item.xml"), 2, &[6, 7]),
+    ];
+
+    for (fixture, response, expected_count, expected_items) in cases {
+        let mut peer = LoopbackPeer::start().await;
+        let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+        let owner = InventoryOwner::new(Uuid::from_u128(2));
+        let root = key(owner, 9);
+        let source = key(owner, 1);
+        let target_parent = key(owner, 4);
+        let mut root_category = category(root, None);
+        root_category.server_version = ServerVersion::from_raw(1);
+        root_category.server_descendent_count = Some(2);
+        let mut source_category = category(source, Some(root));
+        source_category.server_version = ServerVersion::from_raw(1);
+        source_category.server_descendent_count = Some(0);
+        let mut target_parent_category = category(target_parent, Some(root));
+        target_parent_category.server_version = ServerVersion::from_raw(1);
+        target_parent_category.server_descendent_count = Some(0);
+        let mut inventory = Inventory::new(root_category, None, InventoryLimits::default()).expect("valid inventory root");
+        inventory.upsert_category(source_category).expect("add source folder");
+        inventory.upsert_category(target_parent_category).expect("add target parent");
+
+        let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+        peer.grant(&[("FetchInventoryDescendents2", "/legacy")]).await;
+        std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+
+        for folder in [source, target_parent] {
+            let mut updated = inventory.snapshot().category(folder).expect("folder exists").clone();
+            updated.server_version = ServerVersion::UNKNOWN;
+            updated.server_descendent_count = None;
+            inventory.upsert_category(updated).expect("make folder fetchable");
+        }
+        model.send_replace(Some(inventory.snapshot()));
+        let handle = fetch_handle(requests.clone());
+        let source_completion = handle.request_folder(source).expect("request captured source folder");
+        let source_request = peer.next().await;
+        assert_eq!(source_request.method, "POST", "fixture: {fixture}");
+        assert_eq!(source_request.path, "/legacy", "fixture: {fixture}");
+        source_request.respond(200, response.to_vec()).await;
+
+        let (fetch, applied) = take_folder_event(next_event(&mut events).await, source);
+        assert_eq!(fetch.descendent_count, Some(expected_count), "fixture: {fixture}");
+        let direct_ids = fetch
+            .children
+            .iter()
+            .map(|child| match child {
+                InventoryChild::Item(item) => item.key.id().uuid().as_u128(),
+                InventoryChild::Category(_) => panic!("captured listing has no direct categories: {fixture}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(direct_ids, expected_items, "fixture: {fixture}");
+        assert_eq!(fetch.children.len(), expected_count as usize, "fixture: {fixture}");
+        apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply captured direct children");
+        assert_eq!(
+            source_completion.await.expect("foreground completion delivered"),
+            InventoryFetchOutcome::Succeeded,
+            "fixture: {fixture}"
+        );
+        assert!(inventory.snapshot().is_complete(source), "fixture: {fixture}");
+
+        let link_key = ItemKey::new(owner, ItemId::new(Uuid::from_u128(6)));
+        let target_key = ItemKey::new(owner, ItemId::new(Uuid::from_u128(3)));
+        assert_eq!(inventory.snapshot().item(link_key).map(|item| item.parent), Some(source), "fixture: {fixture}");
+        assert!(inventory.snapshot().item(target_key).is_none(), "fixture: {fixture}");
+        assert_eq!(
+            inventory.snapshot().link_resolution(link_key),
+            Some(LinkResolution::NotLoaded(target_key.id().uuid())),
+            "fixture: {fixture}"
+        );
+
+        let target_completion = handle.request_folder(target_parent).expect("request target parent");
+        let target_request = peer.next().await;
+        assert_eq!(target_request.method, "POST", "fixture: {fixture}");
+        assert_eq!(target_request.path, "/legacy", "fixture: {fixture}");
+        target_request
+            .respond(
+                200,
+                legacy_folder_response(
+                    target_parent,
+                    1,
+                    vec![llsd_item(target_key.id().uuid(), target_parent.id().uuid(), owner.id(), Uuid::from_u128(5), 7, 7)],
+                ),
+            )
+            .await;
+        let (fetch, applied) = take_folder_event(next_event(&mut events).await, target_parent);
+        apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply target under its actual parent");
+        assert_eq!(target_completion.await.expect("target completion delivered"), InventoryFetchOutcome::Succeeded, "fixture: {fixture}");
+
+        let snapshot = inventory.snapshot();
+        assert!(snapshot.is_complete(target_parent), "fixture: {fixture}");
+        assert_eq!(snapshot.item(target_key).map(|item| item.parent), Some(target_parent), "fixture: {fixture}");
+        assert_eq!(
+            snapshot.link_resolution(link_key),
+            Some(LinkResolution::Resolved(::inventory::InventoryNodeKey::new(owner, ::inventory::InventoryNodeId::Item(target_key.id()),))),
+            "fixture: {fixture}"
+        );
+
+        drop(handle);
+        drop(requests);
+        stop.send(()).expect("stop captured listing scheduler");
+        task.await.expect("captured listing scheduler stopped");
+    }
 }
 
 #[tokio::test]
@@ -689,7 +782,7 @@ async fn foreground_aux_target_resolves_later() {
         )
         .await;
     let (fetch, applied) = take_folder_event(next_event(&mut events).await, source);
-    assert_eq!(fetch.descendent_count, None);
+    assert_eq!(fetch.descendent_count, Some(2));
     assert_eq!(fetch.children.len(), 1);
     apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply direct link without auxiliary target");
 
@@ -724,6 +817,19 @@ async fn foreground_aux_target_resolves_later() {
         inventory.snapshot().link_resolution(link_key),
         Some(LinkResolution::Resolved(::inventory::InventoryNodeKey::new(owner, ::inventory::InventoryNodeId::Item(target_key.id()),)))
     );
+
+    let source_retry = handle.request_folder(source).expect("retry incomplete source folder");
+    let source_retry_request = peer.next().await;
+    assert_eq!(source_retry_request.method, "POST");
+    assert_eq!(source_retry_request.path, "/legacy");
+    source_retry_request
+        .respond(200, legacy_folder_response(source, 1, vec![llsd_item(link_id, source.id().uuid(), owner.id(), target_id, 24, 24)]))
+        .await;
+    let (fetch, applied) = take_folder_event(next_event(&mut events).await, source);
+    assert_eq!(fetch.descendent_count, Some(1));
+    apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply retried source listing");
+    assert_eq!(source_retry.await.expect("source retry completion delivered"), InventoryFetchOutcome::Succeeded);
+    assert!(inventory.snapshot().is_complete(source));
 
     drop(handle);
     drop(requests);
