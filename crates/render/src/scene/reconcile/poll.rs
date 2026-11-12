@@ -1,8 +1,8 @@
 use std::mem;
 
 use super::{
-    Change, DeliveryState, Duration, Instant, MAX_OBJECT_DETAIL_BATCH_ITEMS, MeshChange, MeshJob, POLL_DELAY, READ_QUANTUM, ReadQuery,
-    ReconcileStep, Reconciler, RecoveryReason, Status, SurfaceStep, WORK, Work,
+    Change, DeliveryState, Duration, Instant, MAX_OBJECT_DETAIL_BATCH_ITEMS, MeshChange, MeshJob, POLL_DELAY, PageState, READ_QUANTUM,
+    ReadQuery, ReconcileStep, Reconciler, RecoveryReason, Status, SurfaceStep, WORK, Work,
 };
 use crate::scene::region_environment::EnvironmentStart;
 
@@ -36,8 +36,7 @@ impl Reconciler {
                 EnvironmentStart::Inline(job) => ReconcileStep::Build(MeshJob(Work::Environment(job))),
             };
         }
-        if self.world.reading.as_ref().is_some_and(|reading| reading.upgrade().is_none()) {
-            self.world.reading = None;
+        if self.world.read.is_abandoned() {
             self.begin_recovery(RecoveryReason::ReadFailed, now);
         }
         let mut blocked = false;
@@ -79,10 +78,9 @@ impl Reconciler {
             }
             self.recovery.retry = None;
         }
-        if self.world.reading.is_none()
-            && self.world.needs_changes
+        if self.world.read.is_idle()
             && self.world.reads_since_changes >= READ_QUANTUM
-            && let Some(cursor) = self.world.cursor
+            && let Some(cursor) = self.world.changes.request_cursor()
         {
             return self.read(ReadQuery::Changes(cursor), now);
         }
@@ -104,14 +102,19 @@ impl Reconciler {
             self.publication.replace = false;
             return ReconcileStep::Publish(self.batch_at(replace, changes, None, Status::Loading));
         }
-        if self.world.reading.is_none() && self.world.barrier.is_some() && !self.world.refresh_regions {
-            if self.world.terrain_cursor.is_none()
+        if self.world.read.is_idle() && self.world.barrier.is_some() && self.world.regions.is_complete() {
+            if self.world.terrain_page.as_ref().is_some_and(|(_, pages)| pages.is_complete()) {
+                self.world.terrain_page = None;
+            }
+            if self.world.terrain_page.is_none()
                 && let Some(region) = self.world.terrain.pop_first()
             {
-                self.world.terrain_cursor = Some((region, None));
+                self.world.terrain_page = Some((region, PageState::NotStarted));
             }
-            if let Some((region, cursor)) = self.world.terrain_cursor {
-                return self.read(ReadQuery::Terrain(region, cursor), now);
+            if let Some((region, pages)) = self.world.terrain_page
+                && !pages.is_complete()
+            {
+                return self.read(ReadQuery::Terrain(region, pages.cursor()), now);
             }
             if let Some(region) = self.world.environments.pop_first() {
                 return self.read(ReadQuery::Environment(region), now);
@@ -164,7 +167,7 @@ impl Reconciler {
                 return ReconcileStep::Build(job);
             }
         }
-        if self.world.reading.is_some() {
+        if !self.world.read.is_idle() {
             return if !blocked && (self.preparation.meshes.has_work() || self.preparation.assets.has_work()) {
                 ReconcileStep::Continue
             } else {
@@ -174,8 +177,8 @@ impl Reconciler {
         if self.world.barrier.is_none() {
             return self.read(ReadQuery::Barrier, now);
         }
-        if self.world.refresh_regions {
-            return self.read(ReadQuery::Regions(self.world.regions), now);
+        if !self.world.regions.is_complete() {
+            return self.read(ReadQuery::Regions(self.world.regions.cursor()), now);
         }
         for _ in 0..WORK {
             if let Some(entity) = self.preparation.scan.pop_front() {
@@ -196,8 +199,8 @@ impl Reconciler {
             return ReconcileStep::Continue;
         }
         self.preparation.expansion.clear();
-        if self.world.enumerate_objects {
-            return self.read(ReadQuery::Objects(self.world.objects), now);
+        if !self.world.objects.is_complete() {
+            return self.read(ReadQuery::Objects(self.world.objects.cursor()), now);
         }
         if self.publication.publish && !blocked {
             self.publication.publish = false;
@@ -209,8 +212,8 @@ impl Reconciler {
             self.publication.replace = false;
             return ReconcileStep::Publish(self.batch(replace, changes));
         }
-        if self.world.needs_changes {
-            return self.read(ReadQuery::Changes(self.world.cursor.expect("barrier before journal")), now);
+        if let Some(cursor) = self.world.changes.request_cursor() {
+            return self.read(ReadQuery::Changes(cursor), now);
         }
         if blocked {
             ReconcileStep::Wait(now + POLL_DELAY)
