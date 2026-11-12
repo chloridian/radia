@@ -592,6 +592,66 @@ fn retired_terrain_jobs() {
 }
 
 #[test]
+fn retirement_clears_terrain_cursor() {
+    let mut world = world();
+    let region = world_region(&world, 0);
+    for id in 0..33 {
+        let x = (id % 16) as u8;
+        let y = (id / 16) as u8;
+        let patch = TerrainPatch::new(x, y, Box::new([id as f32; 256])).unwrap();
+        let _ = world.observe_terrain_patch(source(&world, 0, id + 1), patch).unwrap();
+    }
+
+    let budget = Budget::default();
+    let (mut scene, mut view) = Reconciler::new(budget.clone());
+    let mut now = Instant::now();
+    let mut terrain_pages = 0;
+    let mut retired = false;
+    for _ in 0..20_000 {
+        match scene.poll(now) {
+            ReconcileStep::Read(job) => {
+                if retired && let ReadQuery::Terrain(query_region, _) = job.query() {
+                    assert_ne!(*query_region, region, "retirement must discard the active terrain cursor");
+                }
+                let result = reply(&world, &job);
+                let terrain_next = match (job.query(), &result) {
+                    (ReadQuery::Terrain(query_region, _), Ok(ReadReply::Terrain(Some(page)))) if *query_region == region => Some(page.next),
+                    _ => None,
+                };
+                scene.complete_read(job, result, now);
+                if let Some(next) = terrain_next {
+                    terrain_pages += 1;
+                    if terrain_pages == 3 {
+                        assert!(next.is_some(), "the third bounded page must leave terrain work pending");
+                        let _ = world.retire_region(region).unwrap();
+                        scene.notify_world_change();
+                        retired = true;
+                    }
+                }
+            }
+            ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
+            ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
+            ReconcileStep::Continue => {}
+            ReconcileStep::Wait(until) => now = until,
+            ReconcileStep::Asset(_) => panic!("terrain fixture unexpectedly requested an asset"),
+            ReconcileStep::Idle => break,
+            ReconcileStep::Closed => panic!("scene closed during terrain retirement"),
+        }
+    }
+
+    assert!(retired);
+    assert_eq!(terrain_pages, 3);
+    assert_eq!(view.region_count(), 0);
+    assert_eq!(view.patch_count(), 0);
+    assert_eq!(view.surfaces().count(), 0);
+    assert_eq!(view.status(), Status::Ready);
+    scene.close();
+    drop(scene);
+    drop(view);
+    assert_eq!(budget.charged_bytes(), 0);
+}
+
+#[test]
 fn abandoned_terrain_work_retries() {
     let mut world = world();
     let region = world_region(&world, 0);

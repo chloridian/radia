@@ -4,9 +4,9 @@ use world::{FaceAppearance, SurfaceAppearance, TerrainPatch, TerrainSettings, Te
 
 use super::support::{
     AssetId, BTreeMap, BTreeSet, Budget, DVec3, Detail, DrawnMeshKey, FieldUpdate, Instant, Kind, NonZeroU32, ObjectObservation,
-    ObjectPatch, ParentUpdate, Placement, Pose, PreparedMesh, Quat, ReadFailure, ReadQuery, ReconcileStep, Reconciler, RecoveryReason,
-    RegionInfo, Request, Shape, Status, Uuid, Vec3, add, add_shaped, camera, ids, move_root, positions, prepared_asset, reply, settle,
-    settle_materials, source, world, world_region, world_with_capacity,
+    ObjectPatch, ParentUpdate, Placement, Pose, PreparedMesh, Quat, ReadFailure, ReadQuery, ReadReply, ReconcileStep, Reconciler,
+    RecoveryReason, RegionInfo, Request, Shape, Status, Uuid, Vec3, add, add_shaped, camera, ids, move_root, positions, prepared_asset,
+    reply, settle, settle_materials, source, world, world_region, world_with_capacity,
 };
 
 #[test]
@@ -513,6 +513,157 @@ fn abandoned_read_recovers() {
     let retained = view.region(world_region(&world, 0)).expect("recovery restores region");
     assert_eq!(retained.summary().region, world_region(&world, 0));
     assert_eq!(retained.summary().info.resolved_origin(), Some(DVec3::ZERO));
+}
+
+#[test]
+fn empty_object_pages_resume_after_revision() {
+    let mut world = world_with_capacity(1024);
+    let retired = world_region(&world, 0);
+    for id in 1..=512 {
+        add(&mut world, id, id as u32, ParentUpdate::Root, 1.0, id as u64);
+    }
+    let _ = world.retire_region(retired).unwrap();
+
+    let live = world.register_region().unwrap();
+    let _ = world.patch_region(live, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap();
+    let mut object = ObjectObservation::new(
+        world::UpdateSource::new(live, 1, world::OrderEvidence::Ordered(1), 0),
+        Uuid::from_u128(1000),
+        NonZeroU32::new(1).unwrap(),
+        Kind::Object,
+        ParentUpdate::Root,
+    );
+    object.pose = Some(Pose { position: Some(Vec3::new(25.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+    object.scale = Some(Vec3::ONE);
+    let _ = world.observe_object(object).unwrap();
+
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    let mut object_pages = Vec::new();
+    let mut settled = false;
+    for _ in 0..20_000 {
+        match scene.poll(now) {
+            ReconcileStep::Read(job) => {
+                let result = reply(&world, &job);
+                let page_trace = match (job.query(), &result) {
+                    (ReadQuery::Objects(cursor), Ok(ReadReply::Objects(page))) => {
+                        Some((cursor.is_none(), page.objects.len(), page.next.is_some(), page.hydration_revision.get()))
+                    }
+                    _ => None,
+                };
+                scene.complete_read(job, result, now);
+                if let Some(trace) = page_trace {
+                    object_pages.push(trace);
+                    if object_pages.len() == 1 {
+                        let mut update = ObjectPatch::new(
+                            world::UpdateSource::new(live, 2, world::OrderEvidence::Ordered(2), 0),
+                            NonZeroU32::new(1).unwrap(),
+                        );
+                        update.pose = Some(Pose { position: Some(Vec3::new(30.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+                        let _ = world.patch_object(update).unwrap();
+                        scene.notify_world_change();
+                    }
+                }
+            }
+            ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
+            ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
+            ReconcileStep::Continue => {}
+            ReconcileStep::Wait(until) => now = until,
+            ReconcileStep::Idle => {
+                settled = true;
+                break;
+            }
+            ReconcileStep::Asset(_) => panic!("object fixture unexpectedly requested an asset"),
+            ReconcileStep::Closed => panic!("scene closed during pagination"),
+        }
+    }
+
+    assert!(settled, "pagination must reach an idle state after the final page");
+    assert_eq!(
+        object_pages.iter().map(|(first, count, more, _)| (*first, *count, *more)).collect::<Vec<_>>(),
+        [(true, 0, true), (false, 0, true), (false, 1, false)],
+        "empty pages must retain their advancing cursor until the final visible page"
+    );
+    assert!(object_pages[1].3 > object_pages[0].3, "a cursor from the prior World revision must resume after its last entity");
+    assert_eq!(positions(&view), BTreeMap::from([(1000, 30.0)]));
+}
+
+#[test]
+fn notice_during_read_is_retained() {
+    let mut world = world();
+    add(&mut world, 1, 1, ParentUpdate::Root, 100.0, 1);
+    add(&mut world, 2, 2, ParentUpdate::Root, 110.0, 2);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    settle(&mut scene, &mut view, &world, &mut now);
+
+    move_root(&mut world, 150.0, 3);
+    scene.notify_world_change();
+    let ReconcileStep::Read(job) = scene.poll(now) else {
+        panic!("expected a change read");
+    };
+    assert_matches!(job.query(), ReadQuery::Changes(_));
+    let captured_reply = reply(&world, &job);
+    add(&mut world, 2, 2, ParentUpdate::Root, 200.0, 4);
+    scene.notify_world_change();
+    scene.complete_read(job, captured_reply, now);
+    settle(&mut scene, &mut view, &world, &mut now);
+
+    assert_eq!(positions(&view), BTreeMap::from([(1, 150.0), (2, 200.0)]));
+}
+
+#[test]
+fn late_read_keeps_replacement() {
+    let mut world = world();
+    add(&mut world, 1, 1, ParentUpdate::Root, 100.0, 1);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    settle(&mut scene, &mut view, &world, &mut now);
+
+    move_root(&mut world, 150.0, 2);
+    scene.notify_world_change();
+    let ReconcileStep::Read(old) = scene.poll(now) else {
+        panic!("expected an in-flight change read");
+    };
+    assert_matches!(old.query(), ReadQuery::Changes(_));
+    scene.set_camera(camera(99.0));
+    let abandoned = loop {
+        match scene.poll(now) {
+            ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
+            ReconcileStep::Publish(batch) => break batch,
+            ReconcileStep::Continue => {}
+            _ => panic!("expected a concurrent preparation publication"),
+        }
+    };
+    drop(abandoned);
+
+    let ReconcileStep::Publish(status) = scene.poll(now) else {
+        panic!("abandoned publication must start recovery");
+    };
+    view.apply(status).unwrap();
+    assert_matches!(view.status(), Status::Recovering { reason: RecoveryReason::InvalidReply, .. });
+    let ReconcileStep::Wait(retry) = scene.poll(now) else {
+        panic!("expected recovery backoff");
+    };
+    now = retry;
+    let ReconcileStep::Read(replacement) = scene.poll(now) else {
+        panic!("expected a replacement barrier read");
+    };
+    assert_matches!(replacement.query(), ReadQuery::Barrier);
+
+    let old_result = reply(&world, &old);
+    scene.complete_read(old, old_result, now);
+    match scene.poll(now) {
+        ReconcileStep::Wait(_) => {}
+        _ => panic!("the stale completion must leave its replacement in flight"),
+    }
+
+    let replacement_result = reply(&world, &replacement);
+    scene.complete_read(replacement, replacement_result, now);
+    let ReconcileStep::Read(next) = scene.poll(now) else {
+        panic!("the replacement barrier must advance to region enumeration");
+    };
+    assert_matches!(next.query(), ReadQuery::Regions(None));
 }
 
 #[test]
