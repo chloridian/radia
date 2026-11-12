@@ -3,7 +3,7 @@ use std::{
     fmt,
     mem::size_of,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU8, Ordering},
     },
     time::Duration,
@@ -16,9 +16,10 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use world::{
     Entity, EnvironmentRead, MAX_ENVIRONMENT_READ_BYTES, MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS,
     MAX_OBJECT_PAGE_ITEMS, MAX_PARCEL_READ_BYTES, MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES,
-    MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectDetailBatch, ObjectListItem, ObjectListPage, ObjectPageCursor, ParcelRead, Region, RegionPage,
-    RegionPageCursor, RegionSummary, TERRAIN_PATCH_SAMPLES, TerrainPage, TerrainPageCursor, TerrainPatch, World, WorldChangeCursor,
-    WorldChangePage, WorldChangeRecord, WorldReadBarrier, WorldReadError, WorldRevision,
+    MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectDetailBatch, ObjectDetailBatchPage, ObjectDetailCursor, ObjectListItem, ObjectListPage,
+    ObjectPageCursor, ParcelRead, Region, RegionPage, RegionPageCursor, RegionSummary, TERRAIN_PATCH_SAMPLES, TerrainPage,
+    TerrainPageCursor, TerrainPatch, World, WorldChangeCursor, WorldChangePage, WorldChangeRecord, WorldReadBarrier, WorldReadError,
+    WorldRevision,
 };
 
 const MAX_OUTSTANDING_READS: usize = 8;
@@ -97,6 +98,11 @@ pub(crate) struct ReadResponder<T> {
     permit: ReadPermit,
 }
 
+struct DetailCursorState {
+    request: Arc<()>,
+    cursor: Option<ObjectDetailCursor>,
+}
+
 impl<T> ReadResponder<T> {
     fn cancelled(&self) -> bool {
         self.sender.is_canceled()
@@ -111,9 +117,9 @@ impl<T> ReadResponder<T> {
 
 pub(crate) enum ReadRequest {
     Barrier(ReadResponder<WorldReadBarrier>),
-    Objects(Option<ObjectPageCursor>, usize, ReadResponder<ObjectListPage>),
+    Objects(Option<Box<ObjectPageCursor>>, usize, ReadResponder<ObjectListPage>),
     Regions(Option<RegionPageCursor>, usize, ReadResponder<RegionPage>),
-    Details(Vec<Entity>, ReadResponder<ObjectDetailBatch>),
+    Details(Vec<Entity>, Option<Box<ObjectDetailCursor>>, ReadResponder<ObjectDetailBatchPage>),
     Changes(WorldChangeCursor, usize, ReadResponder<WorldChangePage>),
     Terrain(Region, Option<TerrainPageCursor>, usize, ReadResponder<Option<TerrainPage>>),
     Environment(Region, ReadResponder<Option<EnvironmentRead>>),
@@ -125,13 +131,13 @@ impl ReadRequest {
         match self {
             Self::Barrier(reply) if !reply.cancelled() => reply.send(Ok(world.read_barrier())),
             Self::Objects(cursor, limit, reply) if !reply.cancelled() => {
-                reply.send(world.object_list_page(cursor, limit).map_err(ReadError::World));
+                reply.send(world.object_list_page(cursor.map(|cursor| *cursor), limit).map_err(ReadError::World));
             }
             Self::Regions(cursor, limit, reply) if !reply.cancelled() => {
                 reply.send(world.region_page(cursor, limit).map_err(ReadError::World));
             }
-            Self::Details(entities, reply) if !reply.cancelled() => {
-                reply.send(world.object_detail_batch(&entities).map_err(ReadError::World));
+            Self::Details(entities, cursor, reply) if !reply.cancelled() => {
+                reply.send(world.object_detail_batch_page(&entities, cursor.map(|cursor| *cursor)).map_err(ReadError::World));
             }
             Self::Changes(cursor, limit, reply) if !reply.cancelled() => {
                 reply.send(world.change_page(cursor, limit).map_err(ReadError::World));
@@ -144,6 +150,17 @@ impl ReadRequest {
             _ => {}
         }
     }
+
+    pub(crate) fn serve_from_owner(self, world: &mut World) {
+        match self {
+            Self::Objects(cursor, limit, reply) => {
+                if !reply.cancelled() {
+                    reply.send(world.object_list_page_with_cache(cursor.map(|cursor| *cursor), limit).map_err(ReadError::World));
+                }
+            }
+            request => request.serve(world),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -151,6 +168,7 @@ pub struct WorldReader {
     sender: mpsc::Sender<ReadRequest>,
     revisions: watch::Receiver<Result<WorldRevision, ReadError>>,
     budget: Arc<ReadAdmission>,
+    detail_cursor: Arc<Mutex<DetailCursorState>>,
     runtime: Handle,
 }
 
@@ -173,8 +191,10 @@ impl WorldReader {
 
     pub async fn objects(&self, cursor: Option<ObjectPageCursor>, limit: usize) -> Result<ObjectListPage, ReadError> {
         check_limit(limit, MAX_OBJECT_PAGE_ITEMS)?;
-        self.request(size_of::<ObjectListPage>() + limit * size_of::<ObjectListItem>(), |reply| ReadRequest::Objects(cursor, limit, reply))
-            .await
+        self.request(size_of::<ObjectListPage>() + limit * size_of::<ObjectListItem>(), |reply| {
+            ReadRequest::Objects(cursor.map(Box::new), limit, reply)
+        })
+        .await
     }
 
     pub async fn regions(&self, cursor: Option<RegionPageCursor>, limit: usize) -> Result<RegionPage, ReadError> {
@@ -193,7 +213,29 @@ impl WorldReader {
 
     pub async fn details(&self, entities: &[Entity]) -> Result<ObjectDetailBatch, ReadError> {
         check_limit(entities.len(), MAX_OBJECT_DETAIL_BATCH_ITEMS)?;
-        self.request(MAX_OBJECT_DETAIL_BATCH_BYTES, |reply| ReadRequest::Details(entities.to_vec(), reply)).await
+        let request = Arc::new(());
+        let cursor = {
+            let mut stored = self.detail_cursor.lock().map_err(|_| ReadError::Shutdown)?;
+            let cursor = match stored.cursor {
+                Some(cursor) if entities.contains(&cursor.entity()) => stored.cursor.take(),
+                _ => {
+                    stored.cursor = None;
+                    None
+                }
+            };
+            stored.request = Arc::clone(&request);
+            cursor
+        };
+        let page = self
+            .request(MAX_OBJECT_DETAIL_BATCH_BYTES, |reply| ReadRequest::Details(entities.to_vec(), cursor.map(Box::new), reply))
+            .await?;
+        if let Some(cursor) = page.next {
+            let mut stored = self.detail_cursor.lock().map_err(|_| ReadError::Shutdown)?;
+            if Arc::ptr_eq(&stored.request, &request) {
+                stored.cursor = Some(cursor);
+            }
+        }
+        Ok(page.batch)
     }
 
     pub async fn environment(&self, region: Region) -> Result<Option<EnvironmentRead>, ReadError> {
@@ -253,7 +295,18 @@ impl WorldReadHost {
             bytes: Arc::new(Semaphore::new(MAX_RESERVED_REPLY_BYTES)),
             state: AtomicU8::new(ACTIVE),
         });
-        Self { receiver, revisions, reader: WorldReader { sender, revisions: observed, budget, runtime }, consecutive_intake: 0 }
+        Self {
+            receiver,
+            revisions,
+            reader: WorldReader {
+                sender,
+                revisions: observed,
+                budget,
+                detail_cursor: Arc::new(Mutex::new(DetailCursorState { request: Arc::new(()), cursor: None })),
+                runtime,
+            },
+            consecutive_intake: 0,
+        }
     }
 
     #[cfg(any(test, target_os = "windows", target_os = "linux"))]
@@ -318,7 +371,9 @@ mod tests {
 
     use futures::{join, poll};
     use uuid::Uuid;
-    use world::{Kind, ObjectDetailResult, ObjectObservation, OrderEvidence, ParentUpdate, Region, UpdateSource};
+    use world::{
+        Kind, MAX_OBJECT_DETAIL_WORK_ITEMS, ObjectDetailResult, ObjectObservation, OrderEvidence, ParentUpdate, Region, UpdateSource,
+    };
 
     use super::*;
     use world::{EnvironmentAssignment, EnvironmentScope, EnvironmentSource, MAX_ENVIRONMENT_SOURCE_BYTES, ParcelLocalId, WorldLimits};
@@ -403,7 +458,7 @@ mod tests {
         let mut service = WorldReadHost::new(&world, Handle::current());
         let reader = service.reader();
         let barrier = deliver(reader.barrier(), &mut service, &world).await.unwrap();
-        assert_eq!(barrier.object_count, 2);
+        assert_eq!(barrier.object_count_upper_bound, 2);
         let first = deliver(reader.objects(None, 1), &mut service, &world).await.unwrap();
         assert_eq!(first.objects[0].id, Uuid::from_u128(20));
         insert(&mut world, region, 10, 3, 3);
@@ -447,13 +502,176 @@ mod tests {
                 break;
             }
         }
-        assert!(partial, "region retirement must span a logical revision across pages");
+        assert!(!partial, "region retirement must publish a bounded logical fence without a scene-sized journal revision");
         let other = self::world();
         assert_eq!(
             deliver(reader.changes(other.read_barrier().changes, 1), &mut service, &world).await,
             Err(ReadError::World(WorldReadError::StaleSession))
         );
         assert_eq!(reader.objects(None, 257).await, Err(ReadError::World(WorldReadError::InvalidLimit)));
+    }
+
+    #[tokio::test]
+    async fn detail_reads_resume_deep_visibility_work() {
+        let depth = MAX_OBJECT_DETAIL_WORK_ITEMS + 12;
+        let object_count = (depth + 1) * 2;
+        let mut world = World::new(WorldLimits {
+            max_regions: 8,
+            max_entities: object_count,
+            max_entities_per_region: object_count,
+            max_tombstones_per_region: 16,
+            max_tombstones: 16,
+            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(16),
+            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(16),
+            max_journal_entries: 32,
+            max_journal_changes: 128,
+            max_region_name_bytes: 256,
+            max_recovery_targets: 8,
+        });
+        let region = world.register_region().unwrap();
+        let root_id = depth as u128 + 1;
+        let _ = world
+            .observe_object(ObjectObservation::new(
+                UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0),
+                Uuid::from_u128(root_id),
+                NonZeroU32::new(depth as u32 + 1).unwrap(),
+                Kind::Object,
+                ParentUpdate::Root,
+            ))
+            .unwrap();
+        for local in (1..=depth).rev() {
+            let order = (depth + 2 - local) as u64;
+            let _ = world
+                .observe_object(ObjectObservation::new(
+                    UpdateSource::new(region, order as u32, OrderEvidence::Ordered(order), 0),
+                    Uuid::from_u128(local as u128),
+                    NonZeroU32::new(local as u32).unwrap(),
+                    Kind::Object,
+                    ParentUpdate::Local(NonZeroU32::new(local as u32 + 1).unwrap()),
+                ))
+                .unwrap();
+        }
+        let second_root_local = (2 * depth + 1) as u32;
+        let second_root_order = (depth + 4) as u64;
+        let _ = world
+            .observe_object(ObjectObservation::new(
+                UpdateSource::new(region, second_root_order as u32, OrderEvidence::Ordered(second_root_order), 0),
+                Uuid::from_u128(1_000 + depth as u128),
+                NonZeroU32::new(second_root_local).unwrap(),
+                Kind::Object,
+                ParentUpdate::Root,
+            ))
+            .unwrap();
+        for local in ((depth + 2) as u32..second_root_local).rev() {
+            let order = (2 * depth + 5 - usize::try_from(local).unwrap()) as u64;
+            let _ = world
+                .observe_object(ObjectObservation::new(
+                    UpdateSource::new(region, order as u32, OrderEvidence::Ordered(order), 0),
+                    Uuid::from_u128(1_000 + u128::from(local) - depth as u128 - 1),
+                    NonZeroU32::new(local).unwrap(),
+                    Kind::Object,
+                    ParentUpdate::Local(NonZeroU32::new(local + 1).unwrap()),
+                ))
+                .unwrap();
+        }
+        let target = world.entity(Uuid::from_u128(1)).unwrap();
+        let second_target = world.entity(Uuid::from_u128(1_001)).unwrap();
+        let removal_order = (2 * depth + 6) as u64;
+        let _ = world
+            .remove_object(
+                UpdateSource::new(region, removal_order as u32, OrderEvidence::Ordered(removal_order), 0),
+                NonZeroU32::new(depth as u32 + 1).unwrap(),
+            )
+            .unwrap();
+        let second_removal_order = removal_order + 1;
+        let _ = world
+            .remove_object(
+                UpdateSource::new(region, second_removal_order as u32, OrderEvidence::Ordered(second_removal_order), 0),
+                NonZeroU32::new(second_root_local).unwrap(),
+            )
+            .unwrap();
+        let mut service = WorldReadHost::new(&world, Handle::current());
+        let reader = service.reader();
+
+        let entities = [target, second_target];
+        let first = deliver(reader.details(&entities), &mut service, &world).await.unwrap();
+        assert!(first.details.is_empty());
+        let second = deliver(reader.details(&entities), &mut service, &world).await.unwrap();
+        assert_eq!(second.details, [ObjectDetailResult::Gone(target)]);
+        let third = deliver(reader.details(&entities), &mut service, &world).await.unwrap();
+        assert!(matches!(third.details.as_slice(), [ObjectDetailResult::Gone(entity)] if *entity == second_target));
+    }
+
+    #[tokio::test]
+    async fn replaced_detail_request_cannot_restore_an_old_cursor() {
+        let depth = MAX_OBJECT_DETAIL_WORK_ITEMS * 3 + 132;
+        let object_count = depth + 2;
+        let mut world = World::new(WorldLimits {
+            max_regions: 8,
+            max_entities: object_count,
+            max_entities_per_region: object_count,
+            max_tombstones_per_region: 16,
+            max_tombstones: 16,
+            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(16),
+            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(16),
+            max_journal_entries: 32,
+            max_journal_changes: 128,
+            max_region_name_bytes: 256,
+            max_recovery_targets: 8,
+        });
+        let region = world.register_region().unwrap();
+        let root_local = depth as u32 + 1;
+        let _ = world
+            .observe_object(ObjectObservation::new(
+                UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0),
+                Uuid::from_u128(u128::from(root_local)),
+                NonZeroU32::new(root_local).unwrap(),
+                Kind::Object,
+                ParentUpdate::Root,
+            ))
+            .unwrap();
+        for local in (1..=depth as u32).rev() {
+            let order = u64::from(root_local - local) + 1;
+            let _ = world
+                .observe_object(ObjectObservation::new(
+                    UpdateSource::new(region, order as u32, OrderEvidence::Ordered(order), 0),
+                    Uuid::from_u128(u128::from(local)),
+                    NonZeroU32::new(local).unwrap(),
+                    Kind::Object,
+                    ParentUpdate::Local(NonZeroU32::new(local + 1).unwrap()),
+                ))
+                .unwrap();
+        }
+        let target = world.entity(Uuid::from_u128(1)).unwrap();
+        let other = insert(&mut world, region, 10_000, root_local + 1, u64::from(root_local) + 1);
+        let mut service = WorldReadHost::new(&world, Handle::current());
+        let reader = service.reader();
+
+        let first = deliver(reader.details(&[target]), &mut service, &world).await.unwrap();
+        assert!(first.details.is_empty());
+
+        let target_page = [target];
+        let other_page = [other];
+        let mut replaced = Box::pin(reader.details(&target_page));
+        assert!(poll!(replaced.as_mut()).is_pending());
+        service.next_request().await.serve(&world);
+
+        let mut replacement = Box::pin(reader.details(&other_page));
+        assert!(poll!(replacement.as_mut()).is_pending());
+        service.next_request().await.serve(&world);
+        let replacement = replacement.await.unwrap();
+        assert!(matches!(replacement.details.as_slice(), [ObjectDetailResult::Found(detail)] if detail.summary.entity == other));
+
+        assert!(replaced.await.unwrap().details.is_empty());
+        assert!(deliver(reader.details(&[target]), &mut service, &world).await.unwrap().details.is_empty());
+        assert!(deliver(reader.details(&[target]), &mut service, &world).await.unwrap().details.is_empty());
+
+        let mut cancelled = Box::pin(reader.details(&target_page));
+        assert!(poll!(cancelled.as_mut()).is_pending());
+        let request = service.next_request().await;
+        drop(cancelled);
+        request.serve(&world);
+        assert!(deliver(reader.details(&target_page), &mut service, &world).await.unwrap().details.is_empty());
     }
 
     #[tokio::test]
@@ -472,7 +690,7 @@ mod tests {
         let delivered = pending.remove(0).await.unwrap();
         let mut admitted = Box::pin(reader.barrier());
         assert!(poll!(admitted.as_mut()).is_pending(), "delivery releases admission even while the value is retained");
-        assert_eq!(delivered.object_count, 0);
+        assert_eq!(delivered.object_count_upper_bound, 0);
         drop(pending);
         drop(admitted);
         while let Ok(request) = service.receiver.try_recv() {

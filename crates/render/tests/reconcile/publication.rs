@@ -6,6 +6,9 @@ use super::support::{
     proptest, reply, settle, source, world, world_region,
 };
 
+#[global_allocator]
+static ALLOCATOR: test_support::allocation::CountingAllocator = test_support::allocation::CountingAllocator;
+
 #[test]
 fn atomic_region_retirement() {
     let mut world = world();
@@ -38,10 +41,15 @@ fn atomic_region_retirement() {
             _ => panic!("expected retirement continuation"),
         }
     }
-    assert!(partial);
+    assert!(!partial, "region retirement publishes a bounded region fence instead of a scene-sized removal revision");
     assert!(entities.into_iter().all(|entity| view.object(entity).is_none()), "retirement removes direct object lookups atomically");
     assert!(view.region(region).is_none(), "retirement removes the region lookup with its objects");
     assert_eq!(view.objects().count(), 0);
+    assert_eq!(view.object_count(), 0);
+    let (tracked_count, allocations) = test_support::allocation::measure(|| view.tracked_object_count());
+    assert_eq!(tracked_count, 300);
+    assert_eq!(allocations.allocation_calls, 0);
+    assert_eq!(allocations.reallocation_calls, 0);
     assert_eq!(view.regions().count(), 0);
     assert_eq!(view.revision(), Some(world.revision()));
 }
@@ -269,35 +277,62 @@ fn recovery_memory_admission() {
         panic!("expected new barrier");
     };
     let mut oversized = world.read_barrier();
-    oversized.object_count = render::scene::MAX_OBJECTS + 1;
+    oversized.object_count_upper_bound = render::scene::MAX_OBJECTS + 1;
     scene.complete_read(job, Ok(ReadReply::Barrier(oversized)), now);
-    let ReconcileStep::Publish(status) = scene.poll(now) else {
-        panic!("expected capacity status");
-    };
-    view.apply(status).unwrap();
-    assert_matches!(view.status(), Status::Recovering { reason: RecoveryReason::Capacity, .. });
+    settle(&mut scene, &mut view, &world, &mut now);
+    assert_matches!(view.status(), Status::Ready);
     assert_eq!(ids(&view), BTreeSet::from([1]));
-    let ReconcileStep::Wait(until) = scene.poll(now) else {
-        panic!("expected backoff");
-    };
-    now = until;
-    loop {
+    assert_eq!(budget.charged_bytes(), retained);
+}
+
+#[test]
+fn detail_read_continuation_keeps_pending_entities() {
+    let mut world = world();
+    add(&mut world, 1, 1, ParentUpdate::Root, 1.0, 1);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    let mut intercepted = false;
+    for _ in 0..100 {
         match scene.poll(now) {
+            ReconcileStep::Read(job) if matches!(job.query(), ReadQuery::Details(_)) => {
+                let batch = ::world::ObjectDetailBatch { hydration_revision: world.revision(), details: Vec::new(), has_more: true };
+                scene.complete_read(job, Ok(ReadReply::Details(batch)), now);
+                intercepted = true;
+                break;
+            }
             ReconcileStep::Read(job) => {
-                let details = matches!(job.query(), ReadQuery::Details(_));
                 let result = reply(&world, &job);
                 scene.complete_read(job, result, now);
-                if details {
-                    break;
-                }
             }
+            ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
+            ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
+            ReconcileStep::Asset(_) => {}
             ReconcileStep::Continue => {}
-            _ => panic!("expected staging hydration"),
+            ReconcileStep::Wait(until) => now = until,
+            _ => panic!("expected object hydration"),
         }
     }
-    assert!(budget.charged_bytes() >= 2 * retained);
+    assert!(intercepted);
+
+    let details = loop {
+        match scene.poll(now) {
+            ReconcileStep::Read(job) if matches!(job.query(), ReadQuery::Details(_)) => break job,
+            ReconcileStep::Read(job) => {
+                let result = reply(&world, &job);
+                scene.complete_read(job, result, now);
+            }
+            ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
+            ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
+            ReconcileStep::Asset(_) => {}
+            ReconcileStep::Continue => {}
+            ReconcileStep::Wait(until) => now = until,
+            _ => panic!("expected the unfinished object to remain queued"),
+        }
+    };
+    let result = reply(&world, &details);
+    scene.complete_read(details, result, now);
     settle(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(budget.charged_bytes(), retained);
+    assert_eq!(ids(&view), BTreeSet::from([1]));
 }
 
 proptest! {

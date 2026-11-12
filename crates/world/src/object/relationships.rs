@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     num::NonZeroU32,
     ops::Bound::{Excluded, Unbounded},
 };
@@ -11,8 +11,9 @@ use crate::history::{
     WorldChangeClasses,
 };
 use crate::mutation::Effects;
+use crate::read::{MAX_OBJECT_LOOKUP_WORK_ITEMS, ObjectLookupCursor, ObjectLookupProgress};
 use crate::update::{FieldStamp, Stamp};
-use crate::{ApplyError, Recovery, WorldRevision};
+use crate::{ApplyError, Recovery, RecoveryCancellation, UpdateSource, WorldRevision};
 use crate::{AttachmentPoint, Entity, Kind, LocalAddress, ObjectRecord, Parent, ParentUpdate, Region};
 use crate::{Binding, World};
 use ParentResolution::{Accepted, Cycle};
@@ -61,15 +62,106 @@ pub(crate) struct PendingResolution {
 pub struct RelationshipResolution {
     pub revision: Option<WorldRevision>,
     pub recovery: Recovery,
-    pub recovery_cancellations: Vec<LocalAddress>,
+    pub recovery_cancellations: Vec<RecoveryCancellation>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ParentResolution {
     Accepted(Parent),
     Cycle,
 }
 
+#[derive(Clone, Copy)]
+enum ParentResolutionStage {
+    BeforeParent,
+    Parent,
+    Cycle,
+    Ready,
+}
+
+#[derive(Clone, Copy)]
+pub struct ParentResolutionCursor {
+    world: crate::identity::WorldId,
+    revision: WorldRevision,
+    source: UpdateSource,
+    local_id: NonZeroU32,
+    update: ParentUpdate,
+    child: Option<Entity>,
+    stage: ParentResolutionStage,
+    old_parent: Option<Entity>,
+    logical_before_parent: Option<Parent>,
+    lookup: Option<ObjectLookupCursor>,
+    expected_uuid: Option<Uuid>,
+    parent: Option<Entity>,
+    cycle_parent: Option<Entity>,
+    cycle_steps: usize,
+    resolution: Option<ParentResolution>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ParentResolutionPlan {
+    pub(crate) world: crate::identity::WorldId,
+    pub(crate) revision: WorldRevision,
+    pub(crate) source: UpdateSource,
+    pub(crate) local_id: NonZeroU32,
+    pub(crate) update: ParentUpdate,
+    pub(crate) child: Option<Entity>,
+    pub(crate) logical_before_parent: Parent,
+    pub(crate) resolution: ParentResolution,
+}
+
+impl ParentResolutionPlan {
+    pub(crate) fn matches(&self, world: &World, source: UpdateSource, local_id: NonZeroU32, update: ParentUpdate) -> bool {
+        self.world == world.id
+            && self.revision == world.revision()
+            && self.source == source
+            && self.local_id == local_id
+            && self.update == update
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum ParentResolutionProgress {
+    Ready { plan: ParentResolutionPlan, work_units: usize },
+    Pending { cursor: ParentResolutionCursor, work_units: usize },
+}
+
 impl World {
+    pub(crate) fn insert_relationship_work(&mut self, key: (Uuid, LocalAddress), work: PendingResolution) {
+        self.relationship_work.insert(key, work);
+        self.relationship_work_parents.entry(key.1).or_default().insert(key.0, work.parent);
+    }
+
+    pub(crate) fn queue_pending_children(&mut self, address: LocalAddress, parent: Entity, parent_uuid: Uuid) {
+        let key = (parent_uuid, address);
+        let Some(binding) = self.store.object_record(parent).map(|record| record.state.binding) else { return };
+        let previous = self.relationship_work.get(&key).copied();
+        if previous.is_some_and(|work| work.parent == parent) {
+            return;
+        }
+        self.insert_relationship_work(
+            key,
+            PendingResolution {
+                parent,
+                binding: previous.map_or(binding, |work| work.binding),
+                after: previous.and_then(|work| work.after),
+            },
+        );
+    }
+
+    pub(crate) fn remove_relationship_work(&mut self, key: &(Uuid, LocalAddress)) -> Option<PendingResolution> {
+        let work = self.relationship_work.remove(key)?;
+        if let Some(parents) = self.relationship_work_parents.get_mut(&key.1) {
+            if parents.get(&key.0) == Some(&work.parent) {
+                parents.remove(&key.0);
+            }
+            if parents.is_empty() {
+                self.relationship_work_parents.remove(&key.1);
+            }
+        }
+        Some(work)
+    }
+
     pub(crate) fn relationship_capacity_available(&self, address: LocalAddress, parent_uuid: Uuid) -> bool {
         self.relationship_work.contains_key(&(parent_uuid, address))
             || self.pending_children.get(&address).is_none_or(|children| children.is_empty())
@@ -132,6 +224,9 @@ impl World {
         parent_override: Option<Parent>,
         ancestry: &mut Option<ParentAncestry>,
     ) -> Option<PlannedChild> {
+        if !self.entity_is_visible(child) {
+            return None;
+        }
         let mut read = self.store.read(child.0);
         let (record, ordering) = read.get().ok()?;
         let Parent::Pending { address, expected_uuid } = record.state.parent else { return None };
@@ -205,11 +300,12 @@ impl World {
                 {
                     return Cycle;
                 }
-                let expected_uuid =
-                    child.and_then(|entity| self.store.object_record(entity)).and_then(|object| match object.state.parent {
+                let expected_uuid = child.and_then(|entity| self.store.object_record(entity).map(|object| (entity, object))).and_then(
+                    |(entity, object)| match self.logical_parent_for(entity, object.state.parent) {
                         Parent::Pending { address: pending_address, expected_uuid } if pending_address == address => expected_uuid,
                         _ => None,
-                    });
+                    },
+                );
                 if let Some(parent) = self.entity_at(address) {
                     let object = self.store.object_record(parent).expect("address index contains a live parent");
                     if object.state.binding.admits_parent_link(expected_uuid, Some(stamp), object.id) {
@@ -221,6 +317,249 @@ impl World {
                     Accepted(Parent::Pending { address, expected_uuid })
                 }
             }
+        }
+    }
+
+    pub fn prepare_parent_resolution_with_budget(
+        &mut self,
+        source: UpdateSource,
+        local_id: NonZeroU32,
+        update: ParentUpdate,
+        child: Option<Entity>,
+        cursor: Option<ParentResolutionCursor>,
+        work_limit: usize,
+    ) -> ParentResolutionProgress {
+        let revision = self.revision();
+        let mut cursor = cursor
+            .filter(|cursor| {
+                cursor.world == self.id
+                    && cursor.revision == revision
+                    && cursor.source == source
+                    && cursor.local_id == local_id
+                    && cursor.update == update
+                    && cursor.child == child
+            })
+            .unwrap_or_else(|| self.begin_parent_resolution(source, local_id, update, child));
+        if source.field_stamp().is_none() {
+            cursor.logical_before_parent = Some(Parent::Unknown);
+            cursor.resolution = Some(Accepted(Parent::Unknown));
+            cursor.stage = ParentResolutionStage::Ready;
+        }
+
+        let mut work = 0;
+        loop {
+            match cursor.stage {
+                ParentResolutionStage::BeforeParent => {
+                    if work >= work_limit.min(MAX_OBJECT_LOOKUP_WORK_ITEMS) {
+                        return ParentResolutionProgress::Pending { cursor, work_units: work };
+                    }
+                    let Some(parent) = cursor.old_parent else {
+                        cursor.stage = ParentResolutionStage::Parent;
+                        continue;
+                    };
+                    let Some(record) = self.store.object_record(parent) else {
+                        cursor.logical_before_parent = Some(Parent::Unknown);
+                        cursor.old_parent = None;
+                        cursor.stage = ParentResolutionStage::Parent;
+                        continue;
+                    };
+                    let parent_id = record.id;
+                    let address = record.state.binding.address;
+                    match self.lookup_entity_with_budget(parent_id, cursor.lookup.take(), work_limit.saturating_sub(work)) {
+                        ObjectLookupProgress::Visible { entity, work_units } => {
+                            work = work.saturating_add(work_units);
+                            cursor.logical_before_parent = Some(if entity == parent && self.store.is_current_entity(parent) {
+                                Parent::Resolved(parent)
+                            } else {
+                                Parent::Pending { address, expected_uuid: Some(parent_id) }
+                            });
+                            cursor.old_parent = None;
+                            cursor.stage = ParentResolutionStage::Parent;
+                        }
+                        ObjectLookupProgress::Hidden { work_units } => {
+                            work = work.saturating_add(work_units);
+                            cursor.logical_before_parent = Some(Parent::Pending { address, expected_uuid: Some(parent_id) });
+                            cursor.old_parent = None;
+                            cursor.stage = ParentResolutionStage::Parent;
+                        }
+                        ObjectLookupProgress::Pending { cursor: next, work_units } => {
+                            work = work.saturating_add(work_units);
+                            cursor.lookup = Some(next);
+                            return ParentResolutionProgress::Pending { cursor, work_units: work };
+                        }
+                    }
+                }
+                ParentResolutionStage::Parent => {
+                    let Some(field) = source.field_stamp() else {
+                        cursor.resolution = Some(Accepted(Parent::Unknown));
+                        cursor.stage = ParentResolutionStage::Ready;
+                        continue;
+                    };
+                    match update {
+                        ParentUpdate::Root => {
+                            cursor.resolution = Some(Accepted(Parent::Root));
+                            cursor.stage = ParentResolutionStage::Ready;
+                        }
+                        ParentUpdate::Local(parent_local_id) => {
+                            let address = LocalAddress::new(source.region(), parent_local_id);
+                            cursor.expected_uuid = match cursor.logical_before_parent {
+                                Some(Parent::Pending { address: pending_address, expected_uuid }) if pending_address == address => {
+                                    expected_uuid
+                                }
+                                _ => None,
+                            };
+                            if local_id == parent_local_id
+                                || child.is_some_and(|entity| {
+                                    self.store.object_record(entity).is_some_and(|object| object.state.binding.address == address)
+                                })
+                            {
+                                cursor.resolution = Some(Cycle);
+                                cursor.stage = ParentResolutionStage::Ready;
+                                continue;
+                            }
+                            if work >= work_limit.min(MAX_OBJECT_LOOKUP_WORK_ITEMS) {
+                                return ParentResolutionProgress::Pending { cursor, work_units: work };
+                            }
+                            match self.lookup_entity_at_with_budget(address, cursor.lookup.take(), work_limit.saturating_sub(work)) {
+                                ObjectLookupProgress::Visible { entity, work_units } => {
+                                    work = work.saturating_add(work_units);
+                                    let admits = self.store.object_record(entity).is_some_and(|record| {
+                                        record.state.binding.admits_parent_link(cursor.expected_uuid, Some(field), record.id)
+                                    });
+                                    if admits {
+                                        if child.is_some_and(|child| {
+                                            self.store
+                                                .object_record(child)
+                                                .is_some_and(|record| record.state.parent == Parent::Resolved(entity))
+                                        }) {
+                                            cursor.resolution = Some(Accepted(Parent::Resolved(entity)));
+                                            cursor.stage = ParentResolutionStage::Ready;
+                                        } else {
+                                            cursor.parent = Some(entity);
+                                            cursor.cycle_parent = Some(entity);
+                                            cursor.stage = if child.is_some() {
+                                                ParentResolutionStage::Cycle
+                                            } else {
+                                                cursor.resolution = Some(Accepted(Parent::Resolved(entity)));
+                                                ParentResolutionStage::Ready
+                                            };
+                                        }
+                                    } else {
+                                        cursor.resolution =
+                                            Some(Accepted(Parent::Pending { address, expected_uuid: cursor.expected_uuid }));
+                                        cursor.stage = ParentResolutionStage::Ready;
+                                    }
+                                }
+                                ObjectLookupProgress::Hidden { work_units } => {
+                                    work = work.saturating_add(work_units);
+                                    cursor.resolution = Some(Accepted(Parent::Pending { address, expected_uuid: cursor.expected_uuid }));
+                                    cursor.stage = ParentResolutionStage::Ready;
+                                }
+                                ObjectLookupProgress::Pending { cursor: next, work_units } => {
+                                    work = work.saturating_add(work_units);
+                                    cursor.lookup = Some(next);
+                                    return ParentResolutionProgress::Pending { cursor, work_units: work };
+                                }
+                            }
+                        }
+                    }
+                }
+                ParentResolutionStage::Cycle => {
+                    let Some(parent) = cursor.cycle_parent else {
+                        cursor.resolution = Some(Accepted(Parent::Resolved(cursor.parent.expect("cycle parent exists"))));
+                        cursor.stage = ParentResolutionStage::Ready;
+                        continue;
+                    };
+                    if Some(parent) == child {
+                        cursor.resolution = Some(Cycle);
+                        cursor.stage = ParentResolutionStage::Ready;
+                        continue;
+                    }
+                    if parent.1 != self.id || cursor.cycle_steps >= self.store.physical_len() {
+                        cursor.resolution = Some(if parent.1 != self.id {
+                            Accepted(Parent::Resolved(cursor.parent.expect("cycle parent exists")))
+                        } else {
+                            Cycle
+                        });
+                        cursor.stage = ParentResolutionStage::Ready;
+                        continue;
+                    }
+                    if work >= work_limit.min(MAX_OBJECT_LOOKUP_WORK_ITEMS) {
+                        return ParentResolutionProgress::Pending { cursor, work_units: work };
+                    }
+                    work += 1;
+                    cursor.cycle_steps += 1;
+                    cursor.cycle_parent = self.store.object_record(parent).and_then(|record| match record.state.parent {
+                        Parent::Resolved(next) => Some(next),
+                        Parent::Pending { .. } | Parent::Unknown | Parent::Root => None,
+                    });
+                }
+                ParentResolutionStage::Ready => {
+                    let plan = ParentResolutionPlan {
+                        world: self.id,
+                        revision,
+                        source,
+                        local_id,
+                        update,
+                        child,
+                        logical_before_parent: cursor.logical_before_parent.unwrap_or(Parent::Unknown),
+                        resolution: cursor.resolution.unwrap_or(Accepted(Parent::Unknown)),
+                    };
+                    return ParentResolutionProgress::Ready { plan, work_units: work };
+                }
+            }
+        }
+    }
+
+    fn begin_parent_resolution(
+        &self,
+        source: UpdateSource,
+        local_id: NonZeroU32,
+        update: ParentUpdate,
+        child: Option<Entity>,
+    ) -> ParentResolutionCursor {
+        let (old_parent, logical_before_parent) = child.map_or((None, Some(Parent::Unknown)), |child| {
+            let Some(child_record) = self.store.object_record(child) else { return (None, Some(Parent::Unknown)) };
+            let before = child_record.state.parent;
+            let Parent::Resolved(parent) = before else { return (None, Some(before)) };
+            let Some(parent_record) = self.store.object_record(parent) else { return (None, Some(Parent::Unknown)) };
+            let parent_id = parent_record.id;
+            let address = parent_record.state.binding.address;
+            if child_record.state.binding.address.region() != address.region() {
+                return (None, Some(self.logical_parent_for(child, before)));
+            }
+            if !self.store.is_current_entity(parent) {
+                return (None, Some(Parent::Pending { address, expected_uuid: Some(parent_id) }));
+            }
+            if self.has_pending_removals() && self.lookup_visibility.get(parent, self.revision()).is_none() {
+                (Some(parent), None)
+            } else {
+                (None, Some(self.logical_parent_for(child, before)))
+            }
+        });
+        let (stage, resolution) = if source.field_stamp().is_none() {
+            (ParentResolutionStage::Ready, Some(Accepted(Parent::Unknown)))
+        } else if old_parent.is_some() {
+            (ParentResolutionStage::BeforeParent, None)
+        } else {
+            (ParentResolutionStage::Parent, None)
+        };
+        ParentResolutionCursor {
+            world: self.id,
+            revision: self.revision(),
+            source,
+            local_id,
+            update,
+            child,
+            stage,
+            old_parent,
+            logical_before_parent,
+            lookup: None,
+            expected_uuid: None,
+            parent: None,
+            cycle_parent: None,
+            cycle_steps: 0,
+            resolution,
         }
     }
 
@@ -314,52 +653,6 @@ impl World {
         }
     }
 
-    pub(crate) fn pend_source_children(&mut self, parent: Entity, old_address: LocalAddress, parent_uuid: Uuid, effects: &mut Effects) {
-        let children = self.take_dependents(parent);
-        for child in children.into_values() {
-            let Some((child_address, child_uuid)) = self.store.object_record(child).map(|object| (object.state.binding.address, object.id))
-            else {
-                continue;
-            };
-            if child_address.region != old_address.region {
-                continue;
-            }
-
-            self.set_parent(child, Parent::Pending { address: old_address, expected_uuid: Some(parent_uuid) });
-            effects.recovery_targets.push(child_address);
-            self.relink_changed(child, child_uuid, effects);
-        }
-    }
-
-    pub(crate) fn take_dependents(&mut self, parent: Entity) -> BTreeMap<Uuid, Entity> {
-        let mut children = self.children.remove(&parent).unwrap_or_default();
-        let Some(record) = self.store.object_record(parent) else { return children };
-        let parent_uuid = record.id;
-        let current_binding = record.state.binding;
-        let start = (parent_uuid, LocalAddress::new(Region::minimum(), NonZeroU32::MIN));
-        let keys: Vec<_> =
-            self.relationship_work.range(start..).take_while(|((id, _), _)| *id == parent_uuid).map(|(key, _)| *key).collect();
-        if keys.is_empty() {
-            return children;
-        }
-        let mut ancestry = None;
-        for key in keys {
-            let address = key.1;
-            let work = self.relationship_work.remove(&key).expect("a dependent resolution remains queued");
-            if let Some(waiting) = self.pending_children.get(&address) {
-                for &child in waiting.values() {
-                    let Some(plan) = self.plan_pending_child(key, &work, current_binding, child, None, &mut ancestry) else {
-                        continue;
-                    };
-                    if matches!(plan.plan, LinkPlan::Resolve) {
-                        children.insert(plan.id, child);
-                    }
-                }
-            }
-        }
-        children
-    }
-
     pub(crate) fn relink_changed(&self, child: Entity, id: Uuid, effects: &mut Effects) {
         effects.changes.push(EntityUpdated { id, entity: child, classes: WorldChangeClasses::RELATIONSHIP | WorldChangeClasses::POSE });
         self.invalidate_subtree(child, effects);
@@ -367,7 +660,7 @@ impl World {
 
     pub(crate) fn resolve_waiting_children(&mut self, address: LocalAddress, parent: Entity, parent_uuid: Uuid, effects: &mut Effects) {
         let key = (parent_uuid, address);
-        let previous = self.relationship_work.remove(&key);
+        let previous = self.remove_relationship_work(&key);
         let binding = self.store.object_record(parent).expect("address index contains a live parent").state.binding;
         let mut resolution = PendingResolution {
             parent,
@@ -385,7 +678,7 @@ impl World {
         self.apply_child_plans(address, parent_uuid, parent, &children, effects);
         resolution.after = after;
         if self.next_pending_child(address, resolution.after).is_some() {
-            self.relationship_work.insert(key, resolution);
+            self.insert_relationship_work(key, resolution);
         }
     }
 
@@ -402,12 +695,19 @@ impl World {
         };
         let address = key.1;
         let Some(record) = self.store.object_record(resolution.parent) else {
-            self.relationship_work.remove(&key);
+            self.remove_relationship_work(&key);
             self.relationship_cursor = Some(key);
             return Ok(RelationshipResolution::default());
         };
+        if !self.entity_is_visible(resolution.parent) {
+            if self.relationship_work.get(&key).is_some_and(|work| work.parent == resolution.parent) {
+                self.remove_relationship_work(&key);
+            }
+            self.relationship_cursor = Some(key);
+            return Ok(RelationshipResolution::default());
+        }
         if record.id != key.0 || record.state.binding.address.region != address.region {
-            self.relationship_work.remove(&key);
+            self.remove_relationship_work(&key);
             self.relationship_cursor = Some(key);
             return Ok(RelationshipResolution::default());
         }
@@ -423,9 +723,9 @@ impl World {
         resolution.after = after;
         self.relationship_cursor = Some(key);
         if self.next_pending_child(address, resolution.after).is_none() {
-            self.relationship_work.remove(&key);
+            self.remove_relationship_work(&key);
         } else {
-            self.relationship_work.insert(key, resolution);
+            self.insert_relationship_work(key, resolution);
         }
         Ok(RelationshipResolution {
             revision: self.publish_changes(effects.changes),
@@ -483,7 +783,7 @@ impl World {
                 LinkPlan::Resolve => {
                     self.set_parent(child.entity, Parent::Resolved(parent));
                     self.relink_changed(child.entity, child.id, effects);
-                    effects.recovery_cancellations.push(child.address);
+                    effects.recovery_cancellations.push(RecoveryCancellation::new(child.entity, child.address));
                 }
                 LinkPlan::Cycle => {
                     self.set_parent(child.entity, Parent::Pending { address, expected_uuid: Some(parent_uuid) });
@@ -495,7 +795,13 @@ impl World {
         }
     }
 
-    fn pending_link_admitted(current: Binding, original: Binding, expected: Option<Uuid>, stamp: Option<FieldStamp>, id: Uuid) -> bool {
+    pub(crate) fn pending_link_admitted(
+        current: Binding,
+        original: Binding,
+        expected: Option<Uuid>,
+        stamp: Option<FieldStamp>,
+        id: Uuid,
+    ) -> bool {
         if (current.address != original.address || current.address_generation != original.address_generation)
             && expected != Some(id)
             && stamp.is_none_or(|stamp| stamp.stamp > original.fence())
@@ -557,6 +863,18 @@ mod tests {
             max_region_name_bytes: 32,
             max_recovery_targets: 2,
         }
+    }
+
+    fn drain_removals(world: &mut World) -> (Vec<LocalAddress>, Vec<LocalAddress>) {
+        let mut recovery = Vec::new();
+        let mut cancellations = Vec::new();
+        while world.has_pending_removals() {
+            let progress = world.reclaim_removals(crate::MAX_REMOVAL_WORK_PER_TURN);
+            assert!(progress.work_units <= crate::MAX_REMOVAL_WORK_PER_TURN);
+            recovery.extend(progress.recovery.requests);
+            cancellations.extend(progress.recovery_cancellations.into_iter().map(|cancellation| cancellation.address()));
+        }
+        (recovery, cancellations)
     }
 
     #[test]
@@ -630,6 +948,10 @@ mod tests {
             let _ = world.remove_object(source(region, 300 + ordinal as u64), NonZeroU32::new(local_id).unwrap()).unwrap();
         }
 
+        while world.has_pending_removals() {
+            let progress = world.reclaim_removals(crate::MAX_REMOVAL_WORK_PER_TURN);
+            assert!(progress.work_units <= crate::MAX_REMOVAL_WORK_PER_TURN);
+        }
         assert!(world.has_pending_relationships());
         assert_eq!(world.check_invariants(), Ok(()));
         let applied = world.resolve_relationships(1).unwrap();
@@ -639,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn generation_limit_keeps_avatar_pending() {
+    fn generation_limit_detaches_avatar_without_pose() {
         let mut world = World::new(test_limits());
         let region = world.register_region().unwrap();
         assert!(matches!(
@@ -659,11 +981,16 @@ mod tests {
         assert_eq!(removed.outcome, Removed(Uuid::from_u128(1)));
         assert!(world.object(seat).is_none());
         assert_eq!(world.object_count(), 1);
+        while world.has_pending_removals() {
+            let _ = world.reclaim_removals(crate::MAX_REMOVAL_WORK_PER_TURN);
+        }
+        assert_eq!(world.object(avatar).unwrap().parent(), Parent::Root);
         assert_eq!(
-            world.object(avatar).unwrap().parent(),
-            Pending { address: LocalAddress::new(region, NonZeroU32::new(1).unwrap()), expected_uuid: Some(Uuid::from_u128(1)) }
+            world.object(avatar).unwrap().world_pose().unwrap(),
+            crate::PoseState::Unresolved(crate::UnresolvedReason::PoseNotValidForCurrentFrame)
         );
-        assert_eq!(removed.recovery.requests, [LocalAddress::new(region, NonZeroU32::new(2).unwrap())]);
+        assert!(removed.recovery.requests.is_empty());
+        assert_eq!(world.check_invariants(), Ok(()));
     }
 
     #[test]
@@ -680,7 +1007,8 @@ mod tests {
             world.object(avatar).unwrap().parent(),
             Pending { address: LocalAddress::new(region, NonZeroU32::new(1).unwrap()), expected_uuid: Some(Uuid::from_u128(1)) }
         );
-        assert_eq!(removed.recovery.requests, [LocalAddress::new(region, NonZeroU32::new(2).unwrap())]);
+        assert!(removed.recovery.requests.is_empty());
+        assert_eq!(drain_removals(&mut world).0, [LocalAddress::new(region, NonZeroU32::new(2).unwrap())]);
     }
 
     #[test]
@@ -713,7 +1041,8 @@ mod tests {
         assert!(matches!(retired.outcome, crate::RegionOutcome::Retired { entities_removed: 2, .. }));
         assert!(world.object(parent).is_none());
         assert!(world.object(child).is_none());
-        assert_eq!(retired.recovery_cancellations.len(), 2);
+        assert!(retired.recovery_cancellations.is_empty());
+        assert_eq!(drain_removals(&mut world).1.len(), 2);
     }
 
     fn observation(world: &mut World, region: Region, order: u64, local_id: u32, kind: Kind, parent: ParentUpdate) -> Entity {

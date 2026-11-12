@@ -65,6 +65,7 @@ pub enum WorldChange {
     EntityAdded { id: Uuid, entity: Entity, address: LocalAddress },
     EntityUpdated { id: Uuid, entity: Entity, classes: WorldChangeClasses },
     SubtreeInvalidated { id: Uuid, entity: Entity },
+    SubtreeRemovalPending { id: Uuid, entity: Entity, region: Region, order: u64, block_ordinal: u32 },
     EntityRemoved { id: Uuid, entity: Entity, address: LocalAddress, reason: WorldEntityRemovalReason },
     EntityRebound { id: Uuid, entity: Entity, from: LocalAddress, to: LocalAddress },
     EntityTransferred { id: Uuid, entity: Entity, from: LocalAddress, to: LocalAddress },
@@ -167,7 +168,7 @@ mod tests {
 
     use super::WorldChange::{
         EntityAdded, EntityRebound, EntityRemoved, EntityTransferred, EntityUpdated, RegionRegistered, RegionRetired, RegionUpdated,
-        SubtreeInvalidated,
+        SubtreeInvalidated, SubtreeRemovalPending,
     };
     use OrderEvidence::Ordered;
     use ParentUpdate::{Local, Root};
@@ -221,6 +222,13 @@ mod tests {
                 assert!(revision.get() > 0);
             }
             RegionOutcome::Unchanged => panic!("changed region operation has a revision"),
+        }
+    }
+
+    fn drain_removals(world: &mut World) {
+        while world.has_pending_removals() {
+            let progress = world.reclaim_removals(crate::MAX_REMOVAL_WORK_PER_TURN);
+            assert!(progress.work_units <= crate::MAX_REMOVAL_WORK_PER_TURN);
         }
     }
 
@@ -390,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_journal_entry_still_applies_mutation() {
+    fn region_retirement_journals_removals_incrementally() {
         let mut limits = limits(8);
         limits.max_journal_changes = 2;
         let mut world = World::new(limits);
@@ -411,11 +419,19 @@ mod tests {
         assert_eq!(revision, WorldRevision(before_retirement.get() + 1));
         assert_eq!(world.region(region), None);
         assert!(world.objects().iter().next().is_none());
-        assert!(world.journal.entries.is_empty());
-        assert_eq!(world.journal.retained_changes, 0);
-        assert_eq!(world.journal.lost_through, Some(revision));
-        assert_eq!(world.change_page(before_retirement_cursor, 8), Err(crate::WorldReadError::ResyncRequired));
+        let retirement_page = world.change_page(before_retirement_cursor, 8).unwrap();
+        assert!(matches!(retirement_page.records.as_slice(), [record]
+            if record.revision == revision && matches!(record.change, RegionRetired { region: retired, entities_removed: 2 } if retired == region)));
+        assert!(!retirement_page.has_more);
         assert_eq!(world.check_invariants(), Ok(()));
+
+        drain_removals(&mut world);
+        let removal_page = world.change_page(retirement_page.cursor, 8).unwrap();
+        assert_eq!(removal_page.records.len(), 2);
+        assert!(removal_page.records.iter().all(|record| {
+            record.revision > revision && matches!(record.change, EntityRemoved { reason: WorldEntityRemovalReason::RegionRetired, .. })
+        }));
+        assert!(!removal_page.has_more);
 
         let after_retirement_cursor = world.read_barrier().changes;
         assert!(world.change_page(after_retirement_cursor, 8).unwrap().records.is_empty());
@@ -489,8 +505,14 @@ mod tests {
         assert_revision(world.observe_object(attachment).unwrap());
 
         assert_revision(world.remove_object(UpdateSource::new(region, 5, Ordered(5), 0), NonZeroU32::new(1).unwrap()).unwrap());
+        assert!(matches!(last_changes(&world), [SubtreeRemovalPending { id, .. }] if *id == Uuid::from_u128(250)));
+        assert_eq!(world.object_count(), 2);
+        assert!(world.entity(Uuid::from_u128(250)).is_none());
+        assert!(world.entity(Uuid::from_u128(251)).is_none());
+        assert!(world.entity(Uuid::from_u128(252)).is_some());
+        drain_removals(&mut world);
 
-        let changes = last_changes(&world);
+        let changes = world.journal.entries.iter().flat_map(|entry| &entry.changes).collect::<Vec<_>>();
         assert!(changes.iter().any(|change| {
             matches!(change, EntityRemoved { id, address, reason: WorldEntityRemovalReason::Killed, .. }
                 if *id == Uuid::from_u128(250) && address.local_id().get() == 1)
@@ -605,6 +627,9 @@ mod tests {
         let region = world.register_region().unwrap();
         assert_revision(world.observe_object(observation(region, 1, 260, 1)).unwrap());
         assert_revision(world.observe_object(observation(region, 2, 261, 1)).unwrap());
+        assert!(matches!(last_changes(&world), [SubtreeRemovalPending { id, .. }, EntityAdded { .. }] if *id == Uuid::from_u128(260)));
+        assert!(world.entity(Uuid::from_u128(260)).is_none());
+        drain_removals(&mut world);
         assert!(last_changes(&world).iter().any(|change| {
             matches!(change, EntityRemoved { id, reason: WorldEntityRemovalReason::AddressReplaced, .. } if *id == Uuid::from_u128(260))
         }));
@@ -614,7 +639,10 @@ mod tests {
         child.parent = Local(NonZeroU32::new(1).unwrap());
         assert_revision(world.observe_object(child).unwrap());
         assert_region_revision(world.retire_region(region).unwrap().outcome);
-        let changes = last_changes(&world);
+        assert!(matches!(last_changes(&world), [RegionRetired { region: retired, entities_removed: 2 }] if *retired == region));
+        assert_eq!(world.object_count(), 0);
+        drain_removals(&mut world);
+        let changes = world.journal.entries.iter().flat_map(|entry| &entry.changes).collect::<Vec<_>>();
         assert!(changes.iter().any(|change| {
             matches!(change, EntityRemoved { id, address, reason: WorldEntityRemovalReason::RegionRetired, .. }
                 if *id == Uuid::from_u128(261) && *address == entity_address)
@@ -622,6 +650,36 @@ mod tests {
         assert!(changes.iter().any(|change| {
             matches!(change, EntityRemoved { id, reason: WorldEntityRemovalReason::RegionRetired, .. } if *id == Uuid::from_u128(262))
         }));
-        assert!(matches!(changes.last(), Some(RegionRetired { region: retired, entities_removed: 2 }) if *retired == region));
+        assert!(
+            changes.iter().any(|change| matches!(change, RegionRetired { region: retired, entities_removed: 2 } if *retired == region))
+        );
+    }
+
+    #[test]
+    fn reclamation_publishes_one_revision_per_turn() {
+        let mut world = World::new(limits(16));
+        let region = world.register_region().unwrap();
+        assert_revision(world.observe_object(observation(region, 1, 350, 1)).unwrap());
+        let mut child = observation(region, 2, 351, 2);
+        child.parent = Local(NonZeroU32::new(1).unwrap());
+        assert_revision(world.observe_object(child).unwrap());
+        let mut grandchild = observation(region, 3, 352, 3);
+        grandchild.parent = Local(NonZeroU32::new(2).unwrap());
+        assert_revision(world.observe_object(grandchild).unwrap());
+
+        let cursor = world.read_barrier().changes;
+        assert_revision(world.remove_object(UpdateSource::new(region, 4, Ordered(4), 0), NonZeroU32::new(1).unwrap()).unwrap());
+        let pending = world.change_page(cursor, 8).unwrap();
+        assert!(matches!(pending.records.as_slice(), [record] if matches!(record.change, SubtreeRemovalPending { .. })));
+
+        let progress = world.reclaim_removals(crate::MAX_REMOVAL_WORK_PER_TURN);
+        assert_eq!(progress.removed_entities, 3);
+        assert!(!progress.pending);
+        let changes = world.change_page(pending.cursor, 8).unwrap();
+        assert_eq!(changes.records.len(), 3);
+        assert!(changes.records.iter().all(|record| {
+            record.revision == progress.revision.expect("removal changes are published") && matches!(record.change, EntityRemoved { .. })
+        }));
+        assert!(!changes.has_more);
     }
 }

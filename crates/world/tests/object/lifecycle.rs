@@ -1,8 +1,8 @@
 use super::support::{
     AgentHandedOff, Ambiguous, AmbiguousOrder, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, HashSet, IgnoredStale, Introduced,
     InvalidValue, KindMismatch, LinearMotion, Local, Object, ObjectPatch, Ordered, Parent, ParentCycle, Pending, Pose, Quat, RegionInfo,
-    Removed, Resolved, Root, TombstoneRecorded, Unchanged, UpdateSource, Updated, Vec3, World, WorldLimits, address, limits, local_id,
-    object, source, uuid, with_region,
+    Removed, Resolved, Root, TombstoneRecorded, Unchanged, UpdateSource, Updated, Vec3, World, WorldLimits, address, drain_removals,
+    limits, local_id, object, source, uuid, with_region,
 };
 
 #[test]
@@ -292,9 +292,11 @@ fn recovery_targets_respect_world_limit() {
 
     let removed = world.remove_object(source(region, 105), local_id(1)).unwrap();
     assert_eq!(removed.outcome, Removed(uuid(410)));
-    let targets = removed.recovery.requests;
-    assert_eq!(targets.len(), 2);
-    assert!(targets.iter().all(|target| [2, 3, 4].contains(&target.local_id().get())));
+    assert!(removed.recovery.requests.is_empty());
+    let progress = drain_removals(&mut world);
+    assert!(progress.iter().all(|turn| turn.recovery.requests.len() <= 2));
+    let targets = progress.into_iter().flat_map(|turn| turn.recovery.requests).collect::<HashSet<_>>();
+    assert_eq!(targets, HashSet::from([address(region, 2), address(region, 3), address(region, 4)]));
     assert!(
         child_entities
             .iter()

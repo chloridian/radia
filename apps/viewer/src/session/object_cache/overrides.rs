@@ -174,7 +174,6 @@ mod tests {
         async fn replay(&mut self, update: &ObjectUpdateCached) {
             let sequence = self.next_sequence();
             let batch = decoded_cached_batch(self.region, update, sequence);
-            let world = &self.world;
             let (batch, _, overrides) = self
                 .cache
                 .resolve_cached(
@@ -182,10 +181,7 @@ mod tests {
                     self.region,
                     sequence,
                     OrderEvidence::Ordered(u64::from(sequence)),
-                    |address| {
-                        let world = world.world();
-                        world.entity_at(address).and_then(|entity| world.object(entity).map(|object| object.id()))
-                    },
+                    &mut self.world,
                     update,
                     batch,
                 )
@@ -196,6 +192,9 @@ mod tests {
         }
 
         async fn settle(&mut self) {
+            while self.world.world().has_pending_removals() {
+                drop(self.world.reclaim_removals());
+            }
             self.cache.persist_overrides(&self.world);
             flush(&mut self.cache).await;
         }

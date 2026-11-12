@@ -1027,8 +1027,8 @@ impl SceneWindow {
                     ui.label(format!("GPU depth: {:.1} MiB", stats.depth_bytes as f64 / 1048576.0));
                     if let Some(feed) = &self.feed {
                         ui.label(format!(
-                            "Objects: {}, regions: {}, terrain patches: {}",
-                            feed.view.object_count(),
+                            "Scene records: {}, regions: {}, terrain patches: {}",
+                            feed.view.tracked_object_count(),
                             feed.view.region_count(),
                             feed.view.patch_count()
                         ));

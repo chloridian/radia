@@ -95,3 +95,14 @@ pub(super) fn with_region() -> (World, Region) {
     let region = world.register_region().unwrap();
     (world, region)
 }
+
+pub(super) fn drain_removals(world: &mut World) -> Vec<world::RemovalProgress> {
+    let mut progress = Vec::new();
+    while world.has_pending_removals() {
+        let turn = world.reclaim_removals(world::MAX_REMOVAL_WORK_PER_TURN);
+        assert!(turn.work_units <= world::MAX_REMOVAL_WORK_PER_TURN);
+        assert!(turn.work_units != 0 || !turn.pending);
+        progress.push(turn);
+    }
+    progress
+}

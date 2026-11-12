@@ -129,6 +129,10 @@ impl UpdateSource {
             Ambiguous | Degraded => None,
         }
     }
+
+    pub(crate) fn field_stamp(self) -> Option<FieldStamp> {
+        self.stamp().map(|stamp| FieldStamp { authority: self.authority, stamp })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -356,6 +360,7 @@ pub enum ApplyError {
     RegionBudgetExhausted,
     RegionGenerationExhausted,
     EntityBudgetExhausted,
+    RemovalCapacityExhausted,
     TerrainBudgetExhausted,
     EnvironmentBudgetExhausted,
     ParcelBudgetExhausted,
@@ -374,6 +379,7 @@ impl Display for ApplyError {
             Self::RegionBudgetExhausted => f.write_str("active region budget is exhausted"),
             Self::RegionGenerationExhausted => f.write_str("region generation space is exhausted"),
             Self::EntityBudgetExhausted => f.write_str("object budget is exhausted"),
+            Self::RemovalCapacityExhausted => f.write_str("World removal capacity is exhausted"),
             Self::TerrainBudgetExhausted => f.write_str("terrain patch budget is exhausted"),
             Self::EnvironmentBudgetExhausted => f.write_str("environment source budget is exhausted"),
             Self::ParcelBudgetExhausted => f.write_str("parcel state budget is exhausted"),
@@ -394,7 +400,7 @@ pub struct Applied {
     pub outcome: ApplyOutcome,
     pub revision: Option<WorldRevision>,
     pub recovery: Recovery,
-    pub recovery_cancellations: Vec<LocalAddress>,
+    pub recovery_cancellations: Vec<RecoveryCancellation>,
     pub rejections: Rejections,
 }
 
@@ -432,7 +438,7 @@ impl Applied {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegionApplied {
     pub outcome: RegionOutcome,
-    pub recovery_cancellations: Vec<LocalAddress>,
+    pub recovery_cancellations: Vec<RecoveryCancellation>,
 }
 
 impl RegionApplied {
@@ -458,6 +464,26 @@ impl WorldRevision {
 pub struct Recovery {
     pub requests: Vec<LocalAddress>,
     pub satisfied: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecoveryCancellation {
+    entity: Entity,
+    address: LocalAddress,
+}
+
+impl RecoveryCancellation {
+    pub(crate) const fn new(entity: Entity, address: LocalAddress) -> Self {
+        Self { entity, address }
+    }
+
+    pub const fn entity(self) -> Entity {
+        self.entity
+    }
+
+    pub const fn address(self) -> LocalAddress {
+        self.address
+    }
 }
 
 impl Recovery {

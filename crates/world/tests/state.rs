@@ -28,6 +28,17 @@ fn limits() -> WorldLimits {
     }
 }
 
+fn drain_removals(world: &mut World) -> Vec<world::RemovalProgress> {
+    let mut progress = Vec::new();
+    while world.has_pending_removals() {
+        let turn = world.reclaim_removals(world::MAX_REMOVAL_WORK_PER_TURN);
+        assert!(turn.work_units <= world::MAX_REMOVAL_WORK_PER_TURN);
+        assert!(turn.work_units != 0 || !turn.pending);
+        progress.push(turn);
+    }
+    progress
+}
+
 fn uuid(value: u128) -> Uuid {
     Uuid::from_u128(value)
 }
@@ -358,7 +369,7 @@ fn retirement_clears_objects_and_blocks_reuse() {
 
     let retired = world.retire_region(region).unwrap();
     assert!(matches!(retired.outcome, world::RegionOutcome::Retired { entities_removed: 2, .. }));
-    assert_eq!(retired.recovery_cancellations.into_iter().collect::<HashSet<_>>(), HashSet::from([address(region, 3), address(region, 4)]));
+    assert!(retired.recovery_cancellations.is_empty());
     assert_eq!(world.entity(uuid(10)), None);
     assert_eq!(world.entity(uuid(11)), None);
     assert_eq!(world.entity_at(address(region, 3)), None);
@@ -377,6 +388,11 @@ fn retirement_clears_objects_and_blocks_reuse() {
     assert!(matches!(world.retire_region(region).unwrap().outcome, world::RegionOutcome::Unchanged));
     assert_eq!(world.patch_region(region, RegionInfo::default()), Err(RegionRetired));
     assert_eq!(world.observe_object(observation(source(region, 2), 11, 4)), Err(RegionRetired));
+    let cancellations = drain_removals(&mut world)
+        .into_iter()
+        .flat_map(|turn| turn.recovery_cancellations.into_iter().map(|cancellation| cancellation.address()))
+        .collect::<HashSet<_>>();
+    assert_eq!(cancellations, HashSet::from([address(region, 3), address(region, 4)]));
 }
 
 #[test]
@@ -647,6 +663,7 @@ fn registration_reuses_capacity_without_reusing_handles() {
         }
         assert_eq!(world.register_region(), Err(RegionBudgetExhausted));
         assert!(matches!(world.retire_region(region).unwrap().outcome, world::RegionOutcome::Retired { .. }));
+        let _ = drain_removals(&mut world);
         issued.push(region);
     }
 

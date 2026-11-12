@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::collections::BTreeMap;
 use std::{
     collections::{BTreeSet, HashMap},
     num::NonZeroU32,
@@ -7,11 +5,7 @@ use std::{
 
 use uuid::Uuid;
 
-#[cfg(test)]
-use crate::RegionState;
 use crate::World;
-#[cfg(test)]
-use crate::object::storage::ObjectStore;
 use crate::update::Stamp;
 use crate::{Applied, ApplyOutcome, DeferredReason, LocalAddress, Region, WorldLimits};
 
@@ -53,12 +47,8 @@ impl Tombstones {
         Some(stamp)
     }
 
-    pub(crate) fn remove_region(&mut self, region: Region) {
-        if let Some(entries) = self.oldest_by_region.remove(&region) {
-            for (_, local_id) in entries {
-                self.by_address.remove(&LocalAddress::new(region, local_id));
-            }
-        }
+    pub(crate) fn first_region_address(&self, region: Region) -> Option<LocalAddress> {
+        self.oldest_by_region.get(&region)?.first().map(|(_, local_id)| LocalAddress::new(region, *local_id))
     }
 
     fn region_len(&self, region: Region) -> usize {
@@ -71,15 +61,12 @@ impl Tombstones {
 }
 
 #[cfg(test)]
-pub(crate) fn tombstones_invariants_hold(
-    tombstones: &Tombstones,
-    active_regions: &BTreeMap<Region, RegionState>,
-    store: &ObjectStore,
-) -> bool {
+pub(crate) fn tombstones_invariants_hold(world: &World) -> bool {
+    let tombstones = &world.tombstones;
     tombstones.by_address.len() == tombstones.oldest_by_region.values().map(BTreeSet::len).sum::<usize>()
         && tombstones.by_address.iter().all(|(address, stamp)| {
-            active_regions.contains_key(&address.region())
-                && store.entity_at(*address).is_none()
+            (world.regions.contains_key(&address.region()) || world.retiring_regions.contains_key(&address.region()))
+                && world.entity_at(*address).is_none()
                 && tombstones.oldest_by_region.get(&address.region()).is_some_and(|entries| entries.contains(&(*stamp, address.local_id())))
         })
         && tombstones.oldest_by_region.iter().all(|(region, entries)| {
@@ -155,6 +142,9 @@ impl World {
             let record = self.store.object_record(entity).expect("address index contains a live entity");
             return (record.id != id && stamp <= record.state.binding.fence()).then(|| Applied::new(ApplyOutcome::IgnoredStale));
         }
+        if self.removal_cause_at(address).and_then(crate::removal::RemovalCause::stamp).is_some_and(|fence| stamp <= fence) {
+            return Some(Applied::new(ApplyOutcome::IgnoredStale));
+        }
         if let Some(tombstone) = self.tombstones.get(&address) {
             return (stamp <= *tombstone).then(|| Applied::new(ApplyOutcome::IgnoredStale));
         }
@@ -213,7 +203,9 @@ mod tests {
         assert_eq!(tombstones.remove(&second), Some(new));
         assert_eq!(tombstones.region_len(first_region), 1);
 
-        tombstones.remove_region(first_region);
+        while let Some(address) = tombstones.first_region_address(first_region) {
+            tombstones.remove(&address);
+        }
         assert_eq!(tombstones.len(), 1);
         assert!(tombstones.contains_key(&other));
         assert_eq!(tombstones.oldest_in_region(first_region), None);

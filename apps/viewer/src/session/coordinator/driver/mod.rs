@@ -20,15 +20,20 @@ use network::{
 };
 use protocol::{lludp::Message, login::ResponseData, messages::RequestAgentData};
 use tokio::{runtime::Handle, sync::watch};
-use world::UpdateSource;
+use uuid::Uuid;
+use world::{MAX_OBJECT_LOOKUP_WORK_ITEMS, ObjectLookupCursor, ObjectLookupProgress, UpdateSource};
 
 use super::{
     WriteLock,
-    events::{MovementCompleteOutcome, SimulatorScope, WorldHandoff, handle_simulator_message, order_evidence, route_recovery_targets},
+    events::{
+        EntityUpdateContinuation, EntityUpdateProgress, MovementCompleteOutcome, ObjectUpdateFinishContinuation,
+        ObjectUpdateFinishProgress, ObjectUpdatePreparation, PromotionProgress, SimulatorMessageOutcome, SimulatorScope, WorldHandoff,
+        handle_simulator_message, order_evidence, route_recovery_targets,
+    },
     input::{Input, OrdinaryInputTurn, select_drain_input_fair},
     inventory_bootstrap::{InventoryBootstrapReport, InventoryWorkerError, spawn_inventory_build},
     inventory_cache::{InventoryCacheEvent, InventoryCacheEventOutcome, InventoryCacheSession, InventoryDisposalPermit},
-    media::ObjectMediaIntake,
+    media::{ObjectMediaApplyProgress, ObjectMediaIntake, PendingObjectMediaApply},
     presentation::{AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, SessionEnd, SessionReadyUpdate, ViewerUpdate},
 };
 use crate::{
@@ -41,12 +46,15 @@ use crate::{
     session::{
         AgentMotionPublisher, CameraUplink, RegionLookup, Session, SessionHandle,
         environment::{Completion, EnvironmentIntake},
-        inbound::object_media_requests,
-        object_cache::{ObjectCacheEvent, ObjectCacheSession},
+        inbound::{ObjectMediaRequest, object_media_requests},
+        object_cache::{CachedObjectContinuation, CachedObjectProgress, ObjectCacheEvent, ObjectCacheSession},
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
         recovery::{RecoveryCompletion, RecoveryIntake, ScheduledRecovery, retryable_send_error, simulator_lost_error, warn_unrecovered},
         terrain::{DecodedTerrain, TerrainDecodeQueue},
-        world::{IngestSummary, SessionWorld, viewer_world_limits},
+        world::{
+            IngestSummary, MAX_OBJECTS_PER_INTAKE_QUANTUM, ObjectBatchContinuation, ObjectBatchProgress, ObjectMediaPreparationProgress,
+            SessionWorld, viewer_world_limits,
+        },
     },
     world_reader::{ReadRequest, WorldReadHost},
 };
@@ -79,6 +87,125 @@ enum DriverInput {
     InventoryBootstrap(Result<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>, tokio::task::JoinError>),
     Favorites(Result<FavoritesUpdate, tokio::task::JoinError>),
     Relationships,
+    Removals,
+    MediaWorkTurn,
+}
+
+struct PendingSimulatorObjectUpdate {
+    simulator_id: SimulatorId,
+    packet_order: PacketOrder,
+    source: std::net::SocketAddr,
+    received_at: std::time::Instant,
+    primary_origin_before: Option<math::DVec3>,
+    region: Option<world::Region>,
+    message: Message,
+    media_requests: Vec<ObjectMediaRequest>,
+    agent_id: Option<Uuid>,
+    stage: PendingSimulatorObjectUpdateStage,
+}
+
+enum PendingSimulatorObjectUpdateStage {
+    Cache(CachedObjectContinuation),
+    Batch(ObjectBatchContinuation),
+    Entity(EntityUpdateContinuation),
+    Finish(ObjectUpdateFinishContinuation),
+    Finalize(ObjectMessageFinalization),
+    Finished,
+}
+
+enum ObjectMessageFinalizationStage {
+    Recovery,
+    Media,
+}
+
+struct ObjectMessageFinalization {
+    outcome: SimulatorMessageOutcome,
+    has_summary: bool,
+    recovery_targets: Vec<(Option<SimulatorId>, world::LocalAddress, protocol::messages::CacheMissType)>,
+    cancellations: Vec<(Option<world::Entity>, world::LocalAddress)>,
+    cancellation_index: usize,
+    cancellation_cursor: Option<ObjectLookupCursor>,
+    updated: Vec<world::LocalAddress>,
+    media_requests: VecDeque<ObjectMediaRequest>,
+    current_media: Option<ObjectMediaRequest>,
+    media_cursor: Option<ObjectLookupCursor>,
+    stage: ObjectMessageFinalizationStage,
+}
+
+enum ObjectMessageFinalizationProgress {
+    Pending,
+    Complete,
+}
+
+impl ObjectMessageFinalization {
+    fn new(world: &SessionWorld, mut outcome: SimulatorMessageOutcome, media_requests: Vec<ObjectMediaRequest>) -> Self {
+        let has_summary = outcome.summary.is_some();
+        let mut recovery_targets = Vec::new();
+        let mut cancellations = Vec::new();
+        if let Some((simulator_id, summary)) = outcome.summary.take() {
+            summary.log_incomplete_data(simulator_id, world.region_for(simulator_id));
+            recovery_targets = route_recovery_targets(world, summary.recovery_requests());
+            cancellations.extend(summary.recovery_cancellations());
+        }
+        Self {
+            outcome,
+            has_summary,
+            recovery_targets,
+            cancellations,
+            cancellation_index: 0,
+            cancellation_cursor: None,
+            updated: Vec::new(),
+            media_requests: media_requests.into(),
+            current_media: None,
+            media_cursor: None,
+            stage: ObjectMessageFinalizationStage::Recovery,
+        }
+    }
+}
+
+enum OwnerTurnInput {
+    Continue,
+    Cancelled,
+    WorldRead(ReadRequest),
+}
+
+enum OwnerTurnProgress {
+    Continue,
+    Cancelled,
+    ReadServed,
+}
+
+async fn select_owner_turn_input(reads: &mut WorldReadHost, cancellation: &Cancellation) -> OwnerTurnInput {
+    tokio::select! {
+        biased;
+        _ = cancellation.clone() => OwnerTurnInput::Cancelled,
+        request = reads.next_request() => OwnerTurnInput::WorldRead(request),
+        () = tokio::task::yield_now() => OwnerTurnInput::Continue,
+    }
+}
+
+async fn serve_owner_turn(reads: &mut WorldReadHost, world: &mut SessionWorld, cancellation: &Cancellation) -> OwnerTurnProgress {
+    match select_owner_turn_input(reads, cancellation).await {
+        OwnerTurnInput::Continue => OwnerTurnProgress::Continue,
+        OwnerTurnInput::Cancelled => OwnerTurnProgress::Cancelled,
+        OwnerTurnInput::WorldRead(request) => {
+            request.serve_from_owner(world.world_mut());
+            OwnerTurnProgress::ReadServed
+        }
+    }
+}
+
+async fn serve_owner_turn_with_advance<T>(
+    reads: &mut WorldReadHost,
+    world: &mut SessionWorld,
+    cancellation: &Cancellation,
+    advance: impl FnOnce(&mut SessionWorld) -> T,
+) -> (OwnerTurnProgress, Option<T>) {
+    match serve_owner_turn(reads, world, cancellation).await {
+        OwnerTurnProgress::Continue => (OwnerTurnProgress::Continue, Some(advance(world))),
+        OwnerTurnProgress::ReadServed => (OwnerTurnProgress::ReadServed, Some(advance(world))),
+        OwnerTurnProgress::Cancelled => (OwnerTurnProgress::Cancelled, None),
+    }
 }
 
 pub(super) const MAX_DEFERRED_INVENTORY_EVENTS: usize = 128;
@@ -212,6 +339,8 @@ struct SessionDriver {
     region_lookup: Option<RegionLookup>,
     media: ObjectMediaIntake,
     recovery: RecoveryIntake,
+    pending_object_update: Option<PendingSimulatorObjectUpdate>,
+    pending_media_apply: Option<PendingObjectMediaApply>,
 }
 
 impl SessionDriver {
@@ -448,12 +577,15 @@ impl SessionDriver {
             region_lookup: None,
             media,
             recovery,
+            pending_object_update: None,
+            pending_media_apply: None,
         }
     }
 
     async fn run(mut self) {
         loop {
-            if self.pending_folder_preparation.is_none()
+            if self.pending_object_update.is_none()
+                && self.pending_folder_preparation.is_none()
                 && self.pending_owner_refresh.is_none()
                 && self.deferred_inventory.is_empty()
                 && !self.inventory_overload_recovery_pending
@@ -462,15 +594,21 @@ impl SessionDriver {
             {
                 break;
             }
-            if self.session_world.world().has_pending_relationships() {
-                tokio::task::yield_now().await;
-                if self.resolve_relationships().is_break() {
-                    break;
-                }
-            }
             self.reads.publish(self.session_world.world());
             self.object_cache.persist_overrides(&self.session_world);
-            self.media.flush(&self.session_world);
+            if self.pending_object_update.is_some() {
+                let flow = self.advance_pending_owner_turn().await;
+                if flow.is_break() {
+                    break;
+                }
+                continue;
+            }
+            let media_flush_pending = self.media.flush_step(&mut self.session_world);
+            if let Some(pending) = self.pending_media_apply.as_mut()
+                && matches!(self.media.advance_apply_result(&mut self.session_world, pending), ObjectMediaApplyProgress::Complete)
+            {
+                self.pending_media_apply = None;
+            }
             let terrain_full = self.terrain.is_full();
             let inventory_queue_full = inventory_queue_is_full(self.deferred_inventory.len(), self.deferred_inventory_bytes);
             let inventory_disposal_pending = self.pending_folder_preparation.is_none()
@@ -484,6 +622,7 @@ impl SessionDriver {
             let inventory_disposal =
                 if inventory_disposal_pending { inventory_disposal.boxed() } else { pending::<Option<InventoryDisposalPermit>>().boxed() };
             let relationships_pending = self.session_world.world().has_pending_relationships();
+            let removals_pending = self.session_world.world().has_pending_removals();
             let allow_restore_batch = !self.inventory_observations_deferred();
             let event = async {
                 if terrain_full || self.pending_lifecycle_barrier.is_some() {
@@ -545,9 +684,13 @@ impl SessionDriver {
                 bootstrap = inventory_bootstrap => DriverInput::InventoryBootstrap(bootstrap.expect("bootstrap task must be pending")),
                 favorites = favorites_load => DriverInput::Favorites(favorites.expect("favorites task must be pending")),
                 () = tokio::task::yield_now(), if relationships_pending => DriverInput::Relationships,
+                () = tokio::task::yield_now(), if removals_pending => DriverInput::Removals,
+                () = tokio::task::yield_now(), if media_flush_pending || self.pending_media_apply.is_some() => DriverInput::MediaWorkTurn,
             };
             let flow = match input {
-                DriverInput::Relationships => ControlFlow::Continue(()),
+                DriverInput::Relationships => self.resolve_relationships().await,
+                DriverInput::Removals => self.reclaim_removals().await,
+                DriverInput::MediaWorkTurn => ControlFlow::Continue(()),
                 DriverInput::Favorites(result) => {
                     self::inventory::publish_favorites_refresh(&mut self.favorites_load, &self.mailbox, result);
                     ControlFlow::Continue(())
@@ -627,7 +770,7 @@ impl SessionDriver {
                     }
                     Input::InventoryFetch(None) => ControlFlow::Continue(()),
                     Input::Media(result) => {
-                        self.handle_media_result(result);
+                        self.begin_media_result(result);
                         ControlFlow::Continue(())
                     }
                     Input::Terrain(decoded) => {
@@ -673,8 +816,65 @@ impl SessionDriver {
         }
     }
 
-    fn handle_world_read(&self, request: ReadRequest) {
-        request.serve(self.session_world.world());
+    fn handle_world_read(&mut self, request: ReadRequest) {
+        request.serve_from_owner(self.session_world.world_mut());
+    }
+
+    async fn wait_for_owner_turn(&mut self) -> bool {
+        match serve_owner_turn(&mut self.reads, &mut self.session_world, &self.cancellation).await {
+            OwnerTurnProgress::Continue | OwnerTurnProgress::ReadServed => true,
+            OwnerTurnProgress::Cancelled => {
+                self.mailbox.publish(ViewerUpdate::Ended);
+                false
+            }
+        }
+    }
+
+    async fn lookup_entity_on_owner_turn(&mut self, id: Uuid) -> Result<Option<world::Entity>, ()> {
+        let mut cursor = None;
+        loop {
+            match self.session_world.lookup_entity_step(id, cursor, MAX_OBJECT_LOOKUP_WORK_ITEMS) {
+                ObjectLookupProgress::Visible { entity, .. } => return Ok(Some(entity)),
+                ObjectLookupProgress::Hidden { .. } => return Ok(None),
+                ObjectLookupProgress::Pending { cursor: next, .. } => {
+                    if !self.wait_for_owner_turn().await {
+                        return Err(());
+                    }
+                    cursor = Some(next);
+                }
+            }
+        }
+    }
+
+    async fn lookup_entity_at_on_owner_turn(&mut self, address: world::LocalAddress) -> Result<Option<world::Entity>, ()> {
+        let mut cursor = None;
+        loop {
+            match self.session_world.lookup_entity_at_step(address, cursor, MAX_OBJECT_LOOKUP_WORK_ITEMS) {
+                ObjectLookupProgress::Visible { entity, .. } => return Ok(Some(entity)),
+                ObjectLookupProgress::Hidden { .. } => return Ok(None),
+                ObjectLookupProgress::Pending { cursor: next, .. } => {
+                    if !self.wait_for_owner_turn().await {
+                        return Err(());
+                    }
+                    cursor = Some(next);
+                }
+            }
+        }
+    }
+
+    async fn recovery_cancellations_on_owner_turn(
+        &mut self,
+        cancellations: impl IntoIterator<Item = (Option<world::Entity>, world::LocalAddress)>,
+    ) -> Result<Vec<world::LocalAddress>, ()> {
+        let mut addresses = Vec::new();
+        for (entity, address) in cancellations {
+            let current = self.lookup_entity_at_on_owner_turn(address).await?;
+            if entity.is_some_and(|entity| current.is_some_and(|current| current != entity)) {
+                continue;
+            }
+            addresses.push(address);
+        }
+        Ok(addresses)
     }
 
     fn handle_camera_tick(&mut self) {
@@ -690,12 +890,308 @@ impl SessionDriver {
             .and_then(|info| info.resolved_origin())
     }
 
-    fn handle_media_result(&mut self, result: Option<ObjectMediaResult>) {
+    fn begin_media_result(&mut self, result: Option<ObjectMediaResult>) {
         if let Some(result) = result {
-            self.media.apply_result(result, &mut self.session_world);
+            self.pending_media_apply = self.media.begin_apply_result(result);
         } else if self.cancellation.clone().now_or_never().is_none() {
             tracing::warn!("object media worker stopped; media fetching is disabled for this session");
             self.media.disable();
+        }
+    }
+
+    async fn advance_pending_owner_turn(&mut self) -> ControlFlow<()> {
+        if self.pending_object_update.as_ref().is_some_and(|pending| matches!(&pending.stage, PendingSimulatorObjectUpdateStage::Batch(_)))
+        {
+            return self.advance_pending_object_batch_turn().await;
+        }
+        match serve_owner_turn(&mut self.reads, &mut self.session_world, &self.cancellation).await {
+            OwnerTurnProgress::Continue | OwnerTurnProgress::ReadServed => self.advance_pending_object_update().await,
+            OwnerTurnProgress::Cancelled => {
+                self.mailbox.publish(ViewerUpdate::Ended);
+                ControlFlow::Break(())
+            }
+        }
+    }
+
+    async fn advance_pending_object_batch_turn(&mut self) -> ControlFlow<()> {
+        let Some(mut pending) = self.pending_object_update.take() else { return ControlFlow::Continue(()) };
+        let stage = std::mem::replace(&mut pending.stage, PendingSimulatorObjectUpdateStage::Finished);
+        let PendingSimulatorObjectUpdateStage::Batch(mut continuation) = stage else {
+            pending.stage = stage;
+            self.pending_object_update = Some(pending);
+            return ControlFlow::Continue(());
+        };
+        let agent_data =
+            self.active_session.as_ref().map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
+        let recovery = &mut self.recovery;
+        let (turn, progress) = serve_owner_turn_with_advance(&mut self.reads, &mut self.session_world, &self.cancellation, |world| {
+            let mut on_object_chunk = |targets, updated| recovery.schedule(targets, updated, agent_data);
+            world.advance_object_batch(&mut continuation, &mut on_object_chunk)
+        })
+        .await;
+        match (turn, progress) {
+            (OwnerTurnProgress::Cancelled, None) => {
+                self.mailbox.publish(ViewerUpdate::Ended);
+                ControlFlow::Break(())
+            }
+            (OwnerTurnProgress::Continue | OwnerTurnProgress::ReadServed, Some(ObjectBatchProgress::Pending)) => {
+                pending.stage = PendingSimulatorObjectUpdateStage::Batch(continuation);
+                self.pending_object_update = Some(pending);
+                ControlFlow::Continue(())
+            }
+            (OwnerTurnProgress::Continue | OwnerTurnProgress::ReadServed, Some(ObjectBatchProgress::Complete(summary))) => {
+                pending.stage = PendingSimulatorObjectUpdateStage::Finish(self.handoff.begin_object_update_finish(
+                    pending.simulator_id,
+                    pending.agent_id,
+                    summary,
+                ));
+                self.pending_object_update = Some(pending);
+                ControlFlow::Continue(())
+            }
+            (OwnerTurnProgress::Cancelled, Some(_)) | (OwnerTurnProgress::Continue | OwnerTurnProgress::ReadServed, None) => {
+                unreachable!("owner turn and object batch progress must agree")
+            }
+        }
+    }
+
+    async fn advance_pending_object_update(&mut self) -> ControlFlow<()> {
+        let Some(mut pending) = self.pending_object_update.take() else { return ControlFlow::Continue(()) };
+        let stage = std::mem::replace(&mut pending.stage, PendingSimulatorObjectUpdateStage::Finished);
+        let outcome = match stage {
+            PendingSimulatorObjectUpdateStage::Cache(mut continuation) => {
+                match self.object_cache.advance_resolve_cached(&mut self.session_world, &mut continuation) {
+                    CachedObjectProgress::Pending => {
+                        pending.stage = PendingSimulatorObjectUpdateStage::Cache(continuation);
+                        self.pending_object_update = Some(pending);
+                        return ControlFlow::Continue(());
+                    }
+                    CachedObjectProgress::Complete(batch, media_requests, overrides) => {
+                        if let Err(error) = self.session_world.retain_cached_overrides(overrides) {
+                            tracing::warn!(?error, "cached PBR material overrides could not be restored");
+                        }
+                        if let Some((continuation, media_requests)) = self.handoff.finish_cached_object_update(
+                            &mut self.session_world,
+                            pending.simulator_id,
+                            pending.agent_id,
+                            batch,
+                            media_requests,
+                        ) {
+                            pending.media_requests.extend(media_requests);
+                            pending.stage = PendingSimulatorObjectUpdateStage::Batch(continuation);
+                            self.pending_object_update = Some(pending);
+                            return ControlFlow::Continue(());
+                        }
+                        None
+                    }
+                }
+            }
+            PendingSimulatorObjectUpdateStage::Batch(mut continuation) => {
+                let agent_data = self
+                    .active_session
+                    .as_ref()
+                    .map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
+                let progress = {
+                    let recovery = &mut self.recovery;
+                    let mut on_object_chunk = |targets, updated| recovery.schedule(targets, updated, agent_data);
+                    self.session_world.advance_object_batch(&mut continuation, &mut on_object_chunk)
+                };
+                match progress {
+                    ObjectBatchProgress::Pending => {
+                        pending.stage = PendingSimulatorObjectUpdateStage::Batch(continuation);
+                        self.pending_object_update = Some(pending);
+                        return ControlFlow::Continue(());
+                    }
+                    ObjectBatchProgress::Complete(batch_summary) => {
+                        pending.stage = PendingSimulatorObjectUpdateStage::Finish(self.handoff.begin_object_update_finish(
+                            pending.simulator_id,
+                            pending.agent_id,
+                            batch_summary,
+                        ));
+                        self.pending_object_update = Some(pending);
+                        return ControlFlow::Continue(());
+                    }
+                }
+            }
+            PendingSimulatorObjectUpdateStage::Entity(mut continuation) => {
+                match self.handoff.advance_entity_update(&mut self.session_world, &mut continuation) {
+                    EntityUpdateProgress::Pending => {
+                        pending.stage = PendingSimulatorObjectUpdateStage::Entity(continuation);
+                        self.pending_object_update = Some(pending);
+                        return ControlFlow::Continue(());
+                    }
+                    EntityUpdateProgress::Complete(outcome) => {
+                        pending.stage = PendingSimulatorObjectUpdateStage::Finalize(ObjectMessageFinalization::new(
+                            &self.session_world,
+                            outcome,
+                            std::mem::take(&mut pending.media_requests),
+                        ));
+                        self.pending_object_update = Some(pending);
+                        return ControlFlow::Continue(());
+                    }
+                }
+            }
+            PendingSimulatorObjectUpdateStage::Finish(mut continuation) => {
+                match self.handoff.advance_object_update_finish(&mut self.session_world, &mut continuation) {
+                    ObjectUpdateFinishProgress::Pending => {
+                        pending.stage = PendingSimulatorObjectUpdateStage::Finish(continuation);
+                        self.pending_object_update = Some(pending);
+                        return ControlFlow::Continue(());
+                    }
+                    ObjectUpdateFinishProgress::Complete(outcome) => {
+                        pending.stage = PendingSimulatorObjectUpdateStage::Finalize(ObjectMessageFinalization::new(
+                            &self.session_world,
+                            outcome,
+                            std::mem::take(&mut pending.media_requests),
+                        ));
+                        self.pending_object_update = Some(pending);
+                        return ControlFlow::Continue(());
+                    }
+                }
+            }
+            PendingSimulatorObjectUpdateStage::Finalize(mut continuation) => {
+                match self.advance_object_message_finalization(
+                    &mut continuation,
+                    pending.simulator_id,
+                    pending.packet_order,
+                    pending.received_at,
+                    &pending.message,
+                ) {
+                    ObjectMessageFinalizationProgress::Pending => {
+                        pending.stage = PendingSimulatorObjectUpdateStage::Finalize(continuation);
+                        self.pending_object_update = Some(pending);
+                        return ControlFlow::Continue(());
+                    }
+                    ObjectMessageFinalizationProgress::Complete => {
+                        self.finish_simulator_message_tail(
+                            pending.simulator_id,
+                            pending.source,
+                            pending.received_at,
+                            pending.primary_origin_before,
+                            pending.region,
+                            pending.message,
+                        );
+                        return ControlFlow::Continue(());
+                    }
+                }
+            }
+            PendingSimulatorObjectUpdateStage::Finished => None,
+        };
+        self.finish_simulator_message(
+            pending.simulator_id,
+            pending.packet_order,
+            pending.source,
+            pending.received_at,
+            pending.primary_origin_before,
+            pending.region,
+            pending.message,
+            pending.media_requests,
+            outcome,
+        )
+        .await
+    }
+
+    fn advance_object_message_finalization(
+        &mut self,
+        continuation: &mut ObjectMessageFinalization,
+        simulator_id: SimulatorId,
+        packet_order: PacketOrder,
+        received_at: std::time::Instant,
+        message: &Message,
+    ) -> ObjectMessageFinalizationProgress {
+        let mut lookup_work = 0;
+        let mut media_requests = usize::from(continuation.current_media.is_some());
+        loop {
+            if lookup_work >= MAX_OBJECT_LOOKUP_WORK_ITEMS {
+                return ObjectMessageFinalizationProgress::Pending;
+            }
+            match continuation.stage {
+                ObjectMessageFinalizationStage::Recovery => {
+                    if let Some((expected, address)) = continuation.cancellations.get(continuation.cancellation_index).copied() {
+                        match self.session_world.lookup_entity_at_step(
+                            address,
+                            continuation.cancellation_cursor.take(),
+                            MAX_OBJECT_LOOKUP_WORK_ITEMS.saturating_sub(lookup_work),
+                        ) {
+                            ObjectLookupProgress::Visible { entity, work_units } => {
+                                lookup_work = lookup_work.saturating_add(work_units);
+                                if expected.is_none_or(|expected| expected == entity) {
+                                    continuation.updated.push(address);
+                                }
+                                continuation.cancellation_index += 1;
+                            }
+                            ObjectLookupProgress::Hidden { work_units } => {
+                                lookup_work = lookup_work.saturating_add(work_units);
+                                continuation.updated.push(address);
+                                continuation.cancellation_index += 1;
+                            }
+                            ObjectLookupProgress::Pending { cursor, .. } => {
+                                continuation.cancellation_cursor = Some(cursor);
+                                return ObjectMessageFinalizationProgress::Pending;
+                            }
+                        }
+                        continue;
+                    }
+
+                    if continuation.has_summary {
+                        let agent_data = self
+                            .active_session
+                            .as_ref()
+                            .map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
+                        self.recovery.schedule(
+                            std::mem::take(&mut continuation.recovery_targets),
+                            std::mem::take(&mut continuation.updated),
+                            agent_data,
+                        );
+                    }
+                    if continuation.outcome.touched_agent
+                        && self.primary_simulator == Some(simulator_id)
+                        && let Some(entity) = continuation.outcome.agent_entity
+                    {
+                        self.publish_world_agent_motion_for_entity(entity, received_at);
+                    }
+                    self.environments.simulator_message(
+                        &mut self.session_world,
+                        simulator_id,
+                        packet_order,
+                        message,
+                        self.primary_simulator,
+                    );
+                    continuation.stage = ObjectMessageFinalizationStage::Media;
+                }
+                ObjectMessageFinalizationStage::Media => {
+                    if media_requests >= MAX_OBJECTS_PER_INTAKE_QUANTUM {
+                        return ObjectMessageFinalizationProgress::Pending;
+                    }
+                    if continuation.current_media.is_none() {
+                        let Some(request) = continuation.media_requests.pop_front() else {
+                            return ObjectMessageFinalizationProgress::Complete;
+                        };
+                        continuation.current_media = Some(request);
+                        media_requests += 1;
+                    }
+                    let Some(request) = continuation.current_media else {
+                        return ObjectMessageFinalizationProgress::Complete;
+                    };
+                    match self.session_world.prepare_object_media_step(
+                        simulator_id,
+                        request,
+                        continuation.media_cursor.take(),
+                        MAX_OBJECT_LOOKUP_WORK_ITEMS.saturating_sub(lookup_work),
+                    ) {
+                        ObjectMediaPreparationProgress::Pending(cursor) => {
+                            continuation.media_cursor = Some(cursor);
+                            return ObjectMessageFinalizationProgress::Pending;
+                        }
+                        ObjectMediaPreparationProgress::Complete { target, work_units } => {
+                            lookup_work = lookup_work.saturating_add(work_units);
+                            continuation.current_media = None;
+                            if let Some(target) = target {
+                                self.media.queue_current(target);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -764,15 +1260,33 @@ impl SessionDriver {
                     &capabilities,
                     self.primary_simulator,
                 );
-                let summary = self.handoff.promote(&mut self.session_world, previous_simulator_id, simulator_id);
+                let summary = if let Some(mut continuation) = self.handoff.begin_promotion(previous_simulator_id, simulator_id) {
+                    loop {
+                        match self.handoff.advance_promotion(&mut self.session_world, &mut continuation) {
+                            PromotionProgress::Pending => {
+                                if !self.wait_for_owner_turn().await {
+                                    return ControlFlow::Break(());
+                                }
+                            }
+                            PromotionProgress::Complete(summary) => break summary,
+                        }
+                    }
+                } else {
+                    None
+                };
                 let region = self.session_world.region_for(simulator_id).map(|region| region.get());
                 tracing::info!(simulator = simulator_id.get(), region, "primary simulator promoted");
                 self.on_primary_changed(simulator_id, *session, capabilities, self.active_login_data.clone());
                 if let Some(summary) = summary {
-                    let touched_agent = self.summary_touches_agent(&summary);
-                    self.process_ingest_summary(simulator_id, summary);
-                    if touched_agent {
-                        self.publish_world_agent_motion(std::time::Instant::now());
+                    let touched_agent = match self.summary_touches_agent(&summary).await {
+                        Ok(touched_agent) => touched_agent,
+                        Err(()) => return ControlFlow::Break(()),
+                    };
+                    if self.process_ingest_summary(simulator_id, summary).await.is_break() {
+                        return ControlFlow::Break(());
+                    }
+                    if touched_agent && self.publish_world_agent_motion(std::time::Instant::now()).await.is_break() {
+                        return ControlFlow::Break(());
                     }
                 }
                 if let Some((movement, received_at)) = self.handoff.apply_promoted_movement_complete(
@@ -805,7 +1319,13 @@ impl SessionDriver {
             }
             SimulatorMessage { simulator_id, sequence, packet_order, source, received_at, ping_delay, message } => {
                 let terminal_inventory_overload = self.handle_inventory_udp(&message);
-                self.handle_simulator_message(simulator_id, sequence, packet_order, source, received_at, ping_delay, message).await;
+                if self
+                    .handle_simulator_message(simulator_id, sequence, packet_order, source, received_at, ping_delay, message)
+                    .await
+                    .is_break()
+                {
+                    return ControlFlow::Break(());
+                }
                 if terminal_inventory_overload {
                     self.fail_inventory_overload();
                     return ControlFlow::Break(());
@@ -1012,7 +1532,7 @@ impl SessionDriver {
         received_at: std::time::Instant,
         ping_delay: Option<std::time::Duration>,
         message: Message,
-    ) {
+    ) -> ControlFlow<()> {
         let primary_origin_before = (self.primary_simulator == Some(simulator_id)).then(|| self.primary_region_origin()).flatten();
         let region = self.session_world.region_for(simulator_id);
         if let Message::RegionHandshake(handshake) = &message {
@@ -1043,47 +1563,129 @@ impl SessionDriver {
         }
 
         let agent_id = self.active_session.as_ref().map(|session| session.agent_id);
-        let agent_data =
-            self.active_session.as_ref().map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
-        let result = {
-            let recovery = &mut self.recovery;
-            let mut on_object_chunk = |targets, updated| {
-                recovery.schedule(targets, updated, agent_data);
+        if is_object_message(&message)
+            && let Some(preparation) = self.handoff.begin_object_update(
+                &mut self.session_world,
+                simulator_id,
+                sequence,
+                packet_order,
+                received_at,
+                ping_delay,
+                &message,
+                agent_id,
+                &mut self.object_cache,
+            )
+        {
+            let stage = match preparation {
+                ObjectUpdatePreparation::Cached(continuation) => PendingSimulatorObjectUpdateStage::Cache(continuation),
+                ObjectUpdatePreparation::Entity(continuation) => PendingSimulatorObjectUpdateStage::Entity(continuation),
+                ObjectUpdatePreparation::Ready { continuation, media_requests: recovered } => {
+                    media_requests.extend(recovered);
+                    PendingSimulatorObjectUpdateStage::Batch(continuation)
+                }
             };
-            self.handoff
-                .apply_message_cooperatively(
-                    &mut self.session_world,
-                    simulator_id,
-                    sequence,
-                    packet_order,
-                    received_at,
-                    ping_delay,
-                    &message,
-                    agent_id,
-                    &mut self.object_cache,
-                    &mut on_object_chunk,
-                    &mut media_requests,
-                )
-                .await
-        };
+            self.pending_object_update = Some(PendingSimulatorObjectUpdate {
+                simulator_id,
+                packet_order,
+                source,
+                received_at,
+                primary_origin_before,
+                region,
+                message,
+                media_requests,
+                agent_id,
+                stage,
+            });
+            return ControlFlow::Continue(());
+        }
+        let result = self.handoff.apply_message(
+            &mut self.session_world,
+            simulator_id,
+            sequence,
+            packet_order,
+            received_at,
+            ping_delay,
+            &message,
+            agent_id,
+        );
+        self.finish_simulator_message(
+            simulator_id,
+            packet_order,
+            source,
+            received_at,
+            primary_origin_before,
+            region,
+            message,
+            media_requests,
+            result,
+        )
+        .await
+    }
+
+    async fn finish_simulator_message(
+        &mut self,
+        simulator_id: SimulatorId,
+        packet_order: PacketOrder,
+        source: std::net::SocketAddr,
+        received_at: std::time::Instant,
+        primary_origin_before: Option<math::DVec3>,
+        region: Option<world::Region>,
+        message: Message,
+        media_requests: Vec<ObjectMediaRequest>,
+        result: Option<SimulatorMessageOutcome>,
+    ) -> ControlFlow<()> {
         let mut touched_agent = false;
+        let mut agent_entity = None;
         if let Some(outcome) = result {
             touched_agent = outcome.touched_agent;
-            if let Some((simulator_id, summary)) = outcome.summary {
-                self.process_ingest_summary(simulator_id, summary);
+            agent_entity = outcome.agent_entity;
+            if let Some((simulator_id, summary)) = outcome.summary
+                && self.process_ingest_summary(simulator_id, summary).await.is_break()
+            {
+                return ControlFlow::Break(());
             }
         }
-        if touched_agent && self.primary_simulator == Some(simulator_id) {
-            self.publish_world_agent_motion(received_at);
+        if touched_agent
+            && self.primary_simulator == Some(simulator_id)
+            && let Some(entity) = agent_entity
+        {
+            self.publish_world_agent_motion_for_entity(entity, received_at);
         }
 
         self.environments.simulator_message(&mut self.session_world, simulator_id, packet_order, &message, self.primary_simulator);
         for request in media_requests {
-            if let Some(target) = self.session_world.prepare_object_media(simulator_id, request) {
-                self.media.queue(target, &self.session_world);
+            let mut cursor = None;
+            loop {
+                match self.session_world.prepare_object_media_step(simulator_id, request, cursor.take(), MAX_OBJECT_LOOKUP_WORK_ITEMS) {
+                    ObjectMediaPreparationProgress::Pending(next) => {
+                        if !self.wait_for_owner_turn().await {
+                            return ControlFlow::Break(());
+                        }
+                        cursor = Some(next);
+                    }
+                    ObjectMediaPreparationProgress::Complete { target, .. } => {
+                        if let Some(target) = target {
+                            self.media.queue_current(target);
+                        }
+                        break;
+                    }
+                }
             }
         }
 
+        self.finish_simulator_message_tail(simulator_id, source, received_at, primary_origin_before, region, message);
+        ControlFlow::Continue(())
+    }
+
+    fn finish_simulator_message_tail(
+        &mut self,
+        simulator_id: SimulatorId,
+        source: std::net::SocketAddr,
+        received_at: std::time::Instant,
+        primary_origin_before: Option<math::DVec3>,
+        region: Option<world::Region>,
+        message: Message,
+    ) {
         if let Message::AgentMovementComplete(movement) = &message {
             let outcome = self.handoff.movement_complete(
                 &mut self.session_world,
@@ -1190,16 +1792,20 @@ impl SessionDriver {
         }));
     }
 
-    fn process_ingest_summary(&mut self, simulator_id: SimulatorId, summary: IngestSummary) {
+    async fn process_ingest_summary(&mut self, simulator_id: SimulatorId, summary: IngestSummary) -> ControlFlow<()> {
         summary.log_incomplete_data(simulator_id, self.session_world.region_for(simulator_id));
         let targets = route_recovery_targets(&self.session_world, summary.recovery_requests());
-        let updated = summary.recovery_cancellation_addresses().collect();
+        let updated = match self.recovery_cancellations_on_owner_turn(summary.recovery_cancellations()).await {
+            Ok(updated) => updated,
+            Err(()) => return ControlFlow::Break(()),
+        };
         let agent_data =
             self.active_session.as_ref().map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
         self.recovery.schedule(targets, updated, agent_data);
+        ControlFlow::Continue(())
     }
 
-    fn resolve_relationships(&mut self) -> ControlFlow<()> {
+    async fn resolve_relationships(&mut self) -> ControlFlow<()> {
         let resolution = match self.session_world.resolve_relationships() {
             Ok(resolution) => resolution,
             Err(error) => {
@@ -1214,23 +1820,65 @@ impl SessionDriver {
         );
         let agent_data =
             self.active_session.as_ref().map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
-        self.recovery.schedule(targets, resolution.recovery_cancellations, agent_data);
-        if resolution.revision.is_some() {
-            self.publish_world_agent_motion(std::time::Instant::now());
+        let cancellations = match self
+            .recovery_cancellations_on_owner_turn(
+                resolution.recovery_cancellations.into_iter().map(|cancellation| (Some(cancellation.entity()), cancellation.address())),
+            )
+            .await
+        {
+            Ok(cancellations) => cancellations,
+            Err(()) => return ControlFlow::Break(()),
+        };
+        self.recovery.schedule(targets, cancellations, agent_data);
+        if resolution.revision.is_some() && self.publish_world_agent_motion(std::time::Instant::now()).await.is_break() {
+            return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
     }
 
-    fn summary_touches_agent(&self, summary: &IngestSummary) -> bool {
-        self.active_session
-            .as_ref()
-            .and_then(|session| self.session_world.world().entity(session.agent_id))
-            .is_some_and(|entity| summary.touches_entity(entity))
+    async fn reclaim_removals(&mut self) -> ControlFlow<()> {
+        let progress = self.session_world.reclaim_removals();
+        let targets = route_recovery_targets(
+            &self.session_world,
+            progress.recovery.requests.into_iter().map(|address| (address, protocol::messages::CacheMissType::Full)),
+        );
+        let agent_data =
+            self.active_session.as_ref().map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
+        let cancellations = match self
+            .recovery_cancellations_on_owner_turn(
+                progress.recovery_cancellations.into_iter().map(|cancellation| (Some(cancellation.entity()), cancellation.address())),
+            )
+            .await
+        {
+            Ok(cancellations) => cancellations,
+            Err(()) => return ControlFlow::Break(()),
+        };
+        self.recovery.schedule(targets, cancellations, agent_data);
+        if progress.revision.is_some() && self.publish_world_agent_motion(std::time::Instant::now()).await.is_break() {
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
     }
 
-    fn publish_world_agent_motion(&self, received_at: std::time::Instant) {
-        let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
-        self.agent_motion.publish_world(self.session_world.world(), agent_id, received_at);
+    async fn summary_touches_agent(&mut self, summary: &IngestSummary) -> Result<bool, ()> {
+        let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return Ok(false) };
+        Ok(self.lookup_entity_on_owner_turn(agent_id).await?.is_some_and(|entity| summary.touches_entity(entity)))
+    }
+
+    async fn publish_world_agent_motion(&mut self, received_at: std::time::Instant) -> ControlFlow<()> {
+        let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return ControlFlow::Continue(()) };
+        let entity = match self.lookup_entity_on_owner_turn(agent_id).await {
+            Ok(entity) => entity,
+            Err(()) => return ControlFlow::Break(()),
+        };
+        let Some(entity) = entity else { return ControlFlow::Continue(()) };
+        self.publish_world_agent_motion_for_entity(entity, received_at);
+        ControlFlow::Continue(())
+    }
+
+    fn publish_world_agent_motion_for_entity(&mut self, entity: world::Entity, received_at: std::time::Instant) {
+        let Ok(detail) = self.session_world.world().object_detail(entity) else { return };
+        self.agent_motion.publish_world_detail(&detail, received_at);
     }
 
     fn publish_region_motion(&mut self) {
@@ -1344,7 +1992,19 @@ impl SessionDriver {
         let inventory_snapshot = self.inventory_changes.send_replace(None);
         self.inventory_cache.close_with_payload((inventory, inventory_snapshot)).await;
         self.object_cache.close().await;
-        for (simulator_id, error) in self.session_world.retire_all() {
+        let mut failures = self.session_world.retire_all();
+        while self.session_world.world().has_pending_removals() {
+            drop(self.session_world.reclaim_removals());
+            tokio::task::yield_now().await;
+        }
+        if !failures.is_empty() {
+            failures = self.session_world.retire_all();
+            while self.session_world.world().has_pending_removals() {
+                drop(self.session_world.reclaim_removals());
+                tokio::task::yield_now().await;
+            }
+        }
+        for (simulator_id, error) in failures {
             let region = self.session_world.region_for(simulator_id).map(|region| region.get());
             tracing::warn!(simulator = simulator_id.get(), region, %error, "could not retire simulator world region on session shutdown");
         }
@@ -1416,6 +2076,21 @@ fn cancel_pending_folder_preparation(preparation: PendingFolderPreparation) -> i
             tracing::trace!(folder = %preparation.folder.id().uuid(), "inventory fetch worker stopped before shutdown acknowledgement");
         }
     }
+}
+
+fn is_object_message(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::ObjectUpdate(_)
+            | Message::ObjectUpdateCompressed(_)
+            | Message::ImprovedTerseObjectUpdate(_)
+            | Message::ObjectUpdateCached(_)
+            | Message::ObjectExtraParams(_)
+            | Message::AvatarAppearance(_)
+            | Message::AvatarSitResponse(_)
+            | Message::KillObject(_)
+            | Message::GenericStreamingMessage(_)
+    )
 }
 
 fn is_inventory_lifecycle_barrier(event: &Event) -> bool {

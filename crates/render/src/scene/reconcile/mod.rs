@@ -13,8 +13,8 @@ use utils::AssetId;
 use uuid::Uuid;
 use world::{
     Entity, EnvironmentRead, LocalAddress, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_PAGE_ITEMS, ObjectDetailBatch, ObjectListPage,
-    ObjectPageCursor, Region, RegionPage, RegionPageCursor, RegionSummary, TerrainPage, TerrainPageCursor, TerrainPatch, TerrainPatchId,
-    WorldChangeCursor, WorldChangePage, WorldReadBarrier, WorldReadError, WorldRevision,
+    ObjectPageCursor, Region, RegionPage, RegionPageCursor, RegionSummary, RemovalFence, TerrainPage, TerrainPageCursor, TerrainPatch,
+    TerrainPatchId, WorldChangeCursor, WorldChangePage, WorldReadBarrier, WorldReadError, WorldRevision,
 };
 
 use crate::scene::{
@@ -35,7 +35,7 @@ pub const MAX_OBJECTS: usize = 65_536;
 pub const MAX_REGIONS: usize = 33;
 pub const MAX_RETAINED_BYTES: usize = 96 * 1024 * 1024;
 const MAX_PATCHES: usize = MAX_REGIONS * 256;
-pub const MAX_BATCH_CHANGES: usize = 2 * MAX_OBJECTS + 2 * MAX_PATCHES + 5 * MAX_REGIONS + 65;
+pub const MAX_BATCH_CHANGES: usize = 3 * MAX_OBJECTS + 2 * MAX_PATCHES + 5 * MAX_REGIONS + 65;
 const MAX_PENDING: usize = MAX_OBJECTS + MAX_OBJECT_PAGE_ITEMS;
 const READ_BYTES: usize = 1024 * 1024 + 16 * 1024;
 const WORK: usize = 128;
@@ -100,6 +100,7 @@ pub enum ReconcileStep {
 struct DirtySet {
     objects: HashSet<Entity>,
     removed: HashSet<Entity>,
+    invalidated: HashMap<Entity, RemovalFence>,
     regions: BTreeSet<Region>,
     environments: BTreeSet<Region>,
     retired: BTreeSet<Region>,
@@ -113,6 +114,7 @@ impl DirtySet {
     fn is_empty(&self) -> bool {
         self.objects.is_empty()
             && self.removed.is_empty()
+            && self.invalidated.is_empty()
             && self.regions.is_empty()
             && self.environments.is_empty()
             && self.retired.is_empty()

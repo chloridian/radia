@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU32;
 
 use network::SimulatorId;
 use protocol::messages::{
@@ -6,7 +7,7 @@ use protocol::messages::{
     ObjectUpdateCached,
 };
 use uuid::Uuid;
-use world::{LocalAddress, OrderEvidence, Region, UpdateSource};
+use world::{LocalAddress, ObjectLookupCursor, ObjectLookupProgress, OrderEvidence, Region, UpdateSource};
 
 use crate::session::inbound::{
     ObjectBatch, ObjectMediaRequest, ObjectOperation, decode_cached_object, decode_pbr_overrides, object_media_requests,
@@ -18,125 +19,276 @@ use crate::session::object_cache::{
     MAX_REGION_OVERRIDES, MAX_TOTAL_BYTES, MAX_TOTAL_ENTRIES, ObjectCacheSession, OverrideWrite, StoredScope, now_millis,
 };
 use crate::session::world::MAX_OBJECTS_PER_INTAKE_QUANTUM;
+use crate::session::world::SessionWorld;
+
+pub(in crate::session) struct CachedObjectContinuation {
+    simulator_id: SimulatorId,
+    region: Region,
+    sequence: u32,
+    order: OrderEvidence,
+    scope: Option<CacheScope>,
+    update: ObjectUpdateCached,
+    batch: ObjectBatch,
+    index: usize,
+    stale: HashSet<u32>,
+    media_requests: Vec<ObjectMediaRequest>,
+    stale_overrides: Vec<OverrideWrite>,
+    cached_overrides: Vec<CachedOverride>,
+    invalid_fields: usize,
+    pending: Option<PendingCachedObject>,
+}
+
+struct PendingCachedObject {
+    index: usize,
+    source: UpdateSource,
+    local_id: NonZeroU32,
+    object_id: Uuid,
+    operation: ObjectOperation,
+    media_requests: Vec<ObjectMediaRequest>,
+    cursor: Option<ObjectLookupCursor>,
+}
+
+pub(in crate::session) enum CachedObjectProgress {
+    Pending,
+    Complete(ObjectBatch, Vec<ObjectMediaRequest>, Vec<CachedOverride>),
+}
 
 const FLAGS_USE_PHYSICS: u32 = 1;
 
 impl ObjectCacheSession {
+    pub(in crate::session) fn begin_resolve_cached(
+        &self,
+        simulator_id: SimulatorId,
+        region: Region,
+        sequence: u32,
+        order: OrderEvidence,
+        update: ObjectUpdateCached,
+        batch: ObjectBatch,
+    ) -> CachedObjectContinuation {
+        let scope = self.identities.get(&simulator_id).cloned();
+        CachedObjectContinuation {
+            simulator_id,
+            region,
+            sequence,
+            order,
+            scope,
+            update,
+            batch,
+            index: 0,
+            stale: HashSet::new(),
+            media_requests: Vec::new(),
+            stale_overrides: Vec::new(),
+            cached_overrides: Vec::new(),
+            invalid_fields: 0,
+            pending: None,
+        }
+    }
+
+    pub(in crate::session) fn advance_resolve_cached(
+        &mut self,
+        world: &mut SessionWorld,
+        continuation: &mut CachedObjectContinuation,
+    ) -> CachedObjectProgress {
+        let mut processed = usize::from(continuation.pending.is_some());
+        let mut lookup_work = 0;
+        loop {
+            if processed >= MAX_OBJECTS_PER_INTAKE_QUANTUM || lookup_work >= world::MAX_OBJECT_LOOKUP_WORK_ITEMS {
+                return CachedObjectProgress::Pending;
+            }
+
+            if let Some(mut pending) = continuation.pending.take() {
+                match world.lookup_entity_at_step(
+                    LocalAddress::new(continuation.region, pending.local_id),
+                    pending.cursor.take(),
+                    world::MAX_OBJECT_LOOKUP_WORK_ITEMS.saturating_sub(lookup_work),
+                ) {
+                    ObjectLookupProgress::Visible { entity, work_units } => {
+                        lookup_work = lookup_work.saturating_add(work_units);
+                        let current_id = world.world().object(entity).map(|object| object.id());
+                        if current_id != Some(pending.object_id) {
+                            self.resolve_stored_override(continuation, pending.source, pending.local_id, Some(pending.object_id));
+                        }
+                        continuation.batch.blocks[pending.index] = match current_id {
+                            Some(current_id) if current_id == pending.object_id => None,
+                            Some(_) => {
+                                Some(ObjectOperation::Cached { source: pending.source, local_id: pending.local_id, cache_miss_type: Full })
+                            }
+                            None => {
+                                continuation.media_requests.append(&mut pending.media_requests);
+                                Some(pending.operation)
+                            }
+                        };
+                    }
+                    ObjectLookupProgress::Hidden { work_units } => {
+                        lookup_work = lookup_work.saturating_add(work_units);
+                        self.resolve_stored_override(continuation, pending.source, pending.local_id, Some(pending.object_id));
+                        continuation.media_requests.append(&mut pending.media_requests);
+                        continuation.batch.blocks[pending.index] = Some(pending.operation);
+                    }
+                    ObjectLookupProgress::Pending { cursor, .. } => {
+                        pending.cursor = Some(cursor);
+                        continuation.pending = Some(pending);
+                        return CachedObjectProgress::Pending;
+                    }
+                }
+                continue;
+            }
+
+            if continuation.index == continuation.batch.blocks.len() {
+                continuation.batch.invalid_fields = continuation.batch.invalid_fields.saturating_add(continuation.invalid_fields);
+                if let Some(scope) = continuation.scope.as_ref()
+                    && self.loaded_regions.get(&continuation.simulator_id).is_some_and(|region| &region.scope == scope)
+                {
+                    self.touch_loaded_region(continuation.simulator_id, scope);
+                    self.remove_loaded_entries(continuation.simulator_id, &continuation.stale);
+                    if !continuation.stale.is_empty() {
+                        self.enqueue(make_access_submission(scope.clone(), std::mem::take(&mut continuation.stale), now_millis()));
+                    }
+                    if !continuation.stale_overrides.is_empty() {
+                        self.write_overrides(continuation.simulator_id, scope.clone(), std::mem::take(&mut continuation.stale_overrides));
+                    }
+                }
+                return CachedObjectProgress::Complete(
+                    std::mem::replace(
+                        &mut continuation.batch,
+                        ObjectBatch {
+                            region: continuation.region,
+                            region_handle: None,
+                            blocks: Vec::new(),
+                            invalid_blocks: 0,
+                            invalid_fields: 0,
+                        },
+                    ),
+                    std::mem::take(&mut continuation.media_requests),
+                    std::mem::take(&mut continuation.cached_overrides),
+                );
+            }
+
+            processed += 1;
+            let index = continuation.index;
+            continuation.index += 1;
+            let Some(ObjectOperation::Cached { source, local_id, .. }) = continuation.batch.blocks[index].as_ref() else {
+                continue;
+            };
+            let source = *source;
+            let local_id = *local_id;
+            let reference = continuation.update.objects.get(index).copied();
+            let entry = self
+                .loaded_regions
+                .get(&continuation.simulator_id)
+                .filter(|region| continuation.scope.as_ref() == Some(&region.scope))
+                .and_then(|region| region.entries.get(&local_id.get()));
+            let mut cache_miss_type = Full;
+            let decoded = reference.zip(entry).and_then(|(reference, entry)| {
+                let Some(crc) = u32::try_from(entry.crc).ok() else {
+                    continuation.stale.insert(local_id.get());
+                    return None;
+                };
+                if crc != reference.crc {
+                    continuation.stale.insert(local_id.get());
+                    cache_miss_type = CrcMismatch;
+                    return None;
+                }
+                let Some(mut payload) = decode_entry(entry, local_id.get()) else {
+                    continuation.stale.insert(local_id.get());
+                    return None;
+                };
+                set_region_data(&mut payload, continuation.update.region_data);
+                let ordinal = u32::try_from(index).ok()?;
+                let Some(operation) = decode_cached_object(
+                    continuation.region,
+                    continuation.sequence,
+                    continuation.order,
+                    ordinal,
+                    reference,
+                    &payload,
+                    &mut continuation.invalid_fields,
+                ) else {
+                    continuation.stale.insert(local_id.get());
+                    return None;
+                };
+                Some((reference, payload, operation))
+            });
+
+            let Some((reference, payload, mut operation)) = decoded else {
+                self.resolve_stored_override(continuation, source, local_id, None);
+                continuation.batch.blocks[index] = Some(ObjectOperation::Cached { source, local_id, cache_miss_type });
+                continue;
+            };
+            let object_id = match &operation {
+                ObjectOperation::Observe(observation) => observation.id,
+                _ => {
+                    continuation.stale.insert(local_id.get());
+                    self.resolve_stored_override(continuation, source, local_id, None);
+                    continuation.batch.blocks[index] = Some(ObjectOperation::Cached { source, local_id, cache_miss_type });
+                    continue;
+                }
+            };
+            if let Some(received_at) = source.motion_received_at() {
+                operation.set_source(operation.source().with_motion_timing(received_at, source.motion_ping_delay()));
+            }
+            operation.set_is_physical(reference.update_flags & FLAGS_USE_PHYSICS != 0);
+            let Some(ordinal) = u32::try_from(index).ok() else {
+                continuation.stale.insert(local_id.get());
+                self.resolve_stored_override(continuation, source, local_id, None);
+                continuation.batch.blocks[index] = Some(ObjectOperation::Cached { source, local_id, cache_miss_type });
+                continue;
+            };
+            let mut media_requests = object_media_requests(continuation.region, continuation.sequence, continuation.order, &payload);
+            for request in &mut media_requests {
+                request.source = UpdateSource::new(continuation.region, continuation.sequence, continuation.order, ordinal);
+            }
+            continuation.pending =
+                Some(PendingCachedObject { index, source, local_id, object_id, operation, media_requests, cursor: None });
+        }
+    }
+
+    fn resolve_stored_override(
+        &self,
+        continuation: &mut CachedObjectContinuation,
+        source: UpdateSource,
+        local_id: NonZeroU32,
+        observed_id: Option<Uuid>,
+    ) {
+        let Some(stored) = self
+            .loaded_regions
+            .get(&continuation.simulator_id)
+            .filter(|region| continuation.scope.as_ref() == Some(&region.scope))
+            .and_then(|region| region.overrides.get(&local_id.get()))
+        else {
+            return;
+        };
+        match decode_pbr_overrides(&stored.payload) {
+            Ok(decoded) if decoded.local_id == local_id && observed_id.is_none_or(|id| id == stored.object_id) => {
+                continuation.cached_overrides.push(CachedOverride {
+                    source,
+                    local_id,
+                    expected_id: stored.object_id,
+                    overrides: decoded.overrides,
+                });
+            }
+            _ => continuation.stale_overrides.push(OverrideWrite::Delete(local_id.get())),
+        }
+    }
+
+    #[cfg(test)]
     pub(in crate::session) async fn resolve_cached(
         &mut self,
         simulator_id: SimulatorId,
         region: Region,
         sequence: u32,
         order: OrderEvidence,
-        live_id: impl Fn(LocalAddress) -> Option<Uuid>,
+        world: &mut SessionWorld,
         update: &ObjectUpdateCached,
-        mut batch: ObjectBatch,
+        batch: ObjectBatch,
     ) -> (ObjectBatch, Vec<ObjectMediaRequest>, Vec<CachedOverride>) {
-        enum Resolution {
-            Hit(ObjectOperation),
-            SameLiveObject,
-            DifferentLiveObject(Uuid),
-        }
-
-        let scope = self.identities.get(&simulator_id).cloned();
-        let mut stale = HashSet::new();
-        let mut stale_overrides = Vec::new();
-        let mut cached_overrides = Vec::new();
-        let mut media_requests = Vec::new();
-        let mut invalid_fields = 0;
-        for (index, operation) in batch.blocks.iter_mut().enumerate() {
-            if index > 0 && index.is_multiple_of(MAX_OBJECTS_PER_INTAKE_QUANTUM) {
-                tokio::task::yield_now().await;
-            }
-            let Some(ObjectOperation::Cached { source, local_id, .. }) = operation else { continue };
-            let source = *source;
-            let local_id = *local_id;
-            let reference = update.objects.get(index).copied();
-            let loaded = self.loaded_regions.get(&simulator_id).filter(|region| scope.as_ref() == Some(&region.scope));
-            let entry = loaded.and_then(|region| region.entries.get(&local_id.get()));
-            let stored_override = loaded.and_then(|region| region.overrides.get(&local_id.get()));
-            let mut cache_miss_type = Full;
-            let recovered = reference.zip(entry).and_then(|(reference, entry)| {
-                let Some(crc) = u32::try_from(entry.crc).ok() else {
-                    stale.insert(local_id.get());
-                    return None;
-                };
-                if crc != reference.crc {
-                    stale.insert(local_id.get());
-                    cache_miss_type = CrcMismatch;
-                    return None;
-                }
-                let Some(mut payload) = decode_entry(entry, local_id.get()) else {
-                    stale.insert(local_id.get());
-                    return None;
-                };
-                set_region_data(&mut payload, update.region_data);
-                let ordinal = u32::try_from(index).ok()?;
-                let Some(mut operation) = decode_cached_object(region, sequence, order, ordinal, reference, &payload, &mut invalid_fields)
-                else {
-                    stale.insert(local_id.get());
-                    return None;
-                };
-                let ObjectOperation::Observe(observation) = &operation else {
-                    stale.insert(local_id.get());
-                    return None;
-                };
-                match live_id(LocalAddress::new(region, local_id)) {
-                    Some(current_id) if current_id == observation.id => return Some(Resolution::SameLiveObject),
-                    Some(_) => return Some(Resolution::DifferentLiveObject(observation.id)),
-                    None => {}
-                }
-                if let Some(received_at) = source.motion_received_at() {
-                    operation.set_source(operation.source().with_motion_timing(received_at, source.motion_ping_delay()));
-                }
-                operation.set_is_physical(reference.update_flags & FLAGS_USE_PHYSICS != 0);
-                for mut request in object_media_requests(region, sequence, order, &payload) {
-                    request.source = UpdateSource::new(region, sequence, order, ordinal);
-                    media_requests.push(request);
-                }
-                Some(Resolution::Hit(operation))
-            });
-            if let Some(stored) = stored_override
-                && !matches!(recovered, Some(Resolution::SameLiveObject))
-            {
-                let observed_id = match &recovered {
-                    Some(Resolution::Hit(ObjectOperation::Observe(observation))) => Some(observation.id),
-                    Some(Resolution::DifferentLiveObject(id)) => Some(*id),
-                    _ => None,
-                };
-                match decode_pbr_overrides(&stored.payload) {
-                    Ok(decoded) if decoded.local_id == local_id && observed_id.is_none_or(|id| id == stored.object_id) => {
-                        cached_overrides.push(CachedOverride {
-                            source,
-                            local_id,
-                            expected_id: stored.object_id,
-                            overrides: decoded.overrides,
-                        });
-                    }
-                    _ => stale_overrides.push(OverrideWrite::Delete(local_id.get())),
-                }
-            }
-            *operation = match recovered {
-                Some(Resolution::Hit(operation)) => Some(operation),
-                Some(Resolution::SameLiveObject) => None,
-                Some(Resolution::DifferentLiveObject(_)) => Some(ObjectOperation::Cached { source, local_id, cache_miss_type: Full }),
-                None => Some(ObjectOperation::Cached { source, local_id, cache_miss_type }),
-            };
-        }
-        batch.invalid_fields = batch.invalid_fields.saturating_add(invalid_fields);
-        if let Some(scope) = scope
-            && self.loaded_regions.get(&simulator_id).is_some_and(|region| region.scope == scope)
-        {
-            self.touch_loaded_region(simulator_id, &scope);
-            self.remove_loaded_entries(simulator_id, &stale);
-            if !stale.is_empty() {
-                self.enqueue(make_access_submission(scope.clone(), stale, now_millis()));
-            }
-            if !stale_overrides.is_empty() {
-                self.write_overrides(simulator_id, scope, stale_overrides);
+        let mut continuation = self.begin_resolve_cached(simulator_id, region, sequence, order, update.clone(), batch);
+        loop {
+            match self.advance_resolve_cached(world, &mut continuation) {
+                CachedObjectProgress::Pending => tokio::task::yield_now().await,
+                CachedObjectProgress::Complete(batch, media_requests, overrides) => return (batch, media_requests, overrides),
             }
         }
-        (batch, media_requests, cached_overrides)
     }
 
     pub(super) fn remember_entries(&mut self, simulator_id: SimulatorId, scope: CacheScope, entries: &[EncodedEntry]) {
@@ -376,7 +528,8 @@ mod tests {
         let mut cache = open_cache(directory.path().join("objects.sqlite"));
         assert_eq!(load_region(&mut cache).await, 7);
         let object_id = Uuid::from_u128(0xabcde);
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let mut world = region_world();
+        let region = world.region_for(SIMULATOR).expect("cached simulator has a registered region");
 
         for (index, fixture) in [vectors::OBJECT_UPDATE, vectors::OBJECT_UPDATE_COMPRESSED_TYPED].into_iter().enumerate() {
             let mut full = fixture_message(fixture);
@@ -406,7 +559,7 @@ mod tests {
             let sequence = 90 + u32::try_from(index).expect("two fixture indexes fit u32");
             let batch = decoded_cached_batch(region, &cached, sequence);
             let (resolved, requests, _) = cache
-                .resolve_cached(SIMULATOR, region, sequence, OrderEvidence::Ordered(u64::from(sequence)), |_| None, &cached, batch)
+                .resolve_cached(SIMULATOR, region, sequence, OrderEvidence::Ordered(u64::from(sequence)), &mut world, &cached, batch)
                 .await;
 
             assert_eq!(resolved.blocks.len(), 1);
@@ -438,7 +591,7 @@ mod tests {
         let mut world = region_world();
         let region = world.region_for(SIMULATOR).expect("cached simulator has a registered region");
         let batch = decoded_cached_batch(region, &cached, 80);
-        let (batch, _, _) = cache.resolve_cached(SIMULATOR, region, 80, OrderEvidence::Ordered(80), |_| None, &cached, batch).await;
+        let (batch, _, _) = cache.resolve_cached(SIMULATOR, region, 80, OrderEvidence::Ordered(80), &mut world, &cached, batch).await;
         let summary = world.apply_object_batch(SIMULATOR, batch).expect("registered simulator applies the cached hit");
         assert!(summary.blocks.iter().all(|block| block.applied().is_some()));
         let entity = world.world().entity(object_id).expect("cached object was restored");
@@ -660,7 +813,7 @@ mod tests {
                 warm_region,
                 sequence,
                 OrderEvidence::Ordered(u64::from(sequence)),
-                |_| None,
+                &mut warm_world,
                 &update,
                 batch,
             ).await;
@@ -668,7 +821,7 @@ mod tests {
             warm_misses += batch.blocks.iter().filter(|operation| matches!(operation, Some(super::ObjectOperation::Cached { .. }))).count();
             let started = Instant::now();
             let summary = warm_world
-                .apply_object_batch_cooperatively(SIMULATOR, batch, |_, targets, _| warm_requests += targets.len())
+                .apply_object_batch_cooperatively(SIMULATOR, batch, |targets, _| warm_requests += targets.len())
                 .await;
             world_apply_us += started.elapsed().as_micros();
             assert!(summary.is_some(), "cached objects apply to the registered region");
@@ -685,7 +838,7 @@ mod tests {
                 .expect("full update decodes into World operations");
             let started = Instant::now();
             let summary = full_world
-                .apply_object_batch_cooperatively(SIMULATOR, batch, |_, targets, _| full_recovery_targets += targets.len())
+                .apply_object_batch_cooperatively(SIMULATOR, batch, |targets, _| full_recovery_targets += targets.len())
                 .await;
             full_world_apply_us += started.elapsed().as_micros();
             assert!(summary.is_some(), "synthetic update applies to the registered region");

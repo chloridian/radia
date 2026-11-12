@@ -157,6 +157,12 @@ impl MeshPlanner {
                 break;
             };
             self.cursor = Some(*id);
+            if !mirror.object_visible(*entity) {
+                if let Some(target) = self.detach_target(*entity) {
+                    changes.push(MeshChange::Clear(*entity, target.key));
+                }
+                continue;
+            }
             let object = &mirror.objects[entity];
             let desired = self.desired(camera, object);
             let priority = object_priority(camera, object);
