@@ -55,15 +55,19 @@ struct MeshTarget {
     priority: u32,
 }
 
+#[derive(Clone, Copy)]
+enum ScanState {
+    Idle { dirty: bool },
+    Scanning { cursor: Option<Uuid>, rescan: bool },
+}
+
 pub(in crate::scene) struct MeshPlanner {
     camera: Option<Camera>,
     meshes: MeshCache,
     targets: HashMap<Entity, MeshTarget>,
     target_users: HashMap<MeshKey, HashSet<Entity>>,
-    dirty: bool,
-    scanning: bool,
+    scan: ScanState,
     deferred_switch: bool,
-    cursor: Option<Uuid>,
 }
 
 impl MeshPlanner {
@@ -73,10 +77,8 @@ impl MeshPlanner {
             meshes: MeshCache::new(budget),
             targets: HashMap::new(),
             target_users: HashMap::new(),
-            dirty: false,
-            scanning: false,
+            scan: ScanState::Idle { dirty: false },
             deferred_switch: false,
-            cursor: None,
         }
     }
 
@@ -90,17 +92,17 @@ impl MeshPlanner {
     pub(in crate::scene) fn set_camera(&mut self, camera: Camera) {
         if self.camera != Some(camera) {
             self.camera = Some(camera);
-            self.dirty = true;
+            self.invalidate_scan();
         }
     }
 
     pub(in crate::scene) fn invalidate(&mut self) {
-        self.dirty = true;
+        self.invalidate_scan();
     }
 
     pub(in crate::scene) fn remove(&mut self, entity: Entity) {
         if self.detach_target(entity).is_some() {
-            self.dirty = true;
+            self.invalidate_scan();
         }
     }
 
@@ -108,7 +110,9 @@ impl MeshPlanner {
         let camera = self.camera;
         *self = Self::new(budget);
         self.camera = camera;
-        self.dirty = camera.is_some();
+        if camera.is_some() {
+            self.invalidate_scan();
+        }
     }
 
     pub(in crate::scene) fn complete(&mut self, completion: PrimCompletion) {
@@ -120,7 +124,7 @@ impl MeshPlanner {
     }
 
     pub(in crate::scene) fn has_work(&self) -> bool {
-        self.camera.is_some() && (self.dirty || self.scanning || self.meshes.has_updates())
+        self.camera.is_some() && (!matches!(self.scan, ScanState::Idle { dirty: false }) || self.meshes.has_updates())
     }
 
     pub(in crate::scene) fn waiting(&self) -> bool {
@@ -129,7 +133,9 @@ impl MeshPlanner {
 
     pub(in crate::scene) fn retry_admission(&mut self) -> bool {
         let deferred = self.deferred_switch || self.targets.values().any(|target| !target.admitted);
-        self.dirty |= deferred;
+        if deferred {
+            self.invalidate_scan();
+        }
         deferred
     }
 
@@ -137,26 +143,31 @@ impl MeshPlanner {
         let Some(camera) = self.camera else {
             return Vec::new();
         };
-        if !self.scanning {
-            if !self.dirty {
+        let cursor = match self.scan {
+            ScanState::Idle { dirty: false } => {
                 let mut changes = Vec::new();
                 self.publish_cache_updates(&mut changes);
                 return changes;
             }
-            self.meshes.begin_priority_generation();
-            self.scanning = true;
-            self.dirty = false;
-            self.deferred_switch = false;
-            self.cursor = None;
-        }
+            ScanState::Idle { dirty: true } => {
+                self.meshes.begin_priority_generation();
+                self.deferred_switch = false;
+                self.scan = ScanState::Scanning { cursor: None, rescan: false };
+                None
+            }
+            ScanState::Scanning { cursor, .. } => cursor,
+        };
         let mut changes = Vec::new();
-        let mut entries = identities.range((self.cursor.map_or(Unbounded, Excluded), Unbounded));
+        let mut entries = identities.range((cursor.map_or(Unbounded, Excluded), Unbounded));
+        let mut finished = false;
         for _ in 0..128 {
             let Some((id, entity)) = entries.next() else {
-                self.scanning = false;
+                finished = true;
                 break;
             };
-            self.cursor = Some(*id);
+            if let ScanState::Scanning { cursor, .. } = &mut self.scan {
+                *cursor = Some(*id);
+            }
             if !mirror.object_visible(*entity) {
                 if let Some(target) = self.detach_target(*entity) {
                     changes.push(MeshChange::Clear(*entity, target.key));
@@ -203,8 +214,22 @@ impl MeshPlanner {
                 }
             }
         }
+        if finished {
+            let dirty = match self.scan {
+                ScanState::Scanning { rescan, .. } => rescan,
+                ScanState::Idle { dirty } => dirty,
+            };
+            self.scan = ScanState::Idle { dirty };
+        }
         self.publish_cache_updates(&mut changes);
         changes
+    }
+
+    fn invalidate_scan(&mut self) {
+        match &mut self.scan {
+            ScanState::Idle { dirty } => *dirty = true,
+            ScanState::Scanning { rescan, .. } => *rescan = true,
+        }
     }
 
     fn detach_target(&mut self, entity: Entity) -> Option<MeshTarget> {
@@ -347,18 +372,20 @@ mod tests {
     }
 
     fn fixture(objects: &[(u128, Vec3, Vec3)], budget: &Budget) -> (Mirror, BTreeMap<Uuid, Entity>) {
+        let capacity = objects.len().max(8);
+        let journal_entries = capacity.saturating_mul(2).max(64);
         let mut world = World::new(WorldLimits {
             max_regions: 1,
-            max_entities: 8,
-            max_entities_per_region: 8,
-            max_tombstones_per_region: 8,
-            max_tombstones: 8,
-            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(8),
-            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(8),
-            max_journal_entries: 64,
-            max_journal_changes: 128,
+            max_entities: capacity,
+            max_entities_per_region: capacity,
+            max_tombstones_per_region: capacity,
+            max_tombstones: capacity,
+            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(capacity),
+            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(capacity),
+            max_journal_entries: journal_entries,
+            max_journal_changes: journal_entries.saturating_mul(2),
             max_region_name_bytes: 256,
-            max_recovery_targets: 8,
+            max_recovery_targets: capacity,
         });
         let region = world.register_region().expect("fixture region registers");
         assert_matches!(
@@ -382,14 +409,22 @@ mod tests {
             object.appearance = FieldUpdate::Set(Appearance::Surface);
             assert_matches!(world.observe_object(object).expect("fixture object applies").outcome, ApplyOutcome::Introduced(_));
         }
-        let page = world.object_list_page(None, 8).expect("fixture objects list");
         let mut mirror = Mirror::default();
         let mut identities = BTreeMap::new();
-        for item in page.objects {
-            let detail = world.object_detail(item.entity).expect("fixture detail reads");
-            let lease = budget.reserve(detail.owned_bytes() + 32).expect("fixture object fits budget");
-            mirror.apply(Change::Object(Object::new(detail, lease)));
-            identities.insert(item.id, item.entity);
+        let mut cursor = None;
+        loop {
+            let page = world.object_list_page(cursor, 256).expect("fixture object page reads");
+            let next = page.next;
+            for item in page.objects {
+                let detail = world.object_detail(item.entity).expect("fixture detail reads");
+                let lease = budget.reserve(detail.owned_bytes() + 32).expect("fixture object fits budget");
+                mirror.apply(Change::Object(Object::new(detail, lease)));
+                identities.insert(item.id, item.entity);
+            }
+            cursor = next;
+            if cursor.is_none() {
+                break;
+            }
         }
         (mirror, identities)
     }
@@ -489,5 +524,27 @@ mod tests {
         assert!(planner.retry_admission(), "a rejected detail switch is retried");
         assert_eq!(mirror.objects[&target].mesh().map(|(key, _)| key), Some(DrawnMeshKey::Prim(high)));
         assert_matches!(mesh_state(&mirror.objects[&target]), Some((key, MeshStatus::Ready)) if key == high);
+    }
+
+    #[test]
+    fn camera_change_restarts_partial_scan() {
+        let budget = Budget::default();
+        let objects = (1..=260).map(|id| (id, Vec3::new(100.0, 600.0, 0.0), Vec3::splat(13.0))).collect::<Vec<_>>();
+        let (mirror, identities) = fixture(&objects, &budget);
+        let target = identities[&Uuid::from_u128(1)];
+        let mut planner = MeshPlanner::new(budget);
+
+        planner.set_camera(camera(0.0, 1024.0));
+        planner.step(&mirror, &identities);
+        assert_eq!(planner.targets[&target].key.detail, Detail::High);
+
+        planner.set_camera(camera(-300.0, 1024.0));
+        planner.step(&mirror, &identities);
+        planner.step(&mirror, &identities);
+        assert_eq!(planner.targets[&target].key.detail, Detail::High);
+        assert!(planner.has_work(), "the camera change leaves a full rescan pending");
+
+        planner.step(&mirror, &identities);
+        assert_eq!(planner.targets[&target].key.detail, Detail::Medium);
     }
 }
