@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 use wgpu::Device;
 
 use super::{GeometryRenderer, MAX_MESH_UPLOADS, UPLOAD_BYTES};
@@ -10,6 +12,19 @@ pub(super) struct GpuMesh {
     pub(super) used: u64,
 }
 
+#[derive(Debug)]
+pub(super) enum MeshUpload {
+    Ready,
+    Deferred,
+    CapacityBlocked,
+}
+
+enum MeshRetirement {
+    Retired,
+    Deferred,
+    CapacityBlocked,
+}
+
 impl GeometryRenderer {
     pub(super) fn upload_mesh(
         &mut self,
@@ -18,39 +33,30 @@ impl GeometryRenderer {
         composition: Option<&[f32]>,
         uploaded: &mut usize,
         allow_eviction: bool,
-    ) -> bool {
+    ) -> MeshUpload {
         let key = shared.id();
         if let Some(mesh) = self.meshes.get_mut(&key) {
             mesh.used = self.epoch;
             self.mesh_budget_blocked.remove(&key);
-            return true;
+            return MeshUpload::Ready;
         }
         let mesh = shared.mesh();
-        if composition.is_some_and(|values| values.len() != mesh.vertices().len()) {
-            return false;
-        }
-        let Some(bytes) = mesh
-            .vertices()
-            .len()
-            .checked_mul(VERTEX_BYTES)
-            .and_then(|vertices| mesh.indices().len().checked_mul(4).and_then(|indices| vertices.checked_add(indices)))
-            .and_then(|bytes| composition.map_or(Some(bytes), |values| values.len().checked_mul(size_of::<f32>())?.checked_add(bytes)))
-        else {
-            return false;
-        };
+        let Some(bytes) = mesh_upload_bytes(shared, composition) else { return MeshUpload::CapacityBlocked };
         if *uploaded >= MAX_MESH_UPLOADS
             || (bytes > UPLOAD_BYTES.saturating_sub(self.stats.uploaded_bytes) && (*uploaded > 0 || !allow_eviction))
         {
-            return false;
+            return MeshUpload::Deferred;
         }
         let Some(allocation) =
             self.storage.allocate(device, mesh.vertices().len(), mesh.indices().len(), composition.is_some(), &self.memory)
         else {
-            if allow_eviction {
-                self.retire_mesh();
-            }
+            let retirement = if allow_eviction { self.retire_mesh() } else { MeshRetirement::CapacityBlocked };
             self.mesh_budget_blocked.insert(key);
-            return false;
+            return match retirement {
+                MeshRetirement::Retired | MeshRetirement::Deferred => MeshUpload::Deferred,
+                MeshRetirement::CapacityBlocked if !self.retired.is_empty() => MeshUpload::Deferred,
+                MeshRetirement::CapacityBlocked => MeshUpload::CapacityBlocked,
+            };
         };
         let mut packed = Vec::with_capacity(bytes);
         for vertex in mesh.vertices() {
@@ -74,21 +80,56 @@ impl GeometryRenderer {
         self.mesh_budget_blocked.remove(&key);
         self.stats.uploaded_bytes += bytes;
         *uploaded += 1;
-        true
+        MeshUpload::Ready
     }
 
-    fn retire_mesh(&mut self) -> bool {
+    fn retire_mesh(&mut self) -> MeshRetirement {
         if self.retired.len() == 4 {
-            return false;
+            return MeshRetirement::Deferred;
         }
-        let Some(old) =
-            self.meshes.iter().filter(|(_, mesh)| mesh.used != self.epoch).min_by_key(|(_, mesh)| mesh.used).map(|(key, _)| *key)
-        else {
-            return false;
+        let mut oldest = None;
+        let mut used_this_epoch = false;
+        for (id, mesh) in &self.meshes {
+            if self.cache.mesh_ready.contains(id) || self.draw_list.pins_mesh(*id) {
+                continue;
+            }
+            if mesh.used == self.epoch {
+                used_this_epoch = true;
+                continue;
+            }
+            if oldest.is_none_or(|(_, used)| mesh.used < used) {
+                oldest = Some((*id, mesh.used));
+            }
+        }
+        let Some((old, _)) = oldest else {
+            return if used_this_epoch { MeshRetirement::Deferred } else { MeshRetirement::CapacityBlocked };
         };
-        self.retired.push(self.meshes.remove(&old).expect("selected resident"));
-        true
+        let mesh = self.meshes.remove(&old).expect("selected resident");
+        self.cache.mesh_ready.remove(&old);
+        self.pending_meshes.remove(&old);
+        self.mesh_budget_blocked.remove(&old);
+        let vertices = mesh.allocation.vertices().len();
+        let bytes = vertices
+            .saturating_mul(VERTEX_BYTES)
+            .saturating_add(mesh.allocation.indices().len().saturating_mul(size_of::<u32>()))
+            .saturating_add(if mesh.allocation.buffers().composition.is_some() { vertices.saturating_mul(size_of::<f32>()) } else { 0 });
+        self.stats.gpu_mesh_retirements += 1;
+        self.stats.gpu_mesh_retired_bytes = self.stats.gpu_mesh_retired_bytes.saturating_add(bytes);
+        self.retired.push(mesh);
+        MeshRetirement::Retired
     }
+}
+
+pub(super) fn mesh_upload_bytes(shared: &SharedMesh, composition: Option<&[f32]>) -> Option<usize> {
+    let mesh = shared.mesh();
+    if composition.is_some_and(|values| values.len() != mesh.vertices().len()) {
+        return None;
+    }
+    mesh.vertices()
+        .len()
+        .checked_mul(VERTEX_BYTES)
+        .and_then(|vertices| mesh.indices().len().checked_mul(4).and_then(|indices| vertices.checked_add(indices)))
+        .and_then(|bytes| composition.map_or(Some(bytes), |values| values.len().checked_mul(size_of::<f32>())?.checked_add(bytes)))
 }
 
 fn floats<const N: usize>(bytes: &mut Vec<u8>, values: [f32; N]) {

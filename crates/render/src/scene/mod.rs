@@ -43,6 +43,27 @@ pub use sculpt::tessellate_sculpt;
 pub use surface::{Surface, SurfaceKind};
 pub use utils::ExperienceId;
 
+#[cfg(test)]
+pub(crate) fn distinct_meshes_for_test(count: usize) -> Vec<SharedMesh> {
+    let budget = Budget::default();
+    (0..count)
+        .map(|_| {
+            let mesh = assets::mesh::Mesh::from_parts(
+                vec![
+                    assets::mesh::Vertex { position: math::Vec3::new(-1.0, -1.0, 0.0), normal: math::Vec3::Z, uv: math::Vec2::ZERO },
+                    assets::mesh::Vertex { position: math::Vec3::new(1.0, -1.0, 0.0), normal: math::Vec3::Z, uv: math::Vec2::ZERO },
+                    assets::mesh::Vertex { position: math::Vec3::new(0.0, 1.0, 0.0), normal: math::Vec3::Z, uv: math::Vec2::ZERO },
+                ],
+                vec![0, 1, 2],
+                vec![assets::mesh::Face { slot: 0, indices: 0..3 }],
+            )
+            .expect("test triangle is valid");
+            let lease = budget.reserve(mesh.owned_bytes() + 64).expect("test meshes fit the scene budget");
+            SharedMesh::new(mesh, lease)
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AgentPose {
     agent_id: Uuid,

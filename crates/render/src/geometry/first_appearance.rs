@@ -44,6 +44,7 @@ impl FirstAppearance {
 #[derive(Default)]
 pub(super) struct FirstAppearances {
     entries: HashMap<AppearanceKey, FirstAppearance>,
+    pending: usize,
     version: Option<ViewVersion>,
 }
 
@@ -59,7 +60,15 @@ impl FirstAppearances {
         if self.version.as_ref() == Some(&view.geometry_version()) {
             return;
         }
-        self.entries.retain(|key, _| view.object(key.entity).and_then(appearance_key) == Some(*key));
+        let mut removed_pending = 0;
+        self.entries.retain(|key, appearance| {
+            let retain = view.object(key.entity).and_then(appearance_key) == Some(*key);
+            if !retain && !appearance.shown {
+                removed_pending += 1;
+            }
+            retain
+        });
+        self.pending -= removed_pending;
         self.version = Some(view.geometry_version());
     }
 
@@ -67,13 +76,23 @@ impl FirstAppearances {
         if !complete {
             return false;
         }
+        if !self.entries.contains_key(&key) {
+            self.pending += 1;
+        }
         self.entries.entry(key).or_default().allows_at(now, complete, geometry_ready, assets_ready)
     }
 
     pub(super) fn mark_shown(&mut self, key: AppearanceKey) {
-        if let Some(appearance) = self.entries.get_mut(&key) {
+        if let Some(appearance) = self.entries.get_mut(&key)
+            && !appearance.shown
+        {
             appearance.shown = true;
+            self.pending -= 1;
         }
+    }
+
+    pub(super) fn has_pending(&self) -> bool {
+        self.pending > 0
     }
 
     pub(super) fn deadline(&self, key: AppearanceKey, now: Instant) -> Option<Instant> {
