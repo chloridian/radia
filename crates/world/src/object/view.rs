@@ -1,4 +1,3 @@
-use std::collections::btree_set;
 use std::sync::Arc;
 
 use hecs::{QueryBorrow, Ref};
@@ -8,6 +7,7 @@ use uuid::Uuid;
 use crate::mutation::facet::Facet;
 use crate::object::components::Fenced;
 use crate::object::storage::ComponentView;
+use crate::removal::VisibilityCache;
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, CoordinateFrame, Entity, Kind, LinearMotion, LocalAddress, LocalTransform, ObjectMedia,
     Parent, PbrMaterialAssignments, PbrMaterialOverrides, PoseError, PoseState, Shape, SitTarget, SurfaceAppearance, TextureAnimation,
@@ -77,7 +77,7 @@ impl<'a> Object<'a> {
     }
 
     pub fn parent(&self) -> Parent {
-        self.record.state.parent
+        self.world.logical_parent_for(self.entity, self.record.state.parent)
     }
 
     pub fn linear_motion(&self) -> LinearMotion {
@@ -161,19 +161,35 @@ pub struct Objects<'a> {
 impl<'a> Objects<'a> {
     pub fn iter<'b>(&'b mut self) -> impl Iterator<Item = Object<'b>> + 'b {
         let world = self.world;
-        self.records.iter().map(move |(entity, record)| Object::new(Entity(entity, world.id), record, world))
+        let needs_filter = world.has_pending_removals();
+        let mut visibility = VisibilityCache::default();
+        self.records.iter().filter_map(move |(raw, record)| {
+            let entity = Entity(raw, world.id);
+            if needs_filter && !world.visibility(entity, &mut visibility).visible {
+                return None;
+            }
+            Some(Object::new(entity, record, world))
+        })
     }
 }
 
 pub(crate) struct IndexedObjects<'a> {
-    ids: btree_set::Iter<'a, Uuid>,
+    entities: Box<dyn Iterator<Item = Entity> + 'a>,
     records: ComponentView<'a, ObjectRecord>,
     world: &'a World,
+    needs_filter: bool,
+    visibility: VisibilityCache,
 }
 
 impl<'a> IndexedObjects<'a> {
-    pub(crate) fn new(ids: btree_set::Iter<'a, Uuid>, world: &'a World) -> Self {
-        Self { ids, records: world.store.component_view::<ObjectRecord>(), world }
+    pub(crate) fn new(entities: impl Iterator<Item = Entity> + 'a, world: &'a World, needs_filter: bool) -> Self {
+        Self {
+            entities: Box::new(entities),
+            records: world.store.component_view::<ObjectRecord>(),
+            world,
+            needs_filter,
+            visibility: VisibilityCache::default(),
+        }
     }
 }
 
@@ -181,9 +197,13 @@ impl<'a> Iterator for IndexedObjects<'a> {
     type Item = Object<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let id = *self.ids.next()?;
-        let entity = self.world.entity(id).expect("object index contains only live entities");
-        let record = self.records.get(entity.0).expect("object index contains only complete objects");
-        Some(Object::new(entity, record, self.world))
+        for entity in self.entities.by_ref() {
+            if self.needs_filter && !self.world.visibility(entity, &mut self.visibility).visible {
+                continue;
+            }
+            let record = self.records.get(entity.0).expect("object index contains only complete objects");
+            return Some(Object::new(entity, record, self.world));
+        }
+        None
     }
 }

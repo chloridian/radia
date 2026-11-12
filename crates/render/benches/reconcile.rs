@@ -22,6 +22,12 @@ pub(crate) fn bench(c: &mut Criterion) {
 
     let (mut world, rows) = support::scene_world(OBJECTS, REGIONS);
     let (mut reconciler, mut view, mut now) = support::settle(&world, OBJECTS);
+    let mut diagnostic_count = c.benchmark_group("scene/diagnostic_count");
+    diagnostic_count.bench_function("tracked_scene_records/10k_4_regions", |b| {
+        b.iter(|| std::hint::black_box(&view).tracked_object_count());
+    });
+    diagnostic_count.finish();
+
     let mut order = 2_000_000;
     let mut generation = 1;
     let mut incremental = c.benchmark_group("scene/reconcile_incremental");

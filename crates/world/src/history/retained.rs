@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::collections::BTreeMap;
 use std::{
     collections::{BTreeSet, HashMap},
     num::NonZeroU32,
@@ -8,9 +6,7 @@ use std::{
 use uuid::Uuid;
 
 #[cfg(test)]
-use crate::RegionState;
-#[cfg(test)]
-use crate::object::storage::ObjectStore;
+use crate::World;
 use crate::update::Stamp;
 use crate::{LocalAddress, PbrMaterialOverrides, Region};
 
@@ -81,14 +77,8 @@ impl RetainedOverrides {
         }
     }
 
-    pub(crate) fn remove_region(&mut self, region: Region) {
-        if let Some(entries) = self.oldest_by_region.remove(&region) {
-            for (_, local_id) in entries {
-                if let Some(entry) = self.by_address.remove(&LocalAddress::new(region, local_id)) {
-                    self.bytes -= entry.bytes();
-                }
-            }
-        }
+    pub(crate) fn first_region_address(&self, region: Region) -> Option<LocalAddress> {
+        self.oldest_by_region.get(&region)?.first().map(|(_, local_id)| LocalAddress::new(region, *local_id))
     }
 
     fn region_len(&self, region: Region) -> usize {
@@ -97,18 +87,15 @@ impl RetainedOverrides {
 }
 
 #[cfg(test)]
-pub(crate) fn retained_invariants_hold(
-    retained: &RetainedOverrides,
-    active_regions: &BTreeMap<Region, RegionState>,
-    store: &ObjectStore,
-) -> bool {
+pub(crate) fn retained_invariants_hold(world: &World) -> bool {
+    let retained = &world.retained;
     retained.by_address.len() == retained.oldest_by_region.values().map(BTreeSet::len).sum::<usize>()
         && retained.by_address.len() <= MAX_RETAINED
         && retained.bytes <= MAX_RETAINED_BYTES
         && retained.bytes == retained.by_address.values().map(RetainedOverride::bytes).sum::<usize>()
         && retained.by_address.iter().all(|(address, entry)| {
-            active_regions.contains_key(&address.region())
-                && store.entity_at(*address).is_none()
+            (world.regions.contains_key(&address.region()) || world.retiring_regions.contains_key(&address.region()))
+                && world.entity_at(*address).is_none()
                 && retained
                     .oldest_by_region
                     .get(&address.region())

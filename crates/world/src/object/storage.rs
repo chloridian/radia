@@ -1,7 +1,12 @@
-use std::collections::{BTreeSet, HashMap};
+#![allow(unexpected_cfgs)]
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+#[cfg(world_bench_detailed)]
+use std::time::Duration;
 
 use hecs::{Component, EntityBuilder, QueryBorrow, QueryOne, Ref, ViewBorrow};
+use math::{Quat, Vec3};
 use uuid::Uuid;
 
 use crate::identity::WorldId;
@@ -16,8 +21,15 @@ pub(crate) struct ObjectStore {
     entities: HashMap<Uuid, Entity>,
     ids: BTreeSet<Uuid>,
     addresses: HashMap<LocalAddress, Entity>,
-    regions: HashMap<Region, BTreeSet<Uuid>>,
-    avatars: BTreeSet<Uuid>,
+    regions: HashMap<Region, BTreeMap<Uuid, Entity>>,
+    avatars: BTreeMap<Uuid, Entity>,
+}
+
+pub(crate) struct StoreRemovalTimes {
+    #[cfg(world_bench_detailed)]
+    pub(crate) component_destruction: Duration,
+    #[cfg(world_bench_detailed)]
+    pub(crate) index_removal: Duration,
 }
 
 pub(crate) struct ComponentView<'a, T: Component> {
@@ -40,7 +52,7 @@ impl ObjectStore {
             ids: BTreeSet::new(),
             addresses: HashMap::new(),
             regions: HashMap::new(),
-            avatars: BTreeSet::new(),
+            avatars: BTreeMap::new(),
         }
     }
 
@@ -52,19 +64,34 @@ impl ObjectStore {
         self.addresses.get(&address).copied()
     }
 
+    pub(crate) fn identity_entities(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.entities.values().copied()
+    }
+
+    pub(crate) fn is_current_entity(&self, entity: Entity) -> bool {
+        let Some(record) = self.object_record(entity) else { return false };
+        self.entities.get(&record.id) == Some(&entity)
+            && self.addresses.get(&record.state.binding.address) == Some(&entity)
+            && self.regions.get(&record.state.binding.address.region()).and_then(|objects| objects.get(&record.id)) == Some(&entity)
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.entities.len()
+    }
+
+    pub(crate) fn physical_len(&self) -> usize {
+        self.ecs.len() as usize
     }
 
     pub(crate) fn ids(&self) -> &BTreeSet<Uuid> {
         &self.ids
     }
 
-    pub(crate) fn avatar_ids(&self) -> &BTreeSet<Uuid> {
+    pub(crate) fn avatar_ids(&self) -> &BTreeMap<Uuid, Entity> {
         &self.avatars
     }
 
-    pub(crate) fn region_ids(&self, region: Region) -> Option<&BTreeSet<Uuid>> {
+    pub(crate) fn region_ids(&self, region: Region) -> Option<&BTreeMap<Uuid, Entity>> {
         self.regions.get(&region)
     }
 
@@ -72,8 +99,16 @@ impl ObjectStore {
         let id = record.id;
         let address = record.state.binding.address;
         let kind = record.kind;
-        assert!(!self.entities.contains_key(&id), "new object UUID is already live");
-        assert!(!self.addresses.contains_key(&address), "new object address is already occupied");
+        if let Some(previous) = self.entities.get(&id).copied() {
+            let previous_address = self.object_record(previous).expect("replaced identity remains physically stored").state.binding.address;
+            if self.addresses.get(&previous_address) == Some(&previous) {
+                self.addresses.remove(&previous_address);
+            }
+            self.remove_region_id(previous_address.region(), id, previous);
+            if self.avatars.get(&id) == Some(&previous) {
+                self.avatars.remove(&id);
+            }
+        }
         let mut builder = EntityBuilder::new();
         builder.add(record);
         builder.add(ordering);
@@ -83,24 +118,47 @@ impl ObjectStore {
         self.entities.insert(id, entity);
         self.ids.insert(id);
         self.addresses.insert(address, entity);
-        self.regions.entry(address.region()).or_default().insert(id);
+        self.regions.entry(address.region()).or_default().insert(id, entity);
         if kind == Kind::Avatar {
-            self.avatars.insert(id);
+            self.avatars.insert(id, entity);
+        } else {
+            self.avatars.remove(&id);
         }
         entity
     }
 
-    pub(crate) fn remove(&mut self, entity: Entity) {
+    pub(crate) fn remove(&mut self, entity: Entity) -> StoreRemovalTimes {
         let (id, address) = {
             let record = self.object_record(entity).expect("removal target is live");
             (record.id, record.state.binding.address)
         };
+        let current_identity = self.entities.get(&id) == Some(&entity);
+        #[cfg(world_bench_detailed)]
+        let component_started = std::time::Instant::now();
         self.ecs.despawn(entity.0).expect("removal target is live");
-        self.entities.remove(&id);
-        self.ids.remove(&id);
-        self.avatars.remove(&id);
-        self.addresses.remove(&address);
-        self.remove_region_id(address.region(), id);
+        #[cfg(world_bench_detailed)]
+        let component_destruction = component_started.elapsed();
+        #[cfg(world_bench_detailed)]
+        let indexes_started = std::time::Instant::now();
+        if current_identity {
+            self.entities.remove(&id);
+            self.ids.remove(&id);
+            self.avatars.remove(&id);
+        }
+        if self.addresses.get(&address) == Some(&entity) {
+            self.addresses.remove(&address);
+        }
+        self.remove_region_id(address.region(), id, entity);
+        #[cfg(world_bench_detailed)]
+        let index_removal = indexes_started.elapsed();
+        #[cfg(world_bench_detailed)]
+        {
+            StoreRemovalTimes { component_destruction, index_removal }
+        }
+        #[cfg(not(world_bench_detailed))]
+        {
+            StoreRemovalTimes {}
+        }
     }
 
     pub(crate) fn commit(&mut self, entity: Entity, state: ObjectState, facets: Option<FacetChanges>, ordering: ObjectOrdering) {
@@ -110,12 +168,13 @@ impl ObjectStore {
         };
         let address = state.binding.address;
         if previous != address {
-            assert!(self.entity_at(address).is_none(), "new object address is already occupied");
-            self.addresses.remove(&previous);
+            if self.addresses.get(&previous) == Some(&entity) {
+                self.addresses.remove(&previous);
+            }
             self.addresses.insert(address, entity);
             if previous.region() != address.region() {
-                self.remove_region_id(previous.region(), id);
-                self.regions.entry(address.region()).or_default().insert(id);
+                self.remove_region_id(previous.region(), id, entity);
+                self.regions.entry(address.region()).or_default().insert(id, entity);
             }
         }
         {
@@ -131,9 +190,11 @@ impl ObjectStore {
         }
     }
 
-    fn remove_region_id(&mut self, region: Region, id: Uuid) {
-        let ids = self.regions.get_mut(&region).expect("live object has a region index");
-        assert!(ids.remove(&id), "region index is missing a live object");
+    fn remove_region_id(&mut self, region: Region, id: Uuid, entity: Entity) {
+        let Some(ids) = self.regions.get_mut(&region) else { return };
+        if ids.get(&id) == Some(&entity) {
+            ids.remove(&id);
+        }
         if ids.is_empty() {
             self.regions.remove(&region);
         }
@@ -194,6 +255,25 @@ impl ObjectStore {
         record.state.pending_since = pending_since;
     }
 
+    pub(crate) fn set_detached_pose(&mut self, entity: Entity, pose: Option<(Vec3, Quat)>) {
+        assert_eq!(entity.1, self.world, "pose mutation belongs to another World");
+        let record = self.ecs.query_one_mut::<&mut ObjectRecord>(entity.0).expect("pose mutation target is live");
+        let generation = record.state.frame_generation.checked_add(1);
+        if let Some(generation) = generation {
+            record.state.frame_generation = generation;
+        }
+        if let Some((position, rotation)) = pose.filter(|_| generation.is_some()) {
+            record.state.transform.position = Some(position);
+            record.state.transform.rotation = Some(rotation);
+            record.state.position_frame_generation = generation;
+            record.state.rotation_frame_generation = generation;
+        } else {
+            record.state.position_frame_generation = None;
+            record.state.rotation_frame_generation = None;
+        }
+        record.state.provisional_pose = None;
+    }
+
     #[cfg(test)]
     pub(crate) fn record_mut(&mut self, entity: hecs::Entity) -> &mut ObjectRecord {
         self.ecs.query_one_mut::<&mut ObjectRecord>(entity).expect("test mutation target is live")
@@ -212,23 +292,43 @@ pub(crate) fn object_store_entities(store: &ObjectStore) -> impl Iterator<Item =
 #[cfg(test)]
 pub(crate) fn object_store_invariants_hold(store: &ObjectStore) -> Result<(), &'static str> {
     let count = store.entities.len();
-    if store.ecs.len() as usize != count
-        || store.ecs.query::<(&ObjectRecord, &ObjectOrdering)>().iter().count() != count
+    if (store.ecs.len() as usize) < count
+        || store.ecs.query::<(&ObjectRecord, &ObjectOrdering)>().iter().count() != store.ecs.len() as usize
         || store.ids.len() != count
-        || store.addresses.len() != count
+        || store.addresses.len() > count
     {
         return Err("object storage and identity index counts differ");
     }
-    let mut regions = HashMap::<Region, BTreeSet<Uuid>>::new();
-    let mut avatars = BTreeSet::new();
+    if store.ids.iter().any(|id| !store.entities.contains_key(id)) {
+        return Err("object ID index disagrees with entity index");
+    }
     for (id, entity) in object_store_entities(store) {
         let record = store.object_record(entity).ok_or("UUID index points to a dead or foreign entity")?;
-        if id.is_nil() || record.id != id || !store.ids.contains(&id) || store.entity_at(record.state.binding.address) != Some(entity) {
+        if id.is_nil() || record.id != id || !store.ids.contains(&id) {
             return Err("object identity indexes disagree with stored state");
         }
-        regions.entry(record.state.binding.address.region()).or_default().insert(id);
-        if record.kind == Kind::Avatar {
-            avatars.insert(id);
+        if store.regions.get(&record.state.binding.address.region()).and_then(|entries| entries.get(&id)) != Some(&entity) {
+            return Err("object identity is missing from its region index");
+        }
+        if record.kind == Kind::Avatar && store.avatars.get(&id) != Some(&entity) {
+            return Err("avatar identity is missing from its index");
+        }
+        if record.kind != Kind::Avatar && store.avatars.contains_key(&id) {
+            return Err("non-avatar identity appears in the avatar index");
+        }
+    }
+    for (address, entity) in &store.addresses {
+        let record = store.object_record(*entity).ok_or("address index points to a dead entity")?;
+        if record.state.binding.address != *address || store.entities.get(&record.id) != Some(entity) {
+            return Err("address index disagrees with stored state");
+        }
+    }
+    for (region, entries) in &store.regions {
+        for (id, entity) in entries {
+            let record = store.object_record(*entity).ok_or("region index points to a dead entity")?;
+            if record.id != *id || record.state.binding.address.region() != *region {
+                return Err("region index disagrees with stored state");
+            }
         }
     }
     if store
@@ -239,8 +339,11 @@ pub(crate) fn object_store_invariants_hold(store: &ObjectStore) -> Result<(), &'
     {
         return Err("empty facet components are stored");
     }
-    if store.regions != regions || store.avatars != avatars {
-        return Err("region or avatar indexes disagree with stored state");
+    for (id, entity) in &store.avatars {
+        let record = store.object_record(*entity).ok_or("avatar index points to a dead entity")?;
+        if record.id != *id || record.kind != Kind::Avatar || store.entities.get(id) != Some(entity) {
+            return Err("avatar index disagrees with stored state");
+        }
     }
     Ok(())
 }

@@ -7,7 +7,7 @@ use network::{
 };
 use protocol::{
     lludp::Message,
-    lludp::Message::{ImprovedTerseObjectUpdate, KillObject, ObjectUpdate, ObjectUpdateCached},
+    lludp::Message::{ImprovedTerseObjectUpdate, KillObject, ObjectUpdate, ObjectUpdateCached, ObjectUpdateCompressed},
     messages::{CacheMissType::Full, CachedObjectReference, ObjectUpdateCached as CachedUpdate, RequestAgentData, object::kill_object},
 };
 use test_support::lludp::vectors;
@@ -378,7 +378,8 @@ fn complete_promoted_handoff(
         observations: HashMap::new(),
         pending_movement_completes: HashMap::new(),
     };
-    let result = handoff.complete_promoted(world, target, observation);
+    let entity = world.world().entity(observation.id);
+    let result = handoff.complete_promoted(world, target, entity, observation);
     *world_primary = handoff.world_primary;
     *promoted_target = handoff.promoted_target;
     result
@@ -397,7 +398,8 @@ fn complete_promoted_world_handoff(
         observations: HashMap::new(),
         pending_movement_completes: HashMap::new(),
     };
-    let result = handoff.complete_world_handoff(world, target, observation);
+    let entity = world.world().entity(observation.id);
+    let result = handoff.complete_world_handoff(world, target, entity, observation);
     *world_primary = handoff.world_primary;
     *promoted_target = handoff.promoted_target;
     result
@@ -959,6 +961,129 @@ fn object_update_order_schedules_recovery() {
         apply_world_event(&mut intake, &simulator_message_at_order(simulator_id, 4, Ambiguous, unknown)).expect("registered simulator");
     assert_eq!(&ambiguous.blocks[0].applied().unwrap().outcome, &Deferred(AmbiguousOrder));
     assert_eq!(ambiguous.recovery_targets().count(), 1);
+}
+
+#[test]
+fn synthetic_ordered_object_message_replay_preserves_detach_and_reuse_fences() {
+    let simulator_id = simulator_id();
+    let region_handle = 0x3333_0000_0000_0003;
+    let endpoint = "127.0.0.1:13000".parse().expect("endpoint");
+    let mut intake = SessionWorld::new(viewer_world_limits());
+    apply_world_event(&mut intake, &SimulatorConnected { simulator_id, region_handle: Some(region_handle), endpoint });
+    let region = intake.region_for(simulator_id).expect("registered region");
+    let parent_id = Uuid::from_u128(0x3301);
+    let avatar_id = Uuid::from_u128(0x3302);
+    let replacement_id = Uuid::from_u128(0x3303);
+    let parent_local_id = 10;
+    let avatar_local_id = 11;
+    let parent_address = LocalAddress::new(region, NonZeroU32::new(parent_local_id).expect("nonzero parent local ID"));
+    let avatar_address = LocalAddress::new(region, NonZeroU32::new(avatar_local_id).expect("nonzero avatar local ID"));
+
+    let mut full = fixture_packet(vectors::OBJECT_UPDATE).into_message();
+    let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
+    update.region_data.region_handle = region_handle;
+    let mut parent = update.objects[0].clone();
+    parent.local_id = parent_local_id;
+    parent.id = parent_id;
+    parent.parent_local_id = 0;
+    parent.pcode = 9;
+    parent.motion.position = Vec3::new(7.0, 8.0, 9.0);
+    let mut avatar = update.objects[1].clone();
+    avatar.local_id = avatar_local_id;
+    avatar.id = avatar_id;
+    avatar.parent_local_id = parent_local_id;
+    avatar.pcode = 47;
+    update.objects = vec![parent.clone(), avatar.clone()];
+    let (_, introduced) = apply_world_event(&mut intake, &simulator_message(simulator_id, 1, full.clone())).expect("registered simulator");
+    assert_eq!(introduced.status, IngestStatus::Applied);
+    assert_eq!(introduced.blocks.len(), 2);
+
+    let mut compressed = fixture_packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED).into_message();
+    let ObjectUpdateCompressed(update) = &mut compressed else { panic!("expected compressed object fixture") };
+    update.region_data.region_handle = region_handle;
+    let object = update.objects.first_mut().expect("compressed fixture has an object");
+    object.local_id = avatar_local_id;
+    object.id = avatar_id;
+    object.parent_local_id = parent_local_id;
+    object.pcode = 47;
+    let (_, compressed_summary) =
+        apply_world_event(&mut intake, &simulator_message(simulator_id, 2, compressed)).expect("registered simulator");
+    assert_eq!(compressed_summary.status, IngestStatus::Applied);
+
+    let mut terse = fixture_packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).into_message();
+    let ImprovedTerseObjectUpdate(update) = &mut terse else { panic!("expected terse object fixture") };
+    update.region_data.region_handle = region_handle;
+    let terse_object = update.objects[0].as_decoded_mut().expect("fixture block is structurally valid");
+    terse_object.local_id = parent_local_id;
+    terse_object.motion.position = Vec3::new(10.0, 11.0, 12.0);
+    terse_object.motion.rotation = Quat::IDENTITY;
+    apply_world_event(&mut intake, &simulator_message(simulator_id, 3, terse)).expect("registered simulator");
+
+    let mut cached = fixture_packet(vectors::OBJECT_UPDATE_CACHED).into_message();
+    let ObjectUpdateCached(update) = &mut cached else { panic!("expected cached object fixture") };
+    update.region_data.region_handle = region_handle;
+    update.objects[0].local_id = parent_local_id;
+    let (_, cached_summary) = apply_world_event(&mut intake, &simulator_message(simulator_id, 4, cached)).expect("registered simulator");
+    assert!(cached_summary.recovery_targets().any(|address| address == parent_address));
+
+    let mut kill = fixture_packet(vectors::KILL_OBJECT).into_message();
+    let KillObject(update) = &mut kill else { panic!("expected kill object fixture") };
+    update.object_data.truncate(1);
+    update.object_data[0].local_id = parent_local_id;
+    let (_, killed) = apply_world_event(&mut intake, &simulator_message(simulator_id, 5, kill)).expect("registered simulator");
+    assert!(killed.recovery_cancellation_addresses().any(|address| address == parent_address));
+    let mut cleanup_recovery = Vec::new();
+    while intake.world().has_pending_removals() {
+        let progress = intake.reclaim_removals();
+        assert!(progress.work_units <= world::MAX_REMOVAL_WORK_PER_TURN);
+        cleanup_recovery.extend(progress.recovery.requests);
+    }
+    assert!(!cleanup_recovery.contains(&avatar_address));
+    let state = intake.world();
+    assert!(state.entity(parent_id).is_none());
+    let avatar_entity = state.entity(avatar_id).expect("avatar survives seat removal");
+    assert_eq!(state.object(avatar_entity).unwrap().parent(), Parent::Root);
+
+    let (_, stale) =
+        apply_world_event(&mut intake, &simulator_message_at_order(simulator_id, 6, Ordered(1), full)).expect("registered simulator");
+    assert!(stale.recovery_cancellation_addresses().next().is_none());
+    let state = intake.world();
+    let avatar_entity = state.entity(avatar_id).expect("stale full update does not remove avatar");
+    assert_eq!(state.object(avatar_entity).unwrap().parent(), Parent::Root);
+
+    let mut unseated = fixture_packet(vectors::OBJECT_UPDATE).into_message();
+    let ObjectUpdate(update) = &mut unseated else { panic!("expected full object fixture") };
+    update.region_data.region_handle = region_handle;
+    let mut avatar_update = avatar;
+    avatar_update.parent_local_id = 0;
+    update.objects = vec![avatar_update];
+    apply_world_event(&mut intake, &simulator_message(simulator_id, 7, unseated)).expect("registered simulator");
+
+    let mut replacement = fixture_packet(vectors::OBJECT_UPDATE).into_message();
+    let ObjectUpdate(update) = &mut replacement else { panic!("expected full object fixture") };
+    update.region_data.region_handle = region_handle;
+    parent.id = replacement_id;
+    update.objects = vec![parent];
+    apply_world_event(&mut intake, &simulator_message(simulator_id, 8, replacement)).expect("registered simulator");
+
+    let mut late_kill = fixture_packet(vectors::KILL_OBJECT).into_message();
+    let KillObject(update) = &mut late_kill else { panic!("expected kill object fixture") };
+    update.object_data.truncate(1);
+    update.object_data[0].local_id = parent_local_id;
+    apply_world_event(&mut intake, &simulator_message_at_order(simulator_id, 9, Ordered(7), late_kill)).expect("registered simulator");
+
+    let mut late_terse = fixture_packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).into_message();
+    let ImprovedTerseObjectUpdate(update) = &mut late_terse else { panic!("expected terse object fixture") };
+    update.region_data.region_handle = region_handle;
+    let terse_object = update.objects[0].as_decoded_mut().expect("fixture block is structurally valid");
+    terse_object.local_id = parent_local_id;
+    terse_object.motion.position = Vec3::new(99.0, 99.0, 99.0);
+    apply_world_event(&mut intake, &simulator_message_at_order(simulator_id, 10, Ordered(7), late_terse)).expect("registered simulator");
+
+    let state = intake.world();
+    let replacement = state.object(state.entity(replacement_id).expect("replacement survives late events")).unwrap();
+    assert_eq!(replacement.address(), parent_address);
+    assert_eq!(replacement.transform().position(), Some(Vec3::new(7.0, 8.0, 9.0)));
 }
 
 #[test]

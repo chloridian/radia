@@ -222,7 +222,7 @@ proptest::proptest! {
 
     #[test]
     fn override_retention_preserves_world_indexes(
-        operations in proptest::collection::vec((0_u8..5, 0_u8..2, 0_u8..8, 0_u8..8, 1_u8..32, 0_u8..4), 1..128)
+        operations in proptest::collection::vec((0_u8..6, 0_u8..2, 0_u8..8, 0_u8..8, 1_u8..32, 0_u8..4), 1..128)
     ) {
         let mut world_limits = limits();
         world_limits.max_entities = 16;
@@ -262,15 +262,19 @@ proptest::proptest! {
                 2 => {
                     let _ = world.remove_object(source, local_id).expect("apply valid removal");
                 }
-                3 => {
-                    let _ = world.retire_region(region).expect("retire generated region");
-                    regions[usize::from(region_index)] = world.register_region().expect("register replacement region");
-                }
+                3 => match world.retire_region(region) {
+                    Ok(_) => regions[usize::from(region_index)] = world.register_region().expect("register replacement region"),
+                    Err(error) => proptest::prop_assert_eq!(error, crate::ApplyError::RemovalCapacityExhausted),
+                },
                 4 => {
                     let expected_id = uuid(1_000 + u128::from(identity));
                     let _ = world.retain_pbr_material_overrides(source, local_id, expected_id, overrides).expect("retain valid override");
                 }
-                5.. => panic!("operation generator is bounded to 0..5"),
+                5 => {
+                    let progress = world.reclaim_removals(usize::from(value) + 1);
+                    proptest::prop_assert!(progress.work_units <= usize::from(value) + 1);
+                }
+                6.. => panic!("operation generator is bounded to 0..6"),
             }
 
             proptest::prop_assert_eq!(world.check_invariants(), Ok(()));

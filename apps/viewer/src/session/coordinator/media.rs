@@ -7,8 +7,8 @@ use network::{SimulatorId, capabilities::Client};
 use world::Entity;
 
 use crate::session::{
-    object_media::{ObjectMediaFetcher, ObjectMediaResult, ObjectMediaTarget, response_is_stale},
-    world::{MAX_WORLD_ENTITIES, SessionWorld},
+    object_media::{FetchError, ObjectMediaFetcher, ObjectMediaResult, ObjectMediaTarget, response_is_stale},
+    world::{MAX_WORLD_ENTITIES, ObjectMediaTargetCheck, ObjectMediaTargetCheckProgress, SessionWorld},
 };
 
 const MAX_WAITING_OBJECT_MEDIA: usize = MAX_WORLD_ENTITIES;
@@ -72,13 +72,30 @@ impl WaitingObjectMedia {
 }
 
 pub(super) enum ObjectMediaIntake {
-    Enabled { fetcher: ObjectMediaFetcher, clients: HashMap<SimulatorId, Client>, waiting: WaitingObjectMedia },
+    Enabled {
+        fetcher: ObjectMediaFetcher,
+        clients: HashMap<SimulatorId, Client>,
+        waiting: WaitingObjectMedia,
+        pending_flush: Option<(ObjectMediaTarget, ObjectMediaTargetCheck)>,
+    },
     Disabled,
+}
+
+pub(super) struct PendingObjectMediaApply {
+    target: ObjectMediaTarget,
+    update: Option<Result<world::ObjectMediaUpdate, FetchError>>,
+    retry: Option<ObjectMediaTarget>,
+    check: ObjectMediaTargetCheck,
+}
+
+pub(super) enum ObjectMediaApplyProgress {
+    Pending,
+    Complete,
 }
 
 impl ObjectMediaIntake {
     pub(super) fn new(fetcher: ObjectMediaFetcher) -> Self {
-        Self::Enabled { fetcher, clients: HashMap::new(), waiting: WaitingObjectMedia::default() }
+        Self::Enabled { fetcher, clients: HashMap::new(), waiting: WaitingObjectMedia::default(), pending_flush: None }
     }
 
     pub(super) async fn next_result(&mut self) -> Option<ObjectMediaResult> {
@@ -106,17 +123,17 @@ impl ObjectMediaIntake {
     }
 
     pub(super) fn forget_simulator(&mut self, simulator_id: SimulatorId) {
-        let Self::Enabled { fetcher, clients, waiting } = self else { return };
+        let Self::Enabled { fetcher, clients, waiting, pending_flush } = self else { return };
         clients.remove(&simulator_id);
         fetcher.forget_simulator(simulator_id);
         waiting.forget_simulator(simulator_id);
+        if pending_flush.as_ref().is_some_and(|(target, _)| target.simulator_id == simulator_id) {
+            *pending_flush = None;
+        }
     }
 
-    pub(super) fn queue(&mut self, target: ObjectMediaTarget, world: &SessionWorld) {
-        let Self::Enabled { fetcher, clients, waiting } = self else { return };
-        if !world.object_media_target_is_current(target) {
-            return;
-        }
+    pub(super) fn queue_current(&mut self, target: ObjectMediaTarget) {
+        let Self::Enabled { fetcher, clients, waiting, .. } = self else { return };
         if waiting.update(target) {
             return;
         }
@@ -136,95 +153,144 @@ impl ObjectMediaIntake {
         }
     }
 
-    pub(super) fn apply_result(&mut self, result: ObjectMediaResult, world: &mut SessionWorld) {
+    fn queue_for_validation(&mut self, target: ObjectMediaTarget) {
+        let Self::Enabled { waiting, .. } = self else { return };
+        if !waiting.insert(target) {
+            tracing::debug!(
+                simulator = target.simulator_id.get(),
+                region = target.binding.address().region().get(),
+                object = %target.binding.object_id(),
+                local_id = target.binding.address().local_id().get(),
+                "object media queue reached the live object limit"
+            );
+        }
+    }
+
+    pub(super) fn begin_apply_result(&mut self, result: ObjectMediaResult) -> Option<PendingObjectMediaApply> {
         let retry = self.finish(&result);
+        let target = result.target;
         let requested_version = retry.map_or(result.target.version, |target| target.version);
         let response_version = result.update.as_ref().as_ref().ok().map(|update| update.version());
         if response_version.is_some_and(|version| response_is_stale(version, requested_version)) {
             tracing::debug!(
-                simulator = result.target.simulator_id.get(),
-                region = result.target.binding.address().region().get(),
-                object = %result.target.binding.object_id(),
-                local_id = result.target.binding.address().local_id().get(),
+                simulator = target.simulator_id.get(),
+                region = target.binding.address().region().get(),
+                object = %target.binding.object_id(),
+                local_id = target.binding.address().local_id().get(),
                 response_version,
                 requested_version,
                 "discarded superseded object media response"
             );
-        } else {
-            match result.update {
-                Ok(update) => {
-                    let address = result.target.binding.address();
-                    if let Some(applied) = world.apply_object_media(result.target, update) {
-                        match applied {
-                            Ok(applied) => {
-                                if !applied.rejections.is_empty() {
-                                    tracing::debug!(
-                                        simulator = result.target.simulator_id.get(),
-                                        region = address.region().get(),
-                                        object = %result.target.binding.object_id(),
-                                        local_id = address.local_id().get(),
-                                        rejections = ?applied.rejections,
-                                        "object media update contained rejected fields"
-                                    );
-                                }
-                            }
-                            Err(error) => {
-                                tracing::debug!(
-                                    simulator = result.target.simulator_id.get(),
-                                    region = address.region().get(),
-                                    object = %result.target.binding.object_id(),
-                                    local_id = address.local_id().get(),
-                                    %error,
-                                    "object media update was rejected by world"
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(error) if world.object_media_target_is_current(result.target) => {
-                    tracing::debug!(
-                        simulator = result.target.simulator_id.get(),
-                        region = result.target.binding.address().region().get(),
-                        object = %result.target.binding.object_id(),
-                        local_id = result.target.binding.address().local_id().get(),
-                        ?error,
-                        "object media could not be loaded"
-                    );
-                }
-                Err(error) => {
-                    tracing::debug!(
-                        simulator = result.target.simulator_id.get(),
-                        region = result.target.binding.address().region().get(),
-                        object = %result.target.binding.object_id(),
-                        local_id = result.target.binding.address().local_id().get(),
-                        ?error,
-                        "discarded object media failure for a stale object target"
-                    );
-                }
+            if let Some(target) = retry {
+                self.queue_for_validation(target);
             }
+            return None;
         }
-        if let Some(target) = retry {
-            self.queue(target, world);
-        }
+        Some(PendingObjectMediaApply { target, update: Some(result.update), retry, check: ObjectMediaTargetCheck::default() })
     }
 
-    pub(super) fn flush(&mut self, world: &SessionWorld) {
-        let Self::Enabled { fetcher, clients, waiting } = self else { return };
-        let attempts = waiting.len().min(MAX_MEDIA_FLUSH_BATCH);
-        for _ in 0..attempts {
-            let Some(target) = waiting.pop_front() else { break };
-            if !world.object_media_target_is_current(target) {
-                continue;
+    pub(super) fn advance_apply_result(
+        &mut self,
+        world: &mut SessionWorld,
+        pending: &mut PendingObjectMediaApply,
+    ) -> ObjectMediaApplyProgress {
+        let target = pending.target;
+        let current = match world.object_media_target_is_current_step(target, &mut pending.check, world::MAX_OBJECT_LOOKUP_WORK_ITEMS) {
+            ObjectMediaTargetCheckProgress::Pending => return ObjectMediaApplyProgress::Pending,
+            ObjectMediaTargetCheckProgress::Complete { current, .. } => current,
+        };
+        let Some(update) = pending.update.take() else { return ObjectMediaApplyProgress::Complete };
+        match update {
+            Ok(update) if current => {
+                if let Some(applied) = world.apply_object_media_after_check(target, update) {
+                    let address = target.binding.address();
+                    match applied {
+                        Ok(applied) if !applied.rejections.is_empty() => tracing::debug!(
+                            simulator = target.simulator_id.get(),
+                            region = address.region().get(),
+                            object = %target.binding.object_id(),
+                            local_id = address.local_id().get(),
+                            rejections = ?applied.rejections,
+                            "object media update contained rejected fields"
+                        ),
+                        Err(error) => tracing::debug!(
+                            simulator = target.simulator_id.get(),
+                            region = address.region().get(),
+                            object = %target.binding.object_id(),
+                            local_id = address.local_id().get(),
+                            %error,
+                            "object media update was rejected by world"
+                        ),
+                        Ok(_) => {}
+                    }
+                }
             }
-            let Some(client) = clients.get(&target.simulator_id) else {
-                waiting.push_back(target);
-                continue;
-            };
-            if !fetcher.enqueue(target, client.clone()) {
-                waiting.push_front(target);
-                break;
+            Err(error) if current => tracing::debug!(
+                simulator = target.simulator_id.get(),
+                region = target.binding.address().region().get(),
+                object = %target.binding.object_id(),
+                local_id = target.binding.address().local_id().get(),
+                ?error,
+                "object media could not be loaded"
+            ),
+            Err(error) => tracing::debug!(
+                simulator = target.simulator_id.get(),
+                region = target.binding.address().region().get(),
+                object = %target.binding.object_id(),
+                local_id = target.binding.address().local_id().get(),
+                ?error,
+                "discarded object media failure for a stale object target"
+            ),
+            Ok(_) => {}
+        }
+        if let Some(target) = pending.retry {
+            self.queue_for_validation(target);
+        }
+        ObjectMediaApplyProgress::Complete
+    }
+
+    pub(super) fn flush_step(&mut self, world: &mut SessionWorld) -> bool {
+        let Self::Enabled { fetcher, clients, waiting, pending_flush } = self else { return false };
+        let mut work = 0usize;
+        for _ in 0..MAX_MEDIA_FLUSH_BATCH {
+            if work >= world::MAX_OBJECT_LOOKUP_WORK_ITEMS {
+                return pending_flush.is_some() || Self::waiting_client_is_ready(clients, waiting);
+            }
+            if pending_flush.is_none() {
+                let Some(target) = waiting.pop_front() else { return false };
+                *pending_flush = Some((target, ObjectMediaTargetCheck::default()));
+            }
+            let Some((target, check)) = pending_flush.as_mut() else { return false };
+            let target = *target;
+            match world.object_media_target_is_current_step(target, check, world::MAX_OBJECT_LOOKUP_WORK_ITEMS.saturating_sub(work)) {
+                ObjectMediaTargetCheckProgress::Pending => return true,
+                ObjectMediaTargetCheckProgress::Complete { current: false, work_units } => {
+                    work = work.saturating_add(work_units);
+                    *pending_flush = None;
+                }
+                ObjectMediaTargetCheckProgress::Complete { current: true, work_units } => {
+                    work = work.saturating_add(work_units);
+                    *pending_flush = None;
+                    let Some(client) = clients.get(&target.simulator_id) else {
+                        waiting.push_back(target);
+                        return false;
+                    };
+                    if !fetcher.enqueue(target, client.clone()) {
+                        waiting.push_front(target);
+                        return false;
+                    }
+                }
             }
         }
+        Self::waiting_client_is_ready(clients, waiting)
+    }
+
+    fn waiting_client_is_ready(clients: &HashMap<SimulatorId, Client>, waiting: &WaitingObjectMedia) -> bool {
+        waiting
+            .order
+            .front()
+            .and_then(|entity| waiting.targets.get(entity))
+            .is_some_and(|target| clients.contains_key(&target.simulator_id))
     }
 }
 
@@ -288,7 +354,7 @@ mod tests {
         let mut reads = WorldReadHost::new(world.world(), Handle::current());
         let target = object_media_target(&mut world, simulator, 1, 1);
         let mut media = ObjectMediaIntake::new(ObjectMediaFetcher::new(Handle::current(), ready(())));
-        media.queue(target, &world);
+        media.queue_current(target);
         match &media {
             ObjectMediaIntake::Enabled { waiting, .. } if waiting.len() == 1 => {}
             _ => panic!("expected one waiting media target"),
@@ -296,7 +362,7 @@ mod tests {
         assert!(media.next_result().await.is_none());
 
         media.disable();
-        media.queue(target, &world);
+        media.queue_current(target);
         match &media {
             ObjectMediaIntake::Disabled => {}
             _ => panic!("disabled fetching releases queued work and rejects new work"),
@@ -371,12 +437,12 @@ mod tests {
         assert_eq!(waiting.pop_front(), None);
     }
 
-    #[test]
-    fn rebound_objects_ignore_media_failures() {
+    #[tokio::test]
+    async fn rebound_objects_ignore_media_failures() {
         let simulator_id = simulator_id();
         let mut world = SessionWorld::new(viewer_world_limits());
         let target = object_media_target(&mut world, simulator_id, 1, 1);
-        assert!(world.object_media_target_is_current(target));
+        assert!(object_media_target_is_current(&mut world, target));
 
         let source = UpdateSource::new(target.source.region(), 2, OrderEvidence::Ordered(2), 0);
         world
@@ -392,7 +458,7 @@ mod tests {
             )
             .expect("remove object");
 
-        assert!(!world.object_media_target_is_current(target));
+        assert!(!object_media_target_is_current(&mut world, target));
     }
 
     #[tokio::test]
@@ -447,5 +513,15 @@ mod tests {
 
         assert!(media_serviced, "a queued media response should progress while simulator events remain ready");
         assert!(event_count < 128, "the event stream must remain ready until media is serviced");
+    }
+
+    fn object_media_target_is_current(world: &mut SessionWorld, target: ObjectMediaTarget) -> bool {
+        let mut check = ObjectMediaTargetCheck::default();
+        loop {
+            match world.object_media_target_is_current_step(target, &mut check, world::MAX_OBJECT_LOOKUP_WORK_ITEMS) {
+                ObjectMediaTargetCheckProgress::Pending => {}
+                ObjectMediaTargetCheckProgress::Complete { current, .. } => return current,
+            }
+        }
     }
 }

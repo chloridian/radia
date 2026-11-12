@@ -33,6 +33,495 @@ static ALLOCATOR: test_support::allocation::CountingAllocator = test_support::al
 const OWNER_PATH_ENTRY_COUNT: usize = 100_000;
 
 #[tokio::test(flavor = "current_thread")]
+async fn pending_ordered_object_update_serves_world_read_before_resuming() {
+    use std::{future::pending, num::NonZeroU32};
+
+    use futures::{FutureExt, poll};
+    use math::Vec3;
+    use world::{Kind, LocalAddress, ObjectObservation, ObjectPatch, OrderEvidence, ParentUpdate, UpdateSource};
+
+    use crate::session::{
+        inbound::{ObjectBatch, ObjectOperation},
+        world::{BlockOutcome, ObjectBatchProgress, SessionWorld, viewer_world_limits},
+    };
+    use crate::world_reader::WorldReadHost;
+
+    const DEPTH: u32 = 600;
+    let simulator = crate::test_helpers::simulator_id();
+    let mut session = SessionWorld::new(viewer_world_limits());
+    let region = session.register_simulator(simulator, None).expect("register simulator");
+    for local_id in 1..=DEPTH {
+        let parent = if local_id == 1 {
+            ParentUpdate::Root
+        } else {
+            ParentUpdate::Local(NonZeroU32::new(local_id - 1).expect("parent local ID is nonzero"))
+        };
+        let source = UpdateSource::new(region, local_id, OrderEvidence::Ordered(u64::from(local_id)), 0);
+        let observation = ObjectObservation::new(
+            source,
+            Uuid::from_u128(u128::from(local_id)),
+            NonZeroU32::new(local_id).expect("local ID is nonzero"),
+            Kind::Object,
+            parent,
+        );
+        let summary = session
+            .apply_object_batch(
+                simulator,
+                ObjectBatch {
+                    region,
+                    region_handle: None,
+                    blocks: vec![Some(ObjectOperation::Observe(observation))],
+                    invalid_blocks: 0,
+                    invalid_fields: 0,
+                },
+            )
+            .expect("registered simulator");
+        assert_eq!(summary.blocks.len(), 1);
+    }
+
+    let local_id = NonZeroU32::new(DEPTH).expect("leaf local ID is nonzero");
+    let address = LocalAddress::new(region, local_id);
+    let sequence = DEPTH + 1;
+    let mut patch = ObjectPatch::new(UpdateSource::new(region, sequence, OrderEvidence::Ordered(u64::from(sequence)), 0), local_id);
+    patch.scale = Some(Vec3::splat(2.0));
+    let later_sequence = sequence + 1;
+    let mut later_patch =
+        ObjectPatch::new(UpdateSource::new(region, later_sequence, OrderEvidence::Ordered(u64::from(later_sequence)), 0), local_id);
+    later_patch.scale = Some(Vec3::splat(3.0));
+    let mut later_update = Some(ObjectBatch {
+        region,
+        region_handle: None,
+        blocks: vec![Some(ObjectOperation::Patch(later_patch))],
+        invalid_blocks: 0,
+        invalid_fields: 0,
+    });
+    let mut continuation = session
+        .begin_object_batch(
+            simulator,
+            ObjectBatch {
+                region,
+                region_handle: None,
+                blocks: vec![Some(ObjectOperation::Patch(patch))],
+                invalid_blocks: 0,
+                invalid_fields: 0,
+            },
+        )
+        .expect("registered simulator");
+    let revision_before_update = session.world().revision();
+    let mut on_chunk = |_, _| {};
+
+    let mut reads = WorldReadHost::new(session.world(), tokio::runtime::Handle::current());
+    let reader = reads.reader();
+    let mut barrier_read = Box::pin(reader.barrier());
+    assert!(poll!(barrier_read.as_mut()).is_pending());
+    let cancellation = pending::<()>().boxed().shared();
+    let (turn, first_progress) = super::serve_owner_turn_with_advance(&mut reads, &mut session, &cancellation, |world| {
+        world.advance_object_batch(&mut continuation, &mut on_chunk)
+    })
+    .await;
+    assert!(matches!(turn, super::OwnerTurnProgress::ReadServed));
+    std::assert_matches!(first_progress, Some(ObjectBatchProgress::Pending));
+    let barrier = barrier_read.await.expect("barrier request is served by the owner");
+    assert_eq!(barrier.object_count_upper_bound, DEPTH as usize);
+    assert_eq!(session.world().revision(), revision_before_update);
+    assert!(later_update.is_some());
+
+    let summary = loop {
+        let (turn, progress) = super::serve_owner_turn_with_advance(&mut reads, &mut session, &cancellation, |world| {
+            world.advance_object_batch(&mut continuation, &mut on_chunk)
+        })
+        .await;
+        assert!(matches!(turn, super::OwnerTurnProgress::Continue | super::OwnerTurnProgress::ReadServed));
+        match progress.expect("noncancelled owner turn advances the retained update") {
+            ObjectBatchProgress::Pending => {}
+            ObjectBatchProgress::Complete(summary) => break summary,
+        }
+    };
+
+    std::assert_matches!(summary.blocks.first(), Some(BlockOutcome::Applied { .. }));
+    let entity = session.world().entity_at(address).expect("updated object remains visible");
+    assert_eq!(session.world().object(entity).and_then(|object| object.scale()), Some(Vec3::splat(2.0)));
+    assert!(session.world().revision() > revision_before_update);
+
+    let mut later_continuation = session
+        .begin_object_batch(simulator, later_update.take().expect("later ordered update remains queued"))
+        .expect("registered simulator");
+    let later_summary = loop {
+        match session.advance_object_batch(&mut later_continuation, &mut on_chunk) {
+            ObjectBatchProgress::Pending => {}
+            ObjectBatchProgress::Complete(summary) => break summary,
+        }
+    };
+    std::assert_matches!(later_summary.blocks.first(), Some(BlockOutcome::Applied { .. }));
+    let entity = session.world().entity_at(address).expect("later ordered update remains visible");
+    assert_eq!(session.world().object(entity).and_then(|object| object.scale()), Some(Vec3::splat(3.0)));
+    reads.finish();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_parent_resolution_yields_and_preserves_order() {
+    use std::{future::pending, num::NonZeroU32};
+
+    use futures::{FutureExt, poll};
+    use math::Vec3;
+    use world::{Kind, LocalAddress, ObjectObservation, ObjectPatch, OrderEvidence, Parent, ParentUpdate, UpdateSource};
+
+    use crate::session::{
+        inbound::{ObjectBatch, ObjectOperation},
+        world::{BlockOutcome, ObjectBatchProgress, SessionWorld, viewer_world_limits},
+    };
+    use crate::world_reader::WorldReadHost;
+
+    const DEPTH: u32 = 600;
+    let simulator = crate::test_helpers::simulator_id();
+    let mut session = SessionWorld::new(viewer_world_limits());
+    let region = session.register_simulator(simulator, None).expect("register simulator");
+    for local_id in 1..=DEPTH {
+        let parent = if local_id == 1 {
+            ParentUpdate::Root
+        } else {
+            ParentUpdate::Local(NonZeroU32::new(local_id - 1).expect("parent local ID is nonzero"))
+        };
+        let source = UpdateSource::new(region, local_id, OrderEvidence::Ordered(u64::from(local_id)), 0);
+        let observation = ObjectObservation::new(
+            source,
+            Uuid::from_u128(u128::from(local_id)),
+            NonZeroU32::new(local_id).expect("local ID is nonzero"),
+            Kind::Object,
+            parent,
+        );
+        session
+            .apply_object_batch(
+                simulator,
+                ObjectBatch {
+                    region,
+                    region_handle: None,
+                    blocks: vec![Some(ObjectOperation::Observe(observation))],
+                    invalid_blocks: 0,
+                    invalid_fields: 0,
+                },
+            )
+            .expect("registered simulator");
+    }
+    let removed_local = NonZeroU32::new(DEPTH + 1).expect("nonzero local ID");
+    let existing_local = NonZeroU32::new(DEPTH + 2).expect("nonzero local ID");
+    for (local, id, order) in [(removed_local, 601_u128, DEPTH + 1), (existing_local, 602_u128, DEPTH + 2)] {
+        let observation = ObjectObservation::new(
+            UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0),
+            Uuid::from_u128(id),
+            local,
+            Kind::Object,
+            ParentUpdate::Root,
+        );
+        session
+            .apply_object_batch(
+                simulator,
+                ObjectBatch {
+                    region,
+                    region_handle: None,
+                    blocks: vec![Some(ObjectOperation::Observe(observation))],
+                    invalid_blocks: 0,
+                    invalid_fields: 0,
+                },
+            )
+            .expect("registered simulator");
+    }
+    session
+        .apply_object_batch(
+            simulator,
+            ObjectBatch {
+                region,
+                region_handle: None,
+                blocks: vec![Some(ObjectOperation::Remove {
+                    source: UpdateSource::new(region, DEPTH + 3, OrderEvidence::Ordered(u64::from(DEPTH + 3)), 0),
+                    local_id: removed_local,
+                })],
+                invalid_blocks: 0,
+                invalid_fields: 0,
+            },
+        )
+        .expect("registered simulator");
+    assert!(session.world().has_pending_removals(), "unrelated removal remains physically pending");
+
+    let parent_address = LocalAddress::new(region, NonZeroU32::new(DEPTH).expect("nonzero parent local ID"));
+    let child_local = NonZeroU32::new(DEPTH + 4).expect("nonzero child local ID");
+    let child_address = LocalAddress::new(region, child_local);
+    let child_order = DEPTH + 5;
+    let child = ObjectObservation::new(
+        UpdateSource::new(region, child_order, OrderEvidence::Ordered(u64::from(child_order)), 0),
+        Uuid::from_u128(10_000),
+        child_local,
+        Kind::Object,
+        ParentUpdate::Local(NonZeroU32::new(DEPTH).expect("nonzero parent local ID")),
+    );
+    let existing_address = LocalAddress::new(region, existing_local);
+    let mut reparent =
+        ObjectPatch::new(UpdateSource::new(region, DEPTH + 6, OrderEvidence::Ordered(u64::from(DEPTH + 6)), 0), existing_local);
+    reparent.parent = Some(ParentUpdate::Local(NonZeroU32::new(DEPTH).expect("nonzero parent local ID")));
+    let mut cycle = ObjectPatch::new(
+        UpdateSource::new(region, DEPTH + 7, OrderEvidence::Ordered(u64::from(DEPTH + 7)), 0),
+        NonZeroU32::new(1).expect("nonzero root local ID"),
+    );
+    cycle.parent = Some(ParentUpdate::Local(NonZeroU32::new(DEPTH).expect("nonzero parent local ID")));
+    let mut later_patch =
+        ObjectPatch::new(UpdateSource::new(region, DEPTH + 8, OrderEvidence::Ordered(u64::from(DEPTH + 8)), 0), child_local);
+    later_patch.scale = Some(Vec3::splat(2.0));
+    let mut later_inputs = std::collections::VecDeque::from([
+        ObjectBatch {
+            region,
+            region_handle: None,
+            blocks: vec![Some(ObjectOperation::Patch(reparent))],
+            invalid_blocks: 0,
+            invalid_fields: 0,
+        },
+        ObjectBatch {
+            region,
+            region_handle: None,
+            blocks: vec![Some(ObjectOperation::Patch(cycle))],
+            invalid_blocks: 0,
+            invalid_fields: 0,
+        },
+        ObjectBatch {
+            region,
+            region_handle: None,
+            blocks: vec![Some(ObjectOperation::Patch(later_patch))],
+            invalid_blocks: 0,
+            invalid_fields: 0,
+        },
+    ]);
+    let mut continuation = session
+        .begin_object_batch(
+            simulator,
+            ObjectBatch {
+                region,
+                region_handle: None,
+                blocks: vec![Some(ObjectOperation::Observe(child))],
+                invalid_blocks: 0,
+                invalid_fields: 0,
+            },
+        )
+        .expect("registered simulator");
+    let revision_before_update = session.world().revision();
+    let mut reads = WorldReadHost::new(session.world(), tokio::runtime::Handle::current());
+    let reader = reads.reader();
+    let cancellation = pending::<()>().boxed().shared();
+    let mut on_chunk = |_, _| {};
+    let mut turns = 0;
+    let summary = loop {
+        let revision_before_turn = session.world().revision();
+        let mut read = Box::pin(reader.barrier());
+        assert!(poll!(read.as_mut()).is_pending(), "a barrier request is queued before each owner turn");
+        let (turn, progress) = super::serve_owner_turn_with_advance(&mut reads, &mut session, &cancellation, |world| {
+            world.advance_object_batch(&mut continuation, &mut on_chunk)
+        })
+        .await;
+        assert!(matches!(turn, super::OwnerTurnProgress::ReadServed));
+        let barrier = read.await.expect("the owner serves each queued barrier");
+        assert_eq!(barrier.revision, revision_before_turn);
+        if turns == 0 {
+            assert_eq!(barrier.revision, revision_before_update);
+        }
+        turns += 1;
+        match progress.expect("noncancelled owner turn advances the retained update") {
+            ObjectBatchProgress::Pending => {
+                assert_eq!(later_inputs.len(), 3);
+                if turns == 1 {
+                    assert!(session.world().entity_at(child_address).is_none(), "the first quantum cannot commit a deep parent link");
+                }
+            }
+            ObjectBatchProgress::Complete(summary) => break summary,
+        }
+    };
+    assert!(turns >= 3, "the 600-edge parent lookup spans bounded owner turns");
+    std::assert_matches!(summary.blocks.first(), Some(BlockOutcome::Applied { .. }));
+    let parent = session.world().entity_at(parent_address).expect("deep parent remains visible");
+    let child_entity = session.world().entity_at(child_address).expect("child is added after parent validation");
+    assert_eq!(session.world().object(child_entity).expect("child is visible").parent(), Parent::Resolved(parent));
+
+    while let Some(batch) = later_inputs.pop_front() {
+        let mut later = session.begin_object_batch(simulator, batch).expect("registered simulator");
+        let later_summary = loop {
+            let (turn, progress) = super::serve_owner_turn_with_advance(&mut reads, &mut session, &cancellation, |world| {
+                world.advance_object_batch(&mut later, &mut on_chunk)
+            })
+            .await;
+            assert!(matches!(turn, super::OwnerTurnProgress::Continue | super::OwnerTurnProgress::ReadServed));
+            match progress.expect("noncancelled owner turn advances ordered input") {
+                ObjectBatchProgress::Pending => {}
+                ObjectBatchProgress::Complete(summary) => break summary,
+            }
+        };
+        std::assert_matches!(later_summary.blocks.first(), Some(BlockOutcome::Applied { .. }));
+    }
+
+    let existing_entity = session.world().entity_at(existing_address).expect("reparented child remains visible");
+    assert_eq!(session.world().object(existing_entity).expect("existing child is visible").parent(), Parent::Resolved(parent));
+    let root = session
+        .world()
+        .object(session.world().entity_at(LocalAddress::new(region, NonZeroU32::new(1).unwrap())).unwrap())
+        .expect("root remains visible");
+    assert_eq!(root.parent(), Parent::Root, "cycle validation preserves the existing parent");
+    assert_eq!(session.world().object(child_entity).and_then(|object| object.scale()), Some(Vec3::splat(2.0)));
+    reads.finish();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancellation_precedes_a_queued_world_read() {
+    use std::num::NonZeroU32;
+
+    use futures::{FutureExt, poll};
+    use world::{Kind, ObjectObservation, OrderEvidence, ParentUpdate, UpdateSource};
+
+    use crate::session::{
+        inbound::{ObjectBatch, ObjectOperation},
+        world::{SessionWorld, viewer_world_limits},
+    };
+    use crate::world_reader::WorldReadHost;
+
+    let simulator = crate::test_helpers::simulator_id();
+    let mut session = SessionWorld::new(viewer_world_limits());
+    let region = session.register_simulator(simulator, None).expect("register simulator");
+    let local_id = NonZeroU32::new(1).expect("nonzero local ID");
+    let batch = ObjectBatch {
+        region,
+        region_handle: None,
+        blocks: vec![Some(ObjectOperation::Observe(ObjectObservation::new(
+            UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0),
+            Uuid::from_u128(1),
+            local_id,
+            Kind::Object,
+            ParentUpdate::Root,
+        )))],
+        invalid_blocks: 0,
+        invalid_fields: 0,
+    };
+    let mut continuation = session.begin_object_batch(simulator, batch).expect("registered simulator");
+    let mut reads = WorldReadHost::new(session.world(), tokio::runtime::Handle::current());
+    let reader = reads.reader();
+    let mut read = Box::pin(reader.barrier());
+    assert!(poll!(read.as_mut()).is_pending());
+    let cancellation = futures::future::ready(()).boxed().shared();
+    let (turn, progress) = super::serve_owner_turn_with_advance(&mut reads, &mut session, &cancellation, |world| {
+        world.advance_object_batch(&mut continuation, &mut |_, _| {})
+    })
+    .await;
+
+    assert!(matches!(turn, super::OwnerTurnProgress::Cancelled));
+    assert!(progress.is_none());
+    assert!(poll!(read.as_mut()).is_pending(), "cancellation wins before the queued read is served");
+    assert_eq!(session.world().object_count(), 0, "the pending update does not advance after cancellation");
+    reads.finish();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_avatar_sit_lookup_serves_world_read_before_applying() {
+    use std::{future::pending, num::NonZeroU32};
+
+    use futures::{FutureExt, poll};
+    use math::{Quat, Vec3};
+    use network::PacketOrder;
+    use world::{Kind, ObjectObservation, OrderEvidence, ParentUpdate, SitTarget, UpdateSource};
+
+    use crate::session::{
+        inbound::{ObjectBatch, ObjectOperation},
+        object_cache::ObjectCacheSession,
+        world::{SessionWorld, viewer_world_limits},
+    };
+    use crate::world_reader::WorldReadHost;
+
+    const DEPTH: u32 = 600;
+    let simulator = crate::test_helpers::simulator_id();
+    let mut session = SessionWorld::new(viewer_world_limits());
+    let region = session.register_simulator(simulator, None).expect("register simulator");
+    for local_id in 1..=DEPTH {
+        let parent = if local_id == 1 {
+            ParentUpdate::Root
+        } else {
+            ParentUpdate::Local(NonZeroU32::new(local_id - 1).expect("parent local ID is nonzero"))
+        };
+        let source = UpdateSource::new(region, local_id, OrderEvidence::Ordered(u64::from(local_id)), 0);
+        let observation = ObjectObservation::new(
+            source,
+            Uuid::from_u128(u128::from(local_id)),
+            NonZeroU32::new(local_id).expect("local ID is nonzero"),
+            Kind::Object,
+            parent,
+        );
+        session
+            .apply_object_batch(
+                simulator,
+                ObjectBatch {
+                    region,
+                    region_handle: None,
+                    blocks: vec![Some(ObjectOperation::Observe(observation))],
+                    invalid_blocks: 0,
+                    invalid_fields: 0,
+                },
+            )
+            .expect("registered simulator");
+    }
+
+    let expected = SitTarget { position: Vec3::new(1.0, 2.0, 3.0), rotation: Quat::IDENTITY };
+    let message = protocol::lludp::Message::AvatarSitResponse(protocol::messages::AvatarSitResponse {
+        sit_object: protocol::messages::agent::avatar_sit_response::SitObject { id: Some(Uuid::from_u128(u128::from(DEPTH))) },
+        sit_transform: protocol::messages::agent::avatar_sit_response::SitTransform {
+            auto_pilot: Some(true),
+            sit_position: Some(expected.position),
+            sit_rotation: Some(expected.rotation),
+            camera_eye_offset: Some(Vec3::ZERO),
+            camera_at_offset: Some(Vec3::ZERO),
+            force_mouselook: Some(false),
+        },
+    });
+    let mut handoff = super::WorldHandoff::default();
+    let mut object_cache = ObjectCacheSession::new(network::Grid::Agni);
+    let preparation = handoff.begin_object_update(
+        &mut session,
+        simulator,
+        DEPTH + 1,
+        PacketOrder::Ordered(u64::from(DEPTH + 1)),
+        Instant::now(),
+        None,
+        &message,
+        None,
+        &mut object_cache,
+    );
+    let Some(super::ObjectUpdatePreparation::Entity(mut continuation)) = preparation else {
+        panic!("avatar sit response must retain its visibility lookup");
+    };
+    let revision_before_update = session.world().revision();
+    assert!(matches!(handoff.advance_entity_update(&mut session, &mut continuation), super::EntityUpdateProgress::Pending));
+
+    let mut reads = WorldReadHost::new(session.world(), tokio::runtime::Handle::current());
+    let reader = reads.reader();
+    let mut barrier_read = Box::pin(reader.barrier());
+    assert!(poll!(barrier_read.as_mut()).is_pending());
+    let cancellation = pending::<()>().boxed().shared();
+    assert!(matches!(super::serve_owner_turn(&mut reads, &mut session, &cancellation).await, super::OwnerTurnProgress::ReadServed));
+    let barrier = barrier_read.await.expect("barrier request is served by the owner");
+    assert_eq!(barrier.object_count_upper_bound, DEPTH as usize);
+    assert_eq!(session.world().revision(), revision_before_update);
+
+    let outcome = loop {
+        match super::serve_owner_turn(&mut reads, &mut session, &cancellation).await {
+            super::OwnerTurnProgress::Continue | super::OwnerTurnProgress::ReadServed => {}
+            super::OwnerTurnProgress::Cancelled => panic!("test cancellation remains pending"),
+        }
+        match handoff.advance_entity_update(&mut session, &mut continuation) {
+            super::EntityUpdateProgress::Pending => {}
+            super::EntityUpdateProgress::Complete(outcome) => break outcome,
+        }
+    };
+
+    assert!(outcome.summary.is_some());
+    let address = world::LocalAddress::new(region, NonZeroU32::new(DEPTH).expect("leaf local ID is nonzero"));
+    let entity = session.world().entity_at(address).expect("sit response target remains visible");
+    assert_eq!(session.world().object(entity).and_then(|object| object.sit_target()), Some(expected));
+    assert!(session.world().revision() > revision_before_update);
+    reads.finish();
+}
+
+#[tokio::test(flavor = "current_thread")]
 #[ignore = "manual faithful inventory owner-path measurement"]
 async fn owner_path_reclaim_measurement() {
     for replace in [false, true] {

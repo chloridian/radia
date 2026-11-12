@@ -39,6 +39,86 @@ async fn select_read<T>(service: &mut WorldReadHost, intake: impl Future<Output 
     result
 }
 
+#[tokio::test]
+async fn detail_cursor_tracks_consumed_prefix() {
+    const DEPTH: u32 = 180;
+    const CHAINS: u32 = 9;
+    let count = usize::try_from(DEPTH * CHAINS).unwrap();
+    let limits = WorldLimits {
+        max_regions: 1,
+        max_entities: count,
+        max_entities_per_region: count,
+        max_tombstones_per_region: 32,
+        max_tombstones: 32,
+        max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(32),
+        max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(32),
+        max_journal_entries: count + 32,
+        max_journal_changes: count * 2,
+        max_region_name_bytes: 64,
+        max_recovery_targets: 8,
+    };
+    let mut world = World::new(limits);
+    let region = world.register_region().unwrap();
+    let mut sequence = 0_u64;
+    for chain in 0..CHAINS {
+        let base = chain * DEPTH;
+        for index in (0..DEPTH).rev() {
+            sequence += 1;
+            let local = base + index + 1;
+            let parent =
+                if index + 1 == DEPTH { ParentUpdate::Root } else { ParentUpdate::Local(std::num::NonZeroU32::new(local + 1).unwrap()) };
+            let id = if index == 0 { u128::from(chain + 1) } else { 10_000 + u128::from(chain * DEPTH + index) };
+            let observation = ObjectObservation::new(
+                UpdateSource::new(region, sequence as u32, Ordered(sequence), 0),
+                Uuid::from_u128(id),
+                std::num::NonZeroU32::new(local).unwrap(),
+                Kind::Object,
+                parent,
+            );
+            let _ = world.observe_object(observation).unwrap();
+        }
+    }
+
+    let mut service = WorldReadHost::new(&world, Handle::current());
+    let reader = service.reader();
+    let (mut reconciler, mut view) = Reconciler::new(Budget::default());
+    reconciler.notify_world_change();
+    let mut busy_reads = 0;
+    let mut now = Instant::now();
+    for _ in 0..10_000 {
+        match reconciler.poll(now) {
+            ReconcileStep::Read(job) => {
+                let mut read = Box::pin(execute_world_read(&reader, &job));
+                let reply = loop {
+                    match select_read(&mut service, &mut read).await {
+                        Ok(reply) => break reply,
+                        Err(request) => request.serve(&world),
+                    }
+                };
+                if matches!(&reply, Err(ReadFailure::Busy)) {
+                    busy_reads += 1;
+                }
+                drop(read);
+                reconciler.complete_read(job, reply, now);
+            }
+            ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
+            ReconcileStep::Build(job) => reconciler.complete_mesh(job.run()),
+            ReconcileStep::Continue => {}
+            ReconcileStep::Wait(until) => now = until,
+            ReconcileStep::Idle => {
+                assert_eq!(busy_reads, 0, "detail cursor state must not exhaust the reader's admission");
+                assert_eq!(view.object_count(), count);
+                assert_eq!(view.objects().count(), count);
+                service.finish();
+                return;
+            }
+            ReconcileStep::Closed => panic!("the scene reader remains active"),
+            ReconcileStep::Asset(_) => {}
+        }
+    }
+    panic!("scene reconciliation must converge with more than eight independent deep targets");
+}
+
 fn world() -> World {
     World::new(WorldLimits {
         max_regions: 2,

@@ -6,7 +6,7 @@ use world::{
 use super::{
     Arc, Change, Entity, Instant, Lease, MAX_OBJECT_PAGE_ITEMS, MAX_OBJECTS, MAX_PATCHES, MAX_PENDING, MAX_REGIONS, MAX_RETAINED_BYTES,
     Object, PATCH_BYTES, Patch, READ_BYTES, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, RecoveryReason, Region,
-    RegionData, RegionSummary, SurfaceKind, Weak, WorldReadError, WorldRevision, size_of,
+    RegionData, RegionSummary, SurfaceKind, Weak, WorldReadError, size_of,
 };
 use crate::scene::region_environment::RegionEnvironmentResolver;
 
@@ -64,7 +64,7 @@ impl Reconciler {
     fn apply_read_reply(&mut self, query: &ReadQuery, reply: ReadReply, lease: &mut Lease) -> Result<(), RecoveryReason> {
         match (query, reply) {
             (ReadQuery::Barrier, ReadReply::Barrier(barrier)) => {
-                if barrier.object_count > MAX_OBJECTS || barrier.region_count > MAX_REGIONS {
+                if barrier.region_count > MAX_REGIONS {
                     return Err(RecoveryReason::Capacity);
                 }
                 self.world.cursor = Some(barrier.changes);
@@ -122,7 +122,9 @@ impl Reconciler {
                 self.world.regions = page.next;
                 self.world.refresh_regions = page.next.is_some();
             }
-            (ReadQuery::Details(entities), ReadReply::Details(batch)) if batch.details.len() == entities.len() => {
+            (ReadQuery::Details(entities), ReadReply::Details(batch))
+                if batch.details.len() <= entities.len() && batch.has_more == (batch.details.len() < entities.len()) =>
+            {
                 for (entity, detail) in entities.iter().copied().zip(batch.details) {
                     let returned = match &detail {
                         ObjectDetailResult::Found(detail) => detail.summary.entity,
@@ -139,6 +141,10 @@ impl Reconciler {
                         ObjectDetailResult::Found(detail) => {
                             if detail.hydration_revision != batch.hydration_revision {
                                 return Err(RecoveryReason::InvalidReply);
+                            }
+                            if self.state.mirror.is_retired(detail.summary.address.region()) {
+                                self.remove(entity);
+                                continue;
                             }
                             let conflicts = [
                                 self.state.identities.get(&detail.summary.id).copied(),
@@ -176,7 +182,7 @@ impl Reconciler {
             (ReadQuery::Changes(_), ReadReply::Changes(page)) if page.records.len() <= MAX_WORLD_CHANGE_PAGE_ITEMS => {
                 let partial = page.records.last().is_some_and(|record| record.revision > page.completed_revision);
                 for record in page.records {
-                    self.apply_world_change(record.change, record.revision)?;
+                    self.apply_world_change(record.change)?;
                 }
                 self.world.cursor = Some(page.cursor);
                 self.world.revision = Some(page.completed_revision);
@@ -266,7 +272,7 @@ impl Reconciler {
         Ok(())
     }
 
-    fn apply_world_change(&mut self, change: WorldChange, revision: WorldRevision) -> Result<(), RecoveryReason> {
+    fn apply_world_change(&mut self, change: WorldChange) -> Result<(), RecoveryReason> {
         match change {
             WorldChange::EntityAdded { entity, address, .. } => {
                 self.preparation.expansion.enqueue_address(address);
@@ -274,8 +280,14 @@ impl Reconciler {
             }
             WorldChange::EntityUpdated { entity, .. } => self.invalidate(entity),
             WorldChange::SubtreeInvalidated { entity, .. } => self.expand(entity),
+            WorldChange::SubtreeRemovalPending { entity, region, order, block_ordinal, .. } => {
+                let fence = world::RemovalFence::new(region, order, block_ordinal);
+                self.publication.dirty.invalidated.insert(entity, fence);
+                self.state.mirror.apply(Change::InvalidateSubtree(entity, fence));
+                self.preparation.meshes.invalidate();
+                self.preparation.assets.invalidate_all();
+            }
             WorldChange::EntityRemoved { entity, .. } => {
-                self.expand(entity);
                 self.remove(entity);
             }
             WorldChange::EntityRebound { entity, to, .. } | WorldChange::EntityTransferred { entity, to, .. } => {
@@ -297,21 +309,7 @@ impl Reconciler {
                 self.world.terrain.insert(region);
             }
             WorldChange::RegionRetired { region, .. } => {
-                let removed: Vec<_> = self
-                    .state
-                    .mirror
-                    .objects
-                    .iter()
-                    .filter_map(|(entity, object)| {
-                        let detail = object.detail();
-                        (detail.summary.address.region() == region && detail.hydration_revision <= revision).then_some(*entity)
-                    })
-                    .collect();
-                for entity in removed {
-                    self.remove(entity);
-                }
                 self.retire(region);
-                self.conservative_scan();
             }
         }
         if self.world.pending_set.len() > MAX_PENDING
@@ -347,6 +345,8 @@ impl Reconciler {
     fn remove(&mut self, entity: Entity) {
         self.preparation.meshes.remove(entity);
         self.preparation.assets.remove(entity);
+        self.state.mirror.invalidations.remove(&entity);
+        self.publication.dirty.invalidated.remove(&entity);
         if let Some(old) = self.state.mirror.objects.remove(&entity) {
             self.state.identities.remove(&old.detail().summary.id);
             self.state.bindings.remove(&old.detail().summary.address);
@@ -383,6 +383,9 @@ impl Reconciler {
         self.preparation.surfaces.retire(region);
         self.preparation.surfaces.regions(&self.state.mirror);
         self.world.terrain.remove(&region);
+        self.state.mirror.apply(Change::Retire(region));
+        self.preparation.meshes.invalidate();
+        self.preparation.assets.invalidate_all();
         self.publication.dirty.regions.remove(&region);
         self.publication.dirty.water.remove(&region);
         self.publication.dirty.patches.retain(|(r, _)| *r != region);

@@ -9,8 +9,8 @@ use super::World;
 use crate::object::components::{RegionalStamp, newer_field, newer_region_field};
 use crate::update::{FieldStamp, Stamp};
 use crate::{
-    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, Parent, PoseState, Recovery, RegionApplied,
-    RegionOutcome, UpdateSource, WorldChange, WorldPose, WorldRevision,
+    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, Parent, PoseState, Recovery, RecoveryCancellation,
+    RegionApplied, RegionOutcome, UpdateSource, WorldChange, WorldPose, WorldRevision,
 };
 
 #[derive(Clone, Copy)]
@@ -41,7 +41,7 @@ impl Origin {
 pub(crate) struct Effects {
     pub(crate) changes: Vec<WorldChange>,
     pub(crate) recovery_targets: Vec<LocalAddress>,
-    pub(crate) recovery_cancellations: Vec<LocalAddress>,
+    pub(crate) recovery_cancellations: Vec<RecoveryCancellation>,
 }
 
 impl Effects {

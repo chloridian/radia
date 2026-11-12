@@ -4,7 +4,9 @@ use math::{DVec3, Quat, Vec3};
 use protocol::messages::AgentMovementComplete;
 use tokio::sync::watch;
 use uuid::Uuid;
-use world::{Parent, Region, World, WorldTransformState};
+#[cfg(test)]
+use world::World;
+use world::{ObjectDetail, Parent, Region, WorldTransformState};
 
 const MAX_ARRIVAL_XY: f32 = 256.0;
 const MAX_ARRIVAL_Z: f32 = 4096.0;
@@ -106,6 +108,44 @@ impl AgentMotionPublisher {
         true
     }
 
+    pub(crate) fn publish_world_detail(&self, detail: &ObjectDetail, received_at: Instant) -> bool {
+        let Ok(transform) = &detail.world_transform else { return false };
+        let pose = match transform {
+            WorldTransformState::Resolved(transform) => transform.pose,
+            WorldTransformState::MissingScale(pose) => *pose,
+            WorldTransformState::Provisional { .. } | WorldTransformState::Unresolved(_) => return false,
+        };
+        let motion = detail.linear_motion;
+        let source = detail.motion_source;
+        let received_at = source.and_then(world::UpdateSource::motion_received_at).unwrap_or(received_at);
+        let parented = matches!(detail.summary.parent, Parent::Resolved(_) | Parent::Pending { .. });
+        let (velocity, acceleration) = if parented {
+            (Vec3::ZERO, Vec3::ZERO)
+        } else {
+            (motion.velocity.unwrap_or_default(), motion.acceleration.unwrap_or_default())
+        };
+        let (velocity, acceleration) =
+            if velocity.abs().max_element() <= MAX_MOTION_COMPONENT && acceleration.abs().max_element() <= MAX_MOTION_COMPONENT {
+                (velocity, acceleration)
+            } else {
+                (Vec3::ZERO, Vec3::ZERO)
+            };
+        self.publish(AgentMotionSample {
+            region: detail.summary.address.region(),
+            position: pose.position,
+            scale: detail.summary.local_transform.scale().unwrap_or(Vec3::new(0.6, 0.45, 1.9)),
+            velocity,
+            acceleration,
+            time_dilation: detail.time_dilation,
+            ping_delay: source.and_then(world::UpdateSource::motion_ping_delay),
+            parented,
+            simulator_rotation: pose.rotation,
+            received_at,
+            seed: self.seed,
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn publish_world(&self, world: &World, agent_id: Uuid, received_at: Instant) -> bool {
         let Some(entity) = world.entity(agent_id) else { return false };
         let Some(agent) = world.object(entity) else { return false };
