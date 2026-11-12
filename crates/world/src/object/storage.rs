@@ -9,6 +9,8 @@ use hecs::{Component, EntityBuilder, QueryBorrow, QueryOne, Ref, ViewBorrow};
 use math::{Quat, Vec3};
 use uuid::Uuid;
 
+#[cfg(world_bench_detailed)]
+use crate::World;
 use crate::identity::WorldId;
 use crate::mutation::facet::{FacetChanges, FacetSet, FacetUpdates};
 use crate::object::components::Fenced;
@@ -23,6 +25,8 @@ pub(crate) struct ObjectStore {
     addresses: HashMap<LocalAddress, Entity>,
     regions: HashMap<Region, BTreeMap<Uuid, Entity>>,
     avatars: BTreeMap<Uuid, Entity>,
+    #[cfg(world_bench_detailed)]
+    facet_structural_moves: usize,
 }
 
 pub(crate) struct StoreRemovalTimes {
@@ -53,6 +57,8 @@ impl ObjectStore {
             addresses: HashMap::new(),
             regions: HashMap::new(),
             avatars: BTreeMap::new(),
+            #[cfg(world_bench_detailed)]
+            facet_structural_moves: 0,
         }
     }
 
@@ -186,6 +192,9 @@ impl ObjectStore {
             *stored_ordering = ordering;
         }
         if let Some(facets) = facets {
+            #[cfg(world_bench_detailed)]
+            facets.apply(&mut self.ecs, entity.0, &mut self.facet_structural_moves);
+            #[cfg(not(world_bench_detailed))]
             facets.apply(&mut self.ecs, entity.0);
         }
     }
@@ -281,6 +290,13 @@ impl ObjectStore {
 
     pub(crate) fn ordering_mut(&mut self, entity: hecs::Entity) -> &mut ObjectOrdering {
         self.ecs.query_one_mut::<&mut ObjectOrdering>(entity).expect("mutation target has ordering")
+    }
+}
+
+#[cfg(world_bench_detailed)]
+impl World {
+    pub fn take_bench_layout_stats(&mut self) -> (usize, usize) {
+        (self.store.ecs.archetypes().len(), std::mem::take(&mut self.store.facet_structural_moves))
     }
 }
 
