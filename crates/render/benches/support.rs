@@ -413,6 +413,16 @@ pub fn update_many(world: &mut World, rows: &[Row], count: usize, order: &mut u6
     }
 }
 
+pub fn update_geometry(world: &mut World, rows: &[Row], count: usize, order: &mut u64, generation: u64) {
+    for (index, row) in rows.iter().take(count).enumerate() {
+        let current = *order;
+        *order += 1;
+        let mut patch = ObjectPatch::new(UpdateSource::new(row.region, current as u32, Ordered(current), 0), row.local_id);
+        patch.shape = FieldUpdate::Set(Shape::Prim(prim_shape(index + generation as usize)));
+        let _applied = world.patch_object(patch).expect("benchmark geometry update");
+    }
+}
+
 pub fn update_one_percent(world: &mut World, rows: &[Row], order: &mut u64, generation: u64) {
     let changed = (rows.len() / 100).max(1);
     let offset = (generation % 2) as f32;

@@ -107,6 +107,15 @@ impl ItemSlab {
         self.slots.get_mut(index.0 as usize)?.as_mut()
     }
 
+    pub(super) fn get_at(&self, slot: usize) -> Option<(ItemIndex, &CachedItem)> {
+        let index = ItemIndex(u32::try_from(slot).ok()?);
+        Some((index, self.slots.get(slot)?.as_ref()?))
+    }
+
+    pub(super) fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
     pub(super) fn iter(&self) -> impl Iterator<Item = (ItemIndex, &CachedItem)> {
         self.slots.iter().enumerate().filter_map(|(index, item)| item.as_ref().map(|item| (ItemIndex(index as u32), item)))
     }
@@ -115,6 +124,7 @@ impl ItemSlab {
         self.slots.iter_mut().enumerate().filter_map(|(index, item)| item.as_mut().map(|item| (ItemIndex(index as u32), item)))
     }
 
+    #[cfg(test)]
     pub(super) fn clear(&mut self) {
         self.slots.clear();
         self.free.clear();

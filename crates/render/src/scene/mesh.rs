@@ -75,7 +75,7 @@ impl Display for MeshBuildError {
 
 impl Error for MeshBuildError {}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MeshId(u64);
 
 #[derive(Clone)]
