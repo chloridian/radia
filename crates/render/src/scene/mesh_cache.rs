@@ -66,11 +66,14 @@ pub(in crate::scene) struct PrimCompletion {
     cancelled: Arc<AtomicBool>,
 }
 
+type QueueIndex = (Reverse<u32>, u64);
+type ReadyIndex = (u32, u64);
+
 enum State {
-    Queued,
-    Blocked(usize),
+    Queued { index: QueueIndex },
+    Blocked { bytes: usize, index: QueueIndex },
     Running(Weak<AtomicBool>),
-    Ready(SharedMesh),
+    Ready { mesh: SharedMesh, index: ReadyIndex },
     Failed(MeshBuildError),
 }
 
@@ -80,9 +83,6 @@ struct Entry {
     priority: u32,
     priority_generation: u64,
     state: State,
-    queued: Option<(Reverse<u32>, u64)>,
-    blocked: Option<(Reverse<u32>, u64)>,
-    ready: Option<(u32, u64)>,
     unused: Option<u64>,
 }
 
@@ -91,9 +91,9 @@ pub(super) const ENTRY_BYTES: usize = size_of::<MeshKey>() + size_of::<Entry>() 
 pub(in crate::scene) struct MeshCache {
     budget: Budget,
     entries: HashMap<MeshKey, Entry>,
-    queued: BTreeMap<(Reverse<u32>, u64), MeshKey>,
-    blocked: BTreeMap<(Reverse<u32>, u64), MeshKey>,
-    ready: BTreeMap<(u32, u64), MeshKey>,
+    queued: BTreeMap<QueueIndex, MeshKey>,
+    blocked: BTreeMap<QueueIndex, MeshKey>,
+    ready: BTreeMap<ReadyIndex, MeshKey>,
     unused: BTreeMap<u64, MeshKey>,
     running: Vec<MeshKey>,
     evicted: Vec<MeshKey>,
@@ -155,10 +155,7 @@ impl MeshCache {
                 touched: self.clock,
                 priority,
                 priority_generation: self.priority_generation,
-                state: State::Queued,
-                queued: None,
-                blocked: None,
-                ready: None,
+                state: State::Queued { index: (Reverse(priority), self.clock) },
                 unused: None,
             },
         );
@@ -190,15 +187,21 @@ impl MeshCache {
 
     fn reindex(&mut self, key: MeshKey) {
         let Some(entry) = self.entries.get_mut(&key) else { return };
-        let previous_queued = entry.queued.take();
-        let previous_blocked = entry.blocked.take();
-        let previous_ready = entry.ready.take();
+        let previous_queued = match &entry.state {
+            State::Queued { index } => Some(*index),
+            _ => None,
+        };
+        let previous_blocked = match &entry.state {
+            State::Blocked { index, .. } => Some(*index),
+            _ => None,
+        };
+        let previous_ready = match &entry.state {
+            State::Ready { index, .. } => Some(*index),
+            _ => None,
+        };
         let previous_unused = entry.unused.take();
         let priority = entry.priority;
         let touched = entry.touched;
-        let queued = matches!(&entry.state, State::Queued);
-        let blocked = matches!(&entry.state, State::Blocked(_));
-        let ready = matches!(&entry.state, State::Ready(_));
         if let Some(index) = previous_queued {
             self.queued.remove(&index);
         }
@@ -211,35 +214,52 @@ impl MeshCache {
         if let Some(index) = previous_unused {
             self.unused.remove(&index);
         }
-        if queued {
-            let index = (Reverse(priority), touched);
-            self.queued.insert(index, key);
-            self.entries.get_mut(&key).expect("indexed mesh remains cached").queued = Some(index);
-        } else if blocked {
-            let index = (Reverse(priority), touched);
-            self.blocked.insert(index, key);
-            self.entries.get_mut(&key).expect("indexed mesh remains cached").blocked = Some(index);
-        } else if ready {
-            let index = (priority, touched);
-            self.ready.insert(index, key);
-            let entry = self.entries.get_mut(&key).expect("indexed mesh remains cached");
-            entry.ready = Some(index);
-            if entry.wanted == 0 {
-                self.unused.insert(touched, key);
-                self.entries.get_mut(&key).expect("indexed mesh remains cached").unused = Some(touched);
+
+        let queue_index = (Reverse(priority), touched);
+        let ready_index = (priority, touched);
+        let entry = self.entries.get_mut(&key).expect("indexed mesh remains cached");
+        match &mut entry.state {
+            State::Queued { index } => {
+                *index = queue_index;
+                self.queued.insert(queue_index, key);
             }
+            State::Blocked { index, .. } => {
+                *index = queue_index;
+                self.blocked.insert(queue_index, key);
+            }
+            State::Ready { index, .. } => {
+                *index = ready_index;
+                self.ready.insert(ready_index, key);
+                if entry.wanted == 0 {
+                    self.unused.insert(touched, key);
+                    entry.unused = Some(touched);
+                }
+            }
+            State::Running(_) | State::Failed(_) => {}
         }
     }
 
     fn remove_indexes(&mut self, key: MeshKey) {
         let Some(entry) = self.entries.get_mut(&key) else { return };
-        if let Some(index) = entry.queued.take() {
+        let queued = match &entry.state {
+            State::Queued { index } => Some(*index),
+            _ => None,
+        };
+        let blocked = match &entry.state {
+            State::Blocked { index, .. } => Some(*index),
+            _ => None,
+        };
+        let ready = match &entry.state {
+            State::Ready { index, .. } => Some(*index),
+            _ => None,
+        };
+        if let Some(index) = queued {
             self.queued.remove(&index);
         }
-        if let Some(index) = entry.blocked.take() {
+        if let Some(index) = blocked {
             self.blocked.remove(&index);
         }
-        if let Some(index) = entry.ready.take() {
+        if let Some(index) = ready {
             self.ready.remove(&index);
         }
         if let Some(index) = entry.unused.take() {
@@ -256,7 +276,8 @@ impl MeshCache {
         if entry.wanted == 0 {
             entry.priority = 0;
         }
-        let remove = entry.wanted == 0 && matches!(entry.state, State::Queued | State::Running(_) | State::Blocked(_) | State::Failed(_));
+        let remove = entry.wanted == 0
+            && matches!(&entry.state, State::Queued { .. } | State::Running(_) | State::Blocked { .. } | State::Failed(_));
         if remove {
             if let Some(entry) = self.entries.get(&key)
                 && let State::Running(cancelled) = &entry.state
@@ -276,10 +297,10 @@ impl MeshCache {
 
     pub(in crate::scene) fn get(&self, key: MeshKey) -> PreparedMesh {
         match self.entries.get(&key).map(|entry| &entry.state) {
-            Some(State::Ready(mesh)) => PreparedMesh::Ready(mesh.clone()),
+            Some(State::Ready { mesh, .. }) => PreparedMesh::Ready(mesh.clone()),
             Some(State::Failed(error)) => PreparedMesh::Failed(*error),
-            Some(State::Queued | State::Running(_)) => PreparedMesh::Pending,
-            Some(State::Blocked(_)) => PreparedMesh::Capacity,
+            Some(State::Queued { .. } | State::Running(_)) => PreparedMesh::Pending,
+            Some(State::Blocked { .. }) => PreparedMesh::Capacity,
             None => PreparedMesh::Capacity,
         }
     }
@@ -292,7 +313,7 @@ impl MeshCache {
                 if cancelled.upgrade().is_some() {
                     running.push(key);
                 } else {
-                    entry.state = State::Queued;
+                    entry.state = State::Queued { index: (Reverse(entry.priority), entry.touched) };
                     self.reindex(key);
                 }
             }
@@ -301,12 +322,14 @@ impl MeshCache {
         if self.queued.is_empty()
             && let Some((_, key)) = self.blocked.first_key_value().map(|(index, key)| (*index, *key))
         {
-            let Some(State::Blocked(bytes)) = self.entries.get(&key).map(|entry| &entry.state) else { return None };
+            let Some(State::Blocked { bytes, .. }) = self.entries.get(&key).map(|entry| &entry.state) else { return None };
             let bytes = *bytes;
             let priority = self.entries.get(&key).map_or(0, |entry| entry.priority);
             while !self.has_room(bytes) && self.evict(priority) {}
             if self.has_room(bytes) {
-                self.entries.get_mut(&key).expect("blocked mesh remains cached").state = State::Queued;
+                self.remove_indexes(key);
+                let entry = self.entries.get_mut(&key).expect("blocked mesh remains cached");
+                entry.state = State::Queued { index: (Reverse(entry.priority), entry.touched) };
                 self.reindex(key);
             } else {
                 return None;
@@ -317,7 +340,6 @@ impl MeshCache {
         }
         let work = self.budget.mesh_work()?;
         let (_, key) = self.queued.pop_first()?;
-        self.entries.get_mut(&key).expect("selected queue entry").queued = None;
         let cancelled = Arc::new(AtomicBool::new(false));
         self.entries.get_mut(&key).expect("selected queue entry").state = State::Running(Arc::downgrade(&cancelled));
         self.running.push(key);
@@ -351,12 +373,15 @@ impl MeshCache {
             return;
         }
         self.running.retain(|key| *key != completion.key);
+        let priority = entry.priority;
+        let touched = entry.touched;
         let state = match completion.result {
             Ok(mesh) => {
                 let bytes = retained_bytes(&mesh);
                 while !self.has_room(bytes) {
                     if !self.evict(self.entries.get(&completion.key).map_or(0, |entry| entry.priority)) {
-                        self.entries.get_mut(&completion.key).expect("matched completion").state = State::Blocked(bytes);
+                        self.entries.get_mut(&completion.key).expect("matched completion").state =
+                            State::Blocked { bytes, index: (Reverse(priority), touched) };
                         self.reindex(completion.key);
                         self.evicted.push(completion.key);
                         return;
@@ -364,9 +389,9 @@ impl MeshCache {
                 }
                 let lease = completion.work.lease.split(bytes).expect("bounded mesh fits admitted work");
                 self.bytes += bytes;
-                State::Ready(SharedMesh::new(mesh, lease))
+                State::Ready { mesh: SharedMesh::new(mesh, lease), index: (priority, touched) }
             }
-            Err(MeshBuildError::Cancelled) => State::Queued,
+            Err(MeshBuildError::Cancelled) => State::Queued { index: (Reverse(priority), touched) },
             Err(error) => State::Failed(error),
         };
         self.entries.get_mut(&completion.key).expect("matched completion").state = state;
@@ -390,8 +415,10 @@ impl MeshCache {
             return false;
         };
         let wanted = entry.wanted;
+        let priority = entry.priority;
+        let touched = entry.touched;
         let retained = match &entry.state {
-            State::Ready(mesh) => retained_bytes(mesh.mesh()),
+            State::Ready { mesh, .. } => retained_bytes(mesh.mesh()),
             _ => return false,
         };
         if wanted == 0 {
@@ -399,7 +426,9 @@ impl MeshCache {
             self.entries.remove(&key);
             self.bytes -= ENTRY_BYTES + retained;
         } else {
-            self.entries.get_mut(&key).expect("selected eviction remains cached").state = State::Blocked(retained);
+            self.remove_indexes(key);
+            self.entries.get_mut(&key).expect("selected eviction remains cached").state =
+                State::Blocked { bytes: retained, index: (Reverse(priority), touched) };
             self.bytes -= retained;
             self.reindex(key);
             self.evicted.push(key);
@@ -502,6 +531,7 @@ mod tests {
         assert!(a.start().is_none());
         drop(second);
         let retried = a.start().unwrap();
+        assert_eq!(retried.key, key(Detail::Low), "dropped running work returns to its queue");
         a.complete(retried.run());
         assert!(matches!(a.get(key(Detail::Low)), PreparedMesh::Ready(_)));
         drop(other);
@@ -583,6 +613,15 @@ mod tests {
         assert!(matches!(meshes.get(background), PreparedMesh::Capacity));
         assert_eq!(meshes.take_evicted(), vec![background]);
         assert!(matches!(meshes.get(foreground), PreparedMesh::Pending));
+
+        let foreground_job = meshes.start().expect("queued foreground work starts");
+        assert_eq!(foreground_job.key, foreground);
+        meshes.complete(foreground_job.run());
+
+        let background_job = meshes.start().expect("blocked resident work reenters the queue when room opens");
+        assert_eq!(background_job.key, background);
+        meshes.complete(background_job.run());
+        assert_matches!(status(meshes.get(background)), MeshStatus::Ready);
     }
 
     #[test]
