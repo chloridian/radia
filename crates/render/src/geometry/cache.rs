@@ -19,7 +19,7 @@ use super::visibility::{VisibilityBands, WorldSphere};
 use super::{GeometryRenderer, MeshState, ShadingMode};
 use crate::scene::{
     Camera, DrawnMeshKey, MeshId, Object, Placement, PreparedMesh, SceneView, SharedMesh, Surface, SurfaceKind, ViewVersion,
-    texture_animation,
+    VisibilityVersion, texture_animation,
 };
 
 const REBUILD_ITEMS_PER_FRAME: usize = 1_024;
@@ -54,7 +54,7 @@ pub(super) struct CacheRebuild {
     pub(super) visibility_changed: bool,
     pub(super) mesh_demand_missing: bool,
     observed_geometry: ViewVersion,
-    observed_membership: u64,
+    observed_visibility: VisibilityVersion,
     changed_during_rebuild: bool,
     visibility_restart: bool,
     candidate_camera: Option<Camera>,
@@ -80,7 +80,7 @@ impl CacheRebuild {
             visibility_changed: false,
             mesh_demand_missing: false,
             observed_geometry: view.geometry_version(),
-            observed_membership: view.membership_sequence(),
+            observed_visibility: view.visibility_version(),
             changed_during_rebuild: false,
             visibility_restart: false,
             candidate_camera: None,
@@ -232,7 +232,9 @@ pub(super) struct FrameCache {
     pub(super) changed_surfaces: HashSet<(Region, crate::scene::SurfaceKind)>,
     pub(super) rebuild: Option<CacheRebuild>,
     pub(super) version: Option<ViewVersion>,
-    membership_sequence: Option<u64>,
+    pub(super) rescan_pending: bool,
+    visibility_version: Option<VisibilityVersion>,
+    filtered_visibility_version: Option<VisibilityVersion>,
     pub(super) camera: Option<Camera>,
     pub(super) origin: math::DVec3,
     pub(super) size: [u32; 2],
@@ -363,10 +365,19 @@ impl GeometryRenderer {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn update_cache(&mut self, view: &SceneView) -> CacheUpdate {
+        self.update_cache_inner(view, false)
+    }
+
+    pub(super) fn update_cache_for_frame(&mut self, view: &SceneView, defer_recovery: bool) -> CacheUpdate {
+        self.update_cache_inner(view, defer_recovery)
+    }
+
+    fn update_cache_inner(&mut self, view: &SceneView, defer_recovery: bool) -> CacheUpdate {
         if self.cache.rebuild.is_some() {
             let geometry = view.geometry_version();
-            let membership = view.membership_sequence();
+            let visibility = view.visibility_version();
             if let Some(rebuild) = self.cache.rebuild.as_mut()
                 && rebuild.observed_geometry != geometry
             {
@@ -374,11 +385,11 @@ impl GeometryRenderer {
                 rebuild.observed_geometry = geometry;
             }
             let mut update = CacheUpdate::default();
-            let membership_changed = self.cache.rebuild.as_ref().is_some_and(|rebuild| rebuild.observed_membership != membership);
-            if membership_changed {
+            let visibility_changed = self.cache.rebuild.as_ref().is_some_and(|rebuild| rebuild.observed_visibility != visibility);
+            if visibility_changed {
                 let slot_count = self.cache.slot_count();
                 if let Some(rebuild) = self.cache.rebuild.as_mut() {
-                    rebuild.observed_membership = membership;
+                    rebuild.observed_visibility = visibility;
                     rebuild.sweep_needed = true;
                     match rebuild.phase {
                         RebuildPhase::PruneMeshInfo => {
@@ -404,10 +415,27 @@ impl GeometryRenderer {
                     }
                 }
                 update.immediate_visibility_change = self.filter_inactive(view);
+                self.cache.filtered_visibility_version = Some(visibility);
                 update.layout_changed = false;
             }
             self.advance_rebuild(view, &mut update);
             return update;
+        }
+
+        if defer_recovery {
+            if self.cache.version.as_ref() != Some(&view.version()) {
+                self.cache.rescan_pending = true;
+                self.cache.version = None;
+            }
+            if self.cache.visibility_version != Some(view.visibility_version()) {
+                return self.begin_rebuild(view);
+            }
+            return self.defer_recovery(view);
+        }
+
+        if self.cache.rescan_pending {
+            self.cache.rescan_pending = false;
+            return self.begin_rebuild(view);
         }
 
         let version = self.cache.version.clone();
@@ -434,20 +462,7 @@ impl GeometryRenderer {
             }
         }
         if full || reconcile_all || retired {
-            self.cache.changed_objects.clear();
-            self.cache.changed_surfaces.clear();
-            let sweep_needed = self.cache.membership_sequence != Some(view.membership_sequence());
-            self.cache.clear_mesh_demands();
-            self.cache.rebuild = Some(CacheRebuild::new(view, self.cache.slot_count(), sweep_needed));
-            let mut update = CacheUpdate { rebuild_pending: true, rebuild_started: true, ..CacheUpdate::default() };
-            if self.cache.membership_sequence != Some(view.membership_sequence()) {
-                update.immediate_visibility_change = self.filter_inactive(view);
-            }
-            update.layout_changed = false;
-            if !update.immediate_visibility_change {
-                self.advance_rebuild(view, &mut update);
-            }
-            return update;
+            return self.begin_rebuild(view);
         }
         let mut update = CacheUpdate { motion_changed, ..CacheUpdate::default() };
         regions.sort_unstable();
@@ -482,7 +497,47 @@ impl GeometryRenderer {
             self.prune_mesh_info();
         }
         self.cache.version = Some(view.version());
-        self.cache.membership_sequence = Some(view.membership_sequence());
+        self.cache.visibility_version = Some(view.visibility_version());
+        self.cache.filtered_visibility_version = Some(view.visibility_version());
+        update
+    }
+
+    fn begin_rebuild(&mut self, view: &SceneView) -> CacheUpdate {
+        self.cache.changed_objects.clear();
+        self.cache.changed_surfaces.clear();
+        let visibility = view.visibility_version();
+        let sweep_needed = self.cache.visibility_version != Some(visibility);
+        self.cache.clear_mesh_demands();
+        self.cache.rebuild = Some(CacheRebuild::new(view, self.cache.slot_count(), sweep_needed));
+        let mut update = CacheUpdate { rebuild_pending: true, rebuild_started: true, ..CacheUpdate::default() };
+        if sweep_needed {
+            update.immediate_visibility_change = self.filter_inactive(view);
+            self.cache.filtered_visibility_version = Some(visibility);
+        }
+        update.layout_changed = false;
+        self.advance_rebuild(view, &mut update);
+        update
+    }
+
+    fn defer_recovery(&mut self, view: &SceneView) -> CacheUpdate {
+        let visibility = view.visibility_version();
+        if self.cache.filtered_visibility_version == Some(visibility) {
+            return CacheUpdate::default();
+        }
+
+        let update = CacheUpdate {
+            immediate_visibility_change: self.filter_inactive(view),
+            full_visibility: true,
+            layout_changed: true,
+            ..CacheUpdate::default()
+        };
+        self.cache.filtered_visibility_version = Some(visibility);
+        if self.draw_list.layout_pending() {
+            self.draw_list.cancel_layout();
+            self.layout_required = true;
+            self.layout_pose_items.clear();
+            self.layout_parameter_items.clear();
+        }
         update
     }
 
@@ -668,17 +723,33 @@ impl GeometryRenderer {
                     if bytes.saturating_add(cost) > REBUILD_BYTES_PER_FRAME {
                         break;
                     }
+                    let mut cleanup_faces = 0;
+                    let mut cleanup_pending = false;
                     if let Some((index, entity, region, surface_kind, mesh, replacement_mesh)) = item {
                         let live = self.cache.items.get(index).is_some_and(|item| item_is_live(view, item));
                         if !live {
-                            if self.cleanup_stale_item(index) {
-                                self.stats.rebuild_cleanup_entries += 1;
-                                break;
-                            }
-                            if let Some(entity) = entity {
-                                self.update_object(None, entity, update);
-                            } else if let Some(kind) = surface_kind {
-                                self.update_surface(view, None, region, kind, update);
+                            loop {
+                                let next_items = items.saturating_add(1).saturating_add(cleanup_faces);
+                                let next_bytes =
+                                    bytes.saturating_add(cost).saturating_add(cleanup_faces.saturating_mul(size_of::<CachedFace>()));
+                                if next_items > REBUILD_ITEMS_PER_FRAME
+                                    || next_bytes > REBUILD_BYTES_PER_FRAME
+                                    || started.elapsed() >= REBUILD_TIME_PER_FRAME
+                                {
+                                    cleanup_pending = true;
+                                    break;
+                                }
+                                if self.cleanup_stale_item(index) {
+                                    self.stats.rebuild_cleanup_entries += 1;
+                                    cleanup_faces += 1;
+                                } else {
+                                    if let Some(entity) = entity {
+                                        self.update_object(None, entity, update);
+                                    } else if let Some(kind) = surface_kind {
+                                        self.update_surface(view, None, region, kind, update);
+                                    }
+                                    break;
+                                }
                             }
                         } else if let Some(rebuild) = self.cache.rebuild.as_mut() {
                             rebuild.retained_meshes.insert(mesh);
@@ -687,8 +758,15 @@ impl GeometryRenderer {
                             }
                         }
                     }
-                    items += 1;
-                    bytes = bytes.saturating_add(cost);
+                    if cleanup_pending && cleanup_faces == 0 {
+                        break;
+                    }
+                    let cleanup_extra = cleanup_faces.saturating_sub(1);
+                    items = items.saturating_add(1 + cleanup_extra);
+                    bytes = bytes.saturating_add(cost).saturating_add(cleanup_extra.saturating_mul(size_of::<CachedFace>()));
+                    if cleanup_pending {
+                        break;
+                    }
                     if let Some(rebuild) = self.cache.rebuild.as_mut() {
                         rebuild.sweep_cursor += 1;
                     }
@@ -831,19 +909,12 @@ impl GeometryRenderer {
                     update.mesh_dirty |= mesh_dirty;
                     update.rebuild_visibility_changed |= visibility_changed;
                     update.mesh_demand_missing |= mesh_demand_missing;
-                    if changed_during_rebuild {
-                        self.cache.clear_mesh_demands();
-                        let sweep_needed = self.cache.membership_sequence != Some(view.membership_sequence());
-                        self.cache.rebuild = Some(CacheRebuild::new(view, self.cache.slot_count(), sweep_needed));
-                        update.rebuild_pending = true;
-                        update.rebuild_started = true;
-                    } else {
-                        self.cache.rebuild = None;
-                        update.rebuild_pending = false;
-                        update.rebuild_completed = true;
-                        self.cache.version = Some(view.version());
-                        self.cache.membership_sequence = Some(view.membership_sequence());
-                    }
+                    self.cache.rebuild = None;
+                    update.rebuild_pending = false;
+                    update.rebuild_completed = true;
+                    self.cache.rescan_pending = changed_during_rebuild;
+                    self.cache.version = (!changed_during_rebuild).then(|| view.version());
+                    self.cache.visibility_version = Some(view.visibility_version());
                     break;
                 }
                 None => {
@@ -893,29 +964,27 @@ impl GeometryRenderer {
 
     fn cleanup_stale_item(&mut self, index: ItemIndex) -> bool {
         let Some(item) = self.cache.items.get_mut(index) else { return false };
-        let group = if let Some(mut face) = item.faces.pop() {
+        if let Some(mut face) = item.faces.pop() {
             self.draw_list.hide_face(&mut face);
-            Some(face.group)
-        } else if let Some(replacement) = item.replacement.as_mut() {
-            replacement.item.faces.pop().map(|mut face| {
-                self.draw_list.hide_face(&mut face);
-                face.group
-            })
-        } else if item.animated_faces.pop().is_some() {
-            None
-        } else if let Some(replacement) = item.replacement.as_mut() {
-            if replacement.item.animated_faces.pop().is_some() {
-                None
-            } else {
-                return false;
-            }
-        } else {
-            return false;
-        };
-        if let Some(group) = group {
-            self.draw_list.release_group(group);
+            self.draw_list.release_group(face.group);
+            return true;
         }
-        true
+        if let Some(replacement) = item.replacement.as_mut()
+            && let Some(mut face) = replacement.item.faces.pop()
+        {
+            self.draw_list.hide_face(&mut face);
+            self.draw_list.release_group(face.group);
+            return true;
+        }
+        if item.animated_faces.pop().is_some() {
+            return true;
+        }
+        if let Some(replacement) = item.replacement.as_mut()
+            && replacement.item.animated_faces.pop().is_some()
+        {
+            return true;
+        }
+        false
     }
 
     fn clear_rebuild_mesh_info(&mut self) {

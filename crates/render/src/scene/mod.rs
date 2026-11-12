@@ -30,6 +30,7 @@ pub(crate) use environment::{PropertyChange, PropertyKind, PropertyValue};
 pub use mesh::{Detail, DrawnMeshKey, MeshBuildError, MeshId, SharedMesh};
 pub use mesh_cache::SculptMeshKey;
 pub use mesh_cache::{MeshKey, PreparedMesh};
+pub(crate) use model::VisibilityVersion;
 pub use model::{
     ApplyError, Batch, Geometry, HiddenReason, Object, Patch, Placement, RecoveryReason, RegionData, SceneView, Status, ViewVersion,
 };

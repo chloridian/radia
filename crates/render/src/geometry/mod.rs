@@ -32,6 +32,7 @@ use world::{Entity, WorldTransform};
 use self::cache::FrameCache;
 use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
 use self::first_appearance::FirstAppearances;
+use self::items::ItemIndex;
 use self::mesh::GpuMesh;
 use self::storage::Storage;
 use crate::scene::{AgentPose, Camera, MAX_REGIONS, MeshId, ViewVersion};
@@ -283,6 +284,9 @@ pub(crate) struct GeometryRenderer {
     retired: Vec<GpuMesh>,
     cache: FrameCache,
     draw_list: DrawList,
+    layout_pose_items: HashSet<(ItemIndex, Entity)>,
+    layout_parameter_items: HashSet<(ItemIndex, Entity)>,
+    recovery_publication_pending: bool,
     first_appearances: FirstAppearances,
     mesh_admission: frame::MeshAdmission,
     pending_meshes: HashSet<MeshId>,
@@ -352,6 +356,9 @@ impl GeometryRenderer {
             retired: Vec::new(),
             cache: FrameCache::default(),
             draw_list: DrawList::default(),
+            layout_pose_items: HashSet::new(),
+            layout_parameter_items: HashSet::new(),
+            recovery_publication_pending: false,
             first_appearances: FirstAppearances::default(),
             mesh_admission: frame::MeshAdmission::default(),
             pending_meshes: HashSet::new(),
