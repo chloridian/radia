@@ -644,6 +644,16 @@ impl DrawList {
         self.mesh_references.contains(&mesh) || self.pending.as_ref().is_some_and(|build| !build.stale && build.mesh_pins.contains(&mesh))
     }
 
+    #[cfg(test)]
+    pub(super) fn committed_pins_mesh(&self, mesh: MeshId) -> bool {
+        self.mesh_references.contains(&mesh)
+    }
+
+    #[cfg(test)]
+    pub(super) fn staged_draw_count(&self) -> usize {
+        self.pending.as_ref().map_or(0, |build| build.state.draws.len())
+    }
+
     pub(super) fn cancel_layout(&mut self) {
         if self.retired.is_none()
             && let Some(build) = self.pending.take()
@@ -1537,6 +1547,12 @@ impl DrawList {
     }
 
     pub(super) fn reorder_blended(&mut self, items: &mut ItemSlab) {
+        self.blended.retain(|blended| {
+            items
+                .get(blended.item)
+                .and_then(|item| item.faces.get(blended.face))
+                .is_some_and(|face| face.group == blended.group && face.order == blended.order && face.blended)
+        });
         self.release_draw_group_refs();
         self.blended.sort_unstable_by(|a, b| b.distance_squared.total_cmp(&a.distance_squared).then_with(|| a.order.cmp(&b.order)));
         self.draws.truncate(self.opaque_draws);

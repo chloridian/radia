@@ -47,6 +47,16 @@ pub fn asset_with_lod_geometry(lods: &[(usize, usize, usize, usize)]) -> Vec<u8>
     asset_with_blocks(blocks)
 }
 
+pub fn asset_with_lod_geometry_bounds(lods: &[(usize, usize, usize, usize)], min: [f64; 3], max: [f64; 3]) -> Vec<u8> {
+    let blocks = lods
+        .iter()
+        .map(|(lod, face_count, vertex_count, index_count)| {
+            (*lod, block_with_geometry_bounds(*face_count, *vertex_count, *index_count, min, max))
+        })
+        .collect();
+    asset_with_blocks(blocks)
+}
+
 pub fn asset_with_lod_bounds(lod: usize, min: [f64; 3], max: [f64; 3]) -> Vec<u8> {
     asset_with_blocks([(lod, block_with_bounds(min, max))].into_iter().collect())
 }
@@ -175,12 +185,14 @@ fn next_seeded_word(seed: &mut u64) -> u16 {
 }
 
 fn block_with_geometry(face_count: usize, vertex_count: usize, index_count: usize) -> Vec<u8> {
+    block_with_geometry_bounds(face_count, vertex_count, index_count, [-0.01, -1.0, -1.0], [0.01, 1.0, 1.0])
+}
+
+fn block_with_geometry_bounds(face_count: usize, vertex_count: usize, index_count: usize, min: [f64; 3], max: [f64; 3]) -> Vec<u8> {
     const TRIANGLE_POSITIONS: [[u8; 6]; 3] = [[0x80, 0, 0, 0, 0, 0], [0x80, 0, 0, 0, 0xff, 0xff], [0x80, 0, 0xff, 0xff, 0, 0]];
     const TRIANGLE_UVS: [[u8; 4]; 3] = [[0, 0, 0, 0], [0xff, 0xff, 0, 0], [0, 0, 0xff, 0xff]];
     let mut faces = Vec::with_capacity(face_count);
     for index in 0..face_count {
-        let min_y = -1.0 + 2.0 * index as f64 / face_count as f64;
-        let max_y = -1.0 + 2.0 * (index + 1) as f64 / face_count as f64;
         let mut position = Vec::with_capacity(vertex_count * 6);
         let mut uv = Vec::with_capacity(vertex_count * 4);
         for vertex in 0..vertex_count {
@@ -191,7 +203,10 @@ fn block_with_geometry(face_count: usize, vertex_count: usize, index_count: usiz
         for index in 0..index_count {
             triangles.extend_from_slice(&u16::try_from(index % vertex_count.max(1)).expect("triangle index fixture").to_le_bytes());
         }
-        let domain = map(&[("Min", array(&[real(-0.01), real(min_y), real(-1.0)])), ("Max", array(&[real(0.01), real(max_y), real(1.0)]))]);
+        let min_y = min[1] + (max[1] - min[1]) * index as f64 / face_count as f64;
+        let max_y = min[1] + (max[1] - min[1]) * (index + 1) as f64 / face_count as f64;
+        let domain =
+            map(&[("Min", array(&[real(min[0]), real(min_y), real(min[2])])), ("Max", array(&[real(max[0]), real(max_y), real(max[2])]))]);
         let uv_domain = map(&[("Min", array(&[real(0.0), real(0.0)])), ("Max", array(&[real(1.0), real(1.0)]))]);
         faces.push(map(&[
             ("Position", binary(&position)),
