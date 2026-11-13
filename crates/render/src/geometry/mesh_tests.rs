@@ -2127,6 +2127,32 @@ fn complete_mesh_requests(
     assert!(requests.is_empty(), "mesh fixture requests settle within the bounded chain");
 }
 
+fn complete_mesh_requests_collect_textures(
+    world: &world::World,
+    scene: &mut Reconciler,
+    view: &mut SceneView,
+    assets: &std::collections::HashMap<AssetId, Vec<u8>>,
+    mut requests: Vec<AssetRequest>,
+) -> Vec<AssetRequest> {
+    let mut textures = Vec::new();
+    for _ in 0..8 {
+        if requests.is_empty() {
+            return textures;
+        }
+        for request in requests.drain(..) {
+            if matches!(request.request, Request::MeshHeader(_) | Request::MeshLod(_)) {
+                let bytes = assets.get(&request.request.resource().id).expect("fixture mesh bytes").clone();
+                scene.complete_asset(request.ticket, prepared_asset(request.request, bytes));
+            } else if matches!(request.request, Request::Texture { .. }) {
+                textures.push(request);
+            }
+        }
+        requests = settle_scene(world, scene, view, Instant::now());
+    }
+    assert!(requests.is_empty(), "mesh fixture requests settle within the bounded chain");
+    textures
+}
+
 #[test]
 #[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_asset_reuse_preserves_triangles -- --ignored"]
 fn gpu_asset_reuse_preserves_triangles() {
@@ -2460,6 +2486,459 @@ fn gpu_first_appearance_wait_is_bounded() {
 
 #[test]
 #[ignore = "requires a Vulkan adapter"]
+fn gpu_camera_rebase_keeps_committed_draw() {
+    const OBJECTS: u32 = 1_025;
+    let mesh_asset = AssetId::new(Uuid::from_u128(9_811));
+    let neighbor_mesh_asset = AssetId::new(Uuid::from_u128(9_812));
+    let mut world = world::World::new(world::WorldLimits {
+        max_regions: 2,
+        max_entities: 2_048,
+        max_entities_per_region: 2_048,
+        max_tombstones_per_region: 1,
+        max_tombstones: 2,
+        max_tombstone_bytes_per_region: world::WorldLimits::tombstone_bytes_for_count(1),
+        max_tombstone_bytes: world::WorldLimits::tombstone_bytes_for_count(2),
+        max_journal_entries: 32,
+        max_journal_changes: 128,
+        max_region_name_bytes: 64,
+        max_recovery_targets: 2_048,
+    });
+    let region = world.register_region().expect("first terrain region registers");
+    let neighbor = world.register_region().expect("adjacent terrain region registers");
+    let _ =
+        world.patch_region(region, world::RegionInfo { origin: Some(DVec3::ZERO), ..Default::default() }).expect("first origin applies");
+    let _ = world
+        .patch_region(neighbor, world::RegionInfo { origin: Some(DVec3::new(0.0, 256.0, 0.0)), ..Default::default() })
+        .expect("neighbor origin applies");
+    let first_textures = std::array::from_fn(|index| Uuid::from_u128(98_110 + index as u128));
+    let neighbor_textures = std::array::from_fn(|index| Uuid::from_u128(98_120 + index as u128));
+    let first_texture_assets = first_textures.map(AssetId::new);
+    let neighbor_texture_assets = neighbor_textures.map(AssetId::new);
+    for (region, textures, starts, ranges, sequence) in
+        [(region, first_textures, [0.0; 4], [2.0; 4], 1), (neighbor, neighbor_textures, [1.5; 4], [1.0; 4], 1)]
+    {
+        let settings = world::TerrainSettings::new(textures, starts, ranges).expect("regional terrain settings");
+        let _ = world
+            .observe_terrain_settings(UpdateSource::new(region, sequence, OrderEvidence::Ordered(u64::from(sequence)), 0), settings)
+            .expect("regional terrain settings apply");
+    }
+    for id in 1..=OBJECTS {
+        let mut observation = ObjectObservation::new(
+            UpdateSource::new(region, id, OrderEvidence::Ordered(u64::from(id)), 0),
+            Uuid::from_u128(100_000 + u128::from(id)),
+            std::num::NonZeroU32::new(id).expect("first region local ID"),
+            Kind::Object,
+            ParentUpdate::Root,
+        );
+        observation.pose = Some(Pose { position: Some(Vec3::new(250.0, 255.0, 0.0)), rotation: Some(math::Quat::IDENTITY) });
+        observation.scale = Some(Vec3::ONE);
+        observation.shape = FieldUpdate::Set(Shape::Mesh { asset_id: mesh_asset, flags: SculptFlags::default() });
+        let _ = world.observe_object(observation).expect("first region object applies");
+    }
+    for (region, patch_x, patch_y, height, sequence) in [(region, 15, 15, 0.0, 2_000), (neighbor, 15, 0, 1.5, 2), (neighbor, 14, 0, 1.5, 3)]
+    {
+        let patch =
+            world::TerrainPatch::new(patch_x, patch_y, Box::new([height; world::TERRAIN_PATCH_SAMPLES])).expect("regional terrain patch");
+        let _ = world
+            .observe_terrain_patch(UpdateSource::new(region, sequence, OrderEvidence::Ordered(u64::from(sequence)), 0), patch)
+            .expect("regional terrain patch applies");
+    }
+    let before = Camera::new(DVec3::new(256.5, 256.0, 20.0), Vec3::new(-1.0, 0.0, -1.0), 1.2, [128, 128])
+        .expect("camera before origin rebase")
+        .with_quality(512.0, 4.0)
+        .expect("fixture draw distance");
+    let after = Camera::new(DVec3::new(255.5, 256.0, 20.0), Vec3::new(-1.0, 0.0, -1.0), 1.2, [128, 128])
+        .expect("camera after origin rebase")
+        .with_quality(512.0, 4.0)
+        .expect("fixture draw distance");
+    let (mut scene, mut view) = Reconciler::new(crate::scene::Budget::default());
+    scene.set_camera(before);
+    let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let mut texture_requests =
+        requests.iter().filter(|request| matches!(request.request, Request::Texture { .. })).copied().collect::<Vec<_>>();
+    for request in texture_requests.iter().filter(|request| first_texture_assets.contains(&request.request.resource().id)) {
+        scene.complete_asset(request.ticket, prepared_asset(request.request, test_support::texture::RGB_J2C.to_vec()));
+    }
+    let asset_bytes = test_support::mesh::asset_with_lod_geometry(&[(3, 1, 3, 3)]);
+    texture_requests.extend(complete_mesh_requests_collect_textures(
+        &world,
+        &mut scene,
+        &mut view,
+        &std::collections::HashMap::from([(mesh_asset, asset_bytes)]),
+        requests,
+    ));
+    for request in texture_requests.iter().filter(|request| first_texture_assets.contains(&request.request.resource().id)) {
+        scene.complete_asset(request.ticket, prepared_asset(request.request, test_support::texture::RGB_J2C.to_vec()));
+    }
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    assert_eq!(
+        texture_requests
+            .iter()
+            .filter(|request| first_texture_assets.contains(&request.request.resource().id))
+            .map(|request| request.request.resource().id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        4,
+        "the first region requests all four distinct terrain textures"
+    );
+    assert_eq!(
+        view.region(region)
+            .expect("first region summary")
+            .terrain_textures()
+            .iter()
+            .flatten()
+            .filter(|texture| texture.image().is_some())
+            .count(),
+        4,
+        "the first region retains all four completed terrain textures"
+    );
+    assert_eq!(
+        view.region(region)
+            .expect("first region summary")
+            .terrain_textures()
+            .iter()
+            .flatten()
+            .map(assets::TextureHandle::asset)
+            .collect::<std::collections::HashSet<_>>(),
+        std::collections::HashSet::from(first_texture_assets),
+        "the first region keeps its own terrain texture bindings"
+    );
+    for texture in view.region(region).expect("first region summary").terrain_textures().iter().flatten() {
+        texture.set_usage(assets::TextureUsage::MainAndRender);
+    }
+    assert_eq!(view.objects().count(), OBJECTS as usize);
+    let surfaces = view.surfaces().collect::<Vec<_>>();
+    assert_eq!(surfaces.len(), 3, "both adjacent regions publish terrain surfaces");
+    assert!(surfaces.iter().any(|surface| surface.region == region && surface.position == DVec3::new(240.0, 240.0, 0.0)));
+    assert!(surfaces.iter().any(|surface| surface.region == neighbor && surface.position == DVec3::new(240.0, 256.0, 0.0)));
+    assert!(surfaces.iter().any(|surface| surface.region == neighbor && surface.position == DVec3::new(224.0, 256.0, 0.0)));
+    let first_composition = surfaces
+        .iter()
+        .find(|surface| surface.region == region)
+        .and_then(|surface| surface.terrain_composition.as_deref())
+        .expect("first regional terrain composition");
+    let neighbor_composition = surfaces
+        .iter()
+        .find(|surface| surface.region == neighbor)
+        .and_then(|surface| surface.terrain_composition.as_deref())
+        .expect("neighbor regional terrain composition");
+    assert_ne!(first_composition, neighbor_composition, "each regional origin and terrain settings shape its own composition");
+
+    let (device, queue) = vulkan_device();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    prepare_until_current(&device, &queue, &mut geometry, &view, before);
+    let upload_terrain_textures = |geometry: &mut GeometryRenderer, view: &SceneView, camera: Camera, regions: &[Region]| {
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            prepare_frame(&device, &queue, geometry, view, camera);
+            let mut converted = false;
+            while let Some(job) = geometry.next_texture_job() {
+                geometry.complete_texture(job.run(crate::texture::CompressionQuality::Fast));
+                converted = true;
+            }
+            let complete = regions.iter().all(|region| {
+                view.region(*region).is_some_and(|data| {
+                    let textures = data.terrain_textures();
+                    textures.iter().all(Option::is_some)
+                        && textures.iter().flatten().all(|texture| texture.image().is_some() && geometry.textures.is_resident(texture.id()))
+                })
+            });
+            if complete && !converted && !geometry.textures.uploading() {
+                return;
+            }
+            let progress = regions
+                .iter()
+                .map(|region| {
+                    let textures = view.region(*region).map(|data| {
+                        data.terrain_textures()
+                            .iter()
+                            .flatten()
+                            .map(|texture| (texture.asset(), texture.image().is_some(), geometry.textures.is_resident(texture.id())))
+                            .collect::<Vec<_>>()
+                    });
+                    (*region, textures)
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                Instant::now() < deadline,
+                "regional terrain textures did not become resident: progress={progress:?}, uploading={}, pending={}, uploaded={}",
+                geometry.textures.uploading(),
+                geometry.stats.pending_textures,
+                geometry.textures.uploaded
+            );
+        }
+    };
+    upload_terrain_textures(&mut geometry, &view, before, &[region]);
+    assert!(geometry.draw_list.valid(), "the initial object and terrain layout is committed");
+    assert!(geometry.cache.visible.len() >= OBJECTS as usize, "nearby region objects and terrain are part of the active drawable");
+    let terrain_regions = geometry.draw_list.draws().iter().filter_map(|draw| draw.terrain).collect::<std::collections::HashSet<_>>();
+    assert_eq!(terrain_regions, std::collections::HashSet::from([region, neighbor]), "terrain draws retain each region binding");
+    geometry.depth(&device, [128, 128]).expect("fixture depth target");
+    let assert_positions = |renderer: &GeometryRenderer, view: &SceneView| {
+        let expected = view
+            .objects()
+            .map(|object| {
+                let position = match object.placement() {
+                    crate::scene::Placement::Ready(transform) => transform.pose.position,
+                    placement => panic!("published fixture object has unresolved placement: {placement:?}"),
+                };
+                (object.detail().summary.entity, position)
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(renderer.cache.objects.len(), expected.len(), "renderer object membership matches SceneView");
+        for (entity, position) in expected {
+            let index = renderer.cache.objects.get(&entity).copied().expect("SceneView object has a cached item");
+            assert_eq!(renderer.cache.items.get(index).expect("cached object item").position, position);
+        }
+    };
+    assert_positions(&geometry, &view);
+
+    prepare_frame(&device, &queue, &mut geometry, &view, after);
+    assert!(geometry.draw_list.layout_pending(), "the replacement layout exceeds one bounded layout turn");
+    assert!(geometry.draw_list.valid(), "the previous drawable stays active during replacement");
+    assert!(geometry.needs_frame(Instant::now()), "a pending replacement layout schedules its next useful frame");
+    assert_positions(&geometry, &view);
+
+    let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    prepare_until_current(&device, &queue, &mut clean, &view, after);
+    upload_terrain_textures(&mut clean, &view, after, &[region]);
+    let clean_depth = clean.depth(&device, [128, 128]).expect("clean depth target");
+    let expected = render_pixels(&device, &queue, [128, 128], &clean_depth, |pass| clean.draw(pass));
+    let expected_terrain_pixels = expected.iter().filter(|pixel| **pixel != [0, 0, 0, 255]).count();
+    assert!(expected_terrain_pixels > 100, "the clean near view contains visible terrain and objects");
+    let assert_matches_clean = |renderer: &GeometryRenderer, expected: &[[u8; 4]], phase: &str| {
+        let depth = renderer.depth.as_ref().expect("active depth target");
+        let actual = render_pixels(&device, &queue, [128, 128], &depth.view, |pass| renderer.draw(pass));
+        let first_mismatch = actual
+            .iter()
+            .zip(expected.iter())
+            .enumerate()
+            .find_map(|(index, (actual, expected))| (actual != expected).then_some((index, actual, expected)));
+        let mismatch_count = actual.iter().zip(expected).filter(|(actual, expected)| actual != expected).count();
+        let total_channel_error = actual
+            .iter()
+            .zip(expected)
+            .flat_map(|(actual, expected)| {
+                actual.iter().zip(expected.iter()).map(|(actual, expected)| u64::from(actual.abs_diff(*expected)))
+            })
+            .sum::<u64>();
+        let large_mismatch_count = actual
+            .iter()
+            .zip(expected)
+            .filter(|(actual, expected)| actual.iter().zip(expected.iter()).any(|(actual, expected)| actual.abs_diff(*expected) > 1))
+            .count();
+        assert!(
+            total_channel_error <= 32 && large_mismatch_count == 0,
+            "{phase}: rebase output differs from a clean build at {mismatch_count} pixels, total channel error={total_channel_error}, {large_mismatch_count} exceed one channel value, first mismatch={first_mismatch:?}"
+        );
+    };
+    assert_matches_clean(&geometry, &expected, "first rebase frame");
+    let before_origin = DVec3::new(256.0, 256.0, 0.0);
+    assert_eq!(geometry.active_origin, before_origin, "the committed drawable keeps its old frame while replacement is pending");
+
+    let next_origin = DVec3::new(0.0, 256.0, 0.0);
+    let mut completed = false;
+    let mut turns = Vec::new();
+    for _ in 0..16 {
+        prepare_frame(&device, &queue, &mut geometry, &view, after);
+        assert_positions(&geometry, &view);
+        assert_matches_clean(&geometry, &expected, "rebase continuation");
+        turns.push((
+            geometry.stats.layouts,
+            geometry.stats.layout_items_visited,
+            geometry.layout_required,
+            geometry.draw_list.layout_pending(),
+            geometry.draw_list.layout_building(),
+            geometry.stats.rebuild_pending,
+            geometry.cache.rebuild.is_some(),
+        ));
+        completed |= geometry.active_origin == next_origin;
+        if geometry.draw_list.layout_building() {
+            assert_eq!(geometry.active_origin, before_origin, "the active frame stays old while the replacement builds");
+        }
+        if geometry.active_origin == next_origin && !geometry.layout_required {
+            break;
+        }
+    }
+    assert!(
+        completed,
+        "the bounded replacement layout eventually commits: layouts={}, visited={}, pending={}, building={}, required={}, cache_origin={:?}, active_origin={:?}, turns={turns:?}",
+        geometry.stats.layouts,
+        geometry.stats.layout_items_visited,
+        geometry.draw_list.layout_pending(),
+        geometry.draw_list.layout_building(),
+        geometry.layout_required,
+        geometry.cache.origin,
+        geometry.active_origin
+    );
+    assert!(!geometry.layout_required, "the replacement request is satisfied");
+    assert_eq!(geometry.cache.origin, next_origin);
+    assert_eq!(geometry.active_origin, geometry.cache.origin, "the frame advances with the committed replacement");
+
+    let partial_pixels = {
+        let depth = geometry.depth.as_ref().expect("active partial scene depth");
+        render_pixels(&device, &queue, [128, 128], &depth.view, |pass| geometry.draw(pass))
+    };
+    assert_matches_clean(&geometry, &expected, "partially textured adjacent regions");
+    let neighbor_requests =
+        texture_requests.iter().filter(|request| neighbor_texture_assets.contains(&request.request.resource().id)).collect::<Vec<_>>();
+    assert_eq!(
+        neighbor_requests.iter().map(|request| request.request.resource().id).collect::<std::collections::HashSet<_>>().len(),
+        4,
+        "the neighboring region requests its own terrain textures"
+    );
+    for request in neighbor_requests {
+        scene.complete_asset(request.ticket, prepared_asset(request.request, test_support::texture::GRAY_J2C.to_vec()));
+    }
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let neighbor_handles = view.region(neighbor).expect("neighbor summary").terrain_textures();
+    assert_eq!(neighbor_handles.iter().flatten().filter(|texture| texture.image().is_some()).count(), 4);
+    assert_eq!(
+        neighbor_handles.iter().flatten().map(assets::TextureHandle::asset).collect::<std::collections::HashSet<_>>(),
+        std::collections::HashSet::from(neighbor_texture_assets),
+        "the neighbor keeps its distinct terrain texture bindings"
+    );
+    for texture in neighbor_handles.iter().flatten() {
+        texture.set_usage(assets::TextureUsage::MainAndRender);
+    }
+    prepare_until_current(&device, &queue, &mut geometry, &view, after);
+    upload_terrain_textures(&mut geometry, &view, after, &[region, neighbor]);
+    let neighbor_pixels = {
+        let depth = geometry.depth.as_ref().expect("active textured scene depth");
+        render_pixels(&device, &queue, [128, 128], &depth.view, |pass| geometry.draw(pass))
+    };
+    let texture_arrival_pixels = neighbor_pixels.iter().zip(&partial_pixels).filter(|(after, before)| after != before).count();
+    assert!(texture_arrival_pixels > 0, "neighbor terrain texture arrival changes rendered terrain pixels");
+
+    let mut clean_terrain = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    prepare_until_current(&device, &queue, &mut clean_terrain, &view, after);
+    upload_terrain_textures(&mut clean_terrain, &view, after, &[region, neighbor]);
+    let clean_terrain_depth = clean_terrain.depth(&device, [128, 128]).expect("clean textured terrain depth");
+    let expected_terrain = render_pixels(&device, &queue, [128, 128], &clean_terrain_depth, |pass| clean_terrain.draw(pass));
+    assert_matches_clean(&geometry, &expected_terrain, "neighbor terrain texture arrival");
+
+    let neighbor_height = view.terrain_height_at(DVec3::new(238.0, 260.0, 0.0)).expect("neighbor object terrain height") as f32;
+    let neighbor_position = DVec3::new(238.0, 260.0, f64::from(neighbor_height + 3.0));
+    let mut observation = ObjectObservation::new(
+        UpdateSource::new(neighbor, 4, OrderEvidence::Ordered(4), 0),
+        Uuid::from_u128(200_001),
+        std::num::NonZeroU32::new(1).expect("neighbor local ID"),
+        Kind::Object,
+        ParentUpdate::Root,
+    );
+    observation.pose = Some(Pose {
+        position: Some(Vec3::new(238.0, 4.0, neighbor_height + 3.0)),
+        rotation: Some(math::Quat::from_rotation_z(std::f32::consts::PI)),
+    });
+    observation.scale = Some(Vec3::splat(2.0));
+    observation.shape = FieldUpdate::Set(Shape::Mesh { asset_id: neighbor_mesh_asset, flags: SculptFlags::default() });
+    observation.appearance = FieldUpdate::Set(Appearance::Surface);
+    observation.surface_appearance = Some(
+        SurfaceAppearance::new(world::FaceAppearance { color: [0, 255, 255, 255], ..Default::default() }, Vec::new())
+            .expect("neighbor object material"),
+    );
+    let _ = world.observe_object(observation).expect("neighbor object arrives");
+    scene.notify_world_change();
+    let neighbor_object_requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    assert_eq!(view.objects().count(), OBJECTS as usize + 1, "the neighboring object publishes independently of its mesh");
+    let neighbor_object =
+        view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(200_001)).expect("neighbor object summary");
+    let neighbor_entity = neighbor_object.detail().summary.entity;
+    assert_eq!(neighbor_object.detail().summary.address.region(), neighbor);
+    assert!(neighbor_object.mesh().is_none(), "the neighboring object waits for its mesh asset");
+    assert_matches!(neighbor_object.placement(), crate::scene::Placement::Ready(transform) if transform.pose.position == neighbor_position);
+    prepare_until_current(&device, &queue, &mut geometry, &view, after);
+    let pending_object_pixels = {
+        let depth = geometry.depth.as_ref().expect("neighbor object pending depth");
+        render_pixels(&device, &queue, [128, 128], &depth.view, |pass| geometry.draw(pass))
+    };
+    assert_matches_clean(&geometry, &expected_terrain, "neighbor object mesh pending");
+
+    let late_texture_requests = complete_mesh_requests_collect_textures(
+        &world,
+        &mut scene,
+        &mut view,
+        &std::collections::HashMap::from([(neighbor_mesh_asset, test_support::mesh::asset_with_lod_geometry(&[(3, 1, 3, 3)]))]),
+        neighbor_object_requests,
+    );
+    assert!(late_texture_requests.is_empty(), "the untextured neighbor mesh adds no material texture requests");
+    let published_neighbor = view.object(neighbor_entity).expect("neighbor object remains live");
+    assert!(published_neighbor.mesh().is_some(), "the neighbor mesh arrives through the scene asset path");
+    let neighbor_material = published_neighbor.materials().expect("neighbor object material").first().expect("neighbor face material");
+    assert_eq!(neighbor_material.base_color_factor(), [0.0, 1.0, 1.0, 1.0]);
+    prepare_until_current(&device, &queue, &mut geometry, &view, after);
+    assert_positions(&geometry, &view);
+    assert!(!geometry.layout_required && !geometry.draw_list.layout_pending(), "the neighbor object draw commits before pixel checks");
+    let neighbor_item = geometry.cache.objects.get(&neighbor_entity).copied().expect("neighbor object cache membership");
+    assert!(geometry.cache.visible.contains(&neighbor_item), "the neighbor object is an active visible candidate");
+    assert_eq!(geometry.cache.items.get(neighbor_item).expect("neighbor cached item").position, neighbor_position);
+    let object_pixels = {
+        let depth = geometry.depth.as_ref().expect("neighbor object visible depth");
+        render_pixels(&device, &queue, [128, 128], &depth.view, |pass| geometry.draw(pass))
+    };
+    let object_arrival_pixels = object_pixels.iter().zip(&pending_object_pixels).filter(|(after, before)| after != before).count();
+    let cyan_pixels = object_pixels.iter().filter(|pixel| pixel[1] > pixel[0] + 30 && pixel[2] > pixel[0] + 30).count();
+    let neighbor_item = geometry.cache.items.get(neighbor_item).expect("neighbor cached item");
+    assert!(
+        object_arrival_pixels > 0,
+        "neighbor mesh and material arrival changes rendered pixels: delta={object_arrival_pixels}, cyan={cyan_pixels}, instances={}, faces={}, slots={:?}, position={:?}, scale={:?}, mesh_indices={}, bounds={:?}",
+        geometry.stats.instances,
+        neighbor_item.faces.len(),
+        neighbor_item.faces.iter().map(|face| face.slot).collect::<Vec<_>>(),
+        neighbor_item.position,
+        neighbor_item.scale,
+        neighbor_item.mesh.mesh().indices().len(),
+        neighbor_item.info.bounds
+    );
+    assert!(cyan_pixels > 0, "the late neighbor material produces visible cyan pixels");
+
+    let mut clean_full = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    prepare_until_current(&device, &queue, &mut clean_full, &view, after);
+    upload_terrain_textures(&mut clean_full, &view, after, &[region, neighbor]);
+    let clean_full_depth = clean_full.depth(&device, [128, 128]).expect("clean full-scene depth");
+    let expected_full = render_pixels(&device, &queue, [128, 128], &clean_full_depth, |pass| clean_full.draw(pass));
+    assert_matches_clean(&geometry, &expected_full, "neighbor object and material arrival");
+
+    let mut clean_before = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    prepare_until_current(&device, &queue, &mut clean_before, &view, before);
+    upload_terrain_textures(&mut clean_before, &view, before, &[region, neighbor]);
+    let clean_before_depth = clean_before.depth(&device, [128, 128]).expect("clean far depth target");
+    let expected_before = render_pixels(&device, &queue, [128, 128], &clean_before_depth, |pass| clean_before.draw(pass));
+    prepare_frame(&device, &queue, &mut geometry, &view, before);
+    assert_positions(&geometry, &view);
+    assert!(geometry.draw_list.layout_pending(), "the reverse replacement also spans bounded layout turns");
+    assert_eq!(geometry.active_origin, next_origin);
+    assert_matches_clean(&geometry, &expected_before, "first reverse rebase frame");
+    let mut reverse_completed = false;
+    for _ in 0..16 {
+        prepare_frame(&device, &queue, &mut geometry, &view, before);
+        assert_positions(&geometry, &view);
+        assert_matches_clean(&geometry, &expected_before, "reverse rebase continuation");
+        reverse_completed |= geometry.active_origin == before_origin;
+        if geometry.draw_list.layout_building() {
+            assert_eq!(geometry.active_origin, next_origin, "the reverse active frame stays old while its replacement builds");
+        }
+        if geometry.active_origin == before_origin && !geometry.layout_required {
+            break;
+        }
+    }
+    assert!(reverse_completed, "the reverse bounded replacement layout eventually commits");
+    assert!(!geometry.layout_required, "the reverse replacement request is satisfied");
+    assert_eq!(geometry.cache.origin, before_origin);
+    assert_eq!(geometry.active_origin, geometry.cache.origin);
+
+    let memory = geometry.memory.clone();
+    drop(clean_before);
+    drop(clean_full);
+    drop(clean_terrain);
+    drop(clean);
+    drop(geometry);
+    device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    assert_eq!(memory.mesh_state().bytes, 0);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter"]
 fn gpu_blended_rotation_uploads_instances() {
     let (device, queue) = vulkan_device();
     let (_scene, view, _) = scene(128);
@@ -2474,36 +2953,49 @@ fn gpu_blended_rotation_uploads_instances() {
     prepare_frame(&device, &queue, &mut geometry, &view, camera(0.0));
     assert!(geometry.draw_list.has_blended());
     let instances = geometry.stats.instances;
+    let slots = geometry.draw_list.draws().iter().map(|draw| draw.first + draw.count).max().unwrap();
+    let bytes = u64::from(slots) * crate::pipeline::INSTANCE_BYTES as u64;
+    let expected_instances = |geometry: &GeometryRenderer| {
+        let mut expected = vec![0; bytes as usize];
+        for (_, item) in geometry.cache.items.iter() {
+            for face in &item.faces {
+                let Some(slot) = face.slot else { continue };
+                let start = slot as usize * crate::pipeline::INSTANCE_BYTES;
+                let end = start + crate::pipeline::INSTANCE_BYTES;
+                expected[start..end].copy_from_slice(&packed_instance(&item.transform, &face.params, item.scale));
+            }
+        }
+        expected
+    };
+    let read_instances = |buffer: &wgpu::Buffer| {
+        let readback = device.create_buffer(&BufferDescriptor {
+            label: None,
+            size: bytes,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, bytes);
+        queue.submit([encoder.finish()]);
+        let (sent, received) = std::sync::mpsc::channel();
+        readback.slice(..).map_async(MapMode::Read, move |result| sent.send(result).unwrap());
+        device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        received.recv().unwrap().unwrap();
+        let result = readback.get_mapped_range(..).unwrap().to_vec();
+        readback.unmap();
+        result
+    };
+    let before = read_instances(&geometry.instances);
+    assert_eq!(before, expected_instances(&geometry), "the initial upload matches active transforms and materials");
     prepare_frame(&device, &queue, &mut geometry, &view, camera(26.0));
     assert_eq!(geometry.stats.instances, instances);
     assert_eq!(geometry.stats.layouts, 0);
     assert_eq!(geometry.stats.blended_sorts, 1);
-    let slots = geometry.draw_list.draws().iter().map(|draw| draw.first + draw.count).max().unwrap();
-    let bytes = u64::from(slots) * crate::pipeline::INSTANCE_BYTES as u64;
-    let reference = device.create_buffer(&BufferDescriptor {
-        label: None,
-        size: bytes,
-        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    geometry.draw_list.upload_layout(&queue, &reference);
-    let readback = device.create_buffer(&BufferDescriptor {
-        label: None,
-        size: bytes * 2,
-        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&Default::default());
-    encoder.copy_buffer_to_buffer(&geometry.instances, 0, &readback, 0, bytes);
-    encoder.copy_buffer_to_buffer(&reference, 0, &readback, bytes, bytes);
-    queue.submit([encoder.finish()]);
-    let (sent, received) = std::sync::mpsc::channel();
-    readback.slice(..).map_async(MapMode::Read, move |result| sent.send(result).unwrap());
-    device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
-    received.recv().unwrap().unwrap();
-    let mapped = readback.get_mapped_range(..).unwrap();
-    let (actual, expected) = mapped.split_at(bytes as usize);
-    assert!(actual == expected, "camera sorting must upload the newly ordered transforms and materials");
+    let expected = expected_instances(&geometry);
+    let actual = read_instances(&geometry.instances);
+    assert_ne!(expected, before, "the camera change reorders blended transforms or materials");
+    assert_eq!(actual, expected, "camera sorting must upload the newly ordered transforms and materials");
+    assert!(geometry.stats.draw_instance_write_calls > 0, "the reordered blended instances reach the GPU buffer");
 }
 
 #[test]
@@ -2589,12 +3081,35 @@ fn gpu_warmed_rotation_preserves_triangles() {
     scene.set_camera(away_camera);
     let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
     complete_mesh_requests(&world, &mut scene, &mut view, &assets, requests);
-    prepare_frame(&device, &queue, &mut geometry, &view, away_camera);
     let away_visible = std::collections::HashSet::from([a_entity, c_entity]);
-    let actual_visible: std::collections::HashSet<_> =
-        geometry.cache.visible.iter().filter_map(|index| geometry.cache.items.get(*index).and_then(|item| item.entity)).collect();
-    assert_eq!(actual_visible, away_visible, "the small turn culls the resident edge mesh");
-    assert_eq!(geometry.stats.layouts, 1, "visibility reentry rebuilds the draw layout");
+    let visible_entities = |geometry: &GeometryRenderer| {
+        geometry
+            .cache
+            .visible
+            .iter()
+            .filter_map(|index| geometry.cache.items.get(*index).and_then(|item| item.entity))
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let mut away_committed = false;
+    let mut away_turns = Vec::new();
+    for _ in 0..16 {
+        prepare_frame(&device, &queue, &mut geometry, &view, away_camera);
+        assert_eq!(visible_entities(&geometry), away_visible, "the small turn culls the resident edge mesh");
+        assert_visible_assets_match_source(&device, &queue, &geometry, &view, away_camera, &depth, &away_visible, "resident edge hidden");
+        away_turns.push((
+            geometry.stats.layouts,
+            geometry.stats.layout_items_visited,
+            geometry.layout_required,
+            geometry.draw_list.layout_pending(),
+        ));
+        away_committed = !geometry.layout_required && !geometry.draw_list.layout_pending();
+        if away_committed {
+            break;
+        }
+        assert!(geometry.draw_list.valid(), "the previous drawable remains active while camera visibility is rebuilt");
+        assert!(geometry.needs_frame(Instant::now()), "a pending bounded layout requests its next useful frame");
+    }
+    assert!(away_committed, "camera visibility commits over bounded turns: {away_turns:?}");
     assert_eq!(geometry.draw_list.draw_batches().len(), 1);
     assert_eq!(geometry.draw_list.draw_batches()[0].count, 2, "the opaque page batch drops the hidden command");
     assert_eq!(geometry.stats.draw_commands, 2);
@@ -2612,17 +3127,39 @@ fn gpu_warmed_rotation_preserves_triangles() {
         assert_eq!((allocation.vertices(), allocation.indices()), (vertices.clone(), indices.clone()));
         assert_eq!(Arc::as_ptr(allocation.buffers()) as usize, page);
     }
-    assert_visible_assets_match_source(&device, &queue, &geometry, &view, away_camera, &depth, &away_visible, "resident edge hidden");
-
     scene.set_camera(back_camera);
     let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
     complete_mesh_requests(&world, &mut scene, &mut view, &assets, requests);
-    prepare_frame(&device, &queue, &mut geometry, &view, back_camera);
     let back_visible = all_visible;
-    let actual_visible: std::collections::HashSet<_> =
-        geometry.cache.visible.iter().filter_map(|index| geometry.cache.items.get(*index).and_then(|item| item.entity)).collect();
-    assert_eq!(actual_visible, back_visible, "turning back makes the same resident mesh visible again");
-    assert_eq!(geometry.stats.layouts, 1);
+    let mut back_committed = false;
+    let mut back_turns = Vec::new();
+    for _ in 0..16 {
+        prepare_frame(&device, &queue, &mut geometry, &view, back_camera);
+        assert_eq!(visible_entities(&geometry), back_visible, "turning back makes the same resident mesh visible again");
+        assert_visible_assets_match_source(
+            &device,
+            &queue,
+            &geometry,
+            &view,
+            back_camera,
+            &depth,
+            &back_visible,
+            "resident edge reentered",
+        );
+        back_turns.push((
+            geometry.stats.layouts,
+            geometry.stats.layout_items_visited,
+            geometry.layout_required,
+            geometry.draw_list.layout_pending(),
+        ));
+        back_committed = !geometry.layout_required && !geometry.draw_list.layout_pending();
+        if back_committed {
+            break;
+        }
+        assert!(geometry.draw_list.valid(), "the away drawable remains active while camera visibility is rebuilt");
+        assert!(geometry.needs_frame(Instant::now()), "a pending bounded layout requests its next useful frame");
+    }
+    assert!(back_committed, "camera visibility reentry commits over bounded turns: {back_turns:?}");
     assert_eq!(geometry.draw_list.draw_batches().len(), 1);
     assert_eq!(geometry.draw_list.draw_batches()[0].count, 3, "the reentered command returns to the page batch");
     assert_eq!(geometry.stats.draw_commands, 3);
@@ -2640,8 +3177,6 @@ fn gpu_warmed_rotation_preserves_triangles() {
         assert_eq!((allocation.vertices(), allocation.indices()), (vertices.clone(), indices.clone()));
         assert_eq!(Arc::as_ptr(allocation.buffers()) as usize, page);
     }
-    assert_visible_assets_match_source(&device, &queue, &geometry, &view, back_camera, &depth, &back_visible, "resident edge reentered");
-
     let memory = geometry.memory.clone();
     drop(geometry);
     device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
