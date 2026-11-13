@@ -20,7 +20,7 @@ use std::{
 };
 
 use assets::{TextureHandle, TextureId};
-use math::{Vec4, motion::RegionBounds};
+use math::{DVec3, Vec4, motion::RegionBounds};
 use uuid::Uuid;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
@@ -283,6 +283,7 @@ pub(crate) struct GeometryRenderer {
     storage: Storage,
     retired: Vec<GpuMesh>,
     cache: FrameCache,
+    active_origin: DVec3,
     draw_list: DrawList,
     layout_pose_items: HashSet<(ItemIndex, Entity)>,
     layout_parameter_items: HashSet<(ItemIndex, Entity)>,
@@ -355,6 +356,7 @@ impl GeometryRenderer {
             storage: Storage::default(),
             retired: Vec::new(),
             cache: FrameCache::default(),
+            active_origin: DVec3::ZERO,
             draw_list: DrawList::default(),
             layout_pose_items: HashSet::new(),
             layout_parameter_items: HashSet::new(),

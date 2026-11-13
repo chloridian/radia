@@ -177,7 +177,7 @@ impl GeometryRenderer {
             if self.prepared.as_ref().is_some_and(|prepared| {
                 !motion_was_active && prepared.reusable(&key, self.textures.geometry_state(), self.memory.mesh_state(), started)
             }) {
-                let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, self.cache.origin);
+                let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, self.active_origin);
                 let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
                 self.update_region_water_bounds(camera.position());
                 self.update_environment_uniforms(device, camera, projection, size, frame_input, pairs);
@@ -200,6 +200,9 @@ impl GeometryRenderer {
         let camera_changed = previous_camera != Some(camera) || self.cache.size != size;
         let camera_position_changed = previous_camera.is_none_or(|previous| previous.position() != camera.position());
         let origin = scene_origin(camera.position());
+        if !self.draw_list.valid() {
+            self.active_origin = origin;
+        }
         if self.cache.items.slot_count() == 0 && !self.draw_list.valid() {
             self.cache.origin = origin;
         }
@@ -255,7 +258,7 @@ impl GeometryRenderer {
         self.stats.items_updated = update.items_updated;
         update.pose_items.sort_unstable();
         update.pose_items.dedup();
-        let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, frame_origin);
+        let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, self.active_origin);
         let mut candidate_items = update.visibility_items.clone();
         candidate_items.extend(update.pose_items.iter().copied());
         candidate_items.sort_unstable();
@@ -482,6 +485,10 @@ impl GeometryRenderer {
         }
         let layout_progress = self.draw_list.advance_layout(view, &mut self.cache.items, &self.meshes, self.indirect_first_instance);
         let layout_committed = layout_progress.as_ref().is_some_and(|progress| progress.complete);
+        if layout_committed {
+            self.active_origin = frame_origin;
+            self.pipelines.update_camera_uniform(&self.queue, camera, size, self.active_origin);
+        }
         if let Some(progress) = layout_progress {
             self.stats.layout_items_visited = progress.stats.items_visited;
             self.stats.layout_faces_visited = progress.stats.faces_visited;
@@ -521,7 +528,8 @@ impl GeometryRenderer {
         times.requests = requests_started.elapsed();
 
         let draw_updates_started = Instant::now();
-        let layout_patching_suspended = self.layout_required || self.draw_list.layout_patching_suspended();
+        let layout_patching_suspended =
+            self.layout_required || self.draw_list.layout_patching_suspended() || self.active_origin != frame_origin;
         if rebuilding || layout_patching_suspended {
             self.cache.patch_faces.clear();
         } else {
@@ -818,7 +826,7 @@ impl GeometryRenderer {
         times.motion += motion_started.elapsed();
         update.pose_items.sort_unstable();
         update.pose_items.dedup();
-        let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, frame_origin);
+        let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, self.active_origin);
         let mut candidate_items = update.visibility_items.clone();
         candidate_items.extend(update.pose_items.iter().copied());
         candidate_items.sort_unstable();
@@ -843,7 +851,7 @@ impl GeometryRenderer {
         times.textures = textures_started.elapsed();
         let draw_list_started = Instant::now();
         self.prepare_face_patches(&update, false, Instant::now());
-        let patch_stats = if self.draw_list.layout_patching_suspended() {
+        let patch_stats = if self.draw_list.layout_patching_suspended() || self.active_origin != frame_origin {
             Default::default()
         } else {
             self.draw_list.patch(&mut self.cache.items, &self.cache.patch_faces, &update.pose_items, camera)
@@ -914,7 +922,7 @@ impl GeometryRenderer {
             &self.textures,
             &self.queue,
             camera.position(),
-            camera.position() - self.cache.origin,
+            camera.position() - self.active_origin,
             frame_input.environment,
             normal,
             frame_input.water_height,
