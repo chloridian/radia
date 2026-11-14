@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_timeout_kills_and_reaps_child() -> io::Result<()> {
+    fn timeout_kills_and_reaps() -> io::Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let mode = format!("hold:{}", listener.local_addr()?);
         let mut child = helper(&mode)?;
