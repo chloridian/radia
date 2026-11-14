@@ -4,7 +4,7 @@ use assets::TextureHandle;
 use math::{Bounds, Quat, Vec3};
 use world::{Entity, FaceAppearance, Region, SurfaceAppearance};
 
-use super::draw_list::{DrawKey, DrawList, FaceOrder};
+use super::draw_list::{DrawKey, DrawList, FaceOrder, FaceSlot, LayoutId};
 use super::instance::parameter_part;
 use super::{ShadingMode, TRANSFORM_BYTES};
 use crate::{
@@ -37,6 +37,8 @@ pub(super) struct CachedFace {
     pub(super) parameter_bytes: [u8; super::instance::PARAMETER_BYTES],
     pub(super) slot: Option<u32>,
     pub(super) blended_index: Option<usize>,
+    pub(super) layout: LayoutId,
+    pub(super) retained: Option<FaceSlot>,
 }
 
 pub(super) struct CachedItem {
@@ -217,6 +219,8 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
             parameter_bytes: parameter_part(&params, scale),
             slot: None,
             blended_index: None,
+            layout: LayoutId::default(),
+            retained: None,
         });
     }
     cached

@@ -511,24 +511,23 @@ fn committed_world_position(geometry: &GeometryRenderer, slot: u32) -> Option<DV
 fn assert_committed_positions(geometry: &GeometryRenderer, turn: u32) {
     const LAGGING: f64 = 16.0;
     const EXACT: f64 = 1e-3;
-    let lagging = geometry.draw_list.layout_pending() || geometry.draw_list.layout_patching_suspended() || geometry.layout_required;
+    let lagging = geometry.draw_list.layout_pending() || geometry.layout_required;
     let fail = |what: &str, item: Option<&crate::geometry::items::CachedItem>, expected: Option<DVec3>, actual: DVec3| -> ! {
         panic!(
-            "turn {turn}: {what}; item={:?} expected={expected:?} actual={actual:?} delta={:?} active_origin={:?} cache_origin={:?} rebuild={} layout_pending={} suspended={} layout_required={}",
+            "turn {turn}: {what}; item={:?} expected={expected:?} actual={actual:?} delta={:?} active_origin={:?} cache_origin={:?} rebuild={} layout_pending={} layout_required={}",
             item.map(|item| item.id),
             expected.map(|expected| actual - expected),
             geometry.active_origin,
             geometry.cache.origin,
             geometry.cache.rebuild.is_some(),
             geometry.draw_list.layout_pending(),
-            geometry.draw_list.layout_patching_suspended(),
             geometry.layout_required,
         )
     };
     if !geometry.draw_list.layout_pending() {
         for index in geometry.draw_list.committed_items() {
             let Some(item) = geometry.cache.items.get(*index) else { continue };
-            for slot in item.faces.iter().filter_map(|face| face.slot) {
+            for slot in item.faces.iter().filter_map(|face| geometry.draw_list.committed_slot(face)) {
                 if geometry.draw_list.hides_range(slot, 1) {
                     continue;
                 }
@@ -1630,7 +1629,7 @@ fn assert_inside_region(geometry: &GeometryRenderer, turn: u32) {
         if geometry.draw_list.layout_pending() {
             continue;
         }
-        for slot in item.faces.iter().filter_map(|face| face.slot) {
+        for slot in item.faces.iter().filter_map(|face| geometry.draw_list.committed_slot(face)) {
             let Some(drawn) = committed_world_position(geometry, slot) else { continue };
             assert!(
                 inside(drawn, radius),
@@ -1817,6 +1816,183 @@ fn gpu_blended_sort_keeps_origin_during_pending_rebase() {
     }
     assert!(pending_orders.len() >= 2, "blended draw order follows the camera while the layout is pending: {}", pending_orders.len());
     assert!(pending_after_rebase >= 2, "layouts stay pending after the rebase while the camera moves: {pending_after_rebase}");
+}
+
+const LAYOUT_OBJECTS: u32 = 1_100;
+const LAYOUT_TARGET: u32 = 600;
+
+fn layout_home(id: u32) -> Vec3 {
+    Vec3::new(40.0 + (id % 20) as f32 * 1.5, -14.0 + (id / 20 % 20) as f32 * 1.5, -4.0 + (id / 400) as f32 * 3.0)
+}
+
+fn layout_camera(x: f64) -> Camera {
+    Camera::new(DVec3::new(x, 0.5, 0.5), Vec3::X, 1.2, [128, 128])
+        .expect("layout camera")
+        .with_quality(512.0, 4.0)
+        .expect("fixture draw distance")
+}
+
+fn layout_scene() -> (world::World, Reconciler, SceneView, std::collections::HashMap<AssetId, Vec<u8>>) {
+    let asset = AssetId::new(Uuid::from_u128(98_900));
+    let bytes = test_support::mesh::asset_with_lod_faces(&[(3, 1)]);
+    let mesh_bytes = std::collections::HashMap::from([(asset, bytes.clone())]);
+    let objects =
+        (1..=LAYOUT_OBJECTS).map(|id| (id, asset, if id == 1 { Vec3::new(-40.0, 0.0, 0.0) } else { layout_home(id) })).collect::<Vec<_>>();
+    let (world, mut scene, mut view, _) = ready_mesh_scene(&objects, bytes);
+    scene.set_camera(layout_camera(0.5));
+    scene.notify_world_change();
+    settle_with_meshes(&world, &mut scene, &mut view, &mesh_bytes);
+    (world, scene, view, mesh_bytes)
+}
+
+fn patch_layout_pose(world: &mut world::World, id: u32, order: u32, position: Vec3, rotation: math::Quat) {
+    let mut patch = ObjectPatch::new(
+        UpdateSource::new(fixture_region(world), order, OrderEvidence::Ordered(u64::from(order)), 0),
+        std::num::NonZeroU32::new(id).expect("fixture local ID"),
+    );
+    patch.pose = Some(Pose { position: Some(position), rotation: Some(rotation) });
+    let _ = world.patch_object(patch).expect("fixture pose applies");
+}
+
+fn committed_model(geometry: &GeometryRenderer, slot: u32) -> math::Mat4 {
+    let bytes = geometry.draw_list.instance_transform(slot).expect("committed slot has instance bytes");
+    let values = bytes.as_chunks::<4>().0.iter().take(16).map(|value| f32::from_le_bytes(*value)).collect::<Vec<_>>();
+    math::Mat4::from_cols_slice(&values)
+}
+
+fn target_slot(geometry: &GeometryRenderer, view: &SceneView) -> u32 {
+    let entity = view
+        .objects()
+        .find(|object| object.detail().summary.id == Uuid::from_u128(100_000 + u128::from(LAYOUT_TARGET)))
+        .expect("layout target")
+        .detail()
+        .summary
+        .entity;
+    let index = geometry.cache.objects[&entity];
+    geometry.cache.items.get(index).expect("target item").faces[0].slot.expect("committed target slot")
+}
+
+fn rotate_during_layout(rebase: bool) {
+    const TURNS: u32 = 40;
+    let (mut world, mut scene, mut view, mesh_bytes) = layout_scene();
+    let (device, queue) = vulkan_device();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    prepare_until_current(&device, &queue, &mut geometry, &view, layout_camera(0.5));
+    let mut slot = target_slot(&geometry, &view);
+    let home = layout_home(LAYOUT_TARGET);
+
+    let mut building_turns = 0;
+    let mut rebased_turns = 0;
+    for turn in 1..=TURNS {
+        let rotation = math::Quat::from_rotation_z(turn as f32 * 0.05);
+        patch_layout_pose(&mut world, LAYOUT_TARGET, 10_000 + turn, home, rotation);
+        if turn == 1 && !rebase {
+            patch_layout_pose(&mut world, 1, 20_000, layout_home(1), math::Quat::IDENTITY);
+        }
+        let camera = layout_camera(if rebase { 0.5 - f64::from(turn) * 0.1 } else { 0.5 });
+        scene.set_camera(camera);
+        scene.notify_world_change();
+        settle_with_meshes(&world, &mut scene, &mut view, &mesh_bytes);
+        prepare_frame(&device, &queue, &mut geometry, &view, camera);
+
+        assert_draws_resident(&geometry);
+        if geometry.stats.layouts > 0 {
+            slot = target_slot(&geometry, &view);
+        }
+        building_turns += u32::from(geometry.draw_list.layout_building());
+        rebased_turns += u32::from(geometry.draw_list.layout_building() && geometry.active_origin != geometry.cache.origin);
+        let expected =
+            math::Mat4::from_scale_rotation_translation(Vec3::ONE, rotation, (home.as_dvec3() - geometry.active_origin).as_vec3());
+        let actual = committed_model(&geometry, slot);
+        assert!(
+            actual.abs_diff_eq(expected, 1e-4),
+            "turn {turn} (rebase={rebase}): committed pose lags the object; expected={expected:?} actual={actual:?} building={} active_origin={:?} cache_origin={:?}",
+            geometry.draw_list.layout_building(),
+            geometry.active_origin,
+            geometry.cache.origin,
+        );
+    }
+    assert!(building_turns >= 2, "the layout stays pending across turns (rebase={rebase}): {building_turns}");
+    if rebase {
+        assert!(rebased_turns >= 2, "the layout stays pending after the rebase: {rebased_turns}");
+    }
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(pending_layout_patches_rotation)' --test-threads=1"]
+fn pending_layout_patches_rotation() {
+    rotate_during_layout(false);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(pending_rebase_patches_rotation)' --test-threads=1"]
+fn pending_rebase_patches_rotation() {
+    rotate_during_layout(true);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(pending_removal_leaves_no_instance)' --test-threads=1"]
+fn pending_removal_leaves_no_instance() {
+    let (mut world, mut scene, mut view, mesh_bytes) = layout_scene();
+    let camera = layout_camera(0.5);
+    let (device, queue) = vulkan_device();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    prepare_until_current(&device, &queue, &mut geometry, &view, camera);
+    let committed = target_slot(&geometry, &view);
+    let home = layout_home(LAYOUT_TARGET).as_dvec3();
+
+    patch_layout_pose(&mut world, 1, 20_000, layout_home(1), math::Quat::IDENTITY);
+    scene.notify_world_change();
+    settle_with_meshes(&world, &mut scene, &mut view, &mesh_bytes);
+    let mut staged = false;
+    for _ in 0..16 {
+        prepare_frame(&device, &queue, &mut geometry, &view, camera);
+        let position = geometry
+            .cache
+            .visible
+            .iter()
+            .position(|index| geometry.cache.items.get(*index).is_some_and(|item| item.id.1 == 100_000 + u128::from(LAYOUT_TARGET)));
+        staged = geometry
+            .draw_list
+            .staged_progress()
+            .zip(position)
+            .is_some_and(|((phase, cursor, ..), position)| phase == "fill" && cursor > position);
+        if staged {
+            break;
+        }
+    }
+    assert!(staged, "the pending build staged the target before its removal");
+    assert_ne!(target_slot(&geometry, &view), committed, "the staged build moved the target face");
+
+    let _ = world
+        .remove_object(
+            UpdateSource::new(fixture_region(&world), 30_000, OrderEvidence::Ordered(30_000), 0),
+            std::num::NonZeroU32::new(LAYOUT_TARGET).expect("target local ID"),
+        )
+        .expect("target removal applies");
+    scene.notify_world_change();
+    settle_with_meshes(&world, &mut scene, &mut view, &mesh_bytes);
+    let mut settled_turns = 0;
+    for turn in 1..=200 {
+        prepare_frame(&device, &queue, &mut geometry, &view, camera);
+        assert_draws_resident(&geometry);
+        let mut slot = 0;
+        while let Some(position) = committed_world_position(&geometry, slot) {
+            assert!(
+                (position - home).abs().max_element() > 1e-3,
+                "turn {turn}: committed slot {slot} still submits the removed object (committed slot was {committed}); pending={}",
+                geometry.draw_list.layout_pending(),
+            );
+            slot += 1;
+        }
+        settled_turns += u32::from(!geometry.draw_list.layout_pending() && !geometry.layout_required);
+        if settled_turns > 3 {
+            break;
+        }
+    }
+    assert!(settled_turns > 3, "the layout after the removal commits");
 }
 
 #[test]

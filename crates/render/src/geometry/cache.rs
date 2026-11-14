@@ -720,7 +720,6 @@ impl GeometryRenderer {
             self.draw_list.cancel_layout();
             self.layout_required = true;
             self.layout_pose_items.clear();
-            self.layout_parameter_items.clear();
         }
         update
     }
@@ -2083,6 +2082,8 @@ fn retain_draw_slots(previous: &CachedItem, next: &mut CachedItem) {
         if previous.order == next.order && previous.indices == next.indices {
             next.slot = previous.slot;
             next.blended_index = previous.blended_index;
+            next.layout = previous.layout;
+            next.retained = previous.retained;
         }
     }
 }
