@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn from_parts_requires_faces_to_cover_the_index_buffer() {
+    fn from_parts_requires_face_coverage() {
         let vertices = vec![vertex(); 6];
         let indices = vec![0, 1, 2, 3, 4, 5];
 
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn from_parts_accepts_many_faces_with_reused_slots() {
+    fn from_parts_reuses_face_slots() {
         let face_count = 300;
         let indices = (0..face_count * 3).map(|index| u32::try_from(index).expect("test index fits u32")).collect();
         let faces = (0..face_count)

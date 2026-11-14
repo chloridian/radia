@@ -245,7 +245,7 @@ fn cached(store: &mut Store, now: Instant) -> DecodeInput {
 }
 
 #[test]
-fn disk_hit_uses_decode_admission_and_does_not_count_as_a_fetch_attempt() {
+fn disk_hit_skips_fetch_attempt() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(11);
@@ -280,7 +280,7 @@ fn disk_hit_uses_decode_admission_and_does_not_count_as_a_fetch_attempt() {
 }
 
 #[test]
-fn cached_mesh_reads_stay_within_storage_limit() {
+fn mesh_reads_obey_read_limit() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
@@ -417,7 +417,7 @@ fn cache_miss_skips_disk_job() {
 }
 
 #[test]
-fn retired_route_discards_a_completed_disk_read() {
+fn retired_route_drops_disk_read() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(12);
@@ -600,7 +600,7 @@ fn cancelled_read_allows_retry() {
 }
 
 #[test]
-fn malformed_disk_payload_is_discarded_without_failing_demand_attempts() {
+fn malformed_disk_payload_refetches() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(13);
@@ -633,7 +633,7 @@ fn malformed_disk_payload_is_discarded_without_failing_demand_attempts() {
 }
 
 #[test]
-fn full_write_admission_does_not_hold_network_fetch_admission() {
+fn write_pressure_keeps_fetch_admission() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let write_budget = Budget::default();
@@ -666,7 +666,7 @@ fn full_write_admission_does_not_hold_network_fetch_admission() {
 }
 
 #[test]
-fn decoded_material_and_environment_payloads_survive_disk_round_trips() {
+fn decoded_payloads_round_trip_disk() {
     fn round_trip(cache: &Arc<crate::cache::AssetCache>, resource: Resource, response: Vec<u8>) {
         let now = Instant::now();
         let mut store = Store::with_cache(Budget::default(), Arc::clone(cache));
@@ -830,7 +830,7 @@ fn partial_mesh_metadata_is_validated() {
 }
 
 #[test]
-fn malformed_mesh_blocks_are_not_cached() {
+fn malformed_blocks_stay_uncached() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
@@ -928,7 +928,7 @@ fn corrupt_mesh_lods_are_refetched() {
 }
 
 #[test]
-fn malformed_cached_mesh_lod_is_refetched() {
+fn malformed_cached_lod_refetches() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
@@ -1013,7 +1013,7 @@ fn corrupt_mesh_header_is_refetched() {
 }
 
 #[test]
-fn cached_header_total_rejects_lod_with_mismatched_asset_length() {
+fn mismatched_lod_length_refetches() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
@@ -1339,7 +1339,7 @@ fn mesh_importance_precedes_age() {
 }
 
 #[test]
-fn importance_update_keeps_fetch_and_reorders_queue() {
+fn importance_update_reorders_queue() {
     let now = Instant::now();
     let mut store = Store::new(Budget::default());
     let route = store.register_route().unwrap();
@@ -1364,7 +1364,7 @@ fn importance_update_keeps_fetch_and_reorders_queue() {
 }
 
 #[test]
-fn mesh_fetch_pool_independent_of_textures() {
+fn mesh_fetches_have_own_pool() {
     let now = Instant::now();
     let mut store = Store::new(Budget::default());
     let route = store.register_route().unwrap();
@@ -1397,7 +1397,7 @@ fn mesh_fetch_pool_independent_of_textures() {
 }
 
 #[test]
-fn reservation_block_skips_to_small_work() {
+fn blocked_mesh_yields_to_material() {
     let budget = Budget::default();
     let now = Instant::now();
     let mut store = Store::new(budget.clone());
@@ -2481,7 +2481,7 @@ fn mesh_decode_bypasses_texture_pool() {
 }
 
 #[test]
-fn failed_mesh_lod_keeps_another_lod_ready() {
+fn failed_lod_keeps_other_ready() {
     let id = mesh_resource(101).id;
     let (low, high, block) = mesh_lod_requests(id);
     let now = Instant::now();
