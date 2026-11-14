@@ -23,7 +23,7 @@ fn side_margins_follow_viewport_pixels() {
 }
 
 #[test]
-fn side_margins_leave_depth_limits_strict() {
+fn side_margins_keep_depth_strict() {
     let camera =
         Camera::new(DVec3::ZERO, Vec3::X, 1.0, SIZE).expect("fixture camera").with_quality(32.0, 1.0).expect("fixture draw distance");
     let bands = VisibilityBands::new(projection(camera, SIZE), SIZE);
@@ -38,7 +38,7 @@ fn side_margins_leave_depth_limits_strict() {
 }
 
 #[test]
-fn transformed_negative_scale_bounds_stay_visible() {
+fn negative_scale_stays_visible() {
     let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, SIZE).expect("fixture camera");
     let bounds = Bounds { min: Vec3::new(1.8, -0.2, -0.2), max: Vec3::new(2.2, 0.2, 0.2) };
     let bands = VisibilityBands::new(projection(camera, SIZE), SIZE);

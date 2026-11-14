@@ -7,7 +7,7 @@ use super::support::{
 };
 
 #[test]
-fn environment_keyframes_demand_unique_texture_ids_with_per_environment_and_global_caps() {
+fn keyframe_demands_respect_caps() {
     let (mut world, regions) = world_with_region_count(5);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
@@ -40,7 +40,7 @@ fn environment_keyframes_demand_unique_texture_ids_with_per_environment_and_glob
 }
 
 #[test]
-fn replacement_and_region_retirement_retain_environment_texture_tickets_until_close() {
+fn retirement_retains_texture_tickets() {
     let mut world = world();
     let region = world_region(&world, 0);
     let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
@@ -226,7 +226,7 @@ fn close_releases_environment_texture_tickets() {
 }
 
 #[test]
-fn experience_settings_and_overrides_share_texture_demands() {
+fn experience_overrides_share_demands() {
     let world = world();
     let region = world_region(&world, 0);
     let experience = ExperienceId::new(Uuid::from_u128(204)).unwrap();

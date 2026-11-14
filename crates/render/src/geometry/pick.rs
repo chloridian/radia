@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn terrain_picks_past_draw_distance_but_objects_do_not() {
+    fn pick_distance_limits_objects_only() {
         let mesh = shared_mesh();
         let (triangle, indices) = first_triangle(&mesh);
         let (camera, center, ray) = camera_for_triangle(triangle);

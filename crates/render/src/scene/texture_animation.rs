@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn redraw_predicate_stops_when_non_looping_animation_reaches_its_end() {
+    fn redraw_stops_at_animation_end() {
         assert!(is_changing_at(animation(0x03, [2, 2], 0.0, 0.0, 1.0), 400.0, 0.0));
         assert!(!is_changing_at(animation(0x01, [2, 2], 0.0, 0.0, 1.0), 4.0, 0.0));
         assert!(!is_changing_at(animation(0x01, [2, 2], 0.0, 0.0, 0.0), 0.0, 0.0));

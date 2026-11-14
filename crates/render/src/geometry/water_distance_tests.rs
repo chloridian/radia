@@ -357,8 +357,8 @@ fn water_uv_probe() {
 }
 
 #[test]
-#[ignore = "requires Vulkan; run with cargo test -p render --lib water_base_color_skips_extra_atmosphere_haze -- --ignored"]
-fn water_base_color_skips_extra_atmosphere_haze() {
+#[ignore = "requires Vulkan; run with cargo test -p render --lib water_color_skips_extra_haze -- --ignored"]
+fn water_color_skips_extra_haze() {
     let instance =
         wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
     let (device, queue) = block_on(async {

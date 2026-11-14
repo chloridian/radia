@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn water_fog_exponent_uses_the_converted_light_z_axis() {
+    fn fog_exponent_uses_light_z() {
         let mut environment = evaluate(
             &Sources {
                 base: None,
@@ -218,14 +218,14 @@ mod tests {
     }
 
     #[test]
-    fn water_wave_lattice_phase_keeps_global_region_alignment() {
+    fn wave_phase_keeps_region_alignment() {
         let values = water_surface_values(None, DVec3::new(1.0e12 + 128.0, -2.0e12 + 128.0, 0.0), DVec3::ZERO, None, [0.0; 4], 0.0, false);
         assert_eq!(values[30], (1.0e12_f64 + 128.0).rem_euclid(256.0) as f32);
         assert_eq!(values[31], (-2.0e12_f64 + 128.0).rem_euclid(256.0) as f32);
     }
 
     #[test]
-    fn firestorm_region_quad_interpolates_the_swept_center() {
+    fn region_quad_interpolates_center() {
         let sweep = |x: f64, y: f64| x + ((x * 0.08).cos() + (y * 0.02).sin()) * 6.0;
         let source_center = (sweep(0.0, 0.0) + sweep(256.0, 256.0)) * 0.5;
         let per_fragment = sweep(128.0, 128.0);
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn firestorm_water_fog_vectors_cover_a_grazing_high_altitude_ray() {
+    fn fog_vectors_cover_grazing_ray() {
         let intersection = 20.0_f32 / 0.01;
         let original_endpoint = 2048.0 - intersection;
         let extended_endpoint = intersection + 2048.0 - intersection;

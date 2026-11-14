@@ -84,7 +84,7 @@ fn mesh_importance_survives_small_motion() {
 }
 
 #[test]
-fn unpublished_mesh_slots_bound_and_release() {
+fn unpublished_slots_bound_release() {
     let asset = AssetId::new(Uuid::from_u128(792));
     let textures = (0..13).map(|slot| AssetId::new(Uuid::from_u128(20_000 + slot))).collect::<Vec<_>>();
     let overrides = textures
@@ -131,7 +131,7 @@ fn unpublished_mesh_slots_bound_and_release() {
 }
 
 #[test]
-fn face_budget_retries_overflow_meshes_and_prims_after_shared_mesh_publication() {
+fn overflow_retries_after_publication() {
     const ADMITTED_MESHES: u32 = 4096;
     let shared_asset = AssetId::new(Uuid::from_u128(50_000));
     let rejected_asset = AssetId::new(Uuid::from_u128(50_001));
@@ -228,7 +228,7 @@ fn face_budget_retries_overflow_meshes_and_prims_after_shared_mesh_publication()
 }
 
 #[test]
-fn mesh_lod_falls_back_then_refines() {
+fn lod_falls_back_then_refines() {
     let asset = AssetId::new(Uuid::from_u128(700));
     let bytes = test_support::mesh::asset(&[0, 2, 3], 1);
     let mut world = world();
@@ -286,7 +286,7 @@ fn fallback_skips_missing_lowest() {
 }
 
 #[test]
-fn zero_face_lod_uses_loaded_fallback() {
+fn zero_face_lod_uses_fallback() {
     let asset = AssetId::new(Uuid::from_u128(710));
     let bytes = test_support::mesh::asset_with_empty_lod(&[2], &[3], 1);
     let mut world = world();
@@ -314,7 +314,7 @@ fn zero_face_lod_uses_loaded_fallback() {
 }
 
 #[test]
-fn material_slots_follow_the_published_fallback_lod() {
+fn material_slots_follow_fallback() {
     let asset = AssetId::new(Uuid::from_u128(712));
     let texture = AssetId::new(Uuid::from_u128(713));
     let bytes = test_support::mesh::asset_with_lod_faces(&[(2, 2), (3, 1)]);
@@ -357,7 +357,7 @@ fn material_slots_follow_the_published_fallback_lod() {
 }
 
 #[test]
-fn current_ready_lod_stays_while_selection_loads() {
+fn ready_lod_stays_while_loading() {
     let asset = AssetId::new(Uuid::from_u128(711));
     let bytes = test_support::mesh::asset(&[0, 1, 2, 3], 1);
     let mut world = world();
@@ -393,7 +393,7 @@ fn current_ready_lod_stays_while_selection_loads() {
 }
 
 #[test]
-fn missing_medium_selects_lower_available_lod() {
+fn missing_medium_selects_lower() {
     let asset = AssetId::new(Uuid::from_u128(716));
     let bytes = test_support::mesh::asset(&[0, 3], 1);
     let mut world = world();
@@ -415,7 +415,7 @@ fn missing_medium_selects_lower_available_lod() {
 }
 
 #[test]
-fn current_high_lod_stays_until_medium_is_ready() {
+fn high_lod_stays_until_medium() {
     let asset = AssetId::new(Uuid::from_u128(717));
     let bytes = test_support::mesh::asset(&[0, 1, 2, 3], 1);
     let mut world = world();
@@ -641,7 +641,7 @@ fn removal_releases_pending_lod() {
 }
 
 #[test]
-fn failed_retained_lod_releases_to_fallback() {
+fn failed_lod_releases_fallback() {
     let asset = AssetId::new(Uuid::from_u128(796));
     let bytes = test_support::mesh::asset(&[0, 1, 2, 3], 1);
     let mut world = world();
@@ -848,7 +848,7 @@ fn camera_change_refines_distinct_meshes() {
 }
 
 #[test]
-fn same_asset_shares_geometry_and_releases_on_last_user() {
+fn same_asset_shares_geometry() {
     let asset = AssetId::new(Uuid::from_u128(701));
     let bytes = test_support::mesh::asset(&[0, 2, 3], 1);
     let mut world = world();
@@ -887,7 +887,7 @@ fn same_asset_shares_geometry_and_releases_on_last_user() {
 }
 
 #[test]
-fn shape_and_asset_changes_release_stale_fetches() {
+fn changes_release_stale_fetches() {
     let first_asset = AssetId::new(Uuid::from_u128(702));
     let second_asset = AssetId::new(Uuid::from_u128(703));
     let bytes = test_support::mesh::asset(&[3], 1);
@@ -937,7 +937,7 @@ fn shape_and_asset_changes_release_stale_fetches() {
 }
 
 #[test]
-fn replaced_prim_mesh_is_not_published_for_a_mesh_asset_shape() {
+fn replaced_prim_mesh_unpublished() {
     let asset = AssetId::new(Uuid::from_u128(709));
     let bytes = test_support::mesh::asset(&[3], 1);
     let mut world = world();
@@ -973,7 +973,7 @@ fn replaced_prim_mesh_is_not_published_for_a_mesh_asset_shape() {
 }
 
 #[test]
-fn removing_mesh_during_header_fetch_ignores_late_completion() {
+fn removal_ignores_late_header() {
     let asset = AssetId::new(Uuid::from_u128(705));
     let mut world = world();
     add_mesh(&mut world, 1, asset, 10.0);
@@ -1030,7 +1030,7 @@ fn region_leave_releases_pending_lod() {
 }
 
 #[test]
-fn malformed_headers_and_oversized_face_lists_are_not_drawn() {
+fn malformed_headers_not_drawn() {
     let malformed = AssetId::new(Uuid::from_u128(707));
     let oversized = AssetId::new(Uuid::from_u128(708));
     let oversized_bytes = test_support::mesh::asset(&[3], 9);
@@ -1062,7 +1062,7 @@ fn malformed_headers_and_oversized_face_lists_are_not_drawn() {
 }
 
 #[test]
-fn thousands_of_mesh_objects_share_bounded_asset_and_scene_state() {
+fn many_meshes_share_bounded_state() {
     let asset = AssetId::new(Uuid::from_u128(706));
     let bytes = test_support::mesh::asset(&[0, 2, 3], 1);
     let mut world = world();

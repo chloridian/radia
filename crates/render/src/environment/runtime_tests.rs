@@ -37,7 +37,7 @@ fn region(world: &World, index: usize) -> Region {
 }
 
 #[test]
-fn active_environment_texture_demand_includes_current_and_next_assets() {
+fn active_demand_includes_next_textures() {
     let sources = Sources {
         base: None,
         schedule: Schedule::default(),
@@ -295,7 +295,7 @@ fn push_local_asset(
 }
 
 #[test]
-fn active_environment_uses_agent_region_and_restarts_identity_on_region_change() {
+fn active_follows_agent_region() {
     let mut world = world();
     let first_region = region(&world, 0);
     let second_region = region(&world, 1);
@@ -345,7 +345,7 @@ fn active_environment_uses_agent_region_and_restarts_identity_on_region_change()
 }
 
 #[test]
-fn experience_settings_keep_day_sky_and_water_precedence() {
+fn experience_precedence_day_sky_water() {
     let world = world();
     let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -450,7 +450,7 @@ fn clear_transition_scopes_to_clear() {
 }
 
 #[test]
-fn local_preset_beats_shared_and_experience_and_clear_restores_experience() {
+fn local_preset_precedence_and_clear() {
     let mut world = world();
     let first_region = region(&world, 0);
     let second_region = region(&world, 1);
@@ -531,7 +531,7 @@ fn local_preset_beats_shared_and_experience_and_clear_restores_experience() {
 }
 
 #[test]
-fn completed_local_preset_uses_agent_region_and_updates_active_sky() {
+fn local_preset_uses_agent_region() {
     let mut world = world();
     let first_region = region(&world, 0);
     let agent_region = region(&world, 1);
@@ -578,7 +578,7 @@ fn completed_local_preset_uses_agent_region_and_updates_active_sky() {
 }
 
 #[test]
-fn crossing_retries_local_asset_in_agent_region() {
+fn crossing_retries_local_asset() {
     let mut world = world();
     let first_region = region(&world, 0);
     let agent_region = region(&world, 1);
@@ -629,7 +629,7 @@ fn crossing_retries_local_asset_in_agent_region() {
 }
 
 #[test]
-fn inventory_water_preserves_local_sky_and_daycycle_replaces_both() {
+fn inventory_water_keeps_local_sky() {
     let mut world = world();
     let region = region(&world, 0);
     add_region_environment(
@@ -709,7 +709,7 @@ fn inventory_water_preserves_local_sky_and_daycycle_replaces_both() {
 }
 
 #[test]
-fn closing_scene_releases_local_asset_request() {
+fn close_releases_local_request() {
     let mut world = world();
     let region = region(&world, 0);
     add_region_environment(&mut world, region, b"{'type':'sky'}", None);
@@ -753,7 +753,7 @@ fn closing_scene_releases_local_asset_request() {
 }
 
 #[test]
-fn failed_local_preset_publishes_a_typed_error() {
+fn failed_preset_publishes_error() {
     let mut world = world();
     let region = region(&world, 0);
     add_region_environment(&mut world, region, b"{'type':'sky'}", None);
@@ -786,7 +786,7 @@ fn failed_local_preset_publishes_a_typed_error() {
 }
 
 #[test]
-fn cloud_scroll_follows_windlight_axis_directions() {
+fn cloud_scroll_follows_windlight_axes() {
     let mut world = world();
     let region = region(&world, 0);
     add_region_environment(&mut world, region, b"{'type':'sky'}", None);
@@ -802,7 +802,7 @@ fn cloud_scroll_follows_windlight_axis_directions() {
 }
 
 #[test]
-fn water_phase_uses_elapsed_runtime_seconds() {
+fn water_phase_uses_elapsed_time() {
     let mut world = world();
     let region = region(&world, 0);
     add_region_environment(&mut world, region, b"{'type':'water'}", None);
@@ -948,7 +948,7 @@ fn completed_replacements_break_old_tweens() {
 }
 
 #[test]
-fn same_key_replacement_starts_at_current_value() {
+fn replacement_starts_at_current() {
     let world = world();
     let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -977,7 +977,7 @@ fn same_key_replacement_starts_at_current_value() {
 }
 
 #[test]
-fn clearing_one_property_fades_without_interrupting_another() {
+fn clear_fades_one_property() {
     let world = world();
     let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -1018,7 +1018,7 @@ fn clearing_one_property_fades_without_interrupting_another() {
 }
 
 #[test]
-fn clearing_last_property_fades_to_defaults() {
+fn clearing_last_fades_to_defaults() {
     let world = world();
     let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -1056,7 +1056,7 @@ fn clearing_last_property_fades_to_defaults() {
 }
 
 #[test]
-fn clearing_replaced_owner_keeps_current_property() {
+fn clearing_replaced_owner_keeps_property() {
     let world = world();
     let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -1087,7 +1087,7 @@ fn clearing_replaced_owner_keeps_current_property() {
 }
 
 #[test]
-fn unrelated_region_update_does_not_restart_composition() {
+fn unrelated_region_keeps_composition() {
     let world = world();
     let first_region = region(&world, 0);
     let second_region = region(&world, 1);
@@ -1134,7 +1134,7 @@ fn unrelated_region_update_does_not_restart_composition() {
 }
 
 #[test]
-fn region_teardown_keeps_original_property_deadline() {
+fn teardown_keeps_property_deadline() {
     let world = world();
     let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -1254,7 +1254,7 @@ fn leaving_local_resumes_property_timeline() {
 }
 
 #[test]
-fn inactive_region_property_has_no_deadline() {
+fn inactive_region_has_no_deadline() {
     let mut world = world();
     let first_region = region(&world, 0);
     let second_region = region(&world, 1);

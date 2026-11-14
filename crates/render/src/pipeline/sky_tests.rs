@@ -9,8 +9,8 @@ use super::*;
 use crate::environment::{Schedule, Sources, evaluate};
 
 #[test]
-#[ignore = "requires Vulkan; run with cargo test -p render --lib sky_cloud_noise_and_moon_use_reference_samples -- --ignored"]
-fn sky_cloud_noise_and_moon_use_reference_samples() {
+#[ignore = "requires Vulkan; run with cargo test -p render --lib sky_matches_reference_samples -- --ignored"]
+fn sky_matches_reference_samples() {
     let instance =
         wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
     let (device, queue) = block_on(async {
@@ -79,8 +79,8 @@ fn sky_cloud_noise_and_moon_use_reference_samples() {
 }
 
 #[test]
-#[ignore = "requires Vulkan; run with cargo test -p render --lib stars_sample_the_current_bloom_texture -- --ignored"]
-fn stars_sample_the_current_bloom_texture() {
+#[ignore = "requires Vulkan; run with cargo test -p render --lib stars_sample_current_bloom -- --ignored"]
+fn stars_sample_current_bloom() {
     let instance =
         wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
     let (device, queue) = block_on(async {

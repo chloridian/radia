@@ -198,7 +198,7 @@ fn mesh_requests(demand: &mut AssetDemand) -> Vec<(AssetId, AssetTicket)> {
 }
 
 #[test]
-fn live_region_texture_changes_release_old_demands_and_request_replacements() {
+fn texture_change_replaces_demands() {
     let budget = Budget::default();
     let (_region_world, region) = crate::test_support::registered_region();
     let original = ids(10);
@@ -245,7 +245,7 @@ fn live_region_texture_changes_release_old_demands_and_request_replacements() {
 }
 
 #[test]
-fn missing_and_failed_details_keep_the_neutral_fallback_for_each_layer() {
+fn failed_details_keep_neutral_fallback() {
     let budget = Budget::default();
     let (_region_world, region) = crate::test_support::registered_region();
     let textures = ids(30);
@@ -275,7 +275,7 @@ fn missing_and_failed_details_keep_the_neutral_fallback_for_each_layer() {
 }
 
 #[test]
-fn neighboring_regions_keep_separate_detail_texture_sets() {
+fn neighbors_keep_separate_details() {
     let budget = Budget::default();
     let (_region_world, regions) = crate::test_support::registered_regions(2);
     let [south, east] = regions.as_slice() else { unreachable!() };
@@ -298,7 +298,7 @@ fn neighboring_regions_keep_separate_detail_texture_sets() {
 }
 
 #[test]
-fn nearby_terrain_details_refine_beyond_initial_size() {
+fn nearby_details_refine_size() {
     let budget = Budget::default();
     let (_region_world, region) = crate::test_support::registered_region();
     let mut mirror = Mirror::default();

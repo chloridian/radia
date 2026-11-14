@@ -427,7 +427,7 @@ mod tests {
     use super::RetiredRegions;
 
     #[test]
-    fn retired_region_ranges_merge_without_hiding_active_generations() {
+    fn retired_ranges_spare_active_generations() {
         let (_, regions) = crate::test_support::registered_regions(4);
         let [first, second, third, fourth] = regions.as_slice() else { panic!("four regions are registered") };
         let mut retired = RetiredRegions::default();
