@@ -27,6 +27,31 @@ fn child_first_world() -> (World, Region, world::Entity) {
     (world, region, parent)
 }
 
+fn deep_chain_world() -> (World, Region, world::Entity) {
+    let mut bounds = limits();
+    bounds.max_entities = 320;
+    bounds.max_entities_per_region = 320;
+    let mut world = World::new(bounds);
+    let region = world.register_region().unwrap();
+    for link in 1..=300 {
+        let parent = if link == 1 { Root } else { Local(local_id(link - 1)) };
+        let _ = world.observe_object(object(source(region, u64::from(link)), u128::from(link), link, Object, parent)).unwrap();
+    }
+    for child in 401..=404 {
+        let _ = world
+            .observe_object(object(source(region, u64::from(child) + 2000), u128::from(child), child, Object, Local(local_id(301))))
+            .unwrap();
+    }
+    let Introduced(parent) = world.observe_object(object(source(region, 1000), 1000, 301, Object, Local(local_id(300)))).unwrap().outcome
+    else {
+        panic!("deep parent must be introduced");
+    };
+    let _ = world.resolve_relationships(64).unwrap();
+    assert_eq!(world.children(parent).count(), 0, "a deep chain needs more than one turn");
+    assert!(world.has_pending_relationships());
+    (world, region, parent)
+}
+
 #[test]
 fn late_pending_child_gets_recovery() {
     let mut bounds = limits();
@@ -376,6 +401,45 @@ fn vacated_address_keeps_distinct_work() {
             assert_eq!(world.object(later_child).unwrap().parent(), Resolved(other));
             assert_eq!(world.children(other).count(), 1);
         }
+    }
+}
+
+#[test]
+fn deep_continuation_restarts_after_interruption() {
+    for interruption in ["reparent", "cycle", "replace"] {
+        let (mut world, region, parent) = deep_chain_world();
+        let chain_end = world.entity(uuid(300)).unwrap();
+        let cycle_child = world.entity(uuid(404)).unwrap();
+        let mut expected_parent = parent;
+        match interruption {
+            "reparent" | "cycle" => {
+                let mut patch = ObjectPatch::new(source(region, 1100), local_id(300));
+                patch.parent = Some(if interruption == "cycle" { Local(local_id(404)) } else { Root });
+                assert_eq!(world.patch_object(patch).unwrap().outcome, Updated(chain_end));
+            }
+            _ => {
+                let _ = world.remove_object(source(region, 1500), local_id(301)).unwrap();
+                let replacement = world.observe_object(object(source(region, 1600), 1001, 301, Object, Local(local_id(300)))).unwrap();
+                let Introduced(replacement) = replacement.outcome else { panic!("replacement parent must be introduced") };
+                expected_parent = replacement;
+                let _ = drain_removals(&mut world);
+            }
+        }
+        drain_relationships(&mut world);
+
+        for child in 401..=404 {
+            let entity = world.entity(uuid(child)).unwrap();
+            let expected = if interruption == "cycle" && entity == cycle_child {
+                Pending { address: address(region, 301), expected_uuid: Some(uuid(1000)) }
+            } else {
+                Resolved(expected_parent)
+            };
+            assert_eq!(world.object(entity).unwrap().parent(), expected, "{interruption} child {child}");
+        }
+        if interruption == "cycle" {
+            assert_eq!(world.object(chain_end).unwrap().parent(), Resolved(cycle_child));
+        }
+        assert!(!world.has_pending_relationships());
     }
 }
 
