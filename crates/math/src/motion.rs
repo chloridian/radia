@@ -235,12 +235,12 @@ mod tests {
     }
 
     #[test]
-    fn healthy_motion_has_no_interpolation_cap() {
+    fn healthy_motion_uncapped() {
         assert_eq!(effective_elapsed(12.0, 1.0), 12.0);
     }
 
     #[test]
-    fn phase_out_is_continuous_at_start() {
+    fn phase_out_is_continuous() {
         let sampled_at = Instant::now();
         let phase_out_at = sampled_at + Duration::from_secs_f64(PHASE_OUT_TIME);
         let mut trajectory = LinearTrajectory::new(DVec3::ZERO, Vec3::X, Vec3::ZERO, 1.0, sampled_at);
@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_out_moves_forward_without_reversing() {
+    fn phase_out_never_reverses() {
         let sampled_at = Instant::now();
         let phase_out_at = sampled_at + Duration::from_secs_f64(PHASE_OUT_TIME);
         let mut trajectory = LinearTrajectory::new(DVec3::ZERO, Vec3::X, Vec3::ZERO, 1.0, sampled_at);
@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn old_sample_does_not_snap_when_taper_starts() {
+    fn old_sample_does_not_snap() {
         let sampled_at = Instant::now();
         let phase_out_at = sampled_at + Duration::from_secs(4);
         let mut trajectory = LinearTrajectory::new(DVec3::ZERO, Vec3::X, Vec3::ZERO, 1.0, sampled_at);
@@ -329,12 +329,12 @@ mod tests {
     }
 
     #[test]
-    fn half_ping_lead_applies_time_dilation_to_ping_and_frame() {
+    fn ping_lead_uses_time_dilation() {
         assert!((half_ping_lead(0.5, Some(Duration::from_millis(100)), 0.02) - 0.03).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn unmeasured_ping_uses_only_frame_lead() {
+    fn unmeasured_ping_uses_frame_lead() {
         assert!((half_ping_lead(0.5, None, 0.02) - 0.005).abs() < f64::EPSILON);
     }
 
@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn loaded_region_crossing_limits_prediction_to_one_second_after_boundary() {
+    fn crossing_caps_prediction_time() {
         let regions =
             [RegionBounds { region_id: 1, origin: DVec3::ZERO }, RegionBounds { region_id: 2, origin: DVec3::new(256.0, 0.0, 0.0) }];
 
