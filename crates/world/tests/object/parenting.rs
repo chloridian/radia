@@ -294,7 +294,7 @@ fn transfer_preserves_pending_children() {
 }
 
 #[test]
-fn transfer_coalescing_keeps_old_region_recovery_addresses() {
+fn coalesced_transfer_keeps_recovery_addresses() {
     let (mut world, source_region, parent) = child_first_world();
     let first_destination = world.register_region().unwrap();
     let second_destination = world.register_region().unwrap();
@@ -310,7 +310,7 @@ fn transfer_coalescing_keeps_old_region_recovery_addresses() {
 }
 
 #[test]
-fn transfer_back_preserves_current_relationship_work() {
+fn transfer_back_keeps_relationship_work() {
     let (mut world, source_region, parent) = child_first_world();
     let destination = world.register_region().unwrap();
     let _ = world.observe_object(object(source(destination, 300), 1000, 20, Object, Root)).unwrap();
@@ -557,7 +557,7 @@ fn sit_target_respects_tracked_authority() {
 }
 
 #[test]
-fn sit_target_defers_unknown_and_unordered() {
+fn sit_target_defers_when_unresolved() {
     let (mut world, region) = with_region();
     let target = SitTarget { position: Vec3::X, rotation: Quat::IDENTITY };
 
@@ -578,7 +578,7 @@ fn sit_target_defers_unknown_and_unordered() {
 }
 
 #[test]
-fn cyclic_parent_rejects_pose_but_preserves_siblings_and_blocks_older_declarations() {
+fn cyclic_parent_rejects_only_pose() {
     for use_observation in [false, true] {
         let (mut world, region) = with_region();
         let mut first = object(source(region, 1), 290, 1, Object, Root);
@@ -656,7 +656,7 @@ fn transfer_pends_old_region_children() {
 }
 
 #[test]
-fn transfer_retention_is_bounded_until_reclamation() {
+fn transfer_retention_is_bounded() {
     let mut world_limits = limits();
     world_limits.max_regions = 3;
     world_limits.max_entities = 2;
@@ -777,7 +777,7 @@ fn parent_cascade_respects_child_order() {
 }
 
 #[test]
-fn pending_ancestor_uses_its_own_parent_fence() {
+fn pending_ancestor_uses_own_fence() {
     let mut bounds = limits();
     bounds.max_entities = 80;
     bounds.max_entities_per_region = 80;
@@ -981,7 +981,7 @@ fn parent_resolution_keeps_parent_fence() {
 }
 
 #[test]
-fn parent_removal_detaches_avatar_without_resolved_pose() {
+fn parent_removal_detaches_avatar() {
     let (mut world, region) = with_region();
     let parent = world.observe_object(object(source(region, 10), 150, 1, Object, Root)).unwrap();
     let Introduced(parent_entity) = parent.outcome else { panic!("expected parent introduction") };

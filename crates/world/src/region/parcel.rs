@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_publishes_only_after_out_of_order_parts_and_decodes_flags() {
+    fn overlay_publishes_after_all_parts() {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
         let mut first = overlay_part(0);
@@ -872,7 +872,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_new_overlay_keeps_last_complete_grid() {
+    fn incomplete_overlay_keeps_last_grid() {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
         complete_overlay(&mut world, region, 1, 0);
@@ -886,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_restart_preserves_parts_newer_than_its_boundary() {
+    fn restart_keeps_newer_parts() {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
 
@@ -905,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_overlay_parts_do_not_mutate_assembly() {
+    fn malformed_parts_keep_assembly() {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
 
@@ -926,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn parcel_flag_bits_match_official_wire_values() {
+    fn flag_bits_match_wire() {
         let flags = ParcelFlags::from_bits(
             (1 << 0)
                 | (1 << 1)
@@ -959,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn walking_updates_only_the_newer_agent_parcel_and_excludes_selected_and_collision_replies() {
+    fn newer_walking_updates_current() {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
         observe_properties(&mut world, region, 1, 20, 41, 0);
@@ -999,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_restrictions_combine_region_parcel_and_overlay_flags() {
+    fn effective_restrictions_combine_flags() {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
         let parcel_flags = (1 << 0) | (1 << 1) | (1 << 5) | (1 << 6);
@@ -1023,7 +1023,7 @@ mod tests {
     }
 
     #[test]
-    fn property_validation_bounds_urls_and_debug_redacts_them() {
+    fn urls_bounded_and_redacted() {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
         let mut data = properties(1, 0, bitmap(&[]));
@@ -1045,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn region_crossing_and_interleaved_retirement_preserve_world_invariants() {
+    fn crossing_retirement_keeps_invariants() {
         let mut world = World::new(limits());
         let first = world.register_region().unwrap();
         let second = world.register_region().unwrap();

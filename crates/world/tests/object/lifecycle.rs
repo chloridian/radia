@@ -124,7 +124,7 @@ fn world_queries_follow_lifecycle() {
 }
 
 #[test]
-fn avatar_queries_follow_rebinding_replacement_and_retirement() {
+fn avatar_queries_track_lifecycle() {
     let (mut world, first) = with_region();
     let second = world.register_region().unwrap();
     let Introduced(avatar) = world.observe_object(object(source(first, 1), 10, 1, Avatar, Root)).unwrap().outcome else {
@@ -241,7 +241,7 @@ fn transfer_ignores_old_region_barrier() {
 }
 
 #[test]
-fn rebind_fences_old_local_id_at_rebind_stamp() {
+fn rebind_fences_old_local_id() {
     let (mut world, region) = with_region();
     let created = world.observe_object(object(source(region, 100), 130, 1, Object, Root)).unwrap();
     let Introduced(original) = created.outcome else { panic!("expected introduction") };

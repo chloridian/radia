@@ -123,7 +123,7 @@ fn point_lookup_restarts_after_reparent() {
 }
 
 #[test]
-fn point_lookup_respects_the_callers_remaining_work_budget() {
+fn point_lookup_respects_work_budget() {
     let (mut world, _) = deep_world(600);
     let id = uuid(600);
     let ObjectLookupProgress::Pending { cursor, work_units } = world.lookup_entity_with_budget(id, None, 7) else {
@@ -137,7 +137,7 @@ fn point_lookup_respects_the_callers_remaining_work_budget() {
 }
 
 #[test]
-fn object_pages_reuse_recent_ancestry_across_page_boundaries() {
+fn pages_reuse_recent_ancestry() {
     let depth = 4_096;
     let (mut world, region) = deep_world(depth);
     apply_ok(world.remove_object(source(region, u64::from(depth) + 1), local_id(1)));
@@ -278,7 +278,7 @@ fn insert_after_cursor_is_listed() {
 }
 
 #[test]
-fn object_pages_advance_over_retired_entities() {
+fn pages_skip_retired_entities() {
     let mut limits = world_limits();
     limits.max_entities = MAX_OBJECT_PAGE_WORK_ITEMS + 1;
     limits.max_entities_per_region = MAX_OBJECT_PAGE_WORK_ITEMS;
@@ -305,7 +305,7 @@ fn object_pages_advance_over_retired_entities() {
 }
 
 #[test]
-fn object_pages_resume_deep_visibility_walks() {
+fn object_pages_resume_deep_walks() {
     let depth = MAX_OBJECT_PAGE_WORK_ITEMS + 44;
     let mut limits = world_limits();
     limits.max_entities = depth + 1;
@@ -348,7 +348,7 @@ fn object_pages_resume_deep_visibility_walks() {
 }
 
 #[test]
-fn detail_pages_resume_deep_visibility_walks() {
+fn detail_pages_resume_deep_walks() {
     let depth = MAX_OBJECT_DETAIL_WORK_ITEMS + 12;
     let mut limits = world_limits();
     limits.max_entities = depth + 1;
@@ -398,7 +398,7 @@ fn detail_pages_resume_deep_visibility_walks() {
 }
 
 #[test]
-fn detail_batch_cursor_advances_across_entities() {
+fn batch_cursor_crosses_entities() {
     let depth = 180;
     let mut limits = world_limits();
     limits.max_entities = depth * 2;
@@ -736,7 +736,7 @@ fn journal_eviction_requires_resync() {
 }
 
 #[test]
-fn foreign_handles_or_zero_limits_fail() {
+fn foreign_handle_and_limit_errors() {
     let mut first = World::new(world_limits());
     let mut second = World::new(world_limits());
     let first_region = first.register_region().unwrap();

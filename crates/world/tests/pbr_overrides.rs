@@ -50,7 +50,7 @@ fn object(source: UpdateSource, id: u128, local_id_value: u32, with_surface: boo
 }
 
 #[test]
-fn snapshot_replaces_and_clears_only_overrides() {
+fn snapshot_replaces_overrides_only() {
     let (mut world, region) = with_region();
     let introduced = world.observe_object(object(source(region, 1), 17, 7, true)).unwrap();
     let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
@@ -85,7 +85,7 @@ fn snapshot_replaces_and_clears_only_overrides() {
 }
 
 #[test]
-fn override_is_retained_before_base_binding() {
+fn override_retained_before_binding() {
     let (mut world, region) = with_region();
     let introduced = world.observe_object(object(source(region, 1), 17, 7, true)).unwrap();
     let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
@@ -127,7 +127,7 @@ fn rejects_overrides_without_surface_appearance() {
 }
 
 #[test]
-fn untracked_snapshot_cannot_replace_tracked_data() {
+fn untracked_snapshot_keeps_tracked() {
     let (mut world, region) = with_region();
     let introduced = world.observe_object(object(source(region, 1), 17, 7, true)).unwrap();
     let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
@@ -147,7 +147,7 @@ fn untracked_snapshot_cannot_replace_tracked_data() {
 }
 
 #[test]
-fn local_id_is_scoped_to_region() {
+fn local_id_is_region_scoped() {
     let (mut world, first_region) = with_region();
     let second_region = world.register_region().unwrap();
     let first = world.observe_object(object(source(first_region, 1), 17, 7, true)).unwrap();

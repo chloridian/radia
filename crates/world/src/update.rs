@@ -524,7 +524,7 @@ mod tests {
     use crate::{LocalAddress, World, WorldLimits};
 
     #[test]
-    fn recovery_keeps_first_occurrences_within_limit() {
+    fn recovery_dedups_within_limit() {
         let bounds = WorldLimits {
             max_regions: 1,
             max_entities: 0,
@@ -549,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn rejections_keep_field_order_and_the_first_reason() {
+    fn rejections_keep_first_reason() {
         let first = FieldRejection { group: FieldGroup::Pose, reason: FieldRejectionReason::InvalidRotation };
         let later = FieldRejection { group: FieldGroup::Shape, reason: FieldRejectionReason::UntrustedSource };
         let mut rejections = Rejections::new();
