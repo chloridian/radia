@@ -12,9 +12,6 @@ use protocol::lludp::Message;
 use tokio::sync::oneshot;
 use tracing::Instrument;
 
-#[cfg(test)]
-use ::inventory::InventoryChange;
-
 use crate::{
     inventory::{
         AisDelta, FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryEditEvent, InventoryFetchError, InventoryFetchEvent,
@@ -514,37 +511,12 @@ pub(super) async fn stop_favorites_refresh(task: &mut Option<tokio::task::JoinHa
 }
 
 #[cfg(test)]
-pub(crate) fn resolve_pending_inventory_moves(
-    pending: &mut HashMap<InventoryNodeKey, (MoveExpectation, tokio::sync::oneshot::Sender<()>)>,
-    changes: &ChangeSet,
-) {
-    for change in &changes.changes {
-        let InventoryChange::NodeMoved { node, from, to } = change else { continue };
-        let Some((expectation, _)) = pending.get(node) else { continue };
-        if expectation.from == *from
-            && expectation.to == *to
-            && let Some((_, confirmed)) = pending.remove(node)
-            && confirmed.send(()).is_err()
-        {
-            tracing::trace!("inventory edit worker stopped before receiving move confirmation");
-        }
-    }
-}
-
-#[cfg(test)]
-pub(super) fn cache_restore_move_changes(
-    pending: &HashMap<InventoryNodeKey, (MoveExpectation, tokio::sync::oneshot::Sender<()>)>,
+pub(crate) fn confirm_pending_moves(
+    pending: &mut HashMap<InventoryNodeKey, (MoveExpectation, oneshot::Sender<()>)>,
     before: &InventorySnapshot,
     after: &InventorySnapshot,
-) -> ChangeSet {
-    let changes = pending
-        .iter()
-        .filter_map(|(node, (expectation, _))| {
-            (inventory_node_parent(before, *node) == Some(expectation.from) && inventory_node_parent(after, *node) == Some(expectation.to))
-                .then_some(InventoryChange::NodeMoved { node: *node, from: expectation.from, to: expectation.to })
-        })
-        .collect();
-    ChangeSet::new(after.revision(), changes, Vec::new())
+) {
+    resolve_pending_inventory_moves_between(pending, before, after);
 }
 
 fn inventory_node_parent(snapshot: &InventorySnapshot, node: InventoryNodeKey) -> Option<CategoryKey> {

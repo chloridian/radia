@@ -20,7 +20,7 @@ pub(crate) use coordinator::{
     SessionReadyUpdate, ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,
 };
 #[cfg(test)]
-pub(crate) use coordinator::{FolderFetchApply, apply_inventory_fetch, apply_inventory_udp, resolve_pending_inventory_moves};
+pub(crate) use coordinator::{FolderFetchApply, apply_inventory_fetch, apply_inventory_udp, confirm_pending_moves};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) use experience_environment::EnvironmentInbox;
 pub(crate) use inbound::{ChatMessage, display_message, format_avatar_name};
