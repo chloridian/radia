@@ -1,18 +1,42 @@
-﻿use std::{
-    io::{self, BufRead, BufReader, Write},
+use std::{
+    error::Error,
+    fmt,
+    io::{self, Read, Write},
+    mem,
     process::{Child, Command, ExitStatus, Stdio},
-    sync::mpsc::{self, Receiver},
+    sync::mpsc::{self, Receiver, Sender},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const READ_BUFFER: usize = 8 * 1024;
+const OUTPUT_LIMIT: usize = 1024 * 1024;
+const MESSAGE_LIMIT: usize = 16 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptureLimit {
+    Bytes,
+    Messages,
+}
+
+impl fmt::Display for CaptureLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bytes => write!(f, "subprocess stdout exceeded {OUTPUT_LIMIT} bytes"),
+            Self::Messages => write!(f, "subprocess stdout exceeded {MESSAGE_LIMIT} lines"),
+        }
+    }
+}
+
+impl Error for CaptureLimit {}
 
 pub struct TestProcess {
     child: Child,
     lines: Receiver<io::Result<String>>,
-    reader: Option<JoinHandle<()>>,
+    reader: Option<JoinHandle<Result<(), CaptureLimit>>>,
+    limit: Option<CaptureLimit>,
     output: String,
     reaped: bool,
 }
@@ -22,30 +46,30 @@ impl TestProcess {
         let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
         let stdout = child.stdout.take().expect("spawn configured piped stdout");
         let (sender, lines) = mpsc::channel();
-        let mut process = Self { child, lines, reader: None, output: String::new(), reaped: false };
-        process.reader = Some(thread::Builder::new().name("test-process-stdout".into()).spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let failed = line.is_err();
-                if sender.send(line).is_err() || failed {
-                    break;
-                }
-            }
-        })?);
+        let mut process = Self { child, lines, reader: None, limit: None, output: String::new(), reaped: false };
+        process.reader = Some(thread::Builder::new().name("test-process-stdout".into()).spawn(move || read_lines(stdout, &sender))?);
         Ok(process)
     }
 
     pub fn wait_for_stdout(&mut self, marker: &str) -> io::Result<()> {
         let deadline = Instant::now() + PROCESS_TIMEOUT;
         loop {
-            let line = self.lines.recv_timeout(deadline.saturating_duration_since(Instant::now())).map_err(|error| {
-                io::Error::new(
-                    match error {
+            let line = match self.lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(line) => line?,
+                Err(error) => {
+                    let kind = match error {
                         mpsc::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut,
-                        mpsc::RecvTimeoutError::Disconnected => io::ErrorKind::UnexpectedEof,
-                    },
-                    format!("subprocess did not write {marker:?}: {error}; stdout: {}", self.output),
-                )
-            })??;
+                        mpsc::RecvTimeoutError::Disconnected => {
+                            self.finish_reader()?;
+                            if let Some(limit) = self.limit {
+                                return Err(io::Error::other(limit));
+                            }
+                            io::ErrorKind::UnexpectedEof
+                        }
+                    };
+                    return Err(io::Error::new(kind, format!("subprocess did not write {marker:?}: {error}; stdout: {}", self.output)));
+                }
+            };
             self.output.push_str(&line);
             self.output.push('\n');
             if line == marker {
@@ -80,6 +104,9 @@ impl TestProcess {
             if let Some(status) = self.child.try_wait()? {
                 self.reaped = true;
                 self.finish_reader()?;
+                if let Some(limit) = self.limit {
+                    return Err(io::Error::other(limit));
+                }
                 return Ok(status);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -98,7 +125,8 @@ impl TestProcess {
 
     fn finish_reader(&mut self) -> io::Result<()> {
         if let Some(reader) = self.reader.take() {
-            reader.join().map_err(|_| io::Error::other("subprocess stdout reader panicked"))?;
+            let result = reader.join().map_err(|_| io::Error::other("subprocess stdout reader panicked"))?;
+            self.limit = result.err();
         }
         for line in self.lines.try_iter() {
             self.output.push_str(&line?);
@@ -123,6 +151,61 @@ impl Drop for TestProcess {
             eprintln!("failed to finish test subprocess stdout: {error}");
         }
     }
+}
+
+fn read_lines(mut stdout: impl Read, sender: &Sender<io::Result<String>>) -> Result<(), CaptureLimit> {
+    let mut buffer = [0; READ_BUFFER];
+    let mut pending = Vec::new();
+    let mut bytes = 0;
+    let mut messages = 0;
+    loop {
+        let read = match stdout.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                sender.send(Err(error)).ok();
+                return Ok(());
+            }
+        };
+        bytes += read;
+        if bytes > OUTPUT_LIMIT {
+            return Err(CaptureLimit::Bytes);
+        }
+        for part in buffer[..read].split_inclusive(|&byte| byte == b'\n') {
+            pending.extend_from_slice(part);
+            if !part.ends_with(b"\n") {
+                continue;
+            }
+            messages += 1;
+            if messages > MESSAGE_LIMIT {
+                return Err(CaptureLimit::Messages);
+            }
+            if !send_line(&mut pending, sender) {
+                return Ok(());
+            }
+        }
+    }
+    if !pending.is_empty() {
+        if messages == MESSAGE_LIMIT {
+            return Err(CaptureLimit::Messages);
+        }
+        send_line(&mut pending, sender);
+    }
+    Ok(())
+}
+
+fn send_line(pending: &mut Vec<u8>, sender: &Sender<io::Result<String>>) -> bool {
+    let mut line = mem::take(pending);
+    if line.ends_with(b"\n") {
+        line.pop();
+        if line.ends_with(b"\r") {
+            line.pop();
+        }
+    }
+    let line = String::from_utf8(line).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8"));
+    let ok = line.is_ok();
+    sender.send(line).is_ok() && ok
 }
 
 fn kill_and_wait(child: &mut Child) -> io::Result<ExitStatus> {
@@ -213,9 +296,107 @@ mod tests {
         Ok(())
     }
 
+    fn limit_of(error: &io::Error) -> Option<CaptureLimit> {
+        error.get_ref()?.downcast_ref::<CaptureLimit>().copied()
+    }
+
+    #[test]
+    fn stdout_line_is_bounded() -> io::Result<()> {
+        let mut child = helper("long-line")?;
+        let error = child.wait_for_stdout("never").expect_err("an oversized line must not be accepted");
+        assert_eq!(limit_of(&error), Some(CaptureLimit::Bytes), "{error}");
+        assert!(child.stdout().len() <= OUTPUT_LIMIT, "retained {} bytes", child.stdout().len());
+        let error = child.wait().expect_err("wait must report the capture limit");
+        assert_eq!(limit_of(&error), Some(CaptureLimit::Bytes), "{error}");
+        assert!(child.reaped);
+        assert!(child.reader.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn stdout_capture_is_bounded() -> io::Result<()> {
+        for (mode, limit) in [("lines", CaptureLimit::Bytes), ("empty-lines", CaptureLimit::Messages)] {
+            let mut child = helper(mode)?;
+            let error = child.wait_for_stdout("never").expect_err("flood must not be accepted");
+            assert_eq!(limit_of(&error), Some(limit), "{mode}: {error}");
+            assert!(child.stdout().len() <= OUTPUT_LIMIT, "{mode}: retained {} bytes", child.stdout().len());
+            let error = child.wait().expect_err("wait must report the capture limit");
+            assert_eq!(limit_of(&error), Some(limit), "{mode}: {error}");
+            assert!(child.reaped, "{mode}");
+
+            let mut child = helper(mode)?;
+            let error = child.wait().expect_err("wait without readiness must report the capture limit");
+            assert_eq!(limit_of(&error), Some(limit), "{mode}: {error}");
+            assert!(child.stdout().len() <= OUTPUT_LIMIT, "{mode}: retained {} bytes", child.stdout().len());
+            assert!(child.reaped, "{mode}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn capture_limit_edges() {
+        let long = |len: usize, tail: &str| format!("{}{tail}", "x".repeat(len)).into_bytes();
+        let cases = [
+            ("exact bytes", long(OUTPUT_LIMIT - 1, "\n"), Ok(()), vec!["x".repeat(OUTPUT_LIMIT - 1)]),
+            ("one byte over", long(OUTPUT_LIMIT, "\n"), Err(CaptureLimit::Bytes), vec![]),
+            ("exact unterminated", long(OUTPUT_LIMIT, ""), Ok(()), vec!["x".repeat(OUTPUT_LIMIT)]),
+            ("exact lines", vec![b'\n'; MESSAGE_LIMIT], Ok(()), vec![String::new(); MESSAGE_LIMIT]),
+            ("one line over", vec![b'\n'; MESSAGE_LIMIT + 1], Err(CaptureLimit::Messages), vec![String::new(); MESSAGE_LIMIT]),
+            (
+                "unterminated over",
+                [vec![b'\n'; MESSAGE_LIMIT], b"x".to_vec()].concat(),
+                Err(CaptureLimit::Messages),
+                vec![String::new(); MESSAGE_LIMIT],
+            ),
+            ("crlf", b"a\r\nb".to_vec(), Ok(()), vec!["a".into(), "b".into()]),
+        ];
+        for (name, input, expected, expected_lines) in cases {
+            let (sender, lines) = mpsc::channel();
+            assert_eq!(read_lines(input.as_slice(), &sender), expected, "{name}");
+            drop(sender);
+            let lines: Vec<String> = lines.try_iter().collect::<io::Result<_>>().expect("valid UTF-8");
+            assert_eq!(lines, expected_lines, "{name}");
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_is_error() {
+        let (sender, lines) = mpsc::channel();
+        assert_eq!(read_lines(&b"ok\n\xff\nlater\n"[..], &sender), Ok(()));
+        drop(sender);
+        let results: Vec<_> = lines.try_iter().collect();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].as_ref().ok().map(String::as_str), Some("ok"));
+        assert_eq!(results[1].as_ref().err().map(io::Error::kind), Some(io::ErrorKind::InvalidData));
+    }
+
+    #[test]
+    fn limit_kill_reaps() -> io::Result<()> {
+        let mut child = helper("lines")?;
+        let error = child.wait_for_stdout("never").expect_err("flood must not be accepted");
+        assert_eq!(limit_of(&error), Some(CaptureLimit::Bytes), "{error}");
+        child.kill()?;
+        assert!(child.reaped);
+        assert!(child.reader.is_none());
+        Ok(())
+    }
+
     #[test]
     fn child_helper() -> io::Result<()> {
         let Ok(mode) = env::var("RADIA_TEST_PROCESS_MODE") else { return Ok(()) };
+        let flood = match mode.as_str() {
+            "long-line" => Some((vec![b'x'; 64 * 1024], 2 * OUTPUT_LIMIT / (64 * 1024))),
+            "lines" => Some(([&[b'x'; 1023][..], b"\n"].concat().repeat(64), 2 * OUTPUT_LIMIT / (64 * 1024))),
+            "empty-lines" => Some((vec![b'\n'; 1024], MESSAGE_LIMIT / 1024 + 1)),
+            _ => None,
+        };
+        if let Some((pattern, count)) = flood {
+            let mut stdout = io::stdout().lock();
+            for _ in 0..count {
+                stdout.write_all(&pattern)?;
+            }
+            return stdout.flush();
+        }
         if mode == "exit" {
             println!("helper exiting");
             return Ok(());
