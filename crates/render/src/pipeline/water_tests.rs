@@ -14,8 +14,8 @@ use wgpu::{
 use crate::{texture::CompressionQuality, texture::TextureKey};
 
 #[test]
-#[ignore = "requires Vulkan; run with cargo test -p render --lib firestorm_water_waves_sample_the_interpolated_field -- --ignored"]
-fn firestorm_water_waves_sample_the_interpolated_field() {
+#[ignore = "requires Vulkan; run with cargo test -p render --lib waves_sample_interpolated_field -- --ignored"]
+fn waves_sample_interpolated_field() {
     let instance =
         wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
     let (device, queue) = block_on(async {

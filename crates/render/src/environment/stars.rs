@@ -58,7 +58,7 @@ mod tests {
     }
 
     #[test]
-    fn star_brightness_uses_legacy_setting_scale_without_sun_fade() {
+    fn star_brightness_uses_legacy_scale() {
         assert_eq!(star_brightness(0.49), 0.0);
         assert_eq!(star_brightness(250.0), 0.5);
         assert_eq!(star_brightness(500.0), 1.0);

@@ -108,7 +108,7 @@ mod tests {
     use crate::environment::{Schedule, Sources, evaluate};
 
     #[test]
-    fn default_sky_uniforms_match_windlight_defaults() {
+    fn default_uniforms_match_windlight() {
         let sources = Sources {
             base: None,
             schedule: Schedule::default(),
@@ -155,14 +155,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_ambient_uses_cloud_adjustment_and_linear_luminance() {
+    fn legacy_ambient_uses_cloud_adjustment() {
         assert!((legacy_ambient_irradiance([0.25; 3], 0.0) - 0.03434571).abs() < 1e-6);
         assert!((legacy_ambient_irradiance([0.25; 3], 0.5) - 0.08944999).abs() < 1e-6);
         assert_eq!(legacy_ambient_irradiance([0.25; 3], 2.0), legacy_ambient_irradiance([0.25; 3], 1.0));
     }
 
     #[test]
-    fn legacy_surface_light_points_down_and_disables_specular_when_both_bodies_are_below_horizon() {
+    fn night_light_disables_specular() {
         let sources = Sources {
             base: None,
             schedule: Schedule::default(),
@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_skies_disable_tonemapping_and_probe_skies_enable_it() {
+    fn tonemapping_follows_sky_kind() {
         let sources = Sources {
             base: None,
             schedule: Schedule::default(),

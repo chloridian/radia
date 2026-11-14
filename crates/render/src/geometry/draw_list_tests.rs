@@ -30,7 +30,7 @@ type OpaqueOutput = HashMap<(DrawKey, Vec<u8>), usize>;
 type BlendedOutput = Vec<(DrawKey, Vec<u8>)>;
 
 #[test]
-fn canceled_layout_releases_groups_in_bounded_chunks() {
+fn canceled_layout_retires_in_chunks() {
     let (_region_world, _view, camera, mut items, mut list, index) = active_layout();
     let group = items.items.get(index).expect("active item").faces[0].group;
     let active_refs = group_refs(&list, group);
@@ -73,7 +73,7 @@ fn canceled_layout_releases_groups_in_bounded_chunks() {
 }
 
 #[test]
-fn stale_layout_retires_the_whole_build() {
+fn stale_layout_retires_whole_build() {
     let (_region_world, _view, camera, mut items, mut list, index) = active_layout();
     let group = items.items.get(index).expect("active item").faces[0].group;
     let active_refs = group_refs(&list, group);
@@ -164,7 +164,7 @@ fn canceled_build_keeps_committed_patches() {
 }
 
 #[test]
-fn plain_staged_data_retires_in_one_turn() {
+fn plain_staging_retires_at_once() {
     let (_region_world, _view, camera, mut items, mut list, index) = active_layout();
     let staged = staged_layout(&mut list, index, camera, &items.items, 0);
     assert!(staged_entry_count(&staged) > 4 * super::RETIRED_LAYOUT_ENTRIES_PER_FRAME);
@@ -177,7 +177,7 @@ fn plain_staged_data_retires_in_one_turn() {
 }
 
 #[test]
-fn stateful_draw_changes_match_fresh_layouts() {
+fn draw_changes_match_fresh_layout() {
     let operations = vec![
         (0, 0, 0, 0, 0),
         (0, 1, 0, 0, 0),
@@ -194,7 +194,7 @@ fn stateful_draw_changes_match_fresh_layouts() {
 }
 
 #[test]
-fn blended_parameter_patch_does_not_sort() {
+fn blended_patch_skips_sort() {
     let (_region_world, region) = crate::test_support::registered_region();
     let (_scene, view, _) = super::super::fixtures::scene(255);
     let object = view.objects().next().expect("fixture object");
@@ -217,7 +217,7 @@ fn blended_parameter_patch_does_not_sort() {
 }
 
 #[test]
-fn hiding_one_draw_slot_preserves_other_slots() {
+fn hiding_slot_preserves_others() {
     let (_region_world, region) = crate::test_support::registered_region();
     let (_scene, view, _) = super::super::fixtures::scene(255);
     let object = view.objects().next().expect("fixture object");
@@ -243,7 +243,7 @@ fn hiding_one_draw_slot_preserves_other_slots() {
 }
 
 #[test]
-fn overflow_omits_items_until_within_budget() {
+fn overflow_omits_until_in_budget() {
     let (_region_world, region) = crate::test_support::registered_region();
     let (_scene, view, _) = super::super::fixtures::scene(255);
     let object = view.objects().next().expect("fixture object");

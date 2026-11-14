@@ -136,7 +136,7 @@ fn unseen_objects_get_baselines() {
 }
 
 #[test]
-fn terrain_demand_refines_when_region_origin_arrives() {
+fn terrain_refines_on_origin() {
     let textures = std::array::from_fn(|index| Uuid::from_u128(700 + index as u128));
     let settings = TerrainSettings::new(textures, [0.0; 4], [64.0; 4]).unwrap();
     let mut world = world();
@@ -232,7 +232,7 @@ fn view_bounds_control_texture_priority() {
 }
 
 #[test]
-fn background_pbr_texture_keeps_uv_adjusted_size() {
+fn background_pbr_keeps_uv_size() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
     let material_id = AssetId::new(Uuid::from_u128(9));
@@ -282,7 +282,7 @@ fn background_pbr_texture_keeps_uv_adjusted_size() {
 }
 
 #[test]
-fn background_texture_change_uses_new_asset_baseline() {
+fn texture_change_resets_baseline() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
     let first_id = AssetId::new(Uuid::from_u128(101));
@@ -640,7 +640,7 @@ fn shared_demand_releases_last_user() {
 }
 
 #[test]
-fn regional_demands_have_no_cache_cap() {
+fn regional_demands_skip_cache_cap() {
     let mut world = world();
     for id in 1..=700 {
         add(&mut world, id, id as u32, ParentUpdate::Root, 10.0, id as u64 * 2);

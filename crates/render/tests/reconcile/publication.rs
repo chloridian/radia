@@ -286,7 +286,7 @@ fn recovery_memory_admission() {
 }
 
 #[test]
-fn detail_read_continuation_keeps_pending_entities() {
+fn read_continuation_keeps_pending() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 1.0, 1);
     let (mut scene, mut view) = Reconciler::new(Budget::default());

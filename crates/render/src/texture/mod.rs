@@ -1141,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_maps_use_raw_channel_views() {
+    fn normal_maps_use_raw_views() {
         for (srgb, raw) in [
             (TextureFormat::Rgba8UnormSrgb, TextureFormat::Rgba8Unorm),
             (TextureFormat::Bc1RgbaUnormSrgb, TextureFormat::Bc1RgbaUnorm),

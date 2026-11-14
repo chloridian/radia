@@ -859,8 +859,8 @@ fn assert_visible_draw_coverage(geometry: &GeometryRenderer) {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(gpu_retired_hidden_page_releases_for_visible_mesh)'"]
-fn gpu_retired_hidden_page_releases_for_visible_mesh() {
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(gpu_retired_page_yields_visible)'"]
+fn gpu_retired_page_yields_visible() {
     let (device, queue) = block_on(async {
         let instance =
             wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
@@ -969,8 +969,8 @@ fn gpu_appearance_replacement_rechecks_visibility() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_same_mesh_appearance_rebuilds_after_eviction -- --ignored"]
-fn gpu_same_mesh_appearance_rebuilds_after_eviction() {
+#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_appearance_rebuilds_after_eviction -- --ignored"]
+fn gpu_appearance_rebuilds_after_eviction() {
     let (device, queue) = vulkan_device();
     let (mut world, mut scene, mut view, camera) = scene_with_world(255, [Vec3::splat(2.0); 2], Default::default());
     let entity =
@@ -1020,8 +1020,8 @@ fn gpu_same_mesh_appearance_rebuilds_after_eviction() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_removed_pending_replacement_reconciles_snapshot -- --ignored"]
-fn gpu_removed_pending_replacement_reconciles_snapshot() {
+#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_removed_pending_reconciles_snapshot -- --ignored"]
+fn gpu_removed_pending_reconciles_snapshot() {
     let (device, queue) = vulkan_device();
     let (mut world, mut scene, mut view, camera) = scene_with_world(255, [Vec3::splat(2.0); 2], Default::default());
     let entity =
@@ -1103,8 +1103,8 @@ fn gpu_removed_pending_replacement_reconciles_snapshot() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_history_repeated_overflow_converges_and_matches_clean_build)'"]
-fn gpu_history_repeated_overflow_converges_and_matches_clean_build() {
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_repeated_overflow_matches_clean)'"]
+fn gpu_repeated_overflow_matches_clean() {
     let asset = AssetId::new(Uuid::from_u128(9801));
     let bytes = test_support::mesh::asset_with_lod_faces(&[(3, 1)]);
     let object_count = 1_024u32;
@@ -1291,8 +1291,8 @@ fn settle_with_meshes(
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(gpu_published_items_survive_rebuild_under_churn)' --no-fail-fast --test-threads=1"]
-fn gpu_published_items_survive_rebuild_under_churn() {
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(gpu_items_survive_churn_rebuild)' --no-fail-fast --test-threads=1"]
+fn gpu_items_survive_churn_rebuild() {
     const INITIAL: u32 = 1_100;
     const MESHES: usize = 32;
     const TURNS: u32 = 300;
@@ -1644,8 +1644,8 @@ fn assert_inside_region(geometry: &GeometryRenderer, turn: u32) {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(gpu_origin_crossings_keep_committed_positions)' --no-fail-fast --test-threads=1"]
-fn gpu_origin_crossings_keep_committed_positions() {
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(gpu_origin_crossings_keep_positions)' --no-fail-fast --test-threads=1"]
+fn gpu_origin_crossings_keep_positions() {
     const OBJECTS: u32 = 1_100;
     const MESHES: usize = 16;
     const REPLACEMENT_MESHES: usize = 8;
@@ -1770,8 +1770,8 @@ fn gpu_origin_crossings_keep_committed_positions() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(gpu_blended_sort_keeps_origin_during_pending_rebase)' --no-fail-fast --test-threads=1"]
-fn gpu_blended_sort_keeps_origin_during_pending_rebase() {
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(gpu_blended_sort_keeps_origin)' --no-fail-fast --test-threads=1"]
+fn gpu_blended_sort_keeps_origin() {
     const OBJECTS: u32 = 1_100;
     const TURNS: u32 = 80;
     let asset = AssetId::new(Uuid::from_u128(98_800));
@@ -1996,8 +1996,8 @@ fn pending_removal_leaves_no_instance() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(gpu_late_recovery_changes_are_applied)' --no-fail-fast --test-threads=1"]
-fn gpu_late_recovery_changes_are_applied() {
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(gpu_late_recovery_applies_changes)' --no-fail-fast --test-threads=1"]
+fn gpu_late_recovery_applies_changes() {
     const OBJECTS: u32 = 5_000;
     const PAGE_CHANGES: u32 = 512;
     let asset = AssetId::new(Uuid::from_u128(98_041));
@@ -2165,8 +2165,8 @@ fn gpu_late_recovery_changes_are_applied() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_retirement_filters_draws_during_history_rebuild)'"]
-fn gpu_retirement_filters_draws_during_history_rebuild() {
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_retirement_filters_history_draws)'"]
+fn gpu_retirement_filters_history_draws() {
     let asset = AssetId::new(Uuid::from_u128(9802));
     let bytes = test_support::mesh::asset_with_lod_faces(&[(3, 1)]);
     let objects = (1..=900).map(|id| (id, asset, Vec3::new(10.0, 0.0, 0.0))).collect::<Vec<_>>();
@@ -2224,8 +2224,8 @@ fn gpu_retirement_filters_draws_during_history_rebuild() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_large_face_mesh_info_rebuild_respects_work_allowance)'"]
-fn gpu_large_face_mesh_info_rebuild_respects_work_allowance() {
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_large_face_rebuild_bounded)'"]
+fn gpu_large_face_rebuild_bounded() {
     let asset = AssetId::new(Uuid::from_u128(9803));
     let bytes = test_support::mesh::asset_with_lod_geometry(&[(3, 1, 65_535, 131_079)]);
     let objects = (1..=4).map(|id| (id, asset, Vec3::new(10.0, 0.0, 0.0))).collect::<Vec<_>>();
@@ -2252,8 +2252,8 @@ fn gpu_large_face_mesh_info_rebuild_respects_work_allowance() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(gpu_replacement_visibility_tracks_its_own_bounds)'"]
-fn gpu_replacement_visibility_tracks_its_own_bounds() {
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(gpu_replacement_visibility_tracks_bounds)'"]
+fn gpu_replacement_visibility_tracks_bounds() {
     let first_asset = AssetId::new(Uuid::from_u128(801));
     let second_asset = AssetId::new(Uuid::from_u128(802));
     let first_bytes = test_support::mesh::asset_with_lod_faces(&[(3, 1)]);
@@ -2428,8 +2428,8 @@ fn gpu_skip_rebuilds_scene() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run explicitly with cargo test -p render gpu_hidden_items_leave_no_instances_in_draws -- --ignored"]
-fn gpu_hidden_items_leave_no_instances_in_draws() {
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo test -p render gpu_hidden_items_drop_instances -- --ignored"]
+fn gpu_hidden_items_drop_instances() {
     let (device, queue) = block_on(async {
         let instance =
             wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
@@ -2454,8 +2454,8 @@ fn gpu_hidden_items_leave_no_instances_in_draws() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(gpu_agent_pose_override_patches_draw_and_pick)'"]
-fn gpu_agent_pose_override_patches_draw_and_pick() {
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(gpu_agent_pose_override_patches)'"]
+fn gpu_agent_pose_override_patches() {
     let (device, queue) = block_on(async {
         let instance =
             wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
@@ -2505,8 +2505,8 @@ fn gpu_agent_pose_override_patches_draw_and_pick() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_avatar_mesh_ready_late_uses_agent_pose -- --ignored"]
-fn gpu_avatar_mesh_ready_late_uses_agent_pose() {
+#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_late_avatar_uses_pose -- --ignored"]
+fn gpu_late_avatar_uses_pose() {
     let (device, queue) = vulkan_device();
     let (mut world, mut scene, mut view, camera) = avatar_mesh_scene();
     let agent_id = Uuid::from_u128(1);
@@ -2707,8 +2707,8 @@ fn gpu_mesh_faces_and_alpha() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_large_mesh_first_upload_exceeds_upload_target -- --ignored"]
-fn gpu_large_mesh_first_upload_exceeds_upload_target() {
+#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_large_upload_exceeds_target -- --ignored"]
+fn gpu_large_upload_exceeds_target() {
     let asset = AssetId::new(Uuid::from_u128(810));
     let (world, mut scene, mut view, camera, requests) = mesh_scene(&[(1, asset, Vec3::new(2.0, 0.0, 0.0))], None);
     let bytes = test_support::mesh::asset_with_lod_geometry(&[(3, 3, 65_535, 65_535)]);
@@ -2747,8 +2747,8 @@ fn gpu_large_mesh_first_upload_exceeds_upload_target() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_lod_keeps_fallback_during_unrelated_retirement -- --ignored"]
-fn gpu_lod_keeps_fallback_during_unrelated_retirement() {
+#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_lod_fallback_survives_retirement -- --ignored"]
+fn gpu_lod_fallback_survives_retirement() {
     let target = AssetId::new(Uuid::from_u128(830));
     let unrelated = AssetId::new(Uuid::from_u128(831));
     let target_bytes = test_support::mesh::asset_with_lod_geometry(&[(2, 8, 65_535, 65_535), (3, 8, 65_535, 131_079)]);
@@ -3394,7 +3394,7 @@ fn gpu_ready_texture_wakes_appearance() {
 
 #[test]
 #[ignore = "requires a Vulkan adapter"]
-fn gpu_first_appearance_wait_is_bounded() {
+fn gpu_first_appearance_wait_bounded() {
     let asset = AssetId::new(Uuid::from_u128(860));
     let texture = AssetId::new(Uuid::from_u128(861));
     let data = test_support::mesh::asset_with_lod_bounds(3, [-0.5; 3], [0.5; 3]);
@@ -3444,7 +3444,7 @@ fn gpu_first_appearance_wait_is_bounded() {
 
 #[test]
 #[ignore = "requires a Vulkan adapter"]
-fn gpu_camera_rebase_keeps_committed_draw() {
+fn gpu_rebase_keeps_committed_draw() {
     const OBJECTS: u32 = 1_025;
     let mesh_asset = AssetId::new(Uuid::from_u128(9_811));
     let neighbor_mesh_asset = AssetId::new(Uuid::from_u128(9_812));
@@ -4866,8 +4866,8 @@ fn gpu_prep_cleanup_on_lifecycle() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_large_prep_respects_upload_limit)'"]
-fn gpu_large_prep_respects_upload_limit() {
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_large_prep_respects_limit)'"]
+fn gpu_large_prep_respects_limit() {
     let asset = AssetId::new(Uuid::from_u128(9601));
     let bytes = test_support::mesh::asset_with_lod_geometry(&[(3, 3, 65_535, 65_535)]);
     let (_world, _scene, view, camera) = ready_mesh_scene(&[(1, asset, Vec3::new(10.0, 0.0, 0.0))], bytes);
@@ -4892,8 +4892,8 @@ fn gpu_large_prep_respects_upload_limit() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_pending_visible_mesh_precedes_prep)'"]
-fn gpu_pending_visible_mesh_precedes_prep() {
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_visible_mesh_precedes_prep)'"]
+fn gpu_visible_mesh_precedes_prep() {
     let visible_asset = AssetId::new(Uuid::from_u128(9701));
     let preparation_asset = AssetId::new(Uuid::from_u128(9702));
     let visible_bytes = test_support::mesh::asset_with_lod_geometry(&[(3, 3, 65_535, 65_535)]);
@@ -5050,8 +5050,8 @@ fn gpu_visible_upload_wins() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_mesh_admission_continues_with_bounded_ordered_work)'"]
-fn gpu_mesh_admission_continues_with_bounded_ordered_work() {
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_admission_work_bounded_ordered)'"]
+fn gpu_admission_work_bounded_ordered() {
     const RESIDENT_DEMANDS: usize = 24;
     const EXTRA_DEMANDS: usize = 160;
     let (_scene, view, camera) = scene(255);
@@ -5283,8 +5283,8 @@ fn gpu_pending_layout_pins_meshes() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(gpu_mesh_residency_survives_replacement_eviction)'"]
-fn gpu_mesh_residency_survives_replacement_eviction() {
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(gpu_residency_survives_replacement_eviction)'"]
+fn gpu_residency_survives_replacement_eviction() {
     const OBJECTS: u32 = 1_025;
     let old_asset = AssetId::new(Uuid::from_u128(9_930));
     let spare_asset = AssetId::new(Uuid::from_u128(9_931));
