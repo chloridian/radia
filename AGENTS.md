@@ -79,7 +79,8 @@ Source has no comments or doc comments, and that includes safety comments on `un
 
 - Use [rust-testing](.agents/skills/rust-testing/SKILL.md) for all Rust test work.
 - Smallest proof first. Run tests and clippy for the crates you touched. Run the workspace-wide suite only when asked, because CI owns it.
-- Test behavior through public APIs. Skip tests that assert callback wiring or mirror the implementation.
+- Spend tests where running the viewer will not expose the bug: untrusted wire and asset input, concurrency, cancellation and ordering, `World` and cache invariants with their reverse transitions, recovery paths, and regressions likely to return. Visual output, gui layout, and straight-line plumbing are verified live; for them, adding no test is a complete answer.
+- Test behavior through public APIs. Skip tests that assert callback wiring or mirror the implementation. Extend an existing test or harness before adding a new one.
 - Use property-based or stateful tests where operations interact (reordering, reparenting, stale updates, ID reuse). Generators must be domain-valid and failures reproducible.
 - Wait on completion signals, never on sleeps or polling. Use production timing constants; test-only timing values and short absence windows do not prove behavior. Test deadlines with a controlled clock or slow-runner-safe bounds, and use generous timeouts only as hang guards.
 - Integration tests are plain `tests/<name>.rs` files, auto-discovered by Cargo; no `[[test]]` entries. Only when one grows into several files does it become `tests/<name>/main.rs` with its submodules.
