@@ -854,7 +854,6 @@ fn system_cpu_times() -> Option<SystemCpuTimes> {
     let mut idle = SystemFileTime { low: 0, high: 0 };
     let mut kernel = SystemFileTime { low: 0, high: 0 };
     let mut user = SystemFileTime { low: 0, high: 0 };
-    // The API fills the three valid FILETIME outputs supplied here.
     let read = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
     (read != 0).then(|| SystemCpuTimes {
         idle: system_file_time_value(idle),
@@ -939,7 +938,6 @@ fn thread_cycles() -> Option<u64> {
         }
 
         let mut cycles = 0;
-        // The pseudo-handle names this thread and QueryThreadCycleTime writes one u64.
         let queried = unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) };
         (queried != 0).then_some(cycles)
     }
