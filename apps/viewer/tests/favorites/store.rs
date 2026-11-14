@@ -3,7 +3,7 @@ use uuid::Uuid;
 use viewer::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
 
 #[test]
-fn store_scopes_agents_and_reassigns_usernames() {
+fn scopes_agents_reassigns_usernames() {
     let agni_agent = Uuid::from_u128(1);
     let aditi_agent = Uuid::from_u128(2);
     let agni_favorites = vec![FavoriteLocation { name: "Sandbox".into(), region_name: "Agni region".into(), x: 128, y: 64, z: 23 }];

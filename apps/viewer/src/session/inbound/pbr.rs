@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bad_vectors_and_texture_counts() {
+    fn rejects_bad_vectors_counts() {
         for values in [vec![Value::Real(1.0)], vec![Value::Real(1.0); 5], vec![Value::Boolean(true); 4]] {
             let bad_vector = material([("bc", Value::Array(values))]);
             assert!(decode_payload(&payload(7, vec![Value::Integer(4)], vec![bad_vector])).is_err());
@@ -390,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_finite_values_and_oversized_payload() {
+    fn rejects_non_finite_oversized() {
         let non_finite = material([("rf", Value::Real(f64::MAX))]);
         assert!(decode_payload(&payload(7, vec![Value::Integer(4)], vec![non_finite])).is_err());
         assert!(decode_payload(&vec![b' '; MAX_DATA_BYTES + 1]).is_err());
@@ -446,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn caps_faces_at_texture_entry_limit() {
+    fn caps_faces_at_limit() {
         let faces = (0..46).map(Value::Integer).collect();
         let materials = (0..46).map(|_| material([])).collect();
         let decoded = decode_payload(&payload(7, faces, materials)).expect("excess faces are ignored");

@@ -156,7 +156,7 @@ mod tests {
     use super::{FRAME_INTERVAL, local_environment_failure, sky_frame_deadline, water_frame_deadline};
 
     #[test]
-    fn local_environment_failure_shows_http_status_and_network_errors() {
+    fn failure_shows_status_or_network() {
         assert_eq!(
             local_environment_failure(assets::Failure::HttpStatus { status: 503 }),
             "The environment request failed with HTTP status 503."
@@ -165,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn sky_redraws_require_visible_sky_and_animation() {
+    fn sky_redraw_needs_visible_animation() {
         let now = Instant::now();
         let sky = Camera::new(DVec3::ZERO, Vec3::Z, 1.0, [1280, 720]).unwrap();
         let ground = Camera::new(DVec3::ZERO, Vec3::NEG_Z, 1.0, [1280, 720]).unwrap();
@@ -176,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn water_redraws_require_visible_water_and_nonzero_waves() {
+    fn water_redraw_needs_visible_waves() {
         let now = Instant::now();
         let water = Camera::new(DVec3::new(0.0, 0.0, 10.0), Vec3::NEG_Z, 1.0, [1280, 720]).unwrap();
         let sky = Camera::new(DVec3::new(0.0, 0.0, 10.0), Vec3::Z, 1.0, [1280, 720]).unwrap();

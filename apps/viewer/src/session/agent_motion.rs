@@ -182,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn arrival_flattens_look_and_rejects_out_of_region_position() {
+    fn arrival_flattens_look_bounds_position() {
         let (_region_world, region) = crate::test_helpers::registered_region();
         let mut publisher = AgentMotionPublisher::new();
         let mut movement = arrival();
@@ -219,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn arrival_does_not_replace_existing_motion() {
+    fn arrival_keeps_existing_motion() {
         let (_region_world, region) = crate::test_helpers::registered_region();
         let mut publisher = AgentMotionPublisher::new();
         let movement = arrival();
@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn motion_beyond_protocol_range_is_discarded() {
+    fn huge_velocity_is_discarded() {
         let mut world = World::new(viewer_world_limits());
         let region = world.register_region().expect("region registers");
         let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("region origin");

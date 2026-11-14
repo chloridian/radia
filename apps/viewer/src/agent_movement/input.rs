@@ -272,7 +272,7 @@ mod tests {
     use super::{BodyRotation, HeldControls, KeyBinding, MovementKey};
 
     #[test]
-    fn keyboard_bindings_derive_official_control_flags() {
+    fn bindings_derive_control_flags() {
         let mut controls = HeldControls::default();
         for (key, expected) in [
             ("w", AT_POS | FAST_AT),
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn v_is_not_a_camera_mode_toggle() {
+    fn v_is_unbound() {
         assert_eq!(KeyBinding::from_key(&Key::Character("v".into())), None);
     }
 
@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn toggles_and_focus_loss_publish_fly_run_and_stop_state() {
+    fn toggles_and_release_publish_state() {
         let mut controls = HeldControls::default();
         controls.set_pressed(MovementKey::Forward, true);
         controls.toggle_flying();
@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn body_rotation_uses_ninety_degree_per_second_yaw_rate() {
+    fn yaw_rate_is_ninety_dps() {
         let start = Instant::now();
         let mut rotation = BodyRotation::default();
         assert_eq!(rotation.update(Some((1, Quat::IDENTITY)), 1.0, start), Quat::IDENTITY);
@@ -346,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn simulator_rotation_is_ignored_after_seed() {
+    fn seeded_rotation_ignores_simulator() {
         let start = Instant::now();
         let mut rotation = BodyRotation::default();
         rotation.update(Some((3, Quat::IDENTITY)), 1.0, start);

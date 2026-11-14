@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn decoded_xyz_rotations_pass_world_checks() {
+fn xyz_rotations_pass_world_checks() {
     assert_observed_rotation_is_valid(vectors::OBJECT_UPDATE);
     assert_observed_rotation_is_valid(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
 }
@@ -71,7 +71,7 @@ fn bad_terse_rotation_is_rejected() {
 }
 
 #[test]
-fn compressed_update_keeps_parent_and_angular() {
+fn compressed_keeps_parent_angular() {
     let world = world();
     let region = region(&world);
     let packet = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
@@ -87,7 +87,7 @@ fn compressed_update_keeps_parent_and_angular() {
 }
 
 #[test]
-fn prim_parameters_follow_ordered_world_updates() {
+fn prim_params_follow_ordered_updates() {
     let mut world = world();
     let region = region(&world);
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();

@@ -33,7 +33,7 @@ use super::{
 use world::ApplyError::InvalidValue;
 
 #[test]
-fn packet_handle_is_checked_against_committed_world_metadata() {
+fn packet_handle_checked_against_world() {
     let simulator = simulator_id();
     let mut world = SessionWorld::new(viewer_world_limits());
     let region = world.register_simulator(simulator, None).unwrap();
@@ -60,7 +60,7 @@ fn packet_handle_is_checked_against_committed_world_metadata() {
 }
 
 #[test]
-fn rejected_handle_metadata_does_not_admit_object_blocks() {
+fn rejected_metadata_admits_no_blocks() {
     let simulator = simulator_id();
     let mut world = SessionWorld::new(viewer_world_limits());
     let region = world.register_simulator(simulator, None).unwrap();
@@ -192,7 +192,7 @@ async fn batch_yields_between_chunks() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn deep_point_lookup_yields_while_retaining_the_ordered_update() {
+async fn deep_lookup_yields_keeping_order() {
     let simulator = simulator_id();
     let mut session = SessionWorld::new(viewer_world_limits());
     let region = session.register_simulator(simulator, None).expect("register simulator");
@@ -238,7 +238,7 @@ async fn deep_point_lookup_yields_while_retaining_the_ordered_update() {
 }
 
 #[test]
-fn recovery_routes_follow_active_region_lifetimes() {
+fn recovery_routes_follow_region_lifetimes() {
     let mut session = SessionWorld::new(viewer_world_limits());
     let source_simulator = simulator_id();
     let destination_simulator = simulator_id();
@@ -261,7 +261,7 @@ fn recovery_routes_follow_active_region_lifetimes() {
 }
 
 #[test]
-fn local_intake_limits_preserve_existing_objects() {
+fn intake_limits_preserve_objects() {
     let simulator_id = simulator_id();
     let mut limits = viewer_world_limits();
     limits.max_entities = 1;
@@ -317,7 +317,7 @@ fn local_intake_limits_preserve_existing_objects() {
 }
 
 #[test]
-fn stale_full_observation_does_not_reattach_avatar_after_seat_removal() {
+fn stale_full_keeps_avatar_detached() {
     let simulator_id = simulator_id();
     let mut session = SessionWorld::new(viewer_world_limits());
     let region = session.register_simulator(simulator_id, None).expect("register simulator");
@@ -359,7 +359,7 @@ fn stale_full_observation_does_not_reattach_avatar_after_seat_removal() {
 }
 
 #[test]
-fn pbr_assignments_preserve_partial_region_state() {
+fn pbr_assignments_keep_partial_state() {
     let first_simulator = simulator_id();
     let second_simulator = simulator_id();
     let mut session = SessionWorld::new(viewer_world_limits());
@@ -533,7 +533,7 @@ async fn media_results_reject_stale_targets() {
 }
 
 #[tokio::test]
-async fn media_results_reject_rebound_address_aba_targets() {
+async fn media_rejects_rebound_targets() {
     let simulator_id = simulator_id();
     let mut session = SessionWorld::new(viewer_world_limits());
     let region = session.register_simulator(simulator_id, None).expect("register simulator");
@@ -578,7 +578,7 @@ async fn media_results_reject_rebound_address_aba_targets() {
 }
 
 #[test]
-fn partial_child_update_keeps_recovery_pending() {
+fn partial_child_keeps_recovery() {
     let simulator_id = simulator_id();
     let mut world = SessionWorld::new(viewer_world_limits());
     let region = world.register_simulator(simulator_id, None).expect("register simulator");
@@ -621,7 +621,7 @@ fn partial_child_update_keeps_recovery_pending() {
 }
 
 #[test]
-fn fresh_full_observation_satisfies_cached_recovery_but_stale_and_partial_updates_do_not() {
+fn only_fresh_full_satisfies_recovery() {
     let simulator_id = simulator_id();
     let mut session = SessionWorld::new(viewer_world_limits());
     let region = session.register_simulator(simulator_id, None).expect("register simulator");
@@ -849,7 +849,7 @@ async fn parent_removal_batches_all_children() {
 }
 
 #[test]
-fn session_teardown_drains_retired_regions_in_bounded_turns() {
+fn teardown_drains_regions_in_turns() {
     let first_simulator = simulator_id();
     let second_simulator = simulator_id();
     let mut session = SessionWorld::new(viewer_world_limits());
@@ -952,7 +952,7 @@ fn parent_reintroduction_cancels_child_retry() {
 }
 
 #[test]
-fn parcel_rejection_diagnostics_report_in_batches() {
+fn parcel_rejections_report_in_batches() {
     let mut world = SessionWorld::new(viewer_world_limits());
 
     for _ in 0..63 {

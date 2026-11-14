@@ -236,7 +236,7 @@ mod inventory_intake_progress {
     }
 
     #[tokio::test]
-    async fn world_progresses_while_inventory_intake_is_full() {
+    async fn world_progresses_with_full_inventory() {
         let mut world = SessionWorld::new(viewer_world_limits());
         let mut reads = WorldReadHost::new(world.world(), Handle::current());
         let mut handoff = WorldHandoff::default();

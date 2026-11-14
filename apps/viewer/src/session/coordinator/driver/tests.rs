@@ -33,7 +33,7 @@ static ALLOCATOR: test_support::allocation::CountingAllocator = test_support::al
 const OWNER_PATH_ENTRY_COUNT: usize = 100_000;
 
 #[tokio::test(flavor = "current_thread")]
-async fn pending_ordered_object_update_serves_world_read_before_resuming() {
+async fn pending_update_serves_read_first() {
     use std::{future::pending, num::NonZeroU32};
 
     use futures::{FutureExt, poll};
@@ -159,7 +159,7 @@ async fn pending_ordered_object_update_serves_world_read_before_resuming() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn pending_parent_resolution_yields_and_preserves_order() {
+async fn pending_parent_yields_in_order() {
     use std::{future::pending, num::NonZeroU32};
 
     use futures::{FutureExt, poll};
@@ -366,7 +366,7 @@ async fn pending_parent_resolution_yields_and_preserves_order() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancellation_precedes_a_queued_world_read() {
+async fn cancellation_precedes_queued_read() {
     use std::num::NonZeroU32;
 
     use futures::{FutureExt, poll};
@@ -414,7 +414,7 @@ async fn cancellation_precedes_a_queued_world_read() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn pending_avatar_sit_lookup_serves_world_read_before_applying() {
+async fn pending_sit_serves_read_first() {
     use std::{future::pending, num::NonZeroU32};
 
     use futures::{FutureExt, poll};
@@ -636,7 +636,7 @@ async fn owner_path_reclaim_measurement() {
 }
 
 #[test]
-fn pending_handshake_replies_share_one_drain_and_keep_each_reply() {
+fn handshake_replies_share_one_drain() {
     let simulator = network::SimulatorId::new(7);
     let mut pending = PendingHandshakeReplies::default();
 
@@ -717,7 +717,7 @@ fn item(key: ItemKey, parent: CategoryKey) -> Item {
 }
 
 #[test]
-fn stale_fetch_does_not_replace_a_complete_newer_folder() {
+fn stale_fetch_keeps_newer_folder() {
     let owner = InventoryOwner::new(Uuid::from_u128(1));
     let folder = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(2)));
     let root = Category {
@@ -769,7 +769,7 @@ fn stale_fetch_does_not_replace_a_complete_newer_folder() {
 }
 
 #[test]
-fn prepared_fetch_commits_before_a_deferred_live_delta() {
+fn prepared_fetch_precedes_deferred_delta() {
     let owner = InventoryOwner::new(Uuid::from_u128(11));
     let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(12)));
     let old_item = ItemKey::new(owner, ItemId::new(Uuid::from_u128(13)));
@@ -822,7 +822,7 @@ fn prepared_fetch_commits_before_a_deferred_live_delta() {
 }
 
 #[test]
-fn same_folder_change_makes_inflight_preparation_stale_and_next_fetch_commits() {
+fn folder_change_stales_preparation() {
     let owner = InventoryOwner::new(Uuid::from_u128(41));
     let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(42)));
     let old_item = ItemKey::new(owner, ItemId::new(Uuid::from_u128(43)));
@@ -891,7 +891,7 @@ fn same_folder_change_makes_inflight_preparation_stale_and_next_fetch_commits() 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn shutdown_cancels_and_joins_active_inventory_preparation() {
+async fn shutdown_joins_inventory_preparation() {
     let owner = InventoryOwner::new(Uuid::from_u128(51));
     let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(52)));
     let inventory =
@@ -923,7 +923,7 @@ async fn shutdown_cancels_and_joins_active_inventory_preparation() {
 }
 
 #[test]
-fn older_parent_result_preserves_newer_child_version() {
+fn older_parent_keeps_newer_child() {
     let owner = InventoryOwner::new(Uuid::from_u128(1));
     let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(2)));
     let child = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(3)));
@@ -990,7 +990,7 @@ fn older_parent_result_preserves_newer_child_version() {
 }
 
 #[tokio::test]
-async fn folder_fetch_move_resolves_pending_inventory_edit() {
+async fn fetch_move_resolves_pending_edit() {
     let owner = InventoryOwner::new(Uuid::from_u128(21));
     let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(22)));
     let first = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(23)));
@@ -1035,7 +1035,7 @@ async fn folder_fetch_move_resolves_pending_inventory_edit() {
 }
 
 #[tokio::test]
-async fn cache_restore_move_resolves_pending_inventory_edit() {
+async fn cache_move_resolves_pending_edit() {
     let owner = InventoryOwner::new(Uuid::from_u128(31));
     let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(32)));
     let first = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(33)));
@@ -1169,7 +1169,7 @@ async fn completed_favorites_refresh_is_superseded() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn favorites_shutdown_cancels_and_reaps_worker() {
+async fn favorites_shutdown_reaps_worker() {
     use std::future::pending;
 
     let (started, started_rx) = oneshot::channel();

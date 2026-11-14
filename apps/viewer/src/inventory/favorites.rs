@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn identifies_links_by_asset_type_not_inventory_type() {
+    fn links_identified_by_asset_type() {
         let link = inventory_item(InventoryType::Landmark, AssetType::Link);
         let person = inventory_item(InventoryType::Person, AssetType::Person);
         let folder_link = inventory_item(InventoryType::Category, AssetType::LinkFolder);
@@ -544,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn global_landmark_position_uses_world_grid_cells() {
+    fn global_position_uses_grid_cells() {
         let (cell, position) = global_position([512.5, 769.0, 30.0]).expect("finite positive location");
         assert_eq!(cell, RegionGridCell::new(2, 3));
         assert_eq!(position, [0.5, 1.0, 30.0]);
@@ -554,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_favorites_folder_is_rejected_before_item_parsing() {
+    fn oversized_folder_is_rejected() {
         let item = inventory_item(InventoryType::Landmark, AssetType::Landmark);
         let children = vec![InventoryChild::Item(item); MAX_FAVORITES_PER_AGENT + 1];
 

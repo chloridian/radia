@@ -2,7 +2,7 @@ use super::*;
 use world::TextureAnimation;
 
 #[test]
-fn texture_entries_apply_to_volumes_only() {
+fn textures_apply_to_volumes() {
     let (_region_world, region) = crate::test_helpers::registered_region();
     let texture_entry = valid_texture_entry();
 
@@ -42,7 +42,7 @@ fn texture_entries_apply_to_volumes_only() {
 }
 
 #[test]
-fn texture_animation_updates_clear_and_preserve_by_path() {
+fn texture_animation_updates_by_path() {
     let (_region_world, region) = crate::test_helpers::registered_region();
     let mut wire = vec![0x01, 0xff, 2, 2];
     wire.extend_from_slice(&0.0_f32.to_le_bytes());
@@ -176,7 +176,7 @@ fn clear_textures_are_absent() {
 }
 
 #[test]
-fn malformed_texture_entries_are_field_local() {
+fn malformed_texture_is_field_local() {
     let (_region_world, region) = crate::test_helpers::registered_region();
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
@@ -253,7 +253,7 @@ fn embedded_materials_replace_and_clear() {
 }
 
 #[test]
-fn non_volume_updates_clear_pbr_materials() {
+fn non_volume_clears_pbr() {
     let mut state = world();
     let region = region(&state);
     let bindings = [(0, Uuid::from_u128(0x320))];
@@ -300,7 +300,7 @@ fn non_volume_updates_clear_pbr_materials() {
 }
 
 #[test]
-fn malformed_pbr_materials_are_field_local() {
+fn malformed_pbr_is_field_local() {
     let (_region_world, region) = crate::test_helpers::registered_region();
     for parameters in
         [vec![ExtraParameter { parameter_type: 0x0080, data: vec![1] }], vec![ExtraParameter { parameter_type: 0x0080, data: vec![0, 0] }]]
@@ -319,7 +319,7 @@ fn malformed_pbr_materials_are_field_local() {
 }
 
 #[test]
-fn u8_material_count_skips_extra_faces() {
+fn material_count_skips_extra_faces() {
     let (_region_world, region) = crate::test_helpers::registered_region();
     let bindings: Vec<_> = (0..usize::from(u8::MAX))
         .map(|index| {
@@ -417,7 +417,7 @@ fn incremental_materials_replace_and_clear() {
 }
 
 #[test]
-fn repeated_material_params_replace_in_order() {
+fn repeated_params_replace_in_order() {
     let (_region_world, region) = crate::test_helpers::registered_region();
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };

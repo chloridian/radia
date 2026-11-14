@@ -183,7 +183,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn circuit_wakes_only_for_liveness_transitions() {
+    fn liveness_wakes_on_transitions() {
         let started_at = Instant::now();
         let silence = Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
         let taper = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
@@ -207,7 +207,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn circuit_watcher_wakes_on_state_changes_but_not_active_packets() {
+    async fn watcher_ignores_active_packets() {
         let (_region_world, region) = crate::test_helpers::registered_region();
         let status = CircuitMotionStatus { last_packet_received_at: Instant::now(), measured_ping_delay: None, connected: false };
         let (status_sender, status_receiver) = watch::channel(status);
