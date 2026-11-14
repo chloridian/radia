@@ -431,7 +431,7 @@ mod tests {
     use crate::{Error, Limits, Value, binary};
 
     #[test]
-    fn prefix_decode_reports_serialized_value_length() {
+    fn prefix_decode_reports_length() {
         let value = Value::Map([("version".into(), Value::Integer(1))].into());
         let mut bytes = binary::to_vec(&value).unwrap();
         let length = bytes.len();
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn prefix_decode_counts_binary_header_and_separator() {
+    fn prefix_decode_counts_header() {
         let value = Value::Integer(7);
         let encoded = b"i\0\0\0\x07";
         let mut bytes = b"<?llsd/binary?>\n  ".to_vec();

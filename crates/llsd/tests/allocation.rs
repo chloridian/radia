@@ -117,7 +117,7 @@ fn xml_binary_text_stays_bounded() {
 }
 
 #[test]
-fn notation_uuid_spellings_keep_text_and_value() {
+fn notation_uuid_keeps_spelling() {
     let canonical = "12345678-90ab-cdef-0123-456789abcdef";
     let expected = Uuid::parse_str(canonical).expect("valid UUID");
     let limits = Limits { max_string_bytes: 0, ..Limits::default() };
