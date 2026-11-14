@@ -68,6 +68,10 @@ impl DrawKey {
         matches!(self.pipeline, Pipeline::Blend | Pipeline::BlendDoubleSided | Pipeline::BlendFlipped)
     }
 
+    pub(super) fn fullbright(self) -> bool {
+        matches!(self.pipeline, Pipeline::Fullbright | Pipeline::FullbrightDoubleSided | Pipeline::FullbrightFlipped)
+    }
+
     fn command(self, group: u32, first: u32, count: u32) -> DrawCommand {
         DrawCommand {
             group,
@@ -395,6 +399,7 @@ enum LayoutPhase {
     CountSelected,
     HideOmitted,
     Commands,
+    FullbrightCommands,
     Allocate,
     Fill,
     EmitBlended,
@@ -648,6 +653,7 @@ impl DrawList {
             LayoutPhase::CountSelected => "count_selected",
             LayoutPhase::HideOmitted => "hide_omitted",
             LayoutPhase::Commands => "commands",
+            LayoutPhase::FullbrightCommands => "fullbright_commands",
             LayoutPhase::Allocate => "allocate",
             LayoutPhase::Fill => "fill",
             LayoutPhase::EmitBlended => "emit_blended",
@@ -909,28 +915,37 @@ impl DrawList {
                     }
                     build.face_cursor += 1;
                 }
-                LayoutPhase::Commands => {
+                LayoutPhase::Commands | LayoutPhase::FullbrightCommands => {
+                    let fullbright = matches!(build.phase, LayoutPhase::FullbrightCommands);
                     if build.group_cursor >= build.state.active_groups.len() {
-                        build.state.opaque_draws = build.state.draws.len();
-                        build.state.opaque_instances = build.opaque_count;
                         build.group_cursor = 0;
-                        build.phase = LayoutPhase::Allocate;
+                        if fullbright {
+                            build.state.opaque_draws = build.state.draws.len();
+                            build.state.opaque_instances = build.opaque_count;
+                            build.phase = LayoutPhase::Allocate;
+                        } else {
+                            build.phase = LayoutPhase::FullbrightCommands;
+                        }
                         continue;
                     }
                     let group_id = build.state.active_groups[build.group_cursor];
                     let group_index = group_id as usize;
                     let count = build.state.group_counts.get(group_index).copied().unwrap_or_default();
-                    if group_index >= build.group_limits.len() {
-                        build.group_limits.resize(group_index + 1, 0);
+                    if !fullbright {
+                        if group_index >= build.group_limits.len() {
+                            build.group_limits.resize(group_index + 1, 0);
+                        }
+                        build.group_limits[group_index] = count;
                     }
-                    build.group_limits[group_index] = count;
                     if let Some(group) = self.groups.group(group_id) {
-                        if let Some(key) = group.key.texture
+                        if !fullbright
+                            && let Some(key) = group.key.texture
                             && build.state.texture_seen.insert(key)
                         {
                             build.state.active_textures.push(TextureDemand { key, handle: group.texture.clone() });
                         }
-                        if let Some(region) = group.key.terrain
+                        if !fullbright
+                            && let Some(region) = group.key.terrain
                             && build.state.terrain_seen.insert(region)
                         {
                             build.state.active_terrain.push(TerrainDemand {
@@ -938,7 +953,7 @@ impl DrawList {
                                 textures: group.terrain_textures.clone().unwrap_or_else(|| std::array::from_fn(|_| None)),
                             });
                         }
-                        if !group.key.blended() {
+                        if !group.key.blended() && group.key.fullbright() == fullbright {
                             build.state.group_offsets[group_index] = build.opaque_count;
                             build.state.group_cursors[group_index] = 0;
                             build.opaque_count = build.opaque_count.saturating_add(count);
@@ -1409,36 +1424,42 @@ impl DrawList {
         let layout_items = if required > MAX_FACE_INSTANCES { &self.layout_items } else { visible };
 
         let mut opaque_count = 0usize;
-        for group_id in &self.active_groups {
-            let index = *group_id as usize;
-            let count = std::mem::take(&mut self.group_counts[index]);
-            let Some(group) = self.groups.groups[index].as_ref() else { continue };
-            if let Some(key) = group.key.texture
-                && self.texture_seen.insert(key)
-            {
-                self.active_textures.push(TextureDemand { key, handle: group.texture.clone() });
-            }
-            if let Some(region) = group.key.terrain
-                && self.terrain_seen.insert(region)
-            {
-                self.active_terrain.push(TerrainDemand {
-                    region,
-                    textures: group.terrain_textures.clone().unwrap_or_else(|| std::array::from_fn(|_| None)),
-                });
-            }
-            if !group.key.blended() {
-                self.group_offsets[index] = opaque_count;
-                self.group_cursors[index] = 0;
-                opaque_count = opaque_count.saturating_add(count);
-                if count > 0
-                    && let (Ok(first), Ok(count)) = (u32::try_from(opaque_count - count), u32::try_from(count))
+        for fullbright in [false, true] {
+            for group_id in &self.active_groups {
+                let index = *group_id as usize;
+                let count = self.group_counts[index];
+                let Some(group) = self.groups.groups[index].as_ref() else { continue };
+                if !fullbright
+                    && let Some(key) = group.key.texture
+                    && self.texture_seen.insert(key)
                 {
-                    self.mesh_references.insert(group.key.mesh);
-                    self.draws.push(group.key.command(*group_id, first, count));
+                    self.active_textures.push(TextureDemand { key, handle: group.texture.clone() });
+                }
+                if !fullbright
+                    && let Some(region) = group.key.terrain
+                    && self.terrain_seen.insert(region)
+                {
+                    self.active_terrain.push(TerrainDemand {
+                        region,
+                        textures: group.terrain_textures.clone().unwrap_or_else(|| std::array::from_fn(|_| None)),
+                    });
+                }
+                if !group.key.blended() && group.key.fullbright() == fullbright {
+                    self.group_offsets[index] = opaque_count;
+                    self.group_cursors[index] = 0;
+                    opaque_count = opaque_count.saturating_add(count);
+                    if count > 0
+                        && let (Ok(first), Ok(count)) = (u32::try_from(opaque_count - count), u32::try_from(count))
+                    {
+                        self.mesh_references.insert(group.key.mesh);
+                        self.draws.push(group.key.command(*group_id, first, count));
+                    }
                 }
             }
         }
-        self.active_groups.clear();
+        for group in self.active_groups.drain(..) {
+            self.group_counts[group as usize] = 0;
+        }
         self.opaque_draws = self.draws.len();
         self.opaque_instances = opaque_count;
         self.instance_bytes.resize(opaque_count.saturating_mul(INSTANCE_BYTES), 0);
@@ -1730,7 +1751,7 @@ impl DrawList {
         for face in faces {
             let Some(mut key) = self.groups.key(face.group) else { continue };
             let previous_pipeline = key.pipeline;
-            key.pipeline = surface_pipeline(face.base_params.blend, face.base_params.double_sided, scale, invert_normals);
+            key.pipeline = surface_pipeline(&face.base_params, scale, invert_normals);
             if key.pipeline == previous_pipeline {
                 continue;
             }

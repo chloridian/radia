@@ -5,20 +5,12 @@ use futures::executor::block_on;
 use math::{DVec3, Vec3};
 use wgpu::{
     Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType,
-    BufferBindingType, BufferDescriptor, BufferUsages, Color, ComputePassDescriptor, ComputePipelineDescriptor, Device, DeviceDescriptor,
-    Extent3d, InstanceDescriptor, LoadOp, MapMode, Operations, PipelineLayoutDescriptor, PollType, RenderPassColorAttachment,
-    RenderPassDepthStencilAttachment, RenderPassDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp,
-    TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-    TextureViewDescriptor,
+    BufferBindingType, BufferDescriptor, BufferUsages, ComputePassDescriptor, ComputePipelineDescriptor, DeviceDescriptor,
+    InstanceDescriptor, MapMode, PipelineLayoutDescriptor, PollType, ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat,
 };
 
 use super::*;
-use crate::{
-    FrameInput,
-    environment::{Schedule, Sources, evaluate},
-    pipeline::{PostProcess, projection},
-    texture::CompressionQuality,
-};
+use crate::environment::{Schedule, Sources, evaluate};
 
 const SIZE: [u32; 2] = [320, 180];
 const WATER_HEIGHT: f64 = 20.0;
@@ -59,8 +51,8 @@ fn water_color_ignores_far_plane() {
     let distance = (WATER_HEIGHT - camera.position().z).abs() / f64::from(camera.direction().z.abs());
     let intersection_x = camera.position().x + f64::from(camera.direction().x) * distance;
     assert!(intersection_x > 256.0, "center ray intersects outside the region water bounds");
-    let with_void_water = render_frame(&device, &queue, &mut geometry, &view, camera, &presets[0], Some(WATER_HEIGHT));
-    let without_water = render_frame(&device, &queue, &mut geometry, &view, camera, &presets[0], None);
+    let with_void_water = fixtures::render_frame(&device, &queue, &mut geometry, &view, camera, SIZE, &presets[0], Some(WATER_HEIGHT));
+    let without_water = fixtures::render_frame(&device, &queue, &mut geometry, &view, camera, SIZE, &presets[0], None);
     let center = ((SIZE[1] / 2 * SIZE[0] + SIZE[0] / 2) * 4) as usize;
     let visible_water = with_void_water[center..center + 3]
         .iter()
@@ -72,7 +64,7 @@ fn water_color_ignores_far_plane() {
 
     for height in [200.0, 1000.0] {
         let camera = Camera::new(DVec3::new(128.0, 128.0, WATER_HEIGHT + height), Vec3::Y, 1.0, SIZE).unwrap();
-        let image = render_frame(&device, &queue, &mut geometry, &view, camera, &presets[0], Some(WATER_HEIGHT));
+        let image = fixtures::render_frame(&device, &queue, &mut geometry, &view, camera, SIZE, &presets[0], Some(WATER_HEIGHT));
         let x = SIZE[0] as usize / 2;
         let mut maximum = 0;
         let mut maximum_row = 0;
@@ -92,7 +84,7 @@ fn water_color_ignores_far_plane() {
 
     for position in [DVec3::new(128.0, 128.0, WATER_HEIGHT - 2.0), DVec3::new(512.0, 512.0, WATER_HEIGHT - 2.0)] {
         let camera = Camera::new(position, Vec3::X, 1.0, SIZE).unwrap();
-        let image = render_frame(&device, &queue, &mut geometry, &view, camera, &presets[0], Some(WATER_HEIGHT));
+        let image = fixtures::render_frame(&device, &queue, &mut geometry, &view, camera, SIZE, &presets[0], Some(WATER_HEIGHT));
         for row in [SIZE[1] / 4, SIZE[1] * 3 / 4] {
             let pixel = ((row * SIZE[0] + SIZE[0] / 4) * 4) as usize;
             assert!(
@@ -115,7 +107,7 @@ fn water_color_ignores_far_plane() {
                     .expect("camera is valid")
                     .with_quality(draw_distance, 1.0)
                     .expect("draw distance is valid");
-                render_frame(&device, &queue, &mut geometry, &view, camera, environment, Some(WATER_HEIGHT))
+                fixtures::render_frame(&device, &queue, &mut geometry, &view, camera, SIZE, environment, Some(WATER_HEIGHT))
             };
             let near = render(64.0);
             let far = render(512.0);
@@ -140,104 +132,6 @@ fn water_color_ignores_far_plane() {
             eprintln!("{preset} height {height}: {}", row_profile(&row_maxima, SIZE[1] as usize / 2));
         }
     }
-}
-
-fn render_frame(
-    device: &Device,
-    queue: &wgpu::Queue,
-    geometry: &mut GeometryRenderer,
-    view: &crate::scene::SceneView,
-    camera: Camera,
-    environment: &crate::environment::Evaluated,
-    water_height: Option<f64>,
-) -> Vec<u8> {
-    let mut postprocess = PostProcess::new(device, queue, TextureFormat::Rgba8UnormSrgb);
-    postprocess.resize(device, SIZE);
-    let depth = geometry.depth(device, SIZE).expect("depth target is admitted");
-    postprocess.set_depth_view(device, Some(&depth));
-    let frame =
-        FrameInput { water_height, environment: Some(environment), cloud_scroll: [0.0; 2], animation_time: 1.0, water_scroll: [0.0; 4] };
-    let mut encoder = device.create_command_encoder(&Default::default());
-    let admission = geometry.admit().expect("frame is admitted");
-    geometry.prepare_with_environment(device, &mut encoder, view, None, camera, SIZE, frame);
-    while let Some(job) = geometry.next_texture_job() {
-        geometry.complete_texture(job.run(CompressionQuality::Fast));
-    }
-    geometry.prepare_with_environment(device, &mut encoder, view, None, camera, SIZE, frame);
-    let output = device.create_texture(&TextureDescriptor {
-        label: Some("Water distance comparison"),
-        size: Extent3d { width: SIZE[0], height: SIZE[1], depth_or_array_layers: 1 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format: TextureFormat::Rgba8UnormSrgb,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let output_view = output.create_view(&TextureViewDescriptor::default());
-    {
-        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-            label: Some("Water distance scene"),
-            color_attachments: &[Some(RenderPassColorAttachment {
-                view: postprocess.scene_view(),
-                depth_slice: None,
-                resolve_target: None,
-                ops: Operations { load: LoadOp::Clear(Color { r: 0.012, g: 0.012, b: 0.012, a: 1.0 }), store: StoreOp::Store },
-            })],
-            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                view: &depth,
-                depth_ops: Some(Operations { load: LoadOp::Clear(0.0), store: StoreOp::Store }),
-                stencil_ops: None,
-            }),
-            ..Default::default()
-        });
-        geometry.draw(&mut pass);
-    }
-    postprocess.render(
-        queue,
-        &mut encoder,
-        &output_view,
-        Some(environment),
-        1.0 / 60.0,
-        Some(camera.position()),
-        water_height,
-        projection(camera, SIZE).inverse(),
-        crate::pipeline::camera_view(camera),
-        0,
-        0,
-    );
-    let bytes_per_row = SIZE[0] * 4;
-    let padded = bytes_per_row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let readback = device.create_buffer(&BufferDescriptor {
-        label: Some("Water distance readback"),
-        size: u64::from(padded) * u64::from(SIZE[1]),
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    encoder.copy_texture_to_buffer(
-        TexelCopyTextureInfo { texture: &output, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-        TexelCopyBufferInfo {
-            buffer: &readback,
-            layout: TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(SIZE[1]) },
-        },
-        Extent3d { width: SIZE[0], height: SIZE[1], depth_or_array_layers: 1 },
-    );
-    queue.submit([encoder.finish()]);
-    geometry.submitted(admission);
-    let (send, receive) = mpsc::channel();
-    readback.slice(..).map_async(MapMode::Read, move |result| {
-        send.send(result).expect("readback receiver remains alive until completion");
-    });
-    device.poll(PollType::Wait { submission_index: None, timeout: None }).expect("render completes");
-    receive.recv().expect("readback result arrives").expect("readback maps");
-    let mapped = readback.slice(..).get_mapped_range().expect("readback range is mapped");
-    let mut pixels = Vec::with_capacity(SIZE[0] as usize * SIZE[1] as usize * 4);
-    for row in mapped.chunks_exact(padded as usize) {
-        pixels.extend_from_slice(&row[..bytes_per_row as usize]);
-    }
-    drop(mapped);
-    readback.unmap();
-    pixels
 }
 
 fn row_profile(maxima: &[u8], first_row: usize) -> String {

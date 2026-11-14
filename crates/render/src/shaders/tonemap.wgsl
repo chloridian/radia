@@ -47,7 +47,7 @@ fn aces_hill(input: vec3<f32>) -> vec3<f32> {
     let scene = textureLoad(scene_image, coordinate, 0);
     var color = scene.rgb;
     let depth = textureLoad(depth_image, coordinate, 0);
-    let is_water_surface = scene.a < 0.5;
+    let is_water_surface = scene.a < 0.25;
     if settings.fog.color.w > 0.5 && !is_water_surface {
         let uv = pixel.xy / vec2<f32>(size);
         let clip = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, select(depth, 1.0, depth == 0.0), 1.0);

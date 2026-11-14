@@ -1446,7 +1446,7 @@ mod tests {
         assert!(draw_list.refresh_winding(&mut faces, transform.scale, false, flipped, false));
         let key = draw_list.face_key(faces[0].group).expect("flipped draw group");
         assert_ne!(key.pipeline, original);
-        assert_eq!(key.pipeline, surface_pipeline(faces[0].base_params.blend, faces[0].base_params.double_sided, flipped, false));
+        assert_eq!(key.pipeline, surface_pipeline(&faces[0].base_params, flipped, false));
         assert!(!draw_list.refresh_winding(&mut faces, flipped, false, flipped, false));
     }
 }
