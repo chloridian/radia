@@ -4,8 +4,6 @@ use math::{DVec3, Quat, Vec3};
 use protocol::messages::AgentMovementComplete;
 use tokio::sync::watch;
 use uuid::Uuid;
-#[cfg(test)]
-use world::World;
 use world::{ObjectDetail, Parent, Region, WorldTransformState};
 
 const MAX_ARRIVAL_XY: f32 = 256.0;
@@ -145,46 +143,6 @@ impl AgentMotionPublisher {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn publish_world(&self, world: &World, agent_id: Uuid, received_at: Instant) -> bool {
-        let Some(entity) = world.entity(agent_id) else { return false };
-        let Some(agent) = world.object(entity) else { return false };
-        let Ok(transform) = agent.world_transform() else { return false };
-        let pose = match transform {
-            WorldTransformState::Resolved(transform) => transform.pose,
-            WorldTransformState::MissingScale(pose) => pose,
-            WorldTransformState::Provisional { .. } | WorldTransformState::Unresolved(_) => return false,
-        };
-        let motion = agent.linear_motion();
-        let source = agent.motion_source();
-        let received_at = source.and_then(world::UpdateSource::motion_received_at).unwrap_or(received_at);
-        let parented = matches!(agent.parent(), Parent::Resolved(_) | Parent::Pending { .. });
-        let (velocity, acceleration) = if parented {
-            (Vec3::ZERO, Vec3::ZERO)
-        } else {
-            (motion.velocity.unwrap_or_default(), motion.acceleration.unwrap_or_default())
-        };
-        let (velocity, acceleration) =
-            if velocity.abs().max_element() <= MAX_MOTION_COMPONENT && acceleration.abs().max_element() <= MAX_MOTION_COMPONENT {
-                (velocity, acceleration)
-            } else {
-                (Vec3::ZERO, Vec3::ZERO)
-            };
-        self.publish(AgentMotionSample {
-            region: agent.address().region(),
-            position: pose.position,
-            scale: agent.scale().unwrap_or(Vec3::new(0.6, 0.45, 1.9)),
-            velocity,
-            acceleration,
-            time_dilation: agent.time_dilation(),
-            ping_delay: source.and_then(world::UpdateSource::motion_ping_delay),
-            parented,
-            simulator_rotation: pose.rotation,
-            received_at,
-            seed: self.seed,
-        })
-    }
-
     fn publish(&self, sample: AgentMotionSample) -> bool {
         if !sample.is_finite() {
             return false;
@@ -196,7 +154,10 @@ impl AgentMotionPublisher {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroU32, time::Duration};
+    use std::{
+        num::NonZeroU32,
+        time::{Duration, Instant},
+    };
 
     use math::{DVec3, Quat, Vec3};
     use protocol::{lludp::Message, messages::AgentMovementComplete};
@@ -206,6 +167,12 @@ mod tests {
     use crate::session::world::viewer_world_limits;
 
     use super::{AgentMotionPublisher, AgentMotionSample};
+
+    fn publish_agent(publisher: &AgentMotionPublisher, world: &World, agent_id: Uuid, received_at: Instant) -> bool {
+        let entity = world.entity(agent_id).expect("agent entity");
+        let detail = world.object_detail(entity).expect("agent detail");
+        publisher.publish_world_detail(&detail, received_at)
+    }
 
     fn arrival() -> AgentMovementComplete {
         let bytes = test_support::parse_hex_fixture(test_support::lludp::vectors::AGENT_MOVEMENT_COMPLETE).expect("movement fixture");
@@ -300,7 +267,7 @@ mod tests {
 
         let publisher = AgentMotionPublisher::new();
         let now = std::time::Instant::now();
-        assert!(publisher.publish_world(&world, agent_id, now));
+        assert!(publish_agent(&publisher, &world, agent_id, now));
         let sample = publisher.receiver().borrow().expect("world sample");
         assert_eq!(sample.position, DVec3::new(266.0, 20.0, 1.0));
         assert_eq!(sample.velocity, Vec3::ZERO);
@@ -333,7 +300,7 @@ mod tests {
 
         let publisher = AgentMotionPublisher::new();
         let now = received_at + Duration::from_millis(100);
-        assert!(publisher.publish_world(&world, agent_id, now));
+        assert!(publish_agent(&publisher, &world, agent_id, now));
         let sample = publisher.receiver().borrow().expect("world sample");
         assert_eq!(sample.position, DVec3::new(266.0, 20.0, 3.0));
         assert_eq!(sample.velocity, Vec3::X);
@@ -362,7 +329,7 @@ mod tests {
         let _ = world.observe_object(agent).expect("agent observation");
 
         let publisher = AgentMotionPublisher::new();
-        assert!(publisher.publish_world(&world, agent_id, std::time::Instant::now()));
+        assert!(publish_agent(&publisher, &world, agent_id, std::time::Instant::now()));
         let sample = publisher.receiver().borrow().expect("world sample");
         assert_eq!(sample.position, DVec3::new(10.0, 20.0, 3.0));
         assert_eq!(sample.velocity, Vec3::ZERO);
