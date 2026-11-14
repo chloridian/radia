@@ -17,7 +17,8 @@ use crate::{
     geometry::{
         ShadingMode,
         cache::FrameCache,
-        instance::{instance_base, parameter_part},
+        fixtures,
+        instance::{instance_base, parameter_part, scene_origin},
         items::{CachedFace, CachedItem, ItemId, ItemIndex, ItemSlab, MeshInfo},
     },
     material::FaceParams,
@@ -319,7 +320,7 @@ proptest! {
 
     #[test]
     fn randomized_updates_match_fresh_layouts(
-        operations in prop::collection::vec((0u8..6, 0u8..8, 0u8..8, -3i8..4, -3i8..4), 1..80)
+        operations in prop::collection::vec((0u8..6, 0u8..8, 0u8..9, -3i8..4, -3i8..4), 1..80)
     ) {
         let generated = operations;
         let mut operations = vec![
@@ -334,6 +335,51 @@ proptest! {
         ];
         operations.extend(generated);
         verify_operations(&operations);
+    }
+
+    #[test]
+    fn fullbright_draws_follow_lit(styles in prop::collection::vec(0u8..9, 1..24)) {
+        let (_region_world, region) = crate::test_support::registered_region();
+        let (_scene, view, _) = fixtures::scene(255);
+        let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
+        let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
+        let camera = camera(0.0);
+        let origin = scene_origin(camera.position());
+        let mut items = FrameCache::default();
+        let mut list = DrawList::default();
+        let visible = styles
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(0, 1_100))
+            .zip(1u128..)
+            .map(|(style, id)| {
+                items.insert_item(new_item((2, id, 0), style, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index")
+            })
+            .collect::<Vec<_>>();
+        let has_fullbright = styles.iter().any(|style| style % 9 >= 6);
+        let rank = |list: &DrawList, group| {
+            let key = list.face_key(group).expect("drawn group key");
+            if key.blended() { 2 } else { u8::from(key.fullbright()) }
+        };
+
+        list.layout(&[], &visible, &mut items.items, camera);
+        let ranks = list.draws().iter().map(|draw| rank(&list, draw.group)).collect::<Vec<_>>();
+        prop_assert!(ranks.is_sorted(), "draw classes out of order: {ranks:?}");
+        prop_assert_eq!(ranks.iter().filter(|rank| **rank < 2).count(), list.opaque_draws);
+        prop_assert_eq!(ranks.contains(&1), has_fullbright);
+
+        prop_assert!(list.request_layout(&visible, camera, false, &items.items));
+        let mut steps = 0;
+        while !list.staged_progress().is_some_and(|(phase, ..)| matches!(phase, "allocate" | "fill")) {
+            let _ = list.advance_layout(&mut items.items, &HashMap::new(), false);
+            steps += 1;
+            prop_assert!(steps < 100, "staged layout reaches allocation");
+        }
+        let state = &list.pending.as_ref().expect("staged layout").state;
+        let staged = state.draws.iter().map(|draw| rank(&list, draw.group)).collect::<Vec<_>>();
+        prop_assert_eq!(staged.len(), state.opaque_draws);
+        prop_assert!(staged.is_sorted() && !staged.contains(&2), "staged opaque classes out of order: {staged:?}");
+        prop_assert_eq!(staged.contains(&1), has_fullbright);
     }
 }
 
@@ -606,18 +652,22 @@ fn new_face(
     list: &mut DrawList,
 ) -> CachedFace {
     let mesh_face = mesh.mesh().faces().first().expect("fixture mesh face");
-    let (pipeline, texture_index, blend, double_sided): (Pipeline, Option<usize>, bool, bool) = match style % 6 {
-        0 => (Pipeline::Surface, None, false, false),
-        1 => (Pipeline::Surface, Some(0), false, false),
-        2 => (Pipeline::DoubleSided, Some(1), false, true),
-        3 => (Pipeline::Blend, None, true, false),
-        4 => (Pipeline::BlendDoubleSided, Some(0), true, true),
-        _ => (Pipeline::BlendFlipped, Some(1), true, false),
+    let (pipeline, texture_index, blend, double_sided, fullbright): (Pipeline, Option<usize>, bool, bool, bool) = match style % 9 {
+        0 => (Pipeline::Surface, None, false, false, false),
+        1 => (Pipeline::Surface, Some(0), false, false, false),
+        2 => (Pipeline::DoubleSided, Some(1), false, true, false),
+        3 => (Pipeline::Blend, None, true, false, false),
+        4 => (Pipeline::BlendDoubleSided, Some(0), true, true, false),
+        5 => (Pipeline::BlendFlipped, Some(1), true, false, false),
+        6 => (Pipeline::Fullbright, None, false, false, true),
+        7 => (Pipeline::FullbrightDoubleSided, Some(0), false, true, true),
+        _ => (Pipeline::FullbrightFlipped, Some(1), false, false, true),
     };
     let texture = texture_index.map(|index| textures[index].clone());
     let mut params = FaceParams::new(None);
     params.blend = blend;
     params.double_sided = double_sided;
+    params.fullbright = fullbright;
     params.texture = texture.as_ref().map(|handle| TextureKey { id: handle.id(), sampler: Sampler::default() });
     params.color = [0.3 + f32::from(style) * 0.05, 0.4, 0.5, 1.0];
     let key = DrawKey {

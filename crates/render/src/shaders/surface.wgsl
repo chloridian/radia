@@ -150,7 +150,7 @@ struct Surface {
     return water;
 }
 
-@fragment fn fragment(v: Output, @builtin(front_facing) front: bool) -> Surface {
+fn shade_face(v: Output, front: bool) -> Surface {
     let color = textureSample(image, image_sampler, v.uv) * v.color;
     if v.params.y == 1.0 && color.a < v.params.z { discard; }
     let alpha = select(1.0, clamp(color.a, 0.0, 1.0), v.params.y == 2.0);
@@ -172,5 +172,15 @@ struct Surface {
     var output: Surface;
     output.color = vec4<f32>(fogged, alpha);
     output.depth = max(v.position.z, 0.00000001);
+    return output;
+}
+
+@fragment fn fragment(v: Output, @builtin(front_facing) front: bool) -> Surface {
+    return shade_face(v, front);
+}
+
+@fragment fn fullbright_fragment(v: Output, @builtin(front_facing) front: bool) -> Surface {
+    var output = shade_face(v, front);
+    output.color.a = 0.5;
     return output;
 }

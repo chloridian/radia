@@ -98,7 +98,7 @@ impl Sky {
             immediate_size: 0,
         });
         let buffers = [];
-        let targets = [Some(ColorTargetState { format, blend: None, write_mask: ColorWrites::ALL })];
+        let targets = [Some(ColorTargetState { format, blend: None, write_mask: ColorWrites::COLOR })];
         let depth = Some(DepthStencilState {
             format: TextureFormat::Depth32Float,
             depth_write_enabled: Some(false),
@@ -129,7 +129,7 @@ impl Sky {
         };
         let sky = device.create_render_pipeline(&descriptor);
         let translucent_targets =
-            [Some(ColorTargetState { format, blend: Some(BlendState::ALPHA_BLENDING), write_mask: ColorWrites::ALL })];
+            [Some(ColorTargetState { format, blend: Some(BlendState::ALPHA_BLENDING), write_mask: ColorWrites::COLOR })];
         let translucent = RenderPipelineDescriptor {
             label: Some("Sky details"),
             fragment: Some(FragmentState { targets: &translucent_targets, ..descriptor.fragment.clone().expect("sky fragment") }),
@@ -180,7 +180,7 @@ impl Sky {
                 color: BlendComponent { src_factor: BlendFactor::SrcAlpha, dst_factor: BlendFactor::One, operation: BlendOperation::Add },
                 alpha: BlendComponent { src_factor: BlendFactor::One, dst_factor: BlendFactor::One, operation: BlendOperation::Add },
             }),
-            write_mask: ColorWrites::ALL,
+            write_mask: ColorWrites::COLOR,
         })];
         let stars_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Star field"),

@@ -16,6 +16,7 @@ use wgpu::{
 
 use super::{atmosphere::sky_hdr_scale, water::water_fog_values};
 
+pub(crate) const SCENE_CLEAR: Color = Color { r: 0.012, g: 0.012, b: 0.012, a: 0.5 };
 const HDR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 const EXPOSURE_FLOATS: usize = 48;
 const EXPOSURE_BYTES: usize = EXPOSURE_FLOATS * 4;

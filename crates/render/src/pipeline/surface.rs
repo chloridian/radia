@@ -2,10 +2,11 @@ use math::camera::rh::view::look_to_mat4;
 use math::{DVec3, Mat4, Vec3, Vec4};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
-    BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction,
-    DepthStencilState, Device, Face, FragmentState, FrontFace, MultisampleState, PipelineLayoutDescriptor, PrimitiveState, Queue,
-    RenderPass, RenderPipeline, RenderPipelineDescriptor, SamplerBindingType, ShaderModuleDescriptor, ShaderSource, ShaderStages,
-    TextureFormat, TextureSampleType, TextureViewDimension, VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
+    BindingType, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages,
+    ColorTargetState, ColorWrites, CompareFunction, DepthStencilState, Device, Face, FragmentState, FrontFace, MultisampleState,
+    PipelineLayoutDescriptor, PrimitiveState, Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, SamplerBindingType,
+    ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat, TextureSampleType, TextureViewDimension, VertexAttribute,
+    VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
 };
 
 use crate::scene::Camera;
@@ -35,6 +36,9 @@ pub(crate) enum Pipeline {
     Surface,
     FlippedWinding,
     DoubleSided,
+    Fullbright,
+    FullbrightFlipped,
+    FullbrightDoubleSided,
     Blend,
     BlendFlipped,
     BlendDoubleSided,
@@ -46,6 +50,9 @@ pub(crate) struct SurfacePipelines {
     pipeline: RenderPipeline,
     flipped_winding: RenderPipeline,
     double_sided: RenderPipeline,
+    fullbright: RenderPipeline,
+    fullbright_flipped: RenderPipeline,
+    fullbright_double_sided: RenderPipeline,
     blend: RenderPipeline,
     blend_flipped: RenderPipeline,
     blend_double_sided: RenderPipeline,
@@ -210,6 +217,32 @@ impl SurfacePipelines {
             primitive: PrimitiveState { cull_mode: None, ..descriptor.primitive },
             ..descriptor.clone()
         });
+        let fullbright_targets = [Some(ColorTargetState {
+            format,
+            blend: Some(BlendState {
+                color: BlendComponent::REPLACE,
+                alpha: BlendComponent { src_factor: BlendFactor::One, dst_factor: BlendFactor::One, operation: BlendOperation::Max },
+            }),
+            write_mask: ColorWrites::ALL,
+        })];
+        let fullbright_descriptor = RenderPipelineDescriptor {
+            label: Some("Fullbright scene faces"),
+            fragment: Some(FragmentState {
+                entry_point: Some("fullbright_fragment"),
+                targets: &fullbright_targets,
+                ..descriptor.fragment.clone().expect("scene fragment")
+            }),
+            ..descriptor.clone()
+        };
+        let fullbright = device.create_render_pipeline(&fullbright_descriptor);
+        let fullbright_flipped = device.create_render_pipeline(&RenderPipelineDescriptor {
+            primitive: PrimitiveState { front_face: FrontFace::Cw, ..fullbright_descriptor.primitive },
+            ..fullbright_descriptor.clone()
+        });
+        let fullbright_double_sided = device.create_render_pipeline(&RenderPipelineDescriptor {
+            primitive: PrimitiveState { cull_mode: None, ..fullbright_descriptor.primitive },
+            ..fullbright_descriptor
+        });
         let blended_targets = [Some(ColorTargetState { format, blend: Some(BlendState::ALPHA_BLENDING), write_mask: ColorWrites::COLOR })];
         let blended = RenderPipelineDescriptor {
             label: Some("Blended scene faces"),
@@ -269,6 +302,9 @@ impl SurfacePipelines {
             pipeline,
             flipped_winding,
             double_sided,
+            fullbright,
+            fullbright_flipped,
+            fullbright_double_sided,
             blend,
             blend_flipped,
             blend_double_sided,
@@ -300,6 +336,9 @@ impl SurfacePipelines {
             Pipeline::Surface => &self.pipeline,
             Pipeline::FlippedWinding => &self.flipped_winding,
             Pipeline::DoubleSided => &self.double_sided,
+            Pipeline::Fullbright => &self.fullbright,
+            Pipeline::FullbrightFlipped => &self.fullbright_flipped,
+            Pipeline::FullbrightDoubleSided => &self.fullbright_double_sided,
             Pipeline::Blend => &self.blend,
             Pipeline::BlendFlipped => &self.blend_flipped,
             Pipeline::BlendDoubleSided => &self.blend_double_sided,

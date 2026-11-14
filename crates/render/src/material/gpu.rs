@@ -12,6 +12,7 @@ pub(crate) struct FaceParams {
     pub(crate) texture: Option<TextureKey>,
     pub(crate) blend: bool,
     pub(crate) double_sided: bool,
+    pub(crate) fullbright: bool,
 }
 
 impl FaceParams {
@@ -31,6 +32,7 @@ impl FaceParams {
             texture: None,
             blend: false,
             double_sided: false,
+            fullbright: false,
         };
         let Some(face) = face else { return result };
         result.color = face.base_color_factor();
@@ -49,6 +51,7 @@ impl FaceParams {
         let (matrix, sampler, supported) = match face.material {
             MaterialDescription::Legacy(material) => {
                 result.params[0] = f32::from(u8::from(material.fullbright));
+                result.fullbright = material.fullbright;
                 result.params[3] = f32::from(u8::from(material.mapping == TextureMapping::Planar));
                 (
                     legacy_uv(transform.unwrap_or(material.diffuse.transform)),
@@ -113,7 +116,7 @@ fn compose_uv(first: [[f32; 4]; 2], second: [[f32; 4]; 2]) -> [[f32; 4]; 2] {
 mod tests {
     use std::f32::consts::FRAC_PI_2;
 
-    use assets::{MaterialTexture, PbrMaterial};
+    use assets::{LegacyMaterial, MaterialTexture, PbrMaterial};
     use utils::AssetId;
     use uuid::Uuid;
 
@@ -164,6 +167,27 @@ mod tests {
         let expected = [[-4.5, 0.0, 1.375, 0.0], [0.0, 1.0, -0.125, 0.0]];
         for (actual, expected) in params.uv.iter().flatten().zip(expected.iter().flatten()) {
             assert!((actual - expected).abs() < 1e-6, "UV matrix coefficient {actual} differed from {expected}");
+        }
+    }
+
+    #[test]
+    fn fullbright_comes_from_legacy_only() {
+        let face = |material| FaceMaterial {
+            slot: 0,
+            material,
+            legacy_state: None,
+            pbr_state: None,
+            alpha: AlphaBehavior::Opaque,
+            base_color_texture: None,
+        };
+        for (material, fullbright, unlit_shading) in [
+            (MaterialDescription::Legacy(LegacyMaterial { fullbright: true, ..LegacyMaterial::default() }), true, 1.0),
+            (MaterialDescription::Legacy(LegacyMaterial::default()), false, 0.0),
+            (MaterialDescription::Pbr(PbrMaterial { unlit: true, ..PbrMaterial::default() }), false, 1.0),
+        ] {
+            let params = FaceParams::new(Some(&face(material)));
+            assert_eq!(params.fullbright, fullbright, "{material:?} metering class");
+            assert_eq!(params.params[0], unlit_shading, "{material:?} unlit shading");
         }
     }
 
