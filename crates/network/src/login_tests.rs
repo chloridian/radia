@@ -21,7 +21,7 @@ const SESSION_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
 const FOLDER_ID: &str = "12345678-1234-5678-1234-567812345678";
 
 #[test]
-fn grid_id_is_a_stable_login_identity() {
+fn grid_id_is_stable() {
     assert_eq!(Grid::Agni.id(), "agni");
     assert_eq!(Grid::Aditi.id(), "aditi");
 }
@@ -350,7 +350,7 @@ async fn gateway_503_is_not_replayed() {
 }
 
 #[test]
-fn gateway_html_detection_is_ascii_case_insensitive() {
+fn gateway_html_ignores_ascii_case() {
     let error = super::parse_login_response(
         " \t<!DOCTYPE HTML><HTML>Errors.EdgeSuite.Net</HTML>",
         reqwest::StatusCode::SERVICE_UNAVAILABLE,
@@ -362,7 +362,7 @@ fn gateway_html_detection_is_ascii_case_insensitive() {
 }
 
 #[test]
-fn login_xml_element_limit_is_reported() {
+fn xml_element_limit_reported() {
     let body = "<value/>".repeat(262_145);
     let error = super::parse_login_response(&body, reqwest::StatusCode::OK, "text/xml")
         .expect_err("excessive element counts are rejected before XML-RPC deserialization");

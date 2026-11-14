@@ -269,7 +269,7 @@ fn crossed_region_events(agent_id: Uuid, session_id: Uuid, region_handle: u64, e
 }
 
 #[tokio::test]
-async fn neighbor_intro_precedes_early_udp_data() {
+async fn neighbor_intro_precedes_udp_data() {
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
     let endpoint = neighbor.local_addr().expect("neighbor simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate neighbor ID");
@@ -501,7 +501,7 @@ async fn foreign_ids_are_unavailable() {
 }
 
 #[tokio::test]
-async fn stray_logout_reply_keeps_session_running() {
+async fn stray_logout_keeps_session_running() {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let session = login_session(primary.local_addr().expect("primary simulator address"));
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
@@ -820,7 +820,7 @@ async fn event_queue_starts_neighbor() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn dispatcher_shutdown_cancels_a_held_event_queue_poll() {
+async fn shutdown_cancels_held_poll() {
     let mut server = EventQueueTestServer::start(|base| {
         let mut event_url = base.clone();
         event_url.set_path("/event-queue");
@@ -847,7 +847,7 @@ async fn dispatcher_shutdown_cancels_a_held_event_queue_poll() {
 }
 
 #[test]
-fn stale_event_queue_completion_after_capability_replacement_preserves_promoted_primary() {
+fn stale_completion_keeps_promoted_primary() {
     run_large_stack_test(run_stale_event_queue_completion_after_capability_replacement_preserves_promoted_primary);
 }
 
@@ -973,7 +973,7 @@ async fn run_stale_event_queue_completion_after_capability_replacement_preserves
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn crossed_region_promotes_after_matching_movement() {
+async fn crossed_region_promotes_after_movement() {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind destination simulator");
     let primary_endpoint = primary.local_addr().expect("primary simulator address");

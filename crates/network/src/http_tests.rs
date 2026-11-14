@@ -59,7 +59,7 @@ async fn redirects_are_not_followed() {
 }
 
 #[tokio::test]
-async fn viewer_asset_redirects_follow_loopback_without_referer() {
+async fn viewer_redirect_omits_referer() {
     let redirect = b"HTTP/1.1 302 Found\r\nLocation: /settings\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     let settings = b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nsettings";
     let server = LocalServer::start(vec![redirect.to_vec(), settings.to_vec()]);
@@ -79,7 +79,7 @@ async fn viewer_asset_redirects_follow_loopback_without_referer() {
 }
 
 #[tokio::test]
-async fn viewer_asset_redirects_stop_after_five_hops() {
+async fn viewer_redirects_stop_after_five() {
     let mut responses = (1..=5)
         .map(|hop| format!("HTTP/1.1 302 Found\r\nLocation: /hop{hop}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes())
         .collect::<Vec<_>>();
@@ -110,7 +110,7 @@ async fn body_at_limit_is_accepted() {
 }
 
 #[tokio::test]
-async fn content_length_is_bounded_before_reading() {
+async fn declared_length_is_bounded() {
     let server = LocalServer::start(vec![response(200, "OK", "text/plain", None, "123456")]);
     let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
 

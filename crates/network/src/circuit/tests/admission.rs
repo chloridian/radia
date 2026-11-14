@@ -49,7 +49,7 @@ mod memory {
     }
 
     #[tokio::test]
-    async fn retained_packet_memory_lives_until_dequeue() {
+    async fn retained_memory_lasts_until_dequeue() {
         let budget = SimulatorMemoryBudget::new();
         let wire = fixture();
         let preflight = Packet::preflight(&wire).expect("preflight simulator message");
@@ -155,7 +155,7 @@ mod memory {
     }
 
     #[test]
-    fn demoted_retention_releases_after_handle_drop() {
+    fn demoted_retention_releases_on_drop() {
         let root = SimulatorMemoryBudget::with_test_limits(1_000, 500, 200);
         let former = root.clone();
         let promoted = root.for_neighbor();
@@ -203,7 +203,7 @@ mod memory {
     }
 
     #[test]
-    fn in_flight_decode_trims_after_promotion() {
+    fn decode_trims_after_promotion() {
         let root = SimulatorMemoryBudget::with_test_limits(1_000_000, 500_000, 250_000);
         let former_primary = root.clone();
         let promoted = root.for_neighbor();
@@ -293,7 +293,7 @@ mod memory {
     }
 
     #[test]
-    fn temporary_decode_headroom_does_not_hide_a_retained_bound_mismatch() {
+    fn headroom_does_not_hide_mismatch() {
         let small = Packet::new(1, Message::Unknown { id: MessageId::low(0xfff9), payload: vec![0; 4] })
             .with_zero_coding(true)
             .encode()
@@ -378,7 +378,7 @@ fn preflight_resource_classification() {
 }
 
 #[tokio::test]
-async fn byte_pressure_retries_for_both_roles() {
+async fn byte_pressure_retries_both_roles() {
     run_budget_retry(ConnectionRole::Primary).await;
     run_budget_retry(ConnectionRole::Neighbor).await;
 }

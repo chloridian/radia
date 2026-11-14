@@ -150,7 +150,7 @@ async fn final_loss_wakes_empty_intake() {
 }
 
 #[tokio::test]
-async fn coverage_loss_precedes_event_and_awaits_ack() {
+async fn loss_precedes_event_awaits_ack() {
     let (commands, _) = mpsc::channel(COMMAND_CAPACITY);
     let (disconnect, _) = watch::channel(false);
     let ledger = CoverageLossLedger::new();
@@ -184,7 +184,7 @@ async fn coverage_loss_precedes_event_and_awaits_ack() {
 }
 
 #[tokio::test]
-async fn reported_inventory_loss_gates_later_source_event() {
+async fn inventory_loss_gates_later_event() {
     let (commands, _) = mpsc::channel(COMMAND_CAPACITY);
     let (disconnect, _) = watch::channel(false);
     let ledger = CoverageLossLedger::new();
@@ -315,7 +315,7 @@ async fn preflight_loss_gates_later_event() {
 }
 
 #[tokio::test]
-async fn coalesced_source_loss_is_capped_to_the_event_watermark() {
+async fn coalesced_loss_caps_at_watermark() {
     let (commands, _) = mpsc::channel(COMMAND_CAPACITY);
     let (disconnect, _) = watch::channel(false);
     let ledger = CoverageLossLedger::new();
@@ -354,7 +354,7 @@ async fn coalesced_source_loss_is_capped_to_the_event_watermark() {
 }
 
 #[tokio::test]
-async fn session_overflow_requires_ack_before_covered_event() {
+async fn session_overflow_requires_ack() {
     let (commands, _) = mpsc::channel(COMMAND_CAPACITY);
     let (disconnect, _) = watch::channel(false);
     let ledger = CoverageLossLedger::new();
@@ -405,7 +405,7 @@ async fn session_overflow_requires_ack_before_covered_event() {
 }
 
 #[tokio::test]
-async fn earlier_watermark_does_not_wait_for_later_source_loss() {
+async fn earlier_watermark_skips_later_loss() {
     let (commands, _) = mpsc::channel(COMMAND_CAPACITY);
     let (disconnect, _) = watch::channel(false);
     let ledger = CoverageLossLedger::new();
@@ -424,7 +424,7 @@ async fn earlier_watermark_does_not_wait_for_later_source_loss() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn session_drop_cancels_active_saturated_session() {
+async fn session_drop_cancels_saturated() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let simulator_address = simulator.local_addr().expect("read simulator address");
     let (login_url, poll_started, http_task) = fake_http(simulator_address.port()).await;

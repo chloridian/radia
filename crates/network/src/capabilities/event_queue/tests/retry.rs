@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test(start_paused = true)]
-async fn zero_retry_after_does_not_advance_virtual_time() {
+async fn zero_retry_after_skips_wait() {
     let (events, _received_events) = mpsc::channel(1);
     let (_shutdown, shutdown_requested) = watch::channel(false);
     let (_session_closed, session_closed) = watch::channel(false);
@@ -61,7 +61,7 @@ async fn retry_limit_is_terminal() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn event_queue_retry_limit_records_coverage_before_reporting_error() {
+async fn retry_limit_records_coverage_first() {
     let server = EventQueueTestServer::start(|base| {
         let mut event_url = base.clone();
         event_url.set_path("/event-queue");
@@ -193,7 +193,7 @@ async fn rate_limit_retries() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn event_queue_retry_after_keeps_ack() {
+async fn retry_after_keeps_ack() {
     let mut server = EventQueueTestServer::start(|base| {
         let mut event_url = base.clone();
         event_url.set_path("/event-queue");
@@ -291,7 +291,7 @@ async fn closed_poll_recovers_without_loss() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn aged_idle_close_resets_retry_state() {
+async fn aged_close_resets_retries() {
     let partial_with_retry_after = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/llsd+xml\r\nContent-Length: {}\r\nRetry-After: 0\r\nConnection: close\r\n\r\n{}",
         TWO_EVENT_BATCH.len() + 32,

@@ -21,7 +21,7 @@ async fn retry_limit_keeps_primary_connected() {
 }
 
 #[test]
-fn former_primary_failure_completion_keeps_its_identity() {
+fn former_primary_failure_keeps_identity() {
     let simulator_id = SimulatorId::allocate().expect("allocate former primary ID");
     let endpoint = "127.0.0.1:9000".parse().expect("parse endpoint");
     let event = neighbor_completion_event(
@@ -38,7 +38,7 @@ fn former_primary_failure_completion_keeps_its_identity() {
 }
 
 #[tokio::test]
-async fn primary_event_queue_coverage_loss_keeps_session_active() {
+async fn primary_coverage_loss_keeps_session() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let connection = connect_runtime(login_session(simulator.local_addr().expect("read simulator address")), ResponseData::default())
         .await
@@ -51,7 +51,7 @@ async fn primary_event_queue_coverage_loss_keeps_session_active() {
 }
 
 #[tokio::test]
-async fn primary_event_credit_exhaustion_reports_coverage_without_logout() {
+async fn credit_exhaustion_reports_coverage() {
     use crate::coverage::{CoverageLoss, CoverageLossReason, CoverageSource};
 
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
@@ -114,7 +114,7 @@ async fn primary_event_credit_exhaustion_reports_coverage_without_logout() {
 }
 
 #[tokio::test]
-async fn terminal_logout_skips_capability_events_that_start_neighbor_work() {
+async fn terminal_logout_skips_neighbor_events() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
     let mut connection = connect_runtime(login_session(endpoint), ResponseData::default()).await.expect("connect primary simulator");

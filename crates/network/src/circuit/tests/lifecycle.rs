@@ -74,7 +74,7 @@ async fn fill_promoted_outbound_queue(
 }
 
 #[tokio::test(start_paused = true)]
-async fn handshake_reply_waits_for_outbound_space() {
+async fn handshake_reply_waits_for_space() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
     let agent_session = session(simulator.local_addr().expect("read simulator address"));
@@ -172,7 +172,7 @@ async fn handshake_reply_waits_for_outbound_space() {
 }
 
 #[tokio::test]
-async fn primary_sends_agent_throttle_after_matching_movement_complete() {
+async fn primary_throttle_follows_movement_complete() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let simulator_address = simulator.local_addr().expect("read simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
@@ -298,7 +298,7 @@ async fn demoted_primary_times_out() {
 }
 
 #[tokio::test]
-async fn stale_role_generation_cancels_queued_handoff_movement() {
+async fn stale_role_cancels_handoff_movement() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let simulator_id = SimulatorId::allocate().expect("simulator ID");
     let budget = OutboundBudget::new(crate::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
@@ -422,7 +422,7 @@ async fn promoted_logout_bypasses_full_queue() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn saturated_neighbor_events_preserve_ack_and_generation_completion() {
+async fn saturated_neighbor_keeps_ack_completion() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let simulator_address = simulator.local_addr().expect("simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
@@ -515,7 +515,7 @@ async fn saturated_neighbor_events_preserve_ack_and_generation_completion() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn saturated_event_channel_delivers_expired_send_failure() {
+async fn saturated_channel_delivers_expired_failure() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let simulator_address = simulator.local_addr().expect("simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");

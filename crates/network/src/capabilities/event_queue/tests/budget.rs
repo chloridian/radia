@@ -225,7 +225,7 @@ async fn shared_budget_bounds_event_polls() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ordinary_requests_run_during_event_queue_polls() {
+async fn ordinary_requests_run_during_polls() {
     let event_server = EventQueueTestServer::start(|base| {
         let mut event_url = base.clone();
         event_url.set_path("/event-queue");
@@ -295,7 +295,7 @@ async fn ordinary_requests_run_during_event_queue_polls() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn event_poll_wait_cancels_on_close() {
+async fn poll_wait_cancels_on_close() {
     let server = EventQueueBudgetTestServer::start();
     let budget = CapabilityBudget::new();
     let clients =
@@ -354,7 +354,7 @@ async fn event_poll_wait_cancels_on_close() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn waiting_event_queue_gets_slot_after_active_poll_stops() {
+async fn waiting_queue_gets_freed_slot() {
     let active_server = EventQueueBudgetTestServer::start();
     let waiting_server = EventQueueBudgetTestServer::start();
     let primary_server = EventQueueBudgetTestServer::start();
@@ -440,7 +440,7 @@ async fn waiting_event_queue_gets_slot_after_active_poll_stops() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn primary_event_queue_slot_follows_role_changes() {
+async fn primary_slot_follows_role() {
     let neighbor_server = EventQueueBudgetTestServer::start();
     let old_primary_server = EventQueueBudgetTestServer::start();
     let new_primary_server = EventQueueBudgetTestServer::start();

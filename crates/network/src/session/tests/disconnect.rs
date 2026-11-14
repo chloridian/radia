@@ -164,7 +164,7 @@ pub(super) fn client_ack(sequence: u32, acknowledged: u32) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn root_disconnect_waits_for_matching_logout_reply() {
+async fn root_disconnect_awaits_logout_reply() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let mut connection = connect_runtime(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default())
         .await
@@ -360,7 +360,7 @@ async fn disconnect_logout_respects_deadline() {
 }
 
 #[tokio::test]
-async fn failed_root_disconnect_reports_no_send() {
+async fn failed_disconnect_reports_no_send() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let mut connection = connect_runtime(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default())
         .await

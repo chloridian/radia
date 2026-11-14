@@ -329,7 +329,7 @@ async fn disconnect_after_promotion() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn disconnect_after_promotion_with_full_reliable_window() {
+async fn promoted_disconnect_with_full_window() {
     let PromotedSession { mut session, worker, primary: _primary, destination, destination_peer, destination_id, http_task, .. } =
         promoted_session().await;
 
