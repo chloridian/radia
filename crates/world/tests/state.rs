@@ -106,7 +106,7 @@ fn object_views_support_shared_reads() {
 }
 
 #[test]
-fn old_region_events_are_rejected_by_new_world() {
+fn new_world_rejects_old_regions() {
     let metadata = RegionInfo {
         region_id: Some(uuid(301)),
         handle: Some(RegionHandle::new((256_u64 << 32) | 512)),
@@ -201,7 +201,7 @@ fn region_metadata_conflicts_are_atomic() {
 }
 
 #[test]
-fn region_names_follow_source_order_without_revising_duplicate_values() {
+fn name_source_order_skips_duplicates() {
     let mut world = World::new(limits());
     let region = world.register_region().unwrap();
     for (source, name, expected, changed) in [
@@ -225,7 +225,7 @@ fn region_names_follow_source_order_without_revising_duplicate_values() {
 }
 
 #[test]
-fn rejected_region_observations_preserve_metadata_and_name_ordering() {
+fn rejected_observations_keep_metadata() {
     let mut world = World::new(limits());
     let region = world.register_region().unwrap();
     let original = RegionInfo { region_id: Some(uuid(1)), name: Some("First".into()), ..RegionInfo::default() };
@@ -341,7 +341,7 @@ fn region_index_tracks_transfer() {
 }
 
 #[test]
-fn retirement_clears_objects_and_blocks_reuse() {
+fn retirement_clears_and_blocks_reuse() {
     let mut world_limits = limits();
     world_limits.max_regions = 2;
     world_limits.max_entities = 3;
@@ -502,7 +502,7 @@ fn tombstone_byte_charge_saturates() {
 }
 
 #[test]
-fn zero_tombstone_budget_uses_region_floor() {
+fn zero_tombstone_budget_uses_floor() {
     for (region_id, max_tombstones, max_per_region) in [(90_u32, 0, 1), (91, 1, 0)] {
         let mut world_limits = limits();
         world_limits.max_tombstones = max_tombstones;
@@ -562,7 +562,7 @@ fn tombstone_eviction_advances_region_floor() {
 }
 
 #[test]
-fn tombstone_limits_are_per_region_and_evict_oldest() {
+fn tombstone_limits_are_per_region() {
     let mut world = World::new(WorldLimits {
         max_regions: 2,
         max_entities: 4,
@@ -590,7 +590,7 @@ fn tombstone_limits_are_per_region_and_evict_oldest() {
 }
 
 #[test]
-fn tombstone_pressure_only_degrades_affected_region() {
+fn tombstone_pressure_degrades_one_region() {
     let mut world = World::new(WorldLimits {
         max_regions: 2,
         max_entities: 4,
@@ -647,7 +647,7 @@ fn region_retirement_releases_active_capacity() {
 }
 
 #[test]
-fn registration_reuses_capacity_without_reusing_handles() {
+fn registration_never_reuses_handles() {
     let mut bounds = limits();
     bounds.max_regions = 1;
     bounds.max_journal_entries = 2;

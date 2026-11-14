@@ -140,7 +140,7 @@ mod tests {
         }
     }
     #[test]
-    fn failed_name_commit_does_not_advance_ordering() {
+    fn failed_name_keeps_ordering() {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
         let source = |order| UpdateSource::new(region, order as u32, crate::OrderEvidence::Ordered(order), 0);
