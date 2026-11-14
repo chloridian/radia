@@ -209,7 +209,7 @@ impl GeometryRenderer {
         }
 
         let visibility_started = Instant::now();
-        self.note_rebuild_camera(camera);
+        let noted_camera = self.note_rebuild_camera(camera);
         let cache_started = Instant::now();
         let mut update = self.update_cache_for_frame(view, self.recovery_publication_pending);
         #[cfg(test)]
@@ -232,9 +232,10 @@ impl GeometryRenderer {
             self.moving_entities.retain(|entity| view.object_is_live(*entity) && self.cache.objects.contains_key(entity));
             self.motion_entities.clear();
         }
-        self.note_rebuild_camera(camera);
+        let candidate_camera = self.note_rebuild_camera(camera).or(noted_camera).unwrap_or(camera);
         times.cache = cache_started.elapsed();
         let rebuilding = update.rebuild_pending;
+        let stale_pass = update.rebuild_completed && candidate_camera != camera;
         if self.draw_list.layout_pending() && (update.immediate_visibility_change || update.layout_invalidated) {
             #[cfg(test)]
             {
@@ -267,22 +268,24 @@ impl GeometryRenderer {
         candidate_items.dedup();
         let candidates_started = Instant::now();
         let mut mesh_demand_missing = update.mesh_demand_missing;
-        let (mut candidates_changed, replacement_visibility_changed, preparation_changed) = if update.rebuild_completed || rebuilding {
-            let (candidates, replacements, preparation, missing) =
-                self.update_candidates(view, camera, projection, size, &candidate_items, true);
-            mesh_demand_missing |= missing;
-            (candidates, replacements, preparation)
-        } else if update.full_visibility || camera_changed {
-            mesh_demand_missing = true;
-            self.rebuild_candidates(view, camera, projection, size)
-        } else if !candidate_items.is_empty() {
-            let (candidates, replacements, preparation, missing) =
-                self.update_candidates(view, camera, projection, size, &candidate_items, false);
-            mesh_demand_missing |= missing;
-            (candidates, replacements, preparation)
-        } else {
-            (false, false, false)
-        };
+        let (mut candidates_changed, replacement_visibility_changed, preparation_changed) =
+            if rebuilding || update.rebuild_completed && !stale_pass {
+                let candidate_projection = crate::pipeline::projection(candidate_camera, size);
+                let (candidates, replacements, preparation, missing) =
+                    self.update_candidates(view, candidate_camera, candidate_projection, size, &candidate_items, true);
+                mesh_demand_missing |= missing;
+                (candidates, replacements, preparation)
+            } else if update.full_visibility || camera_changed || stale_pass {
+                mesh_demand_missing = true;
+                self.rebuild_candidates(view, camera, projection, size)
+            } else if !candidate_items.is_empty() {
+                let (candidates, replacements, preparation, missing) =
+                    self.update_candidates(view, camera, projection, size, &candidate_items, false);
+                mesh_demand_missing |= missing;
+                (candidates, replacements, preparation)
+            } else {
+                (false, false, false)
+            };
         if rebuilding && let Some(rebuild) = self.cache.rebuild.as_mut() {
             rebuild.visibility_changed |= candidates_changed || replacement_visibility_changed || preparation_changed;
             rebuild.mesh_demand_missing |= mesh_demand_missing;
@@ -299,12 +302,14 @@ impl GeometryRenderer {
         let meshes_started = Instant::now();
         let pending_priority_changed = camera_changed && (self.mesh_admission.active || !self.pending_meshes.is_empty());
         let mesh_demands_started = Instant::now();
-        let candidate_mesh_missing =
-            if !rebuilding && !update.rebuild_completed && (mesh_demand_missing || update.mesh_dirty || pending_priority_changed) {
-                self.rebuild_visible_meshes(view, camera)
-            } else {
-                false
-            };
+        let candidate_mesh_missing = if !rebuilding
+            && (!update.rebuild_completed || stale_pass)
+            && (mesh_demand_missing || update.mesh_dirty || pending_priority_changed)
+        {
+            self.rebuild_visible_meshes(view, camera)
+        } else {
+            false
+        };
         times.mesh_demands = mesh_demands_started.elapsed();
         let mesh_revision_changed = self.mesh_admission.revision != self.cache.mesh_demand_revision;
         let mesh_follow_up = self.prepared.as_ref().is_some_and(|prepared| prepared.more_meshes)
