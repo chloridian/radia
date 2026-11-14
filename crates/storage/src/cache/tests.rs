@@ -123,7 +123,7 @@ fn lock_helper() {
 }
 
 #[test]
-fn key_paths_are_sharded_and_validated() {
+fn key_paths_shard_and_validate() {
     let name = [0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89];
     let cache_key = Key::new(NamespaceId::new(1), name);
     assert_eq!(
@@ -152,7 +152,7 @@ fn small_namespace_accepts_lower_limit() {
 }
 
 #[test]
-fn small_size_limit_accounts_for_bounded_wal_and_shm() -> Result<(), Box<dyn std::error::Error>> {
+fn limit_counts_wal_and_shm() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;
     let size_limit = MIN_SIZE_LIMIT + 8192;
     let cache = Cache::open(directory.path(), size_limit, &TEST_NAMESPACES)?;
@@ -263,7 +263,7 @@ fn old_index_files_are_discarded() {
 
 #[cfg(windows)]
 #[test]
-fn locked_old_index_temp_does_not_block_open() {
+fn locked_old_temp_allows_open() {
     let directory = tempdir().expect("cache directory");
     let path = directory.path().join(".snapshot-tmp-locked");
     fs::write(&path, b"obsolete").expect("write obsolete index temp file");
@@ -293,13 +293,13 @@ fn locked_old_index_file_is_retried(name: &str) {
 
 #[cfg(windows)]
 #[test]
-fn locked_old_snapshot_does_not_block_open() {
+fn locked_old_snapshot_allows_open() {
     locked_old_index_file_is_retried("snapshot");
 }
 
 #[cfg(windows)]
 #[test]
-fn locked_old_journal_does_not_block_open() {
+fn locked_old_journal_allows_open() {
     locked_old_index_file_is_retried("journal");
 }
 
@@ -364,7 +364,7 @@ fn contains_checks_index() {
 }
 
 #[test]
-fn lookup_checks_hash_and_removes_corruption() {
+fn hash_mismatch_removes_entry() {
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     cache.put(key(1), b"payload bytes".to_vec()).expect("store payload");
@@ -383,7 +383,7 @@ fn lookup_checks_hash_and_removes_corruption() {
 }
 
 #[test]
-fn busy_usage_update_is_requeued_and_merged() -> Result<(), Box<dyn std::error::Error>> {
+fn busy_usage_requeues_and_merges() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;
     let hooks = Arc::new(writer::FaultHooks::default());
     let cache = Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::new(LruPolicy), hooks)?;
@@ -430,7 +430,7 @@ fn bounded_lookup_rejects_large_entries() {
 }
 
 #[test]
-fn missing_and_truncated_payloads_are_corrupt() {
+fn damaged_payloads_are_corrupt() {
     for missing in [false, true] {
         let directory = tempdir().expect("cache directory");
         let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
@@ -617,7 +617,7 @@ fn renamed_unindexed_payload_is_swept() {
 }
 
 #[test]
-fn interrupted_multi_chunk_write_reopens_with_committed_entries() {
+fn interrupted_batch_keeps_committed() {
     let directory = tempdir().expect("cache directory");
     let hooks = Arc::new(writer::FaultHooks::default());
     let (worker_ready, resume_worker) = hooks.pause_at(WritePoint::WriterReady);
@@ -656,7 +656,7 @@ fn interrupted_multi_chunk_write_reopens_with_committed_entries() {
 }
 
 #[test]
-fn schema_recovery_does_not_report_removed_entries_as_written() {
+fn schema_recovery_reports_no_writes() {
     let directory = tempdir().expect("cache directory");
     let database = Connection::open(directory.path().join("index.sqlite")).expect("create constrained index");
     database
@@ -724,7 +724,7 @@ fn failed_replacement_removes_uncommitted_bytes() {
 }
 
 #[test]
-fn full_write_queue_rejects_more_work() {
+fn full_queue_rejects_writes() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
     let (started, resume) = cache.pause_at(WritePoint::DataWritten);
