@@ -335,7 +335,7 @@ mod tests {
     use math::Quat;
 
     #[test]
-    fn follow_camera_uses_official_rear_view_offsets_in_agent_axes() {
+    fn follow_offsets_use_agent_axes() {
         let pose = WorldPose { position: DVec3::new(100.0, 200.0, 30.0), rotation: math::Quat::IDENTITY };
         let (position, focus) = FollowCamera::position_and_focus(pose);
         assert_eq!(position, pose.position + DVec3::new(-3.0, 0.0, 0.75));
@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_camera_moves_rigidly_with_avatar_translation() {
+    fn follow_translates_rigidly() {
         let start = Instant::now();
         let pose = WorldPose { position: DVec3::new(10.0, 20.0, 30.0), rotation: math::Quat::IDENTITY };
         let mut camera = FollowCamera::default();
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_camera_converges_offset_after_turn() {
+    fn follow_converges_after_turn() {
         let start = Instant::now();
         let pose = WorldPose { position: DVec3::ZERO, rotation: math::Quat::IDENTITY };
         let mut camera = FollowCamera::default();
@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_camera_snaps_large_offset_changes() {
+    fn follow_snaps_large_changes() {
         let start = Instant::now();
         let pose = WorldPose { position: DVec3::ZERO, rotation: math::Quat::IDENTITY };
         let mut camera = FollowCamera::default();
@@ -395,7 +395,7 @@ mod tests {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
-    fn picked_focus_detaches_and_escape_returns_to_follow() {
+    fn pick_detaches_escape_returns() {
         let mut mode = CameraMode::Follow;
         mode.detach_for_focus();
         assert_eq!(mode, CameraMode::Free);
@@ -420,7 +420,7 @@ mod tests {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
-    fn egui_captured_movement_does_not_return_to_follow() {
+    fn captured_movement_stays_free() {
         let mut mode = CameraMode::Free;
         let mut controls = HeldControls::default();
 
@@ -431,7 +431,7 @@ mod tests {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
-    fn flight_run_and_stop_keys_return_to_follow() {
+    fn action_keys_return_to_follow() {
         use winit::keyboard::NamedKey;
 
         for key in [Key::Character("f".into()), Key::Character("r".into()), Key::Named(NamedKey::Space)] {
@@ -447,7 +447,7 @@ mod tests {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
-    fn movement_key_release_does_not_change_camera_mode() {
+    fn key_release_keeps_mode() {
         use crate::agent_movement::input::MovementKey;
 
         let mut mode = CameraMode::Free;
@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn detaching_from_follow_preserves_the_live_view() {
+    fn detach_preserves_view() {
         let pose = WorldPose { position: DVec3::new(1280.0, -256.0, 45.0), rotation: math::Quat::from_rotation_z(0.7) };
         let now = Instant::now();
         let follow = FollowCamera::scene_camera(pose, [1280, 720], 512.0, 1.5).expect("valid follow camera");

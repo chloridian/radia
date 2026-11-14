@@ -90,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_deadlines_keep_cadence_and_skip_missed_refreshes() {
+    fn deadline_keeps_cadence_skips_missed() {
         let start = Instant::now();
         let interval = Duration::from_millis(16);
         assert_eq!(next_frame_deadline(start, start + Duration::from_millis(5), interval), start + interval);
@@ -99,7 +99,7 @@ mod tests {
     }
 
     #[test]
-    fn display_refresh_period_uses_millihertz_and_a_fallback() {
+    fn refresh_uses_millihertz_with_fallback() {
         let fallback = Duration::from_micros(16_667);
         assert_eq!(refresh_interval(Some(60_000), fallback), Duration::from_nanos(16_666_666));
         assert_eq!(refresh_interval(Some(144_000), fallback), Duration::from_nanos(6_944_444));
@@ -108,7 +108,7 @@ mod tests {
     }
 
     #[test]
-    fn background_animation_is_capped_without_delaying_movement_stop() {
+    fn background_cap_spares_movement() {
         let refresh = Duration::from_nanos(6_944_444);
         let slow_refresh = Duration::from_millis(33);
         assert_eq!(redraw_interval(refresh, false, false), Duration::from_micros(16_667));

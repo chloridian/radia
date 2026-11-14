@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn end_before_viewport_ready_rejects_ready(cx: &mut gpui::TestAppContext) {
+    fn early_end_rejects_ready(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             cx.set_quit_mode(gpui::QuitMode::Explicit);
             install_lifecycle(Arc::new(crate::gui::SessionLifecycle::default()), cx);
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn close_during_start_discards_late_ready(cx: &mut gpui::TestAppContext) {
+    fn close_discards_late_ready(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             cx.set_quit_mode(gpui::QuitMode::Explicit);
             install_lifecycle(Arc::new(crate::gui::SessionLifecycle::default()), cx);

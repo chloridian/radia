@@ -1444,7 +1444,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn input_and_close_progress_during_initialization() {
+    async fn init_allows_input_and_close() {
         let (_gate_sender, gate_receiver) = oneshot::channel();
         let (started_sender, started_receiver) = oneshot::channel();
         let (dropped_sender, dropped_receiver) = oneshot::channel();
@@ -1550,7 +1550,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn close_retires_send_racing_receiver_drop_once() {
+    async fn close_retires_dropped_receiver_once() {
         let barrier = Arc::new(Barrier::new(2));
         let init_barrier = Arc::clone(&barrier);
         let retirements = Arc::new(AtomicUsize::new(0));
@@ -1572,7 +1572,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn late_completion_stays_out_of_replacement() {
+    async fn late_completion_skips_replacement() {
         let (gate_sender, gate_receiver) = oneshot::channel();
         let (started_sender, started_receiver) = oneshot::channel();
         let (wake_sender, wake_receiver) = oneshot::channel();
@@ -1644,7 +1644,7 @@ mod tests {
     }
 
     #[test]
-    fn environment_deadline_only_invalidates_after_it_passes() {
+    fn deadline_invalidates_only_after_passing() {
         let now = Instant::now();
         let deadline = now + Duration::from_millis(16);
         assert!(!deadline_passed(Some(deadline), now));

@@ -195,7 +195,7 @@ mod tests {
     };
 
     #[test]
-    fn restored_size_respects_minimum_and_maximum_dimensions() {
+    fn restored_size_is_clamped() {
         assert_eq!(
             clamp_size(StoredWindowSize { width: 200, height: MAX_WINDOW_DIMENSION + 1 }, StoredWindowSize { width: 640, height: 400 }),
             StoredWindowSize { width: 640, height: MAX_WINDOW_DIMENSION }
@@ -220,14 +220,14 @@ mod tests {
     }
 
     #[test]
-    fn old_size_entries_without_positions_still_deserialize() {
+    fn legacy_size_entries_deserialize() {
         let geometry: StoredWindowGeometry = serde_json::from_str(r#"{"width":720,"height":480}"#).unwrap();
         assert_eq!(geometry.size(), StoredWindowSize { width: 720, height: 480 });
         assert_eq!(geometry.origin(), None);
     }
 
     #[test]
-    fn saved_position_is_usable_when_its_titlebar_is_visible() {
+    fn visible_titlebar_keeps_position() {
         let display = Bounds { origin: Point { x: px(0.), y: px(0.) }, size: size(px(1920.), px(1080.)) };
         let window = Bounds { origin: Point { x: px(1820.), y: px(10.) }, size: size(px(900.), px(640.)) };
 
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn off_screen_saved_position_can_be_centered_back_on_a_display() {
+    fn offscreen_position_is_recentered() {
         let display = Bounds { origin: Point { x: px(0.), y: px(0.) }, size: size(px(1920.), px(1080.)) };
         let restored = center_on_display(size(px(900.), px(640.)), display);
 

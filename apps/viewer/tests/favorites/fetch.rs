@@ -125,7 +125,7 @@ fn landmark_asset_parsed() {
 }
 
 #[test]
-fn landmark_asset_request_failure_rejects_partial_results() {
+fn asset_failure_rejects_partial_results() {
     const ASSET_COUNT: usize = 16;
 
     let runtime = Runtime::new().expect("create local Tokio runtime");
@@ -182,7 +182,7 @@ fn malformed_landmark_preserves_valid_peer() {
 }
 
 #[test]
-fn landmark_fetches_overlap_and_keep_folder_order() {
+fn landmark_fetches_overlap_in_order() {
     const ASSET_COUNT: usize = 16;
 
     let runtime = Runtime::new().expect("create local Tokio runtime");
