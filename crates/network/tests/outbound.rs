@@ -4,7 +4,7 @@ use protocol::messages::{
 };
 
 #[test]
-fn supported_messages_implement_the_send_contract() {
+fn messages_implement_send_contract() {
     fn outbound<T: OutboundMessage>() {}
 
     outbound::<AgentUpdate>();

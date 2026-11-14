@@ -8,7 +8,7 @@ use crate::{
 };
 
 #[test]
-fn full_neighbor_queue_reports_backlog_without_closing() {
+fn full_queue_reports_backlog() {
     let (events, receiver) = mpsc::channel(1);
     events.try_send(SimulatorEvent::Simulator(Event::Failed("hold event".into()).into())).expect("fill application event channel");
     let mut pending = VecDeque::with_capacity(MAX_QUEUED_SIMULATOR_EVENTS);

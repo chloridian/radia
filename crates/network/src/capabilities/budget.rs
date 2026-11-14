@@ -100,7 +100,7 @@ mod tests {
     use super::spawn_blocking_with_permit;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cancellation_keeps_permit_until_blocking_work_finishes() {
+    async fn cancel_holds_permits_until_done() {
         let slots = Arc::new(Semaphore::new(1));
         let bodies = Arc::new(Semaphore::new(1));
         let permit = Arc::clone(&slots).acquire_owned().await.expect("request slot");

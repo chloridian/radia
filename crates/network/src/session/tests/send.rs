@@ -141,7 +141,7 @@ async fn disconnect_waits() {
 }
 
 #[tokio::test]
-async fn dropping_send_future_keeps_the_admitted_command() {
+async fn dropped_send_keeps_command() {
     use std::{
         future::Future,
         pin::pin,
@@ -200,7 +200,7 @@ async fn targeted_send_full() {
 }
 
 #[tokio::test]
-async fn sends_are_rejected_after_disconnect_begins() {
+async fn sends_rejected_after_disconnect() {
     let (commands, mut command_receiver) = mpsc::channel(2);
     let (disconnect_requested, _) = watch::channel(false);
     let handle = targeted_send_handle(commands, disconnect_requested);
@@ -230,7 +230,7 @@ async fn targeted_send_target_closed() {
 }
 
 #[tokio::test]
-async fn targeted_send_resolves_when_session_closes() {
+async fn targeted_send_resolves_on_close() {
     let (commands, mut command_receiver) = mpsc::channel(1);
     let (disconnect_signal, _) = watch::channel(false);
     let handle = targeted_send_handle(commands, disconnect_signal.clone());
@@ -271,7 +271,7 @@ async fn targeted_send_reports_finished_worker() {
 }
 
 #[test]
-fn outbound_chat_limit_precedes_queue_admission() {
+fn chat_limit_precedes_admission() {
     let (commands, mut command_receiver) = mpsc::channel(1);
     let (disconnect_requested, _) = watch::channel(false);
     let handle = targeted_send_handle(commands.clone(), disconnect_requested);
@@ -301,7 +301,7 @@ fn outbound_chat_limit_precedes_queue_admission() {
 }
 
 #[tokio::test]
-async fn object_request_limit_precedes_targeted_queue_admission() {
+async fn object_limit_precedes_admission() {
     let (commands, mut command_receiver) = mpsc::channel(1);
     let (disconnect_requested, _) = watch::channel(false);
     let handle = targeted_send_handle(commands.clone(), disconnect_requested);
@@ -326,7 +326,7 @@ async fn object_request_limit_precedes_targeted_queue_admission() {
 }
 
 #[tokio::test]
-async fn object_request_at_limit_is_accepted() {
+async fn object_request_at_limit_accepted() {
     let (commands, mut command_receiver) = mpsc::channel(1);
     let (disconnect_requested, _) = watch::channel(false);
     let handle = targeted_send_handle(commands, disconnect_requested);
@@ -344,7 +344,7 @@ async fn object_request_at_limit_is_accepted() {
 }
 
 #[tokio::test]
-async fn oversized_sends_are_rejected_before_admission() {
+async fn session_rejects_oversized_sends() {
     let (commands, mut command_receiver) = mpsc::channel(1);
     let (disconnect_requested, _) = watch::channel(false);
     let handle = targeted_send_handle(commands.clone(), disconnect_requested);

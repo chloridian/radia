@@ -165,7 +165,7 @@ async fn explicit_accept_header_is_sent() {
 }
 
 #[tokio::test]
-async fn range_get_distinguishes_partial_and_full_responses() {
+async fn range_distinguishes_partial_full() {
     let server =
         LocalServer::start(vec![byte_response(206, &[("Content-Range", "bytes 2-5/10")], b"part"), byte_response(200, &[], b"whole")]);
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
@@ -195,7 +195,7 @@ async fn range_get_distinguishes_partial_and_full_responses() {
 }
 
 #[tokio::test]
-async fn range_redirect_preserves_viewer_asset_policy_and_bound() {
+async fn range_redirect_keeps_asset_policy() {
     let server = LocalServer::start(vec![
         byte_response(302, &[("Location", "/redirected")], b""),
         byte_response(206, &[("Content-Range", "bytes 0-1/4")], b"ok"),
@@ -222,7 +222,7 @@ async fn range_redirect_preserves_viewer_asset_policy_and_bound() {
 }
 
 #[tokio::test]
-async fn ignored_range_stays_within_response_limit() {
+async fn ignored_range_respects_limit() {
     let server = LocalServer::start(vec![byte_response(200, &[], b"whole")]);
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
     let url = CapabilityUrl::parse(server.url("/resource").as_str()).expect("valid capability URL");
@@ -236,7 +236,7 @@ async fn ignored_range_stays_within_response_limit() {
 }
 
 #[tokio::test]
-async fn ignored_range_chunked_body_stays_within_response_limit() {
+async fn ignored_range_chunked_respects_limit() {
     let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nwhole\r\n0\r\n\r\n".to_vec();
     let server = LocalServer::start(vec![response]);
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
@@ -251,7 +251,7 @@ async fn ignored_range_chunked_body_stays_within_response_limit() {
 }
 
 #[tokio::test]
-async fn invalid_content_range_is_rejected_and_unknown_total_is_reported() {
+async fn invalid_content_range_rejected() {
     let server = LocalServer::start(vec![
         byte_response(206, &[("Content-Range", "bytes 0-1/1")], b"no"),
         byte_response(206, &[("Content-Range", "bytes 0-1/*")], b"ok"),
@@ -277,7 +277,7 @@ async fn invalid_content_range_is_rejected_and_unknown_total_is_reported() {
 }
 
 #[tokio::test]
-async fn capability_clients_share_the_session_http_connection_pool() {
+async fn clients_share_connection_pool() {
     let listener = net::TcpListener::bind("127.0.0.1:0").await.expect("bind local HTTP listener");
     let address = listener.local_addr().expect("read listener address");
     let server = spawn(async move {
@@ -440,7 +440,7 @@ async fn discovered_urls_are_opaque() {
 }
 
 #[tokio::test]
-async fn get_and_post_return_llsd_values_for_consumer_conversion() {
+async fn get_post_return_llsd_values() {
     #[derive(Debug, Eq, PartialEq)]
     struct Reply {
         count: i32,
@@ -473,7 +473,7 @@ async fn get_and_post_return_llsd_values_for_consumer_conversion() {
 }
 
 #[tokio::test]
-async fn patch_and_delete_send_bounded_llsd_requests_and_preserve_gone_status() {
+async fn patch_delete_preserve_gone() {
     #[derive(Serialize)]
     struct Rename {
         name: &'static str,
@@ -507,7 +507,7 @@ async fn patch_and_delete_send_bounded_llsd_requests_and_preserve_gone_status() 
 }
 
 #[tokio::test]
-async fn raw_body_limits_apply_to_declared_and_unknown_lengths() {
+async fn raw_body_limits_enforced() {
     let server = LocalServer::start(vec![
         response(200, "OK", "application/octet-stream", None, "12345"),
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\n123\r\n3\r\n456\r\n0\r\n\r\n".to_vec(),
@@ -536,7 +536,7 @@ async fn raw_body_limits_apply_to_declared_and_unknown_lengths() {
 }
 
 #[tokio::test]
-async fn full_capability_get_rejects_partial_content() {
+async fn full_get_rejects_partial_content() {
     let server = LocalServer::start(vec![response(206, "Partial Content", "application/octet-stream", None, "partial")]);
     let client = Client::new(server.url("/seed")).unwrap();
     let url = CapabilityUrl::parse(server.url("/resource").as_str()).unwrap();
@@ -549,7 +549,7 @@ async fn full_capability_get_rejects_partial_content() {
 }
 
 #[test]
-fn asset_directory_urls_preserve_opaque_path_and_query() {
+fn asset_urls_preserve_opaque_parts() {
     let url = CapabilityUrl::parse("https://example.test/cap%2Ftoken?grant=opaque")
         .unwrap()
         .with_trailing_slash()
@@ -559,7 +559,7 @@ fn asset_directory_urls_preserve_opaque_path_and_query() {
 }
 
 #[test]
-fn capability_path_segments_are_appended_and_encoded() {
+fn path_segments_are_encoded() {
     let url = CapabilityUrl::parse("https://example.test/cap%2Ftoken?grant=opaque")
         .expect("valid capability URL")
         .with_path_segments(&["category", "id/with slash", "children"])
@@ -569,7 +569,7 @@ fn capability_path_segments_are_appended_and_encoded() {
 }
 
 #[tokio::test]
-async fn post_uses_response_limit_for_decode() {
+async fn post_decodes_at_limit() {
     let body = "<llsd><string>media</string></llsd>";
     let server = LocalServer::start(vec![llsd_response(body)]);
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
@@ -583,7 +583,7 @@ async fn post_uses_response_limit_for_decode() {
 }
 
 #[tokio::test]
-async fn post_rejects_oversized_response_before_reading() {
+async fn post_rejects_over_limit_response() {
     const RESPONSE_LIMIT: usize = 32;
 
     let server = LocalServer::start(vec![content_length_only_response(RESPONSE_LIMIT + 1)]);
@@ -603,7 +603,7 @@ async fn post_rejects_oversized_response_before_reading() {
 }
 
 #[tokio::test]
-async fn post_rejects_invalid_limits_without_sending() {
+async fn post_invalid_limits_send_nothing() {
     let server = LocalServer::start(vec![]);
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
     let url = CapabilityUrl::parse(server.url("/object-media").as_str()).expect("valid capability URL");
@@ -616,7 +616,7 @@ async fn post_rejects_invalid_limits_without_sending() {
 }
 
 #[tokio::test]
-async fn large_valid_capability_value_is_decoded_with_llsd_limits() {
+async fn large_llsd_value_decodes() {
     const PAYLOAD_BYTES: usize = 1024 * 1024;
 
     let payload = "x".repeat(PAYLOAD_BYTES);
@@ -633,7 +633,7 @@ async fn large_valid_capability_value_is_decoded_with_llsd_limits() {
 }
 
 #[tokio::test]
-async fn ordinary_post_is_not_replayed_after_a_server_error() {
+async fn post_is_not_retried() {
     let server = LocalServer::start(vec![response(503, "Service Unavailable", "text/plain", Some("0"), "try again")]);
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
     let url = CapabilityUrl::parse(server.url("/side-effect").as_str()).expect("valid capability URL");
@@ -690,7 +690,7 @@ async fn empty_grants() {
 }
 
 #[tokio::test]
-async fn oversized_declared_seed_body_is_rejected_before_reading() {
+async fn declared_seed_oversize_rejected() {
     let server = LocalServer::start(vec![content_length_only_response(MAX_SEED_CAPABILITY_RESPONSE_BYTES + 1)]);
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
 
@@ -704,7 +704,7 @@ async fn oversized_declared_seed_body_is_rejected_before_reading() {
 }
 
 #[tokio::test]
-async fn oversized_declared_capability_body_is_rejected_before_reading() {
+async fn declared_capability_oversize_rejected() {
     let server = LocalServer::start(vec![content_length_only_response(MAX_CAPABILITY_RESPONSE_BYTES + 1)]);
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
 

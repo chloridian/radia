@@ -422,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn application_credit_is_released_at_viewer_channel_handoff() {
+    fn credit_releases_at_channel_handoff() {
         let credits = Arc::new(Semaphore::new(1));
         let permit = Arc::clone(&credits).try_acquire_owned().expect("admit one application event");
         let mut event = EventEnvelope::new(application_event(0));
