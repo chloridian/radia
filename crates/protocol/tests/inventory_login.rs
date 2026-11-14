@@ -29,7 +29,7 @@ fn parses_personal_and_library_skeletons() {
 }
 
 #[test]
-fn malformed_entries_are_counted_and_skipped() {
+fn skipped_entries_are_counted() {
     let data = response_data(include_str!("fixtures/inventory_login_malformed.xml"));
 
     let bootstrap = data.inventory_bootstrap().expect("skeleton entries are independently rejected");

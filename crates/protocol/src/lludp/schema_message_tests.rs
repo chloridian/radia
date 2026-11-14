@@ -222,7 +222,7 @@ fn missing_fields_zero_fill() {
 }
 
 #[test]
-fn explicit_zero_differs_from_compatibility_fill() {
+fn explicit_zero_differs_from_fill() {
     let supplied = SchemaMessage::decode(&COMPAT_SCHEMA, &[0x11, 0, 0]).expect("decode explicitly supplied zero");
     let omitted = SchemaMessage::decode(&COMPAT_SCHEMA, &[0x11]).expect("decode omitted compatibility fields");
 
@@ -299,7 +299,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
-    fn repeated_fixed_field_preflight_covers_schema_expansion(count in any::<u8>(), available in 0usize..=8192) {
+    fn repeated_fixed_bound_covers_decode(count in any::<u8>(), available in 0usize..=8192) {
         let mut payload = Vec::with_capacity(1 + available);
         payload.push(count);
         payload.resize(1 + available, 0x5a);
@@ -313,7 +313,7 @@ proptest! {
     }
 
     #[test]
-    fn variable_field_preflight_checks_declared_lengths(declared in 0u16..=u16::MAX, available in 0usize..=1024) {
+    fn variable_bound_checks_lengths(declared in 0u16..=u16::MAX, available in 0usize..=1024) {
         let mut payload = declared.to_le_bytes().to_vec();
         payload.resize(2 + available, 0xa5);
 
@@ -333,7 +333,7 @@ proptest! {
 }
 
 #[test]
-fn generated_schema_bounds_fit_packet_limit() {
+fn schema_bounds_fit_packet_limit() {
     for schema in schema::MESSAGES {
         let mut bytes = schema.blocks.len() * size_of::<BlockValues>() + 64 * 1024;
         for block in schema.blocks {

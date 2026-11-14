@@ -156,7 +156,7 @@ mod tests {
     use super::decode_quantized;
 
     #[test]
-    fn quantized_values_within_one_step_of_zero_snap_to_zero() {
+    fn near_zero_snaps_to_zero() {
         assert_eq!(decode_quantized(32_767, -64.0, 64.0), 0.0);
         assert_eq!(decode_quantized(32_768, -64.0, 64.0), 0.0);
         assert!(decode_quantized(32_766, -64.0, 64.0) < 0.0);
