@@ -103,6 +103,7 @@ pub struct Stats {
     pub item_order_items: usize,
     pub candidate_items_visited: usize,
     pub mesh_demand_items_visited: usize,
+    pub mesh_admission_items_visited: usize,
     pub mesh_demand_order_updates: usize,
     pub mesh_upload_attempts: usize,
     pub mesh_upload_attempt_bytes: usize,
@@ -121,6 +122,10 @@ pub struct Stats {
     pub gpu_mesh_retirements: usize,
     pub gpu_mesh_retired_bytes: usize,
     pub rebuild_pending: bool,
+    #[cfg(test)]
+    pub(crate) layout_stale_reason: Option<&'static str>,
+    #[cfg(test)]
+    pub(crate) layout_invalidation_reason: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -302,6 +307,7 @@ pub(crate) struct GeometryRenderer {
     regions: Vec<RegionBounds>,
     motion_redraw: bool,
     layout_required: bool,
+    replacement_retry_pending: bool,
     epoch: u64,
     prepared: Option<FramePreparation>,
     applied_agent: Option<Uuid>,
@@ -375,6 +381,7 @@ impl GeometryRenderer {
             regions: Vec::new(),
             motion_redraw: false,
             layout_required: false,
+            replacement_retry_pending: false,
             epoch: 0,
             prepared: None,
             applied_agent: None,
@@ -419,6 +426,7 @@ impl GeometryRenderer {
         self.placements.clear();
         self.future_placements.clear();
         self.layout_required = false;
+        self.replacement_retry_pending = false;
         if let Some(agent_id) = self.applied_agent.take() {
             self.restore_agent_pose(agent_id);
         }
@@ -433,7 +441,6 @@ impl GeometryRenderer {
         self.cache.visible.clear();
         self.cache.next_visible.clear();
         self.cache.clear_mesh_demands();
-        self.cache.mesh_ready.clear();
         self.pending_meshes.clear();
         for (_, item) in self.cache.items.iter_mut() {
             for face in &mut item.faces {

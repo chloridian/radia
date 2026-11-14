@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use wgpu::{CommandEncoder, Device, Queue, TextureFormat};
 
 use crate::{
@@ -27,6 +29,10 @@ impl GeometryPrepare {
 
     pub fn stats(&self) -> Stats {
         self.0.stats
+    }
+
+    pub fn needs_frame(&self, now: Instant) -> bool {
+        self.0.needs_frame(now)
     }
 
     pub fn next_texture_job(&mut self) -> Option<TextureJob> {

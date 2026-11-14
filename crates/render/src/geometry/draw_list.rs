@@ -2,7 +2,6 @@ use std::{
     cmp::Ordering,
     collections::{BinaryHeap, HashMap, HashSet},
     hash::Hash,
-    mem::size_of,
     ops::Range,
     sync::Arc,
     time::{Duration, Instant},
@@ -23,7 +22,7 @@ use super::{
 };
 use crate::{
     pipeline::{INSTANCE_BYTES, Pipeline},
-    scene::{Camera, MeshId, SceneView, VisibilityVersion},
+    scene::{Camera, MeshId},
     texture::TextureKey,
 };
 
@@ -35,7 +34,6 @@ const MAX_LAYOUT_UPLOAD_RANGES: usize = 256;
 const MAX_PATCH_GAP_SLOTS: u32 = 4;
 const LAYOUT_ITEMS_PER_FRAME: usize = 1_024;
 const RETIRED_LAYOUT_ENTRIES_PER_FRAME: usize = 256;
-const RETIRED_LAYOUT_BYTES_PER_FRAME: usize = 1024 * 1024;
 const LAYOUT_BYTES_PER_FRAME: usize = 8 * 1024 * 1024;
 const LAYOUT_TIME_PER_FRAME: Duration = Duration::from_millis(1);
 
@@ -290,6 +288,7 @@ struct BlendedFace {
     item: ItemIndex,
     face: usize,
     group: u32,
+    slot: u32,
 }
 
 #[derive(Default)]
@@ -349,7 +348,6 @@ struct LayoutBuild {
     selected_items: HashSet<ItemIndex>,
     phase: LayoutPhase,
     camera: Camera,
-    visibility_version: VisibilityVersion,
     item_cursor: usize,
     face_cursor: usize,
     item_has_slot: bool,
@@ -396,14 +394,7 @@ enum LayoutPhase {
 }
 
 impl LayoutBuild {
-    fn new(
-        previous: &[ItemIndex],
-        visible: &[ItemIndex],
-        camera: Camera,
-        visibility_version: VisibilityVersion,
-        retire_previous: bool,
-        items: &ItemSlab,
-    ) -> Self {
+    fn new(previous: &[ItemIndex], visible: &[ItemIndex], camera: Camera, retire_previous: bool, items: &ItemSlab) -> Self {
         Self {
             state: LayoutState::default(),
             previous: if retire_previous { previous.to_vec() } else { Vec::new() },
@@ -413,7 +404,6 @@ impl LayoutBuild {
             selected_items: HashSet::new(),
             phase: if retire_previous { LayoutPhase::RetirePrevious } else { LayoutPhase::CountVisible },
             camera,
-            visibility_version,
             item_cursor: 0,
             face_cursor: 0,
             item_has_slot: false,
@@ -446,36 +436,10 @@ impl LayoutBuild {
 
     fn retired(&self) -> bool {
         let state = &self.state;
-        self.previous.is_empty()
-            && self.visible.is_empty()
-            && self.mesh_pins.is_empty()
-            && self.layout_items.is_empty()
-            && self.selected_items.is_empty()
-            && self.batch_seen.is_empty()
-            && self.group_limits.is_empty()
-            && self.priority.is_empty()
-            && self.blended.is_empty()
-            && state.draws.is_empty()
-            && state.mesh_references.is_empty()
-            && state.instance_bytes.is_empty()
-            && state.active_groups.is_empty()
+        state.draw_group_refs.is_empty()
             && state.active_textures.is_empty()
             && state.active_terrain.is_empty()
-            && state.texture_seen.is_empty()
-            && state.terrain_seen.is_empty()
-            && state.group_counts.is_empty()
-            && state.group_offsets.is_empty()
-            && state.group_cursors.is_empty()
-            && state.layout_items.is_empty()
-            && state.priority_items.is_empty()
-            && state.draw_group_refs.is_empty()
-            && state.draw_group_seen.is_empty()
-            && state.blended.is_empty()
-            && state.dirty_slots.is_empty()
-            && state.batch_order.is_empty()
             && state.draw_batches.is_empty()
-            && state.indirect_bytes.is_empty()
-            && state.first_instances.is_empty()
     }
 }
 
@@ -534,53 +498,14 @@ pub(super) struct LayoutState {
     draw_batches: Vec<DrawBatch>,
     indirect_bytes: Vec<u8>,
     first_instances: Vec<u32>,
+    blended_batches: usize,
+    blended_commands: usize,
 }
 
-struct LayoutRetirementBudget {
-    entries: usize,
-    bytes: usize,
-}
-
-impl LayoutRetirementBudget {
-    fn take(&mut self, bytes: usize) -> bool {
-        if self.entries == 0 || bytes > self.bytes {
-            return false;
-        }
-        self.entries -= 1;
-        self.bytes -= bytes;
-        true
+fn retire_vec<T>(values: &mut Vec<T>, budget: &mut usize) {
+    while *budget > 0 && values.pop().is_some() {
+        *budget -= 1;
     }
-}
-
-fn retire_vec<T>(values: &mut Vec<T>, budget: &mut LayoutRetirementBudget) {
-    while !values.is_empty() && budget.take(size_of::<T>().max(1)) {
-        values.pop();
-    }
-}
-
-fn retire_set<T: Copy + Eq + Hash>(values: &mut HashSet<T>, budget: &mut LayoutRetirementBudget) {
-    while let Some(value) = values.iter().next().copied() {
-        if !budget.take(size_of::<T>().max(1)) {
-            break;
-        }
-        values.remove(&value);
-    }
-}
-
-fn retire_heap<T: Ord>(values: &mut BinaryHeap<T>, budget: &mut LayoutRetirementBudget) {
-    while !values.is_empty() && budget.take(size_of::<T>().max(1)) {
-        values.pop();
-    }
-}
-
-fn retire_bytes(values: &mut Vec<u8>, budget: &mut LayoutRetirementBudget) {
-    let bytes = values.len().min(budget.bytes);
-    if bytes == 0 || budget.entries == 0 {
-        return;
-    }
-    values.truncate(values.len() - bytes);
-    budget.entries -= 1;
-    budget.bytes -= bytes;
 }
 
 #[derive(Default)]
@@ -614,6 +539,8 @@ pub(super) struct DrawList {
     draw_batches: Vec<DrawBatch>,
     indirect_bytes: Vec<u8>,
     first_instances: Vec<u32>,
+    blended_batches: usize,
+    blended_commands: usize,
     batches_dirty: bool,
     pending: Option<LayoutBuild>,
     retired: Option<LayoutBuild>,
@@ -621,22 +548,14 @@ pub(super) struct DrawList {
 }
 
 impl DrawList {
-    pub(super) fn request_layout(
-        &mut self,
-        visible: &[ItemIndex],
-        camera: Camera,
-        visibility_version: VisibilityVersion,
-        retire_previous: bool,
-        items: &ItemSlab,
-    ) -> bool {
-        if let Some(build) = self.pending.as_mut() {
-            build.stale = true;
-            return true;
+    pub(super) fn request_layout(&mut self, visible: &[ItemIndex], camera: Camera, retire_previous: bool, items: &ItemSlab) -> bool {
+        if self.pending.is_some() {
+            return false;
         }
         if self.retired.is_some() {
             return false;
         }
-        self.pending = Some(LayoutBuild::new(&self.layout_items, visible, camera, visibility_version, retire_previous, items));
+        self.pending = Some(LayoutBuild::new(&self.layout_items, visible, camera, retire_previous, items));
         true
     }
 
@@ -650,8 +569,55 @@ impl DrawList {
     }
 
     #[cfg(test)]
+    pub(super) fn committed_items(&self) -> &[ItemIndex] {
+        &self.layout_items
+    }
+
+    #[cfg(test)]
+    pub(super) fn blended_order(&self) -> Vec<u32> {
+        self.draws.get(self.opaque_draws..).unwrap_or_default().iter().map(|draw| draw.first).collect()
+    }
+
+    #[cfg(test)]
     pub(super) fn staged_draw_count(&self) -> usize {
         self.pending.as_ref().map_or(0, |build| build.state.draws.len())
+    }
+
+    #[cfg(test)]
+    pub(super) fn staged_progress(&self) -> Option<(&'static str, usize, usize, usize, usize, usize, usize)> {
+        let build = self.pending.as_ref()?;
+        let phase = match build.phase {
+            LayoutPhase::RetirePrevious => "retire_previous",
+            LayoutPhase::CountVisible => "count_visible",
+            LayoutPhase::ClearInitialCounts => "clear_initial_counts",
+            LayoutPhase::Priority => "priority",
+            LayoutPhase::Select => "select",
+            LayoutPhase::CountSelected => "count_selected",
+            LayoutPhase::HideOmitted => "hide_omitted",
+            LayoutPhase::Commands => "commands",
+            LayoutPhase::Allocate => "allocate",
+            LayoutPhase::Fill => "fill",
+            LayoutPhase::EmitBlended => "emit_blended",
+            LayoutPhase::ClearFinalCounts => "clear_final_counts",
+            LayoutPhase::BatchOpaque => "batch_opaque",
+            LayoutPhase::BatchOpaqueEncode => "batch_opaque_encode",
+            LayoutPhase::BatchBlended => "batch_blended",
+            LayoutPhase::Commit => "commit",
+        };
+        Some((
+            phase,
+            build.item_cursor,
+            build.face_cursor,
+            build.visible.len(),
+            build.layout_items.len(),
+            build.items_visited,
+            build.faces_visited,
+        ))
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_stale(&self) -> bool {
+        self.pending.as_ref().is_some_and(|build| build.stale)
     }
 
     pub(super) fn cancel_layout(&mut self) {
@@ -664,6 +630,18 @@ impl DrawList {
 
     pub(super) fn layout_pending(&self) -> bool {
         self.pending.is_some() || self.retired.is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn layout_queues(&self) -> (bool, bool) {
+        (self.pending.is_some(), self.retired.is_some())
+    }
+
+    #[cfg(test)]
+    pub(super) fn retired_entries_remaining(&self) -> usize {
+        let Some(build) = self.retired.as_ref() else { return 0 };
+        let state = &build.state;
+        state.draw_group_refs.len() + state.active_textures.len() + state.active_terrain.len() + state.draw_batches.len()
     }
 
     pub(super) fn layout_building(&self) -> bool {
@@ -682,7 +660,6 @@ impl DrawList {
 
     pub(super) fn advance_layout(
         &mut self,
-        view: &SceneView,
         items: &mut ItemSlab,
         meshes: &HashMap<MeshId, GpuMesh>,
         indirect_first_instance: bool,
@@ -692,7 +669,7 @@ impl DrawList {
             return None;
         }
         let mut build = self.pending.take()?;
-        if build.stale || build.visibility_version != view.visibility_version() {
+        if build.stale {
             self.retired = Some(build);
             return Some(LayoutProgress { stats: LayoutStats::default(), complete: false, stale: true, commit_ms: 0.0 });
         }
@@ -994,6 +971,7 @@ impl DrawList {
                             item: index,
                             face: face_index,
                             group: face.group,
+                            slot: 0,
                         });
                     } else {
                         let group = face.group as usize;
@@ -1057,7 +1035,7 @@ impl DrawList {
                     };
                     let blend_index = build.blend_index;
                     build.blend_index += 1;
-                    build.state.blended.push(blended);
+                    build.state.blended.push(BlendedFace { slot, ..blended });
                     let start = slot as usize * INSTANCE_BYTES;
                     let old = self.instance_bytes.get(start..start + INSTANCE_BYTES);
                     build.state.instance_bytes.extend_from_slice(&item.transform);
@@ -1125,6 +1103,8 @@ impl DrawList {
                     if build.batch_order_cursor >= build.state.batch_order.len() {
                         build.batch_cursor = build.state.opaque_draws;
                         build.blended_batch_start = build.state.draw_batches.len();
+                        build.state.blended_batches = build.state.draw_batches.len();
+                        build.state.blended_commands = build.state.first_instances.len();
                         build.phase = LayoutPhase::BatchBlended;
                         continue;
                     }
@@ -1273,53 +1253,23 @@ impl DrawList {
         std::mem::swap(&mut self.draw_batches, &mut state.draw_batches);
         std::mem::swap(&mut self.indirect_bytes, &mut state.indirect_bytes);
         std::mem::swap(&mut self.first_instances, &mut state.first_instances);
+        std::mem::swap(&mut self.blended_batches, &mut state.blended_batches);
+        std::mem::swap(&mut self.blended_commands, &mut state.blended_commands);
         self.hidden_slots.clear();
         self.batches_dirty = false;
     }
 
     fn retire_layout_step(&mut self) {
         let Some(build) = self.retired.as_mut() else { return };
-        let mut budget = LayoutRetirementBudget { entries: RETIRED_LAYOUT_ENTRIES_PER_FRAME, bytes: RETIRED_LAYOUT_BYTES_PER_FRAME };
-        while budget.entries > 0 && budget.bytes > 0 {
-            if build.retired() {
-                break;
-            }
-            if let Some(group) = build.state.draw_group_refs.last().copied() {
-                if !budget.take(size_of::<u32>()) {
-                    break;
-                }
-                build.state.draw_group_refs.pop();
+        let mut budget = RETIRED_LAYOUT_ENTRIES_PER_FRAME;
+        while budget > 0 && !build.retired() {
+            if let Some(group) = build.state.draw_group_refs.pop() {
                 self.groups.release(group);
+                budget -= 1;
             } else {
                 retire_vec(&mut build.state.active_textures, &mut budget);
                 retire_vec(&mut build.state.active_terrain, &mut budget);
                 retire_vec(&mut build.state.draw_batches, &mut budget);
-                retire_vec(&mut build.state.draws, &mut budget);
-                retire_set(&mut build.state.mesh_references, &mut budget);
-                retire_bytes(&mut build.state.instance_bytes, &mut budget);
-                retire_vec(&mut build.state.active_groups, &mut budget);
-                retire_set(&mut build.state.texture_seen, &mut budget);
-                retire_set(&mut build.state.terrain_seen, &mut budget);
-                retire_vec(&mut build.state.group_counts, &mut budget);
-                retire_vec(&mut build.state.group_offsets, &mut budget);
-                retire_vec(&mut build.state.group_cursors, &mut budget);
-                retire_vec(&mut build.state.layout_items, &mut budget);
-                retire_vec(&mut build.state.priority_items, &mut budget);
-                retire_set(&mut build.state.draw_group_seen, &mut budget);
-                retire_vec(&mut build.state.blended, &mut budget);
-                retire_vec(&mut build.state.dirty_slots, &mut budget);
-                retire_vec(&mut build.state.batch_order, &mut budget);
-                retire_bytes(&mut build.state.indirect_bytes, &mut budget);
-                retire_vec(&mut build.state.first_instances, &mut budget);
-                retire_vec(&mut build.previous, &mut budget);
-                retire_vec(&mut build.visible, &mut budget);
-                retire_set(&mut build.mesh_pins, &mut budget);
-                retire_vec(&mut build.layout_items, &mut budget);
-                retire_set(&mut build.selected_items, &mut budget);
-                retire_set(&mut build.batch_seen, &mut budget);
-                retire_vec(&mut build.group_limits, &mut budget);
-                retire_heap(&mut build.priority, &mut budget);
-                retire_heap(&mut build.blended, &mut budget);
             }
         }
         if self.retired.as_ref().is_some_and(LayoutBuild::retired) {
@@ -1461,12 +1411,18 @@ impl DrawList {
             faces_visited = faces_visited.saturating_add(item.faces.len());
             for (face_index, face) in item.faces.iter_mut().enumerate() {
                 if face.blended {
+                    let Ok(slot) = u32::try_from(self.opaque_instances.saturating_add(self.blended.len())) else { continue };
+                    face.slot = Some(slot);
+                    face.blended_index = Some(self.blended.len());
+                    self.instance_bytes.extend_from_slice(&item.transform);
+                    self.instance_bytes.extend_from_slice(&face.parameter_bytes);
                     self.blended.push(BlendedFace {
                         distance_squared: blend_distance(item.position, item.rotation, item.scale, face.center, camera),
                         order: face.order,
                         item: *id,
                         face: face_index,
                         group: face.group,
+                        slot,
                     });
                 } else {
                     let group_index = face.group as usize;
@@ -1531,7 +1487,7 @@ impl DrawList {
         stats
     }
 
-    pub(super) fn sort_blended(&mut self, items: &mut ItemSlab, camera: Camera) -> bool {
+    pub(super) fn sort_blended(&mut self, items: &ItemSlab, camera: Camera) -> bool {
         if self.blended.is_empty() {
             return false;
         }
@@ -1546,31 +1502,29 @@ impl DrawList {
         true
     }
 
-    pub(super) fn reorder_blended(&mut self, items: &mut ItemSlab) {
-        self.blended.retain(|blended| {
-            items
-                .get(blended.item)
-                .and_then(|item| item.faces.get(blended.face))
-                .is_some_and(|face| face.group == blended.group && face.order == blended.order && face.blended)
-        });
+    pub(super) fn reorder_blended(&mut self, items: &ItemSlab) {
+        let mut order = (0..self.blended.len())
+            .filter(|index| {
+                let blended = &self.blended[*index];
+                items
+                    .get(blended.item)
+                    .and_then(|item| item.faces.get(blended.face))
+                    .is_some_and(|face| face.group == blended.group && face.order == blended.order && face.blended)
+            })
+            .collect::<Vec<_>>();
         self.release_draw_group_refs();
-        self.blended.sort_unstable_by(|a, b| b.distance_squared.total_cmp(&a.distance_squared).then_with(|| a.order.cmp(&b.order)));
+        order.sort_unstable_by(|a, b| {
+            let (a, b) = (&self.blended[*a], &self.blended[*b]);
+            b.distance_squared.total_cmp(&a.distance_squared).then_with(|| a.order.cmp(&b.order))
+        });
         self.draws.truncate(self.opaque_draws);
-        self.instance_bytes.truncate(self.opaque_instances.saturating_mul(INSTANCE_BYTES));
-        for (index, blended) in self.blended.iter().enumerate() {
-            let Ok(slot) = u32::try_from(self.opaque_instances.saturating_add(index)) else { continue };
-            let Some(item) = items.get_mut(blended.item) else { continue };
-            let Some(face) = item.faces.get_mut(blended.face) else { continue };
-            face.slot = Some(slot);
-            face.blended_index = Some(index);
-            self.instance_bytes.extend_from_slice(&item.transform);
-            self.instance_bytes.extend_from_slice(&face.parameter_bytes);
+        for index in order {
+            let blended = &self.blended[index];
             if let Some(key) = self.groups.key(blended.group) {
                 self.mesh_references.insert(key.mesh);
-                self.draws.push(key.command(blended.group, slot, 1));
+                self.draws.push(key.command(blended.group, blended.slot, 1));
             }
         }
-        self.instance_count = self.instance_bytes.len() / INSTANCE_BYTES;
         self.retain_draw_group_refs();
     }
 
@@ -1627,11 +1581,11 @@ impl DrawList {
         stats
     }
 
-    pub(super) fn upload_patch(&mut self, queue: &Queue, buffer: &Buffer, reordered_blended: bool) -> UploadStats {
+    pub(super) fn upload_patch(&mut self, queue: &Queue, buffer: &Buffer) -> UploadStats {
         let mut stats = UploadStats::default();
         let mut range_count = 0;
         let mut previous = None;
-        for slot in self.dirty_slots.iter().copied().filter(|slot| !reordered_blended || (*slot as usize) < self.opaque_instances) {
+        for slot in self.dirty_slots.iter().copied() {
             if previous.is_none_or(|last: u32| slot.saturating_sub(last) > MAX_PATCH_GAP_SLOTS) {
                 range_count += 1;
             }
@@ -1648,7 +1602,7 @@ impl DrawList {
         }
         let mut first = None;
         let mut last = 0u32;
-        for slot in self.dirty_slots.iter().copied().filter(|slot| !reordered_blended || (*slot as usize) < self.opaque_instances) {
+        for slot in self.dirty_slots.iter().copied() {
             if let Some(start) = first
                 && slot.saturating_sub(last) > MAX_PATCH_GAP_SLOTS
             {
@@ -1666,16 +1620,6 @@ impl DrawList {
             let uploaded = self.write_slot_range(queue, buffer, start, last);
             stats.bytes += uploaded.bytes;
             stats.calls += uploaded.calls;
-        }
-        if reordered_blended {
-            let start = self.opaque_instances.saturating_mul(INSTANCE_BYTES);
-            if let Some(bytes) = self.instance_bytes.get(start..)
-                && !bytes.is_empty()
-            {
-                queue.write_buffer(buffer, start as u64, bytes);
-                stats.bytes += bytes.len();
-                stats.calls += 1;
-            }
         }
         self.dirty_slots.clear();
         stats
@@ -1889,6 +1833,8 @@ impl DrawList {
         self.draw_batches.clear();
         self.indirect_bytes.clear();
         self.first_instances.clear();
+        self.blended_batches = 0;
+        self.blended_commands = 0;
         self.batches_dirty = false;
         for group in self.groups.batches.iter_mut().flatten() {
             group.commands.clear();
@@ -1931,7 +1877,24 @@ impl DrawList {
             });
         }
 
-        let blended_start = self.draw_batches.len();
+        self.blended_batches = self.draw_batches.len();
+        self.blended_commands = self.first_instances.len();
+        self.push_blended_batches(meshes, indirect_first_instance);
+        self.batches_dirty = false;
+        self.draws.len()
+    }
+
+    pub(super) fn rebuild_blended_batches(&mut self, meshes: &HashMap<MeshId, GpuMesh>, indirect_first_instance: bool) -> usize {
+        self.draw_batches.truncate(self.blended_batches);
+        self.first_instances.truncate(self.blended_commands);
+        let start = self.blended_commands.saturating_mul(INDIRECT_DRAW_BYTES);
+        self.indirect_bytes.truncate(start);
+        self.push_blended_batches(meshes, indirect_first_instance);
+        start
+    }
+
+    fn push_blended_batches(&mut self, meshes: &HashMap<MeshId, GpuMesh>, indirect_first_instance: bool) {
+        let blended_start = self.blended_batches;
         for draw in &self.draws[self.opaque_draws..] {
             if self.hides_range(draw.first, draw.count) {
                 continue;
@@ -1952,8 +1915,6 @@ impl DrawList {
                 self.draw_batches.push(DrawBatch { id: binding.id, key: group.key, buffers: Arc::clone(&group.buffers), offset, count: 1 });
             }
         }
-        self.batches_dirty = false;
-        self.draws.len()
     }
 
     fn clear_group_counts(&mut self) {

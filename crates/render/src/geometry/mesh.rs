@@ -90,7 +90,7 @@ impl GeometryRenderer {
         let mut oldest = None;
         let mut used_this_epoch = false;
         for (id, mesh) in &self.meshes {
-            if self.cache.mesh_ready.contains(id) || self.draw_list.pins_mesh(*id) {
+            if self.cache.admission_protected.contains(id) || self.draw_list.pins_mesh(*id) {
                 continue;
             }
             if mesh.used == self.epoch {
@@ -105,7 +105,7 @@ impl GeometryRenderer {
             return if used_this_epoch { MeshRetirement::Deferred } else { MeshRetirement::CapacityBlocked };
         };
         let mesh = self.meshes.remove(&old).expect("selected resident");
-        self.cache.mesh_ready.remove(&old);
+        self.cache.admission_protected.remove(&old);
         self.pending_meshes.remove(&old);
         self.mesh_budget_blocked.remove(&old);
         let vertices = mesh.allocation.vertices().len();
