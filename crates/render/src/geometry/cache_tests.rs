@@ -1,13 +1,15 @@
+use std::{collections::HashSet, time::Instant};
+
 use math::{DVec3, Quat, Vec3};
 use world::Region;
 
-use super::{FrameCache, ItemId};
+use super::{CacheRebuild, CacheUpdate, FrameCache, ItemId};
 use crate::geometry::{
     ShadingMode,
     instance::instance_base,
     items::{CachedItem, CachedReplacement, mesh_info},
 };
-use crate::scene::SharedMesh;
+use crate::scene::{Camera, SharedMesh};
 
 #[test]
 fn item_order_tracks_lifecycle() {
@@ -50,6 +52,58 @@ fn item_order_tracks_lifecycle() {
     assert_eq!(ordered_ids(&mut cache), vec![low, high]);
 
     assert!(cache.items.get(low_index).is_none());
+}
+
+#[test]
+fn camera_recovery_progresses() {
+    let (world, _scene, view) = crate::geometry::fixtures::object_scene(1_100);
+    let region = world.region_page(None, 1).expect("fixture region page").regions[0].region;
+    let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
+    let mut cache = FrameCache::default();
+    for object in view.objects() {
+        let summary = &object.detail().summary;
+        let mut cached = item((2, summary.id.as_u128(), 0), &mesh, region);
+        cached.entity = Some(summary.entity);
+        let index = cache.insert_item(cached).expect("cached object index");
+        cache.objects.insert(summary.entity, index);
+    }
+    let camera =
+        |turn: u32| Camera::new(DVec3::new(0.0, 0.0, f64::from(turn) * 0.01), Vec3::X, 1.0, [128, 128]).expect("moving fixture camera");
+    let mut rebuild = CacheRebuild::new(&view, cache.slot_count(), false);
+    rebuild.object_change_page_complete = true;
+    rebuild.added_object_page_complete = true;
+    rebuild.note_camera(camera(0));
+    rebuild.note_camera(camera(1));
+    rebuild.finish_mesh_info();
+    cache.rebuild = Some(rebuild);
+
+    let mut visited = HashSet::new();
+    let mut pass_cameras = Vec::new();
+    let mut erased_cursors = 0;
+    let mut completed = None;
+    for turn in 2..1_000 {
+        let rebuild = cache.rebuild.as_mut().expect("recovery is pending until it completes");
+        let cursor = rebuild.visibility_object_after;
+        pass_cameras.push(rebuild.note_camera(camera(turn)));
+        erased_cursors += usize::from(cursor.is_some() && rebuild.visibility_object_after.is_none());
+        let mut update = CacheUpdate::default();
+        let mut items = 0;
+        while cache.advance_visibility(&view, view.sequence(), Instant::now(), &mut items, &mut update) {}
+        visited.extend(update.visibility_items);
+        if update.rebuild_completed {
+            completed = Some(turn);
+            break;
+        }
+    }
+
+    assert!(
+        completed.is_some(),
+        "visibility recovery never completed while the camera moved every turn: {:?}",
+        cache.rebuild.as_ref().map(CacheRebuild::progress)
+    );
+    assert_eq!(erased_cursors, 0, "camera updates must not erase the in-progress pass cursor");
+    assert_eq!(visited.len(), cache.objects.len(), "the pass revisits every cached object");
+    assert!(pass_cameras.iter().all(|pass| *pass == camera(1)), "the whole pass evaluates its snapshot camera");
 }
 
 fn ordered_ids(cache: &mut FrameCache) -> Vec<ItemId> {
