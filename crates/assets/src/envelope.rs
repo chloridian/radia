@@ -107,7 +107,7 @@ mod tests {
     }
 
     #[test]
-    fn literal_pbr_asset_requires_supported_type_and_version() {
+    fn pbr_literal_requires_version() {
         let bytes = b"{\0\0\0\x03k\0\0\0\x07versions\0\0\0\x031.1k\0\0\0\x04types\0\0\0\x08GLTF 2.0k\0\0\0\x04datas\0\0\0\x02{}}";
         assert_eq!(extract(resource(Kind::PbrMaterial), bytes.to_vec()), Ok(b"{}".to_vec()));
         let invalid = bytes.windows(3).position(|window| window == b"1.1").unwrap();
@@ -144,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_request_and_literal_response_use_binary_ids_and_select_requested_material() {
+    fn legacy_material_selects_requested_id() {
         let resource = resource(Kind::LegacyMaterial);
         let Value::Map(request) = legacy_request(resource.id).unwrap() else { unreachable!() };
         let Some(Value::Binary(zipped)) = request.get("Zipped") else { unreachable!() };
@@ -166,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn compressed_expansion_and_raw_input_are_bounded() {
+    fn oversized_input_is_too_large() {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&vec![b' '; MAX_ENVELOPE_BYTES + 1]).unwrap();
         assert_eq!(extract(resource(Kind::LegacyMaterial), outer(encoder.finish().unwrap())), Err(Failure::TooLarge));

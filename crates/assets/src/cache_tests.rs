@@ -20,7 +20,7 @@ fn charged_blob(budget: &Budget, bytes: &[u8]) -> Blob {
 }
 
 #[test]
-fn texture_payload_uses_sharded_raw_path() {
+fn texture_uses_sharded_path() {
     let directory = tempdir().expect("cache directory");
     let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
     let resource = Resource {
@@ -41,7 +41,7 @@ fn texture_payload_uses_sharded_raw_path() {
 }
 
 #[test]
-fn open_discards_the_previous_cache_root_and_sweeps_old_assets() {
+fn open_sweeps_old_cache_files() {
     let directory = tempdir().expect("cache directory");
     std::fs::write(directory.path().join("snapshot"), b"old snapshot").expect("write old snapshot");
     std::fs::write(directory.path().join("journal"), b"old journal").expect("write old journal");
@@ -101,7 +101,7 @@ fn llsd_kinds_use_distinct_paths() {
 }
 
 #[test]
-fn retired_whole_mesh_namespace_is_removed() {
+fn whole_mesh_namespace_removed() {
     let directory = tempdir().expect("cache directory");
     let id = AssetId::new(Uuid::from_u128(55));
     let uuid = id.uuid().to_string();
@@ -123,7 +123,7 @@ fn retired_whole_mesh_namespace_is_removed() {
 }
 
 #[test]
-fn open_uses_asset_policy_for_real_eviction() {
+fn eviction_follows_asset_policy() {
     const ENTRY_BYTES: usize = 16 * 1024;
     let directory = tempdir().expect("cache directory");
     let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
@@ -145,7 +145,7 @@ fn open_uses_asset_policy_for_real_eviction() {
 }
 
 #[test]
-fn lookup_rejects_payload_over_kind_bound() {
+fn oversized_payload_is_corrupt() {
     let directory = tempdir().expect("cache directory");
     let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
     let resource = resource(4, Kind::Texture);
@@ -158,7 +158,7 @@ fn lookup_rejects_payload_over_kind_bound() {
 }
 
 #[test]
-fn write_admission_charges_raw_copy_and_bounds_in_flight() {
+fn write_admission_is_bounded() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let budget = Budget::default();
@@ -198,7 +198,7 @@ fn writes_record_raw_byte_counts() {
 }
 
 #[test]
-fn unused_asset_cache_write_releases_admission() {
+fn dropped_write_releases_admission() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let budget = Budget::default();
@@ -213,7 +213,7 @@ fn unused_asset_cache_write_releases_admission() {
 }
 
 #[test]
-fn cache_open_uses_its_assets_root_index() {
+fn open_uses_assets_index() {
     let directory = tempdir().expect("cache directory");
     let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
     assert_eq!(cache.lookup(Request::new(resource(50, Kind::Texture))), AssetLookup::Miss);
