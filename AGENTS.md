@@ -73,7 +73,7 @@ The legacy viewer is a reference for protocol behavior, content compatibility, a
 
 ## Comments
 
-Do not add comments or doc comments to source, except a concise safety comment on an `unsafe {}` block. If code seems to need a comment to explain its behavior, improve its names, types, or structure until that explanation is clear from the code. Remove existing comments from code you touch.
+Source has no comments or doc comments, and that includes safety comments on `unsafe` blocks. If code seems to need a comment to explain its behavior, improve its names, types, or structure until that explanation is clear from the code. Remove existing comments from code you touch.
 
 ## Testing
 

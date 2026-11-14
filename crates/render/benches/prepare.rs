@@ -1243,7 +1243,6 @@ fn thread_cpu_cycles() -> Option<u64> {
     }
 
     let mut cycles = 0;
-    // SAFETY: GetCurrentThread returns a valid pseudo-handle and cycles points to writable storage.
     let succeeded = unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) };
     (succeeded != 0).then_some(cycles)
 }
@@ -1283,7 +1282,6 @@ fn process_memory() -> Option<ProcessMemory> {
 
     let mut counters = ProcessMemoryCountersEx { cb: std::mem::size_of::<ProcessMemoryCountersEx>() as u32, ..Default::default() };
     let size = counters.cb;
-    // SAFETY: The pseudo-handle identifies this process and the initialized counters buffer has the documented size.
     let succeeded = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) };
     (succeeded != 0).then_some(ProcessMemory {
         private_bytes: counters.private_usage,
