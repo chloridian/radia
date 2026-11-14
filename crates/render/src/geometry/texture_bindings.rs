@@ -24,21 +24,6 @@ pub(super) struct TerrainDemand {
 }
 
 impl GeometryRenderer {
-    pub(super) fn request_rebuild_textures(&mut self, view: &SceneView, background: &[Entity]) {
-        let epoch = self.epoch;
-        self.requested_textures.clear();
-        for texture in &self.visible_texture_requests {
-            if self.requested_textures.insert(texture.id()) {
-                self.textures.request(texture, epoch, Priority::Visible);
-            }
-        }
-        for entity in background {
-            if let Some(object) = view.object(*entity).filter(|_| view.object_is_live(*entity)) {
-                self.request_background_textures(object);
-            }
-        }
-    }
-
     pub(super) fn request_frame_textures(&mut self, view: &SceneView, background: &[Entity], gated: &[Entity]) {
         self.requested_textures.clear();
         self.visible_textures.clear();

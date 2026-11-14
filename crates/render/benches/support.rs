@@ -54,6 +54,39 @@ pub fn live_prepare_world_with_regions(count: usize, mesh_count: usize, texture_
     (world, rows)
 }
 
+pub fn add_meshes(world: &mut World, rows: &[Row], count: usize, order: &mut u64) -> std::collections::HashMap<AssetId, Vec<u8>> {
+    let mut assets = std::collections::HashMap::with_capacity(count);
+    for (index, row) in rows.iter().take(count).enumerate() {
+        let id = AssetId::new(Uuid::from_u128(50_000_000 + index as u128));
+        let current = *order;
+        *order += 1;
+        let mut patch = ObjectPatch::new(UpdateSource::new(row.region, current as u32, Ordered(current), 0), row.local_id);
+        patch.shape = FieldUpdate::Set(Shape::Mesh { asset_id: id, flags: SculptFlags::default() });
+        patch.pose = Some(Pose {
+            position: Some(Vec3::new(240.0 + (index % 7) as f32 * 0.1, 15.0 + (index / 7) as f32 * 0.1, 0.0)),
+            rotation: Some(Quat::IDENTITY),
+        });
+        let _applied = world.patch_object(patch).expect("benchmark mesh shape update");
+        let vertices = 300 + index * 3;
+        let faces = if index < 8 { 2 } else { 1 };
+        let bytes = test_support::mesh::asset_with_lod_geometry(&[(3, faces, vertices, vertices)]);
+        assets.insert(id, bytes);
+    }
+    assets
+}
+
+pub fn update_mesh_one(world: &mut World, row: &Row, index: usize, order: &mut u64, generation: u64) {
+    let current = *order;
+    *order += 1;
+    let offset = (generation % 2) as f32 * 0.01;
+    let mut patch = ObjectPatch::new(UpdateSource::new(row.region, current as u32, Ordered(current), 0), row.local_id);
+    patch.pose = Some(Pose {
+        position: Some(Vec3::new(240.0 + (index % 7) as f32 * 0.1 + offset, 15.0 + (index / 7) as f32 * 0.1, 0.0)),
+        rotation: Some(Quat::IDENTITY),
+    });
+    let _applied = world.patch_object(patch).expect("benchmark mesh update");
+}
+
 pub fn animate_objects(world: &mut World, rows: &[Row], count: usize, rate: f32, smooth: bool) {
     let mut bytes = [0; 16];
     bytes[0] = 0x03 | if smooth { 0x10 } else { 0 };
@@ -370,6 +403,16 @@ pub fn settle_with_textures(
     camera: Camera,
     textures: &std::collections::HashMap<AssetId, assets::TextureHandle>,
 ) -> (Reconciler, SceneView, Instant) {
+    settle_with_assets(world, expected_objects, camera, textures, &std::collections::HashMap::new())
+}
+
+pub fn settle_with_assets(
+    world: &World,
+    expected_objects: usize,
+    camera: Camera,
+    textures: &std::collections::HashMap<AssetId, assets::TextureHandle>,
+    meshes: &std::collections::HashMap<AssetId, Vec<u8>>,
+) -> (Reconciler, SceneView, Instant) {
     let (mut reconciler, mut view) = Reconciler::new(Budget::default());
     reconciler.set_camera(camera);
     let mut now = Instant::now();
@@ -383,11 +426,17 @@ pub fn settle_with_textures(
             ReconcileStep::Build(job) => reconciler.complete_mesh(job.run()),
             ReconcileStep::Continue => {}
             ReconcileStep::Wait(until) => now = until,
-            ReconcileStep::Asset(AssetChange::Request(request)) if request.request.resource().kind == assets::Kind::Texture => {
-                let id = request.request.resource().id;
-                let texture = textures.get(&id).expect("benchmark texture fixture contains requested asset").clone();
-                reconciler.complete_asset(request.ticket, AssetStatus::Ready(Content::Texture(texture)));
-            }
+            ReconcileStep::Asset(AssetChange::Request(request)) => match request.request {
+                Request::Texture { id, .. } => {
+                    let texture = textures.get(&id).expect("benchmark texture fixture contains requested asset").clone();
+                    reconciler.complete_asset(request.ticket, AssetStatus::Ready(Content::Texture(texture)));
+                }
+                Request::MeshHeader(_) | Request::MeshLod(_) => {
+                    let bytes = meshes.get(&request.request.resource().id).expect("benchmark mesh fixture contains requested asset");
+                    reconciler.complete_asset(request.ticket, prepared_asset(request.request, bytes));
+                }
+                _ => {}
+            },
             ReconcileStep::Asset(_) => {}
             ReconcileStep::Idle => {
                 assert_eq!(view.object_count(), expected_objects);
@@ -398,19 +447,6 @@ pub fn settle_with_textures(
         }
     }
     panic!("live-like benchmark scene did not settle");
-}
-
-pub fn update_many(world: &mut World, rows: &[Row], count: usize, order: &mut u64, generation: u64) {
-    let offset = (generation % 2) as f32;
-    for row in rows.iter().take(count) {
-        let current = *order;
-        *order += 1;
-        let mut patch = ObjectPatch::new(UpdateSource::new(row.region, current as u32, Ordered(current), 0), row.local_id);
-        let x = (((row.local_id.get() as usize - 1) * 137) % 256) as f32 + offset;
-        let y = (row.local_id.get() / 100) as f32;
-        patch.pose = Some(Pose { position: Some(Vec3::new(x, y, 0.0)), rotation: Some(Quat::IDENTITY) });
-        let _applied = world.patch_object(patch).expect("benchmark object update");
-    }
 }
 
 pub fn update_geometry(world: &mut World, rows: &[Row], count: usize, order: &mut u64, generation: u64) {
