@@ -48,7 +48,7 @@ fn request_multiple_objects_conversion() {
 }
 
 #[test]
-fn object_fixtures_reject_every_truncated_prefix() {
+fn truncated_prefixes_are_rejected() {
     for wire in [
         vectors::OBJECT_UPDATE,
         vectors::OBJECT_UPDATE_COMPRESSED_TYPED,
@@ -80,7 +80,7 @@ fn object_fixtures_reject_every_truncated_prefix() {
 }
 
 #[test]
-fn malformed_object_transforms_and_optional_data_fail() {
+fn malformed_object_data_fails() {
     let (_, packet) = decode(vectors::OBJECT_UPDATE);
     let Message::ObjectUpdate(mut update) = packet.message().clone() else {
         panic!("expected full object update");
@@ -214,7 +214,7 @@ fn unknown_wire_values_round_trip() {
 }
 
 #[test]
-fn extra_parameter_lengths_must_be_nonnegative() {
+fn negative_extra_length_rejected() {
     let mut bytes = fixture(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
     let offset = unique_offset(&bytes, &[0x34, 0x12, 0x03, 0x00, 0x00, 0x00]);
     bytes[offset + 2..offset + 6].copy_from_slice(&(-1i32).to_le_bytes());

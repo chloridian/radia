@@ -39,7 +39,7 @@ mod tests {
     use crate::lludp::{codec::Reader, error::LLUdpError};
 
     #[test]
-    fn decodes_official_chunk_index_and_variable_data() {
+    fn decodes_sequence_and_data() {
         let payload = [2, 0, 0, 0, 4, 0, 0, 0x11, 0x20, 0xc0];
         let mut reader = Reader::new(&payload);
 

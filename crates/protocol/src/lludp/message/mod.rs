@@ -207,7 +207,7 @@ mod tests {
     use crate::lludp::error::LLUdpError;
 
     #[test]
-    fn typed_and_schema_routes_are_explicit() {
+    fn allocation_routes_are_explicit() {
         for (id, strategy) in [
             (schema::ids::USE_CIRCUIT_CODE, AllocationStrategy::NoAlloc),
             (schema::ids::COMPLETE_AGENT_MOVEMENT, AllocationStrategy::NoAlloc),
@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn every_specialized_message_has_a_preflight_route() {
+    fn specialized_messages_have_bounds() {
         for metadata in schema::MESSAGES.iter() {
             if Message::allocation_strategy(metadata.id) == AllocationStrategy::Specialized {
                 assert_ne!(
