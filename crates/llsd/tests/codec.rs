@@ -523,7 +523,7 @@ fn xml_combines_text_and_cdata() {
 }
 
 #[test]
-fn xml_preserves_character_reference_line_endings() {
+fn xml_reference_keeps_carriage_return() {
     let input = "<llsd><array><string>crlf\r\ncr\rlf</string><string>ref&#13;char</string><string><![CDATA[crlf\r\ncr\rlf]]></string></array></llsd>";
     let value = xml::from_str::<Value>(input).expect("decode XML line endings");
 
@@ -985,7 +985,7 @@ fn xml_event_budget_counts_references() {
 }
 
 #[test]
-fn xml_ignored_events_count_toward_budget() {
+fn xml_budget_counts_ignored_events() {
     let limits = Limits { max_values: 1, ..Limits::default() };
     let within_budget = format!("{}<llsd><undef/></llsd>", "<!--ignored-->".repeat(20));
     assert_eq!(
