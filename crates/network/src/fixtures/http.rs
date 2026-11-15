@@ -264,7 +264,7 @@ impl EventQueueTestServer {
                         async_request_sender.send(request).expect("async test should read request");
                     }
                     EventServerResponse::Controlled(response) => {
-                        async_request_sender.send(request.clone()).expect("async test should read request");
+                        async_request_sender.send(request).expect("async test should read request");
                         let response = response.recv_timeout(TEST_TIMEOUT).expect("controlled HTTP response");
                         stream.write_all(&response).expect("write controlled HTTP response");
                     }
