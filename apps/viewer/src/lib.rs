@@ -11,5 +11,3 @@ mod session;
 #[cfg(test)]
 mod test_helpers;
 pub mod world_reader;
-
-pub(crate) const DEFAULT_DRAW_DISTANCE: f32 = 512.0;

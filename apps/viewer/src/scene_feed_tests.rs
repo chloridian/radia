@@ -284,7 +284,7 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
     assert!(feed.agent.is_none(), "the self avatar has not entered World yet");
     assert_eq!(
         feed.camera_pose_at(now),
-        Some(sample.pose(sample.position + sample.velocity.as_dvec3() * 0.008)),
+        Some(WorldPose { position: sample.position + sample.velocity.as_dvec3() * 0.008, rotation: sample.simulator_rotation }),
         "follow mode uses the sample until World resolves the avatar"
     );
 }

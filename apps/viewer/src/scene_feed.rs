@@ -95,7 +95,7 @@ impl DeadReckoning {
     fn pose(&self, now: Instant, regions: &[kinematics::RegionBounds]) -> Option<WorldPose> {
         let sample = self.sample?;
         let position = self.trajectory?.position_at(sample.region.get(), now, regions);
-        Some(sample.pose(position))
+        Some(WorldPose { position, rotation: sample.simulator_rotation })
     }
 
     fn active(&self, now: Instant) -> bool {
