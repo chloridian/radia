@@ -3,6 +3,124 @@ use std::{future::poll_fn, task::Poll};
 use super::*;
 use crate::fixtures::event_queue::EventQueueBudgetHarness;
 
+async fn held_body(
+    server: &EventQueueBudgetTestServer,
+    client: &http::Client,
+    body_bytes: usize,
+) -> (http::IncomingResponse, std::net::TcpStream) {
+    let request = {
+        let client = client.clone();
+        let url = server.url("/event-queue");
+        spawn(async move { client.post_headers("event_queue", &url, "application/llsd+xml", None, Vec::new(), 1024).await })
+    };
+    let mut stream = server.next_poll();
+    write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {body_bytes}\r\nRetry-After: 7\r\nConnection: close\r\n\r\n")
+        .expect("send response headers");
+    let incoming = request.await.expect("request task").expect("parsed response headers");
+    (incoming, stream)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn body_lanes_preserve_primary() {
+    let server = EventQueueBudgetTestServer::start();
+    let client = http::Client::new(Some(crate::capabilities::budget::EVENT_QUEUE_REQUEST_TIMEOUT), false, None).expect("HTTP client");
+    let budget = CapabilityBudget::new();
+    let body = b"<llsd><map><key>id</key><integer>5</integer><key>events</key><array/></map></llsd>";
+    let (first, mut first_stream) = held_body(&server, &client, body.len()).await;
+    let (second, second_stream) = held_body(&server, &client, body.len()).await;
+    let (waiting, mut waiting_stream) = held_body(&server, &client, body.len()).await;
+    let (primary, mut primary_stream) = held_body(&server, &client, body.len()).await;
+
+    let mut first = Box::pin(read_admitted_body(first, Arc::clone(&budget.neighbor_event_bodies)));
+    let mut second = Box::pin(read_admitted_body(second, Arc::clone(&budget.neighbor_event_bodies)));
+    let mut waiting = Box::pin(read_admitted_body(waiting, Arc::clone(&budget.neighbor_event_bodies)));
+    let mut primary = Box::pin(read_admitted_body(primary, Arc::clone(&budget.primary_event_bodies)));
+    std::assert_matches!(
+        poll_fn(|cx| Poll::Ready((
+            first.as_mut().poll(cx),
+            second.as_mut().poll(cx),
+            waiting.as_mut().poll(cx),
+            primary.as_mut().poll(cx)
+        )))
+        .await,
+        (Poll::Pending, Poll::Pending, Poll::Pending, Poll::Pending)
+    );
+    assert_eq!(budget.neighbor_event_bodies.available_permits(), 0);
+    assert_eq!(budget.primary_event_bodies.available_permits(), 0, "neighbors leave the primary lane available");
+
+    first_stream.write_all(body).expect("release first neighbor body");
+    let (response, body_permit) = first.await.expect("first neighbor body completes");
+    std::assert_matches!(poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await, Poll::Pending);
+    let role_permit = Arc::clone(&budget.neighbor_event_queues).acquire_owned().await.expect("neighbor poll admission");
+    let (id, events, role_permit) =
+        decode_admitted_event_batch(response.body, role_permit, body_permit).await.expect("decode admitted body");
+    assert_eq!(id, 5);
+    assert!(events.is_empty());
+    drop(role_permit);
+    std::assert_matches!(poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await, Poll::Pending);
+    assert_eq!(budget.neighbor_event_bodies.available_permits(), 0, "the waiting body takes released decoder admission");
+    waiting_stream.write_all(body).expect("release waiting body");
+    let (response, permit) = waiting.await.expect("waiting body completes");
+    assert_eq!(response.body, body);
+    drop(permit);
+
+    primary_stream.write_all(body).expect("release primary body");
+    let (response, permit) = primary.await.expect("primary completes independently of neighbors");
+    assert_eq!(response.body, body);
+    drop(permit);
+    drop(second);
+    let permit = Arc::clone(&budget.neighbor_event_bodies).acquire_many_owned(2).await.expect("cancellation releases both neighbor lanes");
+    drop(permit);
+    drop((first_stream, second_stream, waiting_stream, primary_stream));
+    server.stop();
+    assert_eq!(server.finish(), 0);
+}
+
+#[tokio::test]
+async fn body_admission_keeps_deadline() {
+    let server = LocalServer::start(vec![b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nRetry-After: 7\r\nConnection: close\r\n\r\n".to_vec()]);
+    let client = http::Client::new(Some(crate::capabilities::budget::EVENT_QUEUE_REQUEST_TIMEOUT), false, None).expect("HTTP client");
+    let incoming = client
+        .post_headers("event_queue", &server.url("/event-queue"), "application/llsd+xml", None, Vec::new(), 1024)
+        .await
+        .expect("parsed response headers");
+    let budget = Arc::new(Semaphore::new(1));
+    let held = Arc::clone(&budget).acquire_owned().await.expect("occupy body admission");
+    let mut response = Box::pin(read_admitted_body(incoming, Arc::clone(&budget)));
+    std::assert_matches!(poll_fn(|cx| Poll::Ready(response.as_mut().poll(cx))).await, Poll::Pending);
+    time::pause();
+    time::advance(crate::capabilities::budget::EVENT_QUEUE_REQUEST_TIMEOUT).await;
+    let error = response.await.expect_err("admission remains within the original request deadline");
+    assert_eq!(error.kind, http::ErrorKind::Timeout);
+    assert_eq!(error.status, Some(StatusCode::OK));
+    assert_eq!(error.retry_after, Some(Duration::from_secs(7)));
+    drop(held);
+    let permit = budget.acquire().await.expect("timed-out admission leaves no lease behind");
+    drop(permit);
+    assert_eq!(server.finish().len(), 1);
+}
+
+#[tokio::test]
+async fn broken_body_releases_admission() {
+    let server = LocalServer::start(vec![
+        b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nshort".to_vec(),
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec(),
+    ]);
+    let client = http::Client::new(Some(crate::capabilities::budget::EVENT_QUEUE_REQUEST_TIMEOUT), false, None).expect("HTTP client");
+    let budget = Arc::new(Semaphore::new(1));
+    let error = post_event_queue(&client, &server.url("/event-queue"), &Value::Undefined, 1024, Arc::clone(&budget))
+        .await
+        .expect_err("truncated response body fails");
+    assert_eq!(error.kind, http::ErrorKind::Transport);
+    assert_eq!(error.status, Some(StatusCode::OK));
+    let (response, permit) = post_event_queue(&client, &server.url("/event-queue"), &Value::Undefined, 1024, budget)
+        .await
+        .expect("failed read releases admission for the next body");
+    assert_eq!(response.body, b"ok");
+    drop(permit);
+    assert_eq!(server.finish().len(), 2);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn shared_budget_bounds_event_polls() {
     let task_count = MAX_CONCURRENT_EVENT_QUEUES + 1;

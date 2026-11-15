@@ -100,11 +100,11 @@ async fn run_stalled_logout_is_unavailable() {
     receive(&simulator).await;
     pause_sends.send_replace(true);
     let (first_logout, first_response) = oneshot::channel();
-    runtime.primary.logout.send(first_logout).await.expect("start a stalled logout send");
+    runtime.state.primary.logout.send(first_logout).await.expect("start a stalled logout send");
     timeout(WAIT, send_entered.notified()).await.expect("logout should enter the stalled local send");
     advance(Duration::from_secs(1)).await;
-    runtime.logout_attempted = true;
-    runtime.pending_primary_logout =
+    runtime.state.logout_attempted = true;
+    runtime.state.pending_primary_logout =
         Some(PendingLogout { completion: first_response, deadline: tokio::time::Instant::now() + LOGOUT_TIMEOUT });
     let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, _event_receiver) = mpsc::channel(TEST_EVENT_CAPACITY);

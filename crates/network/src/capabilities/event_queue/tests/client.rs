@@ -331,15 +331,60 @@ async fn lost_batch_is_redelivered_on_new_queue_incarnation() {
 #[test]
 fn bad_event_fields() {
     for body in [
+        "<llsd><array/></llsd>",
         "<llsd><map><key>events</key><array></array></map></llsd>",
         "<llsd><map><key>id</key><integer>5</integer><key>events</key><string>not an array</string></map></llsd>",
         "<llsd><map><key>id</key><string>five</string><key>events</key><array></array></map></llsd>",
         "<llsd><map><key>id</key><integer>5</integer><key>events</key><array><string>not an event map</string></array></map></llsd>",
         "<llsd><map><key>id</key><integer>5</integer><key>events</key><array><map><key>body</key><string>missing message name</string></map></array></map></llsd>",
         "<llsd><map><key>id</key><integer>5</integer><key>events</key><array><map><key>message</key><integer>5</integer></map></array></map></llsd>",
+        "<llsd><map><key>id</key><integer>5</integer><key>events</key><array><map><key>message</key><uri>ObjectUpdate</uri></map></array></map></llsd>",
+        "<llsd><map><key>id</key><integer>5</integer><key>events</key><array><map><key>message</key><string>Complete</string></map></array><key>truncated</key>",
     ] {
         assert!(decode_event_batch(body.as_bytes()).is_err(), "malformed batch should be rejected");
     }
+}
+
+#[test]
+fn envelope_fields_preserve_events() {
+    let body = concat!(
+        "<llsd><map><key>id</key><string>stale</string><key>events</key><integer>1</integer>",
+        "<key>events</key><map><key>wrong</key><string>shape</string></map>",
+        "<key>events</key><array><integer>2</integer></array>",
+        "<key>events</key><array><map><key>message</key><uri>Discarded</uri></map></array>",
+        "<key>unknown</key><map><key>nested</key><array><undef/><integer>2</integer></array></map>",
+        "<key>events</key><array><map><key>body</key><integer>3</integer><key>message</key><string>Old</string>",
+        "<key>body</key><string>new</string><key>ignored</key><array><integer>4</integer></array>",
+        "<key>message</key><integer>3</integer><key>message</key><uri>Wrong</uri><key>message</key><string>Kept</string></map></array>",
+        "<key>id</key><integer>5</integer></map></llsd>"
+    );
+    let (id, events) = decode_event_batch(body.as_bytes()).expect("decode reordered and repeated fields");
+    assert_eq!(id, 5);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].message, "Kept");
+    assert_eq!(events[0].body, Value::String("new".into()));
+}
+
+#[test]
+fn final_events_determine_validity() {
+    let too_many = format!("<array>{}</array>", "<map><key>message</key><string>x</string></map>".repeat(1025));
+    let large_event = format!("<map><key>message</key><string>x</string><key>body</key><string>{}</string></map>", "x".repeat(200_000));
+    let too_large = format!("<array>{}</array>", large_event.repeat(42));
+    for discarded in [too_many.as_str(), too_large.as_str(), "<array><map/></array>"] {
+        let input =
+            format!("<llsd><map><key>id</key><integer>5</integer><key>events</key>{discarded}<key>events</key><array/></map></llsd>");
+        let (id, events) = decode_event_batch(input.as_bytes()).expect("the final events field replaces an invalid earlier candidate");
+        assert_eq!(id, 5);
+        assert!(events.is_empty());
+
+        let input =
+            format!("<llsd><map><key>id</key><integer>5</integer><key>events</key><array/><key>events</key>{discarded}</map></llsd>");
+        assert!(decode_event_batch(input.as_bytes()).is_err(), "an invalid surviving events field rejects the batch");
+    }
+    let input = format!(
+        "<llsd><map><key>id</key><integer>5</integer><key>events</key>{too_many}<key>events</key><array><integer>invalid</integer></array></map></llsd>"
+    );
+    assert!(decode_event_batch(input.as_bytes()).is_err(), "draining an invalid candidate still validates XML values");
 }
 
 #[test]
@@ -375,7 +420,7 @@ fn event_batch_limits() {
 #[test]
 fn event_data_limits() {
     let nested = format!("{}<undef/>{}", "<array>".repeat(65), "</array>".repeat(65));
-    let xml = format!("<llsd>{nested}</llsd>");
+    let xml = format!("<llsd><map><key>id</key><integer>5</integer><key>events</key><array/><key>ignored</key>{nested}</map></llsd>");
     let error = decode_event_batch(xml.as_bytes()).expect_err("excessive LLSD nesting should be rejected before parsing");
     assert!(error.contains("nesting exceeded"));
 
@@ -396,13 +441,15 @@ fn map_budget() {
     let Err(error) = decode_event_batch(xml.as_bytes()) else {
         panic!("decoded map storage should exceed the event memory limit");
     };
-    assert!(error.contains("event exceeded"), "{error}");
+    assert!(error.contains("heap limit"), "{error}");
 }
 
 #[test]
 fn xml_element_limit() {
-    let values = "<undef/>".repeat(MAX_LLSD_XML_ELEMENTS);
-    let xml = format!("<llsd><array>{values}</array></llsd>");
+    let values = format!("<array>{}</array>", "<undef/>".repeat(4096)).repeat(64);
+    let xml = format!(
+        "<llsd><map><key>id</key><integer>5</integer><key>events</key><array/><key>ignored</key><array>{values}</array></map></llsd>"
+    );
     let Err(error) = decode_event_batch(xml.as_bytes()) else {
         panic!("excessive LLSD values should be rejected by decoder limits");
     };
@@ -452,8 +499,9 @@ async fn poll_timeout_is_typed() {
     let server = EventQueueTestServer::start(|_| vec![hold_response()]);
     let client = http::Client::new(Some(Duration::from_millis(25)), false, None).expect("build short-timeout HTTP client");
 
-    let error =
-        post_event_queue(&client, &server.url("/event-queue"), &Value::Undefined, 1024).await.expect_err("held response should time out");
+    let error = post_event_queue(&client, &server.url("/event-queue"), &Value::Undefined, 1024, Arc::new(Semaphore::new(1)))
+        .await
+        .expect_err("held response should time out");
     assert_eq!(error.kind, http::ErrorKind::Timeout);
     assert_eq!(server.finish().len(), 1);
 }
