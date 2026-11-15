@@ -34,6 +34,7 @@ pub(super) fn decode_message(message: &GenericStreamingMessage) -> Option<Result
 }
 
 fn decode_payload(bytes: &[u8]) -> Result<Decoded, ()> {
+    let bytes = bytes.strip_suffix(b"\0").unwrap_or(bytes);
     let payload: Value = notation::from_slice_with_limits(bytes, LLSD_LIMITS).map_err(|_| ())?;
     let Value::Map(payload) = payload else { return Err(()) };
     let local_id = match payload.get("id") {
@@ -250,6 +251,15 @@ mod tests {
         let decoded = decode_payload(&payload(7, Vec::new(), Vec::new())).expect("empty snapshot");
 
         assert!(decoded.overrides.is_empty());
+    }
+
+    #[test]
+    fn decodes_nul_terminated_payload() {
+        let decoded = decode_payload(b"{'id':i1863579,'od':[{'ds':1},{'ds':1}],'te':[i0,i1]}\0").expect("simulator payload");
+
+        assert_eq!(decoded.local_id.get(), 1863579);
+        assert_eq!(decoded.overrides.face(0).unwrap().double_sided, Some(true));
+        assert_eq!(decoded.overrides.face(1).unwrap().double_sided, Some(true));
     }
 
     #[test]
