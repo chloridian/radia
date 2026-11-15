@@ -46,7 +46,7 @@ pub use pick::PickError;
 
 const MESH_BYTES: usize = 64 * 1024 * 1024;
 const DEPTH_BYTES: usize = 128 * 1024 * 1024;
-pub(super) const INSTANCE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const INSTANCE_BUFFER_BYTES: usize = 20 * 1024 * 1024;
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MESH_UPLOADS: usize = 16;
 const TRANSFORM_BYTES: usize = 112;
@@ -502,7 +502,7 @@ impl GeometryRenderer {
         self.sky.draw(pass);
         self.void_water.draw(pass);
         let mut pipeline = None;
-        let mut texture = None;
+        let mut textures = None;
         let mut terrain = None;
         let mut buffers = None;
         for draw in self.draw_list.draw_batches() {
@@ -510,9 +510,9 @@ impl GeometryRenderer {
                 self.pipelines.bind_pipeline(pass, draw.key.pipeline);
                 pipeline = Some(draw.key.pipeline);
             }
-            if texture != Some(draw.key.texture) {
-                pass.set_bind_group(1, self.textures.binding(draw.key.texture), &[]);
-                texture = Some(draw.key.texture);
+            if textures != Some(draw.key.textures) {
+                pass.set_bind_group(1, self.textures.material_binding(draw.key.textures), &[]);
+                textures = Some(draw.key.textures);
             }
             if draw.key.pipeline == Pipeline::Terrain {
                 let key = draw.key.terrain.expect("terrain batch has detail texture bindings");

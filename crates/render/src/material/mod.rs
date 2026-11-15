@@ -53,6 +53,7 @@ pub struct FaceMaterial {
     pub pbr_state: Option<AssetState>,
     pub alpha: AlphaBehavior,
     pub base_color_texture: Option<TextureBinding>,
+    pub emissive_texture: Option<TextureBinding>,
 }
 
 impl FaceMaterial {
@@ -67,6 +68,10 @@ impl FaceMaterial {
             };
         }
         self.base_color_texture = Some(TextureBinding { state, image });
+    }
+
+    pub(crate) fn resolve_emissive(&mut self, state: AssetState, image: Option<TextureHandle>) {
+        self.emissive_texture = Some(TextureBinding { state, image });
     }
 
     pub fn base_color_factor(&self) -> [f32; 4] {

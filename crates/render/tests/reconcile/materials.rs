@@ -19,10 +19,11 @@ fn color_image(face: &FaceMaterial) -> &TextureHandle {
 
 fn material_asset(id: AssetId) -> assets::Status {
     let json = r#"{"asset":{"version":"2.0"},
-        "images":[{"uri":"00000000-0000-0000-0000-000000000064"},{"uri":"00000000-0000-0000-0000-0000000000c8"}],
-        "textures":[{"source":0},{"source":1}],
+        "images":[{"uri":"00000000-0000-0000-0000-000000000064"},{"uri":"00000000-0000-0000-0000-0000000000c8"},
+            {"uri":"00000000-0000-0000-0000-00000000012c"}],
+        "textures":[{"source":0},{"source":1},{"source":2}],
         "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[0.2,0.3,0.4,0.5],"baseColorTexture":{"index":0}},
-            "normalTexture":{"index":1},"alphaMode":"MASK","alphaCutoff":0.4,"doubleSided":true}]}
+            "normalTexture":{"index":1},"emissiveTexture":{"index":2},"alphaMode":"MASK","alphaCutoff":0.4,"doubleSided":true}]}
     "#;
     let mut envelope = b"{\0\0\0\x03k\0\0\0\x07versions\0\0\0\x031.1k\0\0\0\x04types\0\0\0\x08GLTF 2.0k\0\0\0\x04datas".to_vec();
     envelope.extend((json.len() as u32).to_be_bytes());
@@ -521,15 +522,23 @@ fn material_arrival_preserves_geometry() {
     assert_eq!((work.reads, work.builds), (0, 0), "material completion must not rehydrate or rebuild geometry");
     assert_ne!(view.version(), version, "material publications invalidate prepared rendering");
     assert_eq!(view.revision(), revision, "World revision alone cannot identify Scene content");
-    assert_eq!(work.requested.len(), 1, "only the visible base-color image is fetched at this shading stage");
-    let image_request = work.requested[0];
-    assert_eq!(image_request.request.resource(), assets::Resource { id: AssetId::new(Uuid::from_u128(100)), kind: assets::Kind::Texture });
+    assert_eq!(work.requested.len(), 2, "base-color and emissive images are fetched, normal maps are not");
+    let image = |id: u128| {
+        let resource = assets::Resource { id: AssetId::new(Uuid::from_u128(id)), kind: assets::Kind::Texture };
+        work.requested.iter().find(|request| request.request.resource() == resource).copied().expect("image request")
+    };
+    let (image_request, emissive_request) = (image(100), image(300));
     let object = view.objects().next().unwrap();
     assert_eq!(object.mesh().unwrap().1.id(), mesh);
     let faces = object.materials().unwrap();
     assert_eq!(faces[0].base_color_factor(), [0.6, 0.7, 0.8, 1.0]);
     assert_eq!(faces[0].material.base_color_texture().source, assets::TextureRef::Clear);
     assert_eq!(faces[0].base_color_texture, None, "a cleared assignment has no pending binding");
+    assert_eq!(
+        faces[0].emissive_texture.as_ref().map(|binding| binding.state().asset),
+        Some(AssetId::new(Uuid::from_u128(300))),
+        "clearing the base-color texture keeps the emissive image"
+    );
     assert_eq!(faces[0].alpha, AlphaBehavior::Opaque);
     assert!(!faces[0].double_sided());
     assert_eq!(faces[1].base_color_factor(), [1.0; 4]);
@@ -551,7 +560,8 @@ fn material_arrival_preserves_geometry() {
     patch.pbr_materials = Some(PbrMaterialAssignments::new(Vec::new()).unwrap());
     assert!(world.patch_object(patch).unwrap().revision.is_some(), "removing PBR bindings must change World state");
     scene.notify_world_change();
-    settle_materials(&mut scene, &mut view, &world, &mut now);
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.released.contains(&emissive_request.ticket), "removing PBR bindings releases the emissive image");
     let object = view.objects().next().unwrap();
     assert_eq!(object.mesh().unwrap().1.id(), mesh, "removing PBR bindings must preserve geometry");
     let face = &object.materials().unwrap()[0];
@@ -574,7 +584,8 @@ fn binding_edits_reject_old_completion() {
     scene.set_camera(camera(0.0));
     let first = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
     scene.complete_asset(first.ticket, material_asset(old));
-    let image = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
+    let images = settle_materials(&mut scene, &mut view, &world, &mut now).requested;
+    assert_eq!(images.len(), 2, "base-color and emissive images are fetched");
     assert_matches!(view.objects().next().unwrap().materials().unwrap()[0].material, assets::MaterialDescription::Pbr(_));
     let current = AssetId::new(Uuid::from_u128(10));
     let mut patch = ObjectPatch::new(source(&world, 0, 3), NonZeroU32::new(1).unwrap());
@@ -582,9 +593,9 @@ fn binding_edits_reject_old_completion() {
     let _ = world.patch_object(patch).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(work.released.len(), 2);
+    assert_eq!(work.released.len(), 3);
     assert!(work.released.contains(&first.ticket));
-    assert!(work.released.contains(&image.ticket));
+    assert!(images.iter().all(|image| work.released.contains(&image.ticket)), "a binding edit releases base-color and emissive images");
     assert_eq!(work.builds, 0);
     let next = work.requested[0];
     scene.complete_asset(first.ticket, material_asset(old));

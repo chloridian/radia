@@ -27,6 +27,7 @@ use crate::pipeline::{INSTANCE_BYTES, Pipeline, VERTEX_BYTES};
 use crate::scene::{
     AgentPose, AssetChange, AssetRequest, Camera, DrawnMeshKey, Placement, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView,
 };
+use crate::texture::MaterialTextures;
 use world::{
     Appearance, FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence, ParentUpdate, Pose, Region, SculptFlags, Shape,
     SurfaceAppearance, UpdateSource, WorldPose,
@@ -134,7 +135,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
             geometry.draw(&mut pass);
         } else {
             geometry.pipelines.bind_pipeline(&mut pass, if alpha == 255 { Pipeline::Surface } else { Pipeline::Blend });
-            pass.set_bind_group(1, geometry.textures.binding(None), &[]);
+            pass.set_bind_group(1, geometry.textures.material_binding(MaterialTextures::default()), &[]);
             pass.set_vertex_buffer(1, geometry.face_indices.slice(..));
             for (face, (vertices, indices, _, count)) in (first_reference..).zip(&reference) {
                 pass.set_vertex_buffer(0, vertices.slice(..));
@@ -810,6 +811,8 @@ fn check_planar_projection(device: &wgpu::Device, queue: &wgpu::Queue) {
         entries: &[
             BindGroupEntry { binding: 0, resource: BindingResource::TextureView(&texture_view) },
             BindGroupEntry { binding: 1, resource: BindingResource::Sampler(&sampler) },
+            BindGroupEntry { binding: 2, resource: BindingResource::TextureView(&texture_view) },
+            BindGroupEntry { binding: 3, resource: BindingResource::Sampler(&sampler) },
         ],
     });
     let pixels = render_pixels(device, queue, size, &depth, |pass| {
@@ -3053,7 +3056,7 @@ fn assert_visible_assets_match_source(
     let first_reference = reference_faces(queue, geometry, references.iter().map(|(_, _, instance, _)| instance));
     let expected = render_pixels(device, queue, [128, 128], depth, |pass| {
         geometry.pipelines.bind_pipeline(pass, Pipeline::Surface);
-        pass.set_bind_group(1, geometry.textures.binding(None), &[]);
+        pass.set_bind_group(1, geometry.textures.material_binding(MaterialTextures::default()), &[]);
         pass.set_vertex_buffer(1, geometry.face_indices.slice(..));
         for (face, (vertices, indices, _, count)) in (first_reference..).zip(&references) {
             pass.set_vertex_buffer(0, vertices.slice(..));

@@ -227,6 +227,44 @@ pub(crate) struct TextureKey {
     pub(crate) sampler: Sampler,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub(crate) enum EmissiveImage {
+    #[default]
+    Absent,
+    Pending,
+    Ready(TextureKey),
+}
+
+impl EmissiveImage {
+    pub(crate) fn key(self) -> Option<TextureKey> {
+        match self {
+            Self::Ready(key) => Some(key),
+            Self::Absent | Self::Pending => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub(crate) struct MaterialTextures {
+    pub(crate) base: Option<TextureKey>,
+    pub(crate) emissive: EmissiveImage,
+}
+
+impl MaterialTextures {
+    pub(crate) fn keys(self) -> impl Iterator<Item = TextureKey> {
+        self.base.into_iter().chain(self.emissive.key())
+    }
+
+    pub(crate) fn has_images(self) -> bool {
+        self.keys().next().is_some()
+    }
+}
+
+struct MaterialBinding {
+    revisions: [u64; 2],
+    binding: BindGroup,
+}
+
 struct TerrainBinding {
     key: [Option<TextureKey>; 4],
     revisions: [u64; 4],
@@ -237,7 +275,6 @@ struct GpuTexture {
     texture: Texture,
     view: TextureView,
     raw_view: TextureView,
-    bindings: HashMap<Sampler, BindGroup>,
     charge: GpuCharge,
 }
 
@@ -322,9 +359,12 @@ pub(crate) struct Textures {
     pub(crate) pair_layout: BindGroupLayout,
     pub(crate) default_sampler: wgpu::Sampler,
     pub(crate) water_sampler: wgpu::Sampler,
+    samplers: HashMap<Sampler, wgpu::Sampler>,
+    material_bindings: HashMap<MaterialTextures, MaterialBinding>,
     fallback: BindGroup,
     fallback_view: TextureView,
     fallback_raw_view: TextureView,
+    pending_view: TextureView,
     mip_layout: BindGroupLayout,
     mip_pipeline: RenderPipeline,
     pub(crate) uploaded: usize,
@@ -336,27 +376,30 @@ impl Textures {
     }
     pub(crate) fn new(device: &Device, queue: &Queue) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
-        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("Scene texture"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: true },
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: false,
+        let material_entries: Vec<_> = (0..2)
+            .flat_map(|image| {
+                [
+                    BindGroupLayoutEntry {
+                        binding: image * 2,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Texture {
+                            sample_type: TextureSampleType::Float { filterable: true },
+                            view_dimension: TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+                    BindGroupLayoutEntry {
+                        binding: image * 2 + 1,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ]
+            })
+            .collect();
+        let layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor { label: Some("Material images"), entries: &material_entries });
         let mut terrain_entries: Vec<_> = (0..4)
             .map(|binding| BindGroupLayoutEntry {
                 binding,
@@ -435,22 +478,8 @@ impl Textures {
             anisotropy_clamp: 16,
             ..Default::default()
         });
-        let texture = device.create_texture(&TextureDescriptor {
-            label: Some("Neutral image"),
-            size: Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba8UnormSrgb,
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-            view_formats: raw_channel_view_formats(TextureFormat::Rgba8UnormSrgb),
-        });
-        queue.write_texture(
-            texture.as_image_copy(),
-            &[255; 4],
-            TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
-            Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-        );
+        let texture = solid_image(device, queue, "Neutral image", [255; 4]);
+        let pending = solid_image(device, queue, "Pending emissive image", [127, 127, 127, 255]);
         let neutral = device.create_texture(&TextureDescriptor {
             label: Some("Neutral terrain detail"),
             size: Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -506,7 +535,8 @@ impl Textures {
             format: Some(raw_channel_view_format(TextureFormat::Rgba8UnormSrgb)),
             ..Default::default()
         });
-        let fallback = binding_with_sampler(device, &layout, &fallback_view, &default_sampler);
+        let pending_view = pending.create_view(&TextureViewDescriptor::default());
+        let fallback = material_binding(device, &layout, [&fallback_view; 2], [&default_sampler; 2]);
         let mip_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Mipmap source"),
             entries: &[BindGroupLayoutEntry {
@@ -576,9 +606,12 @@ impl Textures {
             pair_layout,
             default_sampler,
             water_sampler,
+            samplers: HashMap::new(),
+            material_bindings: HashMap::new(),
             fallback,
             fallback_view,
             fallback_raw_view,
+            pending_view,
             mip_layout,
             mip_pipeline,
             uploaded: 0,
@@ -763,19 +796,6 @@ impl Textures {
         }
     }
 
-    pub(crate) fn resident(&mut self, device: &Device, key: TextureKey) -> Option<TextureKey> {
-        let entry = self.entries.get_mut(&key.id)?;
-        if !entry.owner.is_alive() {
-            return None;
-        }
-        let gpu = match &mut entry.state {
-            TextureUploadState::Ready(gpu) => gpu,
-            _ => entry.fallback.as_mut()?,
-        };
-        gpu.bindings.entry(key.sampler).or_insert_with(|| binding(device, &self.layout, &gpu.view, key.sampler));
-        Some(key)
-    }
-
     pub(crate) fn is_resident(&self, id: TextureId) -> bool {
         self.entries.get(&id).is_some_and(|entry| {
             entry.owner.is_alive() && (matches!(entry.state, TextureUploadState::Ready(_)) || entry.fallback.is_some())
@@ -820,6 +840,34 @@ impl Textures {
         true
     }
 
+    pub(crate) fn prepare_material_binding(&mut self, device: &Device, key: MaterialTextures) {
+        let revisions =
+            [key.base, key.emissive.key()].map(|key| key.and_then(|key| self.entries.get(&key.id)).map_or(0, |entry| entry.state_revision));
+        if self.material_bindings.get(&key).is_some_and(|binding| binding.revisions == revisions) {
+            return;
+        }
+        for settings in key.keys().map(|key| key.sampler) {
+            self.samplers.entry(settings).or_insert_with(|| make_sampler(device, settings));
+        }
+        let base = key.base.and_then(|key| self.texture_view(key)).unwrap_or(&self.fallback_view);
+        let emissive = match key.emissive {
+            EmissiveImage::Absent => &self.fallback_view,
+            EmissiveImage::Pending => &self.pending_view,
+            EmissiveImage::Ready(key) => self.texture_view(key).unwrap_or(&self.pending_view),
+        };
+        let sampler = |key: Option<TextureKey>| key.and_then(|key| self.samplers.get(&key.sampler)).unwrap_or(&self.default_sampler);
+        let binding = material_binding(device, &self.layout, [base, emissive], [sampler(key.base), sampler(key.emissive.key())]);
+        self.material_bindings.insert(key, MaterialBinding { revisions, binding });
+    }
+
+    pub(crate) fn material_binding(&self, key: MaterialTextures) -> &BindGroup {
+        self.material_bindings.get(&key).map_or(&self.fallback, |binding| &binding.binding)
+    }
+
+    pub(crate) fn retain_material_bindings(&mut self, keys: &HashSet<MaterialTextures>) {
+        self.material_bindings.retain(|key, _| keys.contains(key));
+    }
+
     pub(crate) fn terrain_binding(&self, region: Region) -> &BindGroup {
         &self.terrain_bindings.get(&region).expect("terrain binding prepared with its draw").binding
     }
@@ -841,18 +889,6 @@ impl Textures {
             TextureUploadState::Ready(gpu) => Some(&gpu.view),
             _ => entry.fallback.as_ref().map(|gpu| &gpu.view),
         }
-    }
-
-    pub(crate) fn binding(&self, key: Option<TextureKey>) -> &BindGroup {
-        key.and_then(|key| {
-            let entry = self.entries.get(&key.id)?;
-            let gpu = match &entry.state {
-                TextureUploadState::Ready(gpu) => gpu,
-                _ => entry.fallback.as_ref()?,
-            };
-            gpu.bindings.get(&key.sampler)
-        })
-        .unwrap_or(&self.fallback)
     }
 
     pub(crate) fn view(&self, key: Option<TextureKey>) -> &TextureView {
@@ -917,7 +953,7 @@ impl Textures {
     fn changed(&mut self, id: TextureId) {
         self.revision = self.revision.checked_add(1).expect("texture state space exhausted");
         if let Some(entry) = self.entries.get_mut(&id) {
-            entry.state_revision = entry.state_revision.checked_add(1).expect("texture entry state space exhausted");
+            entry.state_revision = self.revision;
         }
         self.changed_ids.insert(id);
         if self.entries.get(&id).is_some_and(|entry| entry.geometry) {
@@ -1035,18 +1071,40 @@ fn allocation_bytes(descriptor: &TextureDescriptor<'_>) -> Option<usize> {
     Some(total)
 }
 
-fn binding(device: &Device, layout: &BindGroupLayout, view: &TextureView, settings: Sampler) -> BindGroup {
-    let sampler = make_sampler(device, settings);
-    binding_with_sampler(device, layout, view, &sampler)
+fn solid_image(device: &Device, queue: &Queue, label: &str, pixel: [u8; 4]) -> Texture {
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some(label),
+        size: Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba8UnormSrgb,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: raw_channel_view_formats(TextureFormat::Rgba8UnormSrgb),
+    });
+    queue.write_texture(
+        texture.as_image_copy(),
+        &pixel,
+        TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+        Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+    );
+    texture
 }
 
-fn binding_with_sampler(device: &Device, layout: &BindGroupLayout, view: &TextureView, sampler: &wgpu::Sampler) -> BindGroup {
+fn material_binding(
+    device: &Device,
+    layout: &BindGroupLayout,
+    [base, emissive]: [&TextureView; 2],
+    [base_sampler, emissive_sampler]: [&wgpu::Sampler; 2],
+) -> BindGroup {
     device.create_bind_group(&BindGroupDescriptor {
-        label: Some("Scene image"),
+        label: Some("Material images"),
         layout,
         entries: &[
-            BindGroupEntry { binding: 0, resource: BindingResource::TextureView(view) },
-            BindGroupEntry { binding: 1, resource: BindingResource::Sampler(sampler) },
+            BindGroupEntry { binding: 0, resource: BindingResource::TextureView(base) },
+            BindGroupEntry { binding: 1, resource: BindingResource::Sampler(base_sampler) },
+            BindGroupEntry { binding: 2, resource: BindingResource::TextureView(emissive) },
+            BindGroupEntry { binding: 3, resource: BindingResource::Sampler(emissive_sampler) },
         ],
     })
 }
