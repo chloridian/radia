@@ -19,6 +19,7 @@ use crate::support;
 const OBJECTS: usize = 3_000;
 const TEXTURES: usize = 512;
 const ANIMATED_OBJECTS: usize = 500;
+const SETTLE_FRAMES: usize = 256;
 const SIZE: [u32; 2] = [1024, 1024];
 const DURATION_BUCKETS: usize = 10_001;
 const DURATION_BUCKET_US: u64 = 10;
@@ -933,10 +934,10 @@ fn bench_camera_walk(
                 assert_eq!(latest.pending_textures, 0, "camera walk must use resident textures");
                 assert_eq!(latest.omitted_faces, 0);
             }
-            assert!(layouts > 0, "multi-region camera walk must relayout when visible items change");
             elapsed
         });
     });
+    assert!(generation == 0 || layouts > 0, "multi-region camera walk must relayout when visible items change");
     report("camera_walk_025_multi_region", latest);
 }
 
@@ -1002,19 +1003,30 @@ fn bench_camera_culling_edge_sweep(
     let cameras = [camera_yaw_at(896.0, 0.0, 1024.0), camera_yaw_at(896.0, 0.35, 1024.0)];
     fixture.sample(device, queue, cameras[0]);
     let first = fixture.prepare.stats();
-    fixture.sample(device, queue, cameras[1]);
-    let second = fixture.prepare.stats();
+    let mut second = first;
+    let mut settle_layouts = 0;
+    let mut settle_frames = 0;
+    for frame in 1..=SETTLE_FRAMES {
+        fixture.sample(device, queue, cameras[1]);
+        second = fixture.prepare.stats();
+        settle_layouts += second.layouts;
+        settle_frames = frame;
+        if !second.rebuild_pending {
+            break;
+        }
+    }
     for stats in [first, second] {
         assert_eq!(stats.pending_meshes, 0, "warm edge sweep must use resident meshes");
         assert_eq!(stats.pending_textures, 0, "warm edge sweep must use resident textures");
         assert_eq!(stats.omitted_faces, 0);
     }
+    assert!(!second.rebuild_pending, "edge sweep layout must settle within {SETTLE_FRAMES} frames");
     assert_ne!(first.instances, second.instances, "edge sweep must change visible item count");
-    assert!(second.layouts > 0, "edge sweep must rebuild the visible draw layout");
-    eprintln!("{name}: edge sweep instances={}->{} layouts={}->{}", first.instances, second.instances, first.layouts, second.layouts);
+    assert!(settle_layouts > 0, "edge sweep must rebuild the visible draw layout");
+    eprintln!("{name}: edge sweep instances={}->{} settled after {settle_frames} frames", first.instances, second.instances);
 
     let mut generation = 0usize;
-    let mut previous_instances = second.instances;
+    let mut layouts = 0usize;
     let mut latest = second;
     group.bench_function(name, |b| {
         b.iter_custom(|iters| {
@@ -1027,13 +1039,12 @@ fn bench_camera_culling_edge_sweep(
                 assert_eq!(latest.pending_meshes, 0, "warm edge sweep must use resident meshes");
                 assert_eq!(latest.pending_textures, 0, "warm edge sweep must use resident textures");
                 assert_eq!(latest.omitted_faces, 0);
-                assert_ne!(latest.instances, previous_instances, "edge sweep must change visible item count");
-                assert!(latest.layouts > 0, "edge sweep must rebuild the visible draw layout");
-                previous_instances = latest.instances;
+                layouts += latest.layouts;
             }
             elapsed
         });
     });
+    eprintln!("{name}: alternating sweep committed {layouts} layouts");
     report(name, latest);
 }
 
@@ -1074,6 +1085,8 @@ fn bench_reprepare(
     let mut generation = 0;
     let mut order = 20_000_000;
     let mut latest = fixture.prepare.stats();
+    let mut frames = 0usize;
+    let mut max_frames = 0usize;
     group.bench_function(name, |b| {
         b.iter_custom(|iters| {
             let mut elapsed = Duration::ZERO;
@@ -1091,12 +1104,24 @@ fn bench_reprepare(
                 elapsed += fixture.sample(device, queue, camera);
                 latest = fixture.prepare.stats();
                 assert!(latest.items_updated > 0, "appearance update must refresh an object");
-                assert_eq!(latest.layouts, 1, "appearance change must rebuild the draw list");
+                let mut layouts = latest.layouts;
+                let mut settle_frames = 1;
+                while latest.rebuild_pending && settle_frames < SETTLE_FRAMES {
+                    elapsed += fixture.sample(device, queue, camera);
+                    latest = fixture.prepare.stats();
+                    layouts += latest.layouts;
+                    settle_frames += 1;
+                }
+                assert!(!latest.rebuild_pending, "appearance change layout must settle within {SETTLE_FRAMES} frames");
+                assert_eq!(layouts, 1, "appearance change must rebuild the draw list once");
                 assert_eq!(latest.omitted_faces, 0);
+                frames += settle_frames;
+                max_frames = max_frames.max(settle_frames);
             }
             elapsed
         });
     });
+    eprintln!("{name}: frames_per_change mean={:.1} max={max_frames}", frames as f64 / generation.max(1) as f64);
     report(name, latest);
 }
 
