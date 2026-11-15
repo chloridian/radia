@@ -43,6 +43,10 @@ impl RetainedOverrides {
         self.by_address.get(address).filter(|entry| entry.expected_id.is_none_or(|expected| expected == id)).map(|entry| &entry.overrides)
     }
 
+    pub(crate) fn contains(&self, address: &LocalAddress) -> bool {
+        self.by_address.contains_key(address)
+    }
+
     pub(crate) fn retain(&mut self, address: LocalAddress, entry: RetainedOverride) {
         if self.by_address.get(&address).is_some_and(|existing| existing.stamp >= entry.stamp) {
             return;

@@ -31,6 +31,7 @@ impl WorldChangeClasses {
     pub const SHAPE: Self = Self(1 << 4);
     pub const APPEARANCE: Self = Self(1 << 5);
     pub const MEDIA: Self = Self(1 << 6);
+    pub const PBR_MATERIAL_OVERRIDES: Self = Self(1 << 7);
 
     pub const fn is_empty(self) -> bool {
         self.0 == 0
@@ -38,6 +39,10 @@ impl WorldChangeClasses {
 
     pub const fn contains(self, classes: Self) -> bool {
         self.0 & classes.0 == classes.0
+    }
+
+    pub(crate) const fn union(self, classes: Self) -> Self {
+        Self(self.0 | classes.0)
     }
 }
 
