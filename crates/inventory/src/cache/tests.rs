@@ -954,7 +954,8 @@ fn interrupted_batch_keeps_cached_folder_incomplete() -> Result<(), Box<dyn Erro
         .stderr(Stdio::inherit());
     let mut child = TestProcess::spawn(&mut command)?;
     child.wait_for_stdout("transaction-open")?;
-    child.kill()?;
+    let status = child.kill()?;
+    assert!(!status.success(), "helper exited on its own before the kill, so the second batch committed: {status:?}");
 
     let mut current = fixture(7)?;
     let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", current.agent, None)?;
