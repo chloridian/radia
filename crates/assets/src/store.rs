@@ -1323,8 +1323,10 @@ impl Store {
             return writes;
         }
         if origin == DecodeOrigin::Disk && result.as_ref().is_err_and(|failure| *failure != Failure::Cancelled) && !job.is_cancelled() {
-            if let Some(cache) = &self.cache {
-                cache.discard_corrupt(job.request);
+            if let Some(cache) = &self.cache
+                && let Err(error) = cache.discard_corrupt(job.request)
+            {
+                tracing::warn!(error = %error, "failed to discard corrupt asset cache entry");
             }
             return writes;
         }
