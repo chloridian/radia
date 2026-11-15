@@ -62,8 +62,11 @@ fn size_limit_evicts_least_recently_used() {
     let single = tempdir().expect("single cache directory");
     let single_cache = Cache::open(single.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open single cache");
     single_cache.put(key(10), vec![1; 64 * 1024]).expect("store sample entry");
-    let one_entry_limit = single_cache.accounted_size();
+    let one_entry_size = single_cache.accounted_size();
     single_cache.shutdown().expect("close single cache");
+    let empty_floor = empty_cache_floor();
+    let one_entry_limit = limit_for_watermark(one_entry_size, empty_floor);
+    assert!(test_low_watermark(one_entry_limit, empty_floor) >= one_entry_size);
 
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
