@@ -93,11 +93,12 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
             (
                 device.create_buffer_init(&BufferInitDescriptor { label: None, contents: &vertices, usage: BufferUsages::VERTEX }),
                 device.create_buffer_init(&BufferInitDescriptor { label: None, contents: &indices, usage: BufferUsages::INDEX }),
-                device.create_buffer_init(&BufferInitDescriptor { label: None, contents: &packed, usage: BufferUsages::VERTEX }),
+                packed,
                 mesh.indices().len() as u32,
             )
         })
         .collect();
+    let first_reference = reference_faces(queue, &geometry, reference.iter().map(|(_, _, packed, _)| packed));
     let color = device.create_texture(&TextureDescriptor {
         label: None,
         size: Extent3d { width: 128, height: 128, depth_or_array_layers: 2 },
@@ -134,11 +135,11 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
         } else {
             geometry.pipelines.bind_pipeline(&mut pass, if alpha == 255 { Pipeline::Surface } else { Pipeline::Blend });
             pass.set_bind_group(1, geometry.textures.binding(None), &[]);
-            for (vertices, indices, instance, count) in &reference {
+            pass.set_vertex_buffer(1, geometry.face_indices.slice(..));
+            for (face, (vertices, indices, _, count)) in (first_reference..).zip(&reference) {
                 pass.set_vertex_buffer(0, vertices.slice(..));
-                pass.set_vertex_buffer(1, instance.slice(..));
                 pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..*count, 0, 0..1);
+                pass.draw_indexed(0..*count, 0, face..face + 1);
             }
         }
     }
@@ -641,6 +642,18 @@ fn fill_mesh_pages(device: &wgpu::Device, geometry: &mut GeometryRenderer) -> Ve
     allocations
 }
 
+fn reference_faces<'a>(
+    queue: &wgpu::Queue,
+    geometry: &GeometryRenderer,
+    records: impl IntoIterator<Item = &'a [u8; INSTANCE_BYTES]>,
+) -> u32 {
+    let bytes: Vec<u8> = records.into_iter().flatten().copied().collect();
+    let count = bytes.len() / INSTANCE_BYTES;
+    let first = crate::geometry::draw_list::MAX_FACE_INSTANCES - count;
+    queue.write_buffer(&geometry.instances, (first * INSTANCE_BYTES) as u64, &bytes);
+    u32::try_from(first).expect("face slots fit u32")
+}
+
 fn render_pixels(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -741,7 +754,7 @@ fn check_planar_projection(device: &wgpu::Device, queue: &wgpu::Queue) {
     let projection = geometry.pipelines.update_camera_uniform(queue, camera, size, camera.position());
     let mut objects: Vec<_> = view.objects().collect();
     objects.sort_by_key(|object| object.detail().summary.id);
-    let mut instances = Vec::new();
+    let mut records = Vec::new();
     for object in &objects {
         let Placement::Ready(transform) = object.placement() else { panic!("fixture prim must be placed") };
         let face = object.materials().unwrap().iter().find(|material| material.slot == 0).expect("fixture has face zero");
@@ -749,12 +762,13 @@ fn check_planar_projection(device: &wgpu::Device, queue: &wgpu::Queue) {
         assert_eq!(params.params[3], 1.0, "scene planar mapping reaches the production surface parameters");
         params.color = [1.0; 4];
         params.params[0] = 1.0;
-        instances.extend_from_slice(&packed_instance(
+        records.push(packed_instance(
             &instance_base(transform.pose.position, transform.pose.rotation, transform.scale, false, camera.position()),
             &params,
             transform.scale,
         ));
     }
+    let first_reference = reference_faces(queue, &geometry, &records);
     let vertices: Vec<u8> = [Vec3::new(0.0, -0.5, -0.5), Vec3::new(0.0, 0.5, -0.5), Vec3::new(0.0, 0.5, 0.5), Vec3::new(0.0, -0.5, 0.5)]
         .into_iter()
         .flat_map(|position| position.to_array().into_iter().chain([-1.0, 0.0, 0.0]).chain([0.0, 0.0]).flat_map(f32::to_le_bytes))
@@ -763,8 +777,6 @@ fn check_planar_projection(device: &wgpu::Device, queue: &wgpu::Queue) {
     let index_bytes: Vec<_> = indices.into_iter().flat_map(u32::to_le_bytes).collect();
     let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor { label: None, contents: &vertices, usage: BufferUsages::VERTEX });
     let index_buffer = device.create_buffer_init(&BufferInitDescriptor { label: None, contents: &index_bytes, usage: BufferUsages::INDEX });
-    let instance_buffer =
-        device.create_buffer_init(&BufferInitDescriptor { label: None, contents: &instances, usage: BufferUsages::VERTEX });
     let texture_pixels: Vec<_> =
         (0..8).flat_map(|_| (0..8).flat_map(|x| if x < 4 { [255, 0, 0, 255] } else { [0, 0, 255, 255] })).collect();
     let texture = device.create_texture(&TextureDescriptor {
@@ -804,12 +816,9 @@ fn check_planar_projection(device: &wgpu::Device, queue: &wgpu::Queue) {
         geometry.pipelines.bind_pipeline(pass, Pipeline::DoubleSided);
         pass.set_bind_group(1, &texture_binding, &[]);
         pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        pass.set_vertex_buffer(1, geometry.face_indices.slice(..));
         pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        for index in 0..objects.len() {
-            let start = index * INSTANCE_BYTES;
-            pass.set_vertex_buffer(1, instance_buffer.slice(start as u64..(start + INSTANCE_BYTES) as u64));
-            pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
-        }
+        pass.draw_indexed(0..indices.len() as u32, 0, first_reference..first_reference + records.len() as u32);
     });
     for object in objects {
         let Placement::Ready(transform) = object.placement() else { panic!("fixture prim must be placed") };
@@ -3035,20 +3044,21 @@ fn assert_visible_assets_match_source(
         references.push((
             device.create_buffer_init(&BufferInitDescriptor { label: None, contents: &vertices, usage: BufferUsages::VERTEX }),
             device.create_buffer_init(&BufferInitDescriptor { label: None, contents: &indices, usage: BufferUsages::INDEX }),
-            device.create_buffer_init(&BufferInitDescriptor { label: None, contents: &instance, usage: BufferUsages::VERTEX }),
+            instance,
             mesh.indices().len() as u32,
         ));
     }
     assert_eq!(references.len(), visible.len(), "{phase}: every visible asset has one independent reference draw");
     let actual = render_pixels(device, queue, [128, 128], depth, |pass| geometry.draw(pass));
+    let first_reference = reference_faces(queue, geometry, references.iter().map(|(_, _, instance, _)| instance));
     let expected = render_pixels(device, queue, [128, 128], depth, |pass| {
         geometry.pipelines.bind_pipeline(pass, Pipeline::Surface);
         pass.set_bind_group(1, geometry.textures.binding(None), &[]);
-        for (vertices, indices, instance, count) in &references {
+        pass.set_vertex_buffer(1, geometry.face_indices.slice(..));
+        for (face, (vertices, indices, _, count)) in (first_reference..).zip(&references) {
             pass.set_vertex_buffer(0, vertices.slice(..));
-            pass.set_vertex_buffer(1, instance.slice(..));
             pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..*count, 0, 0..1);
+            pass.draw_indexed(0..*count, 0, face..face + 1);
         }
     });
     let lit = actual.iter().filter(|pixel| pixel[0] > 16 || pixel[1] > 16 || pixel[2] > 16).count();
@@ -4360,7 +4370,7 @@ fn gpu_blended_rotation_uploads_instances() {
     geometry.instances = device.create_buffer(&BufferDescriptor {
         label: None,
         size: crate::geometry::INSTANCE_BUFFER_BYTES as u64,
-        usage: BufferUsages::VERTEX | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     let camera = |x| Camera::new(DVec3::new(x, -30.0, 0.0), Vec3::Y, 1.0, [128, 128]).unwrap();
@@ -4418,14 +4428,18 @@ fn gpu_blended_rotation_uploads_instances() {
 #[test]
 #[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_warmed_rotation_preserves_triangles -- --ignored"]
 fn gpu_warmed_rotation_preserves_triangles() {
-    let (device, queue, indirect) = block_on(async {
+    for indirect in [true, false] {
+        warmed_rotation_preserves_triangles(indirect);
+    }
+}
+
+fn warmed_rotation_preserves_triangles(indirect: bool) {
+    let (device, queue) = block_on(async {
         let instance =
             wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-        let indirect = adapter.features() & wgpu::Features::INDIRECT_FIRST_INSTANCE;
-        let (device, queue) =
-            adapter.request_device(&DeviceDescriptor { required_features: indirect, ..Default::default() }).await.unwrap();
-        (device, queue, indirect.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE))
+        let features = if indirect { wgpu::Features::INDIRECT_FIRST_INSTANCE } else { wgpu::Features::empty() };
+        adapter.request_device(&DeviceDescriptor { required_features: features, ..Default::default() }).await.unwrap()
     });
     let scope = device.push_error_scope(ErrorFilter::Validation);
     let a = AssetId::new(Uuid::from_u128(850));

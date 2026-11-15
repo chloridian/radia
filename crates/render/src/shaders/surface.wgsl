@@ -13,24 +13,23 @@ struct SurfaceAtmosphere {
 @group(0) @binding(3) var water_normal_image: texture_2d<f32>;
 @group(0) @binding(4) var water_normal_next_image: texture_2d<f32>;
 @group(0) @binding(5) var water_normal_sampler: sampler;
+struct Face {
+    model: mat4x4<f32>,
+    normal: mat3x3<f32>,
+    color: vec4<f32>,
+    u: vec4<f32>,
+    v: vec4<f32>,
+    params: vec4<f32>,
+    scale: vec4<f32>,
+}
+@group(0) @binding(6) var<storage, read> faces: array<Face>;
 
 struct Input {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) composition: f32,
-    @location(4) x: vec4<f32>,
-    @location(5) y: vec4<f32>,
-    @location(6) z: vec4<f32>,
-    @location(7) translation: vec4<f32>,
-    @location(8) nx: vec4<f32>,
-    @location(9) ny: vec4<f32>,
-    @location(10) nz: vec4<f32>,
-    @location(11) color: vec4<f32>,
-    @location(12) u: vec4<f32>,
-    @location(13) v: vec4<f32>,
-    @location(14) params: vec4<f32>,
-    @location(15) scale: vec4<f32>,
+    @location(4) face: u32,
 }
 struct Output {
     @builtin(position) position: vec4<f32>,
@@ -44,17 +43,17 @@ struct Output {
 }
 fn transform(v: Input) -> Output {
     var out: Output;
-    let model = mat4x4<f32>(v.x, v.y, v.z, v.translation);
-    let position = model * vec4<f32>(v.position, 1.0);
+    let face = faces[v.face];
+    let position = face.model * vec4<f32>(v.position, 1.0);
     out.position = camera.projection * position;
-    let normal = mat3x3<f32>(v.nx.xyz, v.ny.xyz, v.nz.xyz) * v.normal;
+    let normal = face.normal * v.normal;
     out.normal = (camera.view * vec4<f32>(normal, 0.0)).xyz;
     out.position_view = (camera.view * position).xyz;
     out.relative_position = position.xyz;
     out.camera_relative_position = position.xyz - surface_water.camera_relative.xyz;
-    out.color = v.color;
+    out.color = face.color;
     var uv = v.uv;
-    if v.params.w == 1.0 {
+    if face.params.w == 1.0 {
         var binormal = vec3<f32>(1.0, 0.0, 0.0);
         if abs(v.normal.x) >= 0.5 {
             binormal = vec3<f32>(0.0, select(1.0, -1.0, v.normal.x < 0.0), 0.0);
@@ -62,11 +61,11 @@ fn transform(v: Input) -> Output {
             binormal = vec3<f32>(-1.0, 0.0, 0.0);
         }
         let tangent = cross(binormal, v.normal);
-        let point = v.position * v.scale.xyz;
+        let point = v.position * face.scale.xyz;
         uv = vec2<f32>(0.5 + 2.0 * dot(binormal, point), 0.5 - 2.0 * dot(tangent, point));
     }
-    out.uv = vec2<f32>(dot(v.u.xyz, vec3<f32>(uv, 1.0)), dot(v.v.xyz, vec3<f32>(uv, 1.0)));
-    out.params = v.params;
+    out.uv = vec2<f32>(dot(face.u.xyz, vec3<f32>(uv, 1.0)), dot(face.v.xyz, vec3<f32>(uv, 1.0)));
+    out.params = face.params;
     return out;
 }
 
