@@ -12,7 +12,9 @@ mod region_lookup;
 mod terrain;
 mod world;
 
-pub(crate) use agent_motion::{AgentMotionPublisher, AgentMotionSample};
+pub(crate) use agent_motion::AgentMotionPublisher;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub(crate) use agent_motion::AgentMotionSample;
 pub(crate) use coordinator::{
     AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionEnd,
     SessionReadyUpdate, ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,

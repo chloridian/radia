@@ -4,7 +4,7 @@ use math::{DVec3, Quat, Vec3};
 use protocol::messages::AgentMovementComplete;
 use tokio::sync::watch;
 use uuid::Uuid;
-use world::{Parent, Region, World, WorldPose, WorldTransformState};
+use world::{Parent, Region, World, WorldTransformState};
 
 const MAX_ARRIVAL_XY: f32 = 256.0;
 const MAX_ARRIVAL_Z: f32 = 4096.0;
@@ -38,10 +38,6 @@ impl AgentMotionSample {
             && self.simulator_rotation.length_squared().is_finite()
             && self.simulator_rotation.length_squared() > f32::EPSILON
     }
-
-    pub(crate) fn pose(self, position: DVec3) -> WorldPose {
-        WorldPose { position, rotation: self.simulator_rotation }
-    }
 }
 
 pub(crate) struct AgentMotionPublisher {
@@ -55,6 +51,7 @@ impl AgentMotionPublisher {
         Self { sender, seed: 0 }
     }
 
+    #[cfg(any(test, target_os = "windows", target_os = "linux"))]
     pub(crate) fn receiver(&self) -> watch::Receiver<Option<AgentMotionSample>> {
         self.sender.subscribe()
     }

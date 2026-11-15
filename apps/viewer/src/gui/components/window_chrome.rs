@@ -1,6 +1,6 @@
 #[cfg(target_os = "linux")]
 mod platform {
-    use gpui::{AnyElement, Decorations, IntoElement, ParentElement, Window, div, prelude::*, px};
+    use gpui::{AnyElement, Decorations, IntoElement, ParentElement, Window, div, prelude::*};
     use gpui_component::{StyledExt, ThemeColor, TitleBar};
 
     pub(crate) fn appears_transparent() -> bool {
