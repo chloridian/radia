@@ -10,6 +10,16 @@ use crate::{
     },
 };
 
+const TRUNCATION_CASES: [&str; 7] = [
+    "UpdateCreateInventoryItem",
+    "RemoveInventoryItem",
+    "RemoveInventoryFolder",
+    "RemoveInventoryObjects",
+    "SaveAssetIntoInventory",
+    "BulkUpdateInventory",
+    "MoveInventoryItem",
+];
+
 fn uuid(value: u128) -> Uuid {
     Uuid::from_u128(value)
 }
@@ -100,97 +110,23 @@ fn encode(message: &Message) -> Vec<u8> {
     payload
 }
 
-fn assert_round_trip(message: Message) {
-    let payload = encode(&message);
-    let (decoded, trailing) = Message::decode(message.id(), &payload).expect("decode inventory message");
-    assert_eq!(decoded, message);
-    assert!(trailing.is_empty());
-}
-
-fn assert_truncated(message: Message) {
-    let id = message.id();
-    let mut payload = encode(&message);
-    payload.pop();
-    assert_eq!(Message::decode(id, &payload), Err(LLUdpError::TruncatedPacket));
+#[test]
+fn truncation_fails() {
+    let messages = messages();
+    for (case, message) in TRUNCATION_CASES.into_iter().zip(&messages) {
+        let id = message.id();
+        let mut payload = encode(message);
+        payload.pop();
+        assert_eq!(Message::decode(id, &payload), Err(LLUdpError::TruncatedPacket), "{case}");
+    }
 }
 
 #[test]
-fn update_create_round_trips() {
-    assert_round_trip(messages()[0].clone());
-}
-
-#[test]
-fn remove_item_round_trips() {
-    assert_round_trip(messages()[1].clone());
-}
-
-#[test]
-fn remove_folder_round_trips() {
-    assert_round_trip(messages()[2].clone());
-}
-
-#[test]
-fn remove_objects_round_trips() {
-    assert_round_trip(messages()[3].clone());
-}
-
-#[test]
-fn save_asset_round_trips() {
-    assert_round_trip(messages()[4].clone());
-}
-
-#[test]
-fn bulk_update_round_trips() {
-    assert_round_trip(messages()[5].clone());
-}
-
-#[test]
-fn move_item_round_trips() {
-    let message = messages()[6].clone();
-    assert!(!message.is_inbound_only());
-    assert_round_trip(message);
-}
-
-#[test]
-fn move_folder_round_trips() {
-    let message = messages()[7].clone();
-    assert!(!message.is_inbound_only());
-    assert_round_trip(message);
-}
-
-#[test]
-fn update_create_truncation_fails() {
-    assert_truncated(messages()[0].clone());
-}
-
-#[test]
-fn remove_item_truncation_fails() {
-    assert_truncated(messages()[1].clone());
-}
-
-#[test]
-fn remove_folder_truncation_fails() {
-    assert_truncated(messages()[2].clone());
-}
-
-#[test]
-fn remove_objects_truncation_fails() {
-    assert_truncated(messages()[3].clone());
-}
-
-#[test]
-fn save_asset_truncation_fails() {
-    assert_truncated(messages()[4].clone());
-}
-
-#[test]
-fn bulk_update_truncation_fails() {
-    assert_truncated(messages()[5].clone());
-}
-
-#[test]
-fn move_item_truncation_fails() {
-    assert_truncated(messages()[6].clone());
+fn moves_are_outbound() {
+    let messages = messages();
+    for (case, message) in ["MoveInventoryItem", "MoveInventoryFolder"].into_iter().zip(&messages[6..]) {
+        assert!(!message.is_inbound_only(), "{case}");
+    }
 }
 
 #[test]

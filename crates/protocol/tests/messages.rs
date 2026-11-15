@@ -168,46 +168,33 @@ fn logout_reply_fields() {
 }
 
 #[test]
-fn enable_simulator_fields() {
-    let expected = fixture(vectors::ENABLE_SIMULATOR);
-    let decoded = Packet::decode(&expected).expect("decode EnableSimulator fixture");
+fn simulator_fixtures() {
+    let cases = [
+        (
+            "EnableSimulator",
+            vectors::ENABLE_SIMULATOR,
+            Message::EnableSimulator(EnableSimulator {
+                simulator_info: SimulatorInfo { handle: 0x1122_3344_5566_7788, ip: Ipv4Addr::new(192, 0, 2, 10), port: 0x32c8 },
+            }),
+        ),
+        ("DisableSimulator", vectors::DISABLE_SIMULATOR, Message::DisableSimulator(DisableSimulator)),
+        (
+            "ConfirmEnableSimulator",
+            vectors::CONFIRM_ENABLE_SIMULATOR,
+            Message::ConfirmEnableSimulator(ConfirmEnableSimulator {
+                agent_data: confirm_enable_simulator::AgentData { agent_id: agent_id(), session_id: session_id() },
+            }),
+        ),
+    ];
+    for (case, hex, message) in cases {
+        let expected = fixture(hex);
+        let decoded = Packet::decode(&expected).expect(case);
 
-    assert_eq!(decoded.sequence(), 0x0102_0304);
-    assert_eq!(
-        decoded.message(),
-        &Message::EnableSimulator(EnableSimulator {
-            simulator_info: SimulatorInfo { handle: 0x1122_3344_5566_7788, ip: Ipv4Addr::new(192, 0, 2, 10), port: 0x32c8 },
-        })
-    );
-    assert!(decoded.message().is_inbound_only());
-    assert_eq!(decoded.encode().expect("re-encode EnableSimulator fixture"), expected);
-}
-
-#[test]
-fn disable_simulator_fields() {
-    let expected = fixture(vectors::DISABLE_SIMULATOR);
-    let decoded = Packet::decode(&expected).expect("decode DisableSimulator fixture");
-
-    assert_eq!(decoded.sequence(), 0x0102_0304);
-    assert_eq!(decoded.message(), &Message::DisableSimulator(DisableSimulator));
-    assert!(decoded.message().is_inbound_only());
-    assert_eq!(decoded.encode().expect("re-encode DisableSimulator fixture"), expected);
-}
-
-#[test]
-fn confirm_enable_simulator_fields() {
-    let expected = fixture(vectors::CONFIRM_ENABLE_SIMULATOR);
-    let decoded = Packet::decode(&expected).expect("decode ConfirmEnableSimulator fixture");
-
-    assert_eq!(decoded.sequence(), 0x0102_0304);
-    assert_eq!(
-        decoded.message(),
-        &Message::ConfirmEnableSimulator(ConfirmEnableSimulator {
-            agent_data: confirm_enable_simulator::AgentData { agent_id: agent_id(), session_id: session_id() },
-        })
-    );
-    assert_eq!(decoded.encode().expect("re-encode ConfirmEnableSimulator fixture"), expected);
-    assert!(decoded.message().is_inbound_only());
+        assert_eq!(decoded.sequence(), 0x0102_0304, "{case}");
+        assert_eq!(decoded.message(), &message, "{case}");
+        assert!(decoded.message().is_inbound_only(), "{case}");
+        assert_eq!(decoded.encode().expect(case), expected, "{case}");
+    }
 }
 
 #[test]

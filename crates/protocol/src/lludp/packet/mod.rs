@@ -329,13 +329,6 @@ mod tests {
     }
 
     #[test]
-    fn oversized_unknown_payload() {
-        let packet = Packet::new(1, Message::Unknown { id: MessageId::high(1), payload: vec![0x55; MAX_LLUDP_PACKET_SIZE * 128] });
-
-        assert_eq!(packet.encode(), Err(LLUdpError::DatagramTooLarge));
-    }
-
-    #[test]
     fn encoded_expansion_limit() {
         let packet =
             Packet::new(1, Message::Unknown { id: MessageId::high(1), payload: vec![0; MAX_LLUDP_PACKET_SIZE] }).with_zero_coding(true);

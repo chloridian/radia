@@ -55,18 +55,44 @@ fn packet_ack(packet_ids: &[u32]) -> Message {
 }
 
 #[test]
-fn circuit_code_round_trip() {
-    let expected = fixture(vectors::USE_CIRCUIT_CODE);
-    let message = Message::UseCircuitCode(UseCircuitCode {
-        circuit_code: CircuitCode { code: 0x1122_3344, session_id: session_id(), agent_id: agent_id() },
-    });
-    let packet = Packet::new(0x0102_0304, message.clone()).with_reliable();
+fn reliable_fixture_round_trips() {
+    let cases = [
+        (
+            "UseCircuitCode",
+            vectors::USE_CIRCUIT_CODE,
+            Message::UseCircuitCode(UseCircuitCode {
+                circuit_code: CircuitCode { code: 0x1122_3344, session_id: session_id(), agent_id: agent_id() },
+            }),
+        ),
+        (
+            "CompleteAgentMovement",
+            vectors::COMPLETE_AGENT_MOVEMENT,
+            Message::CompleteAgentMovement(CompleteAgentMovement {
+                agent_data: complete_agent_movement::AgentData {
+                    agent_id: agent_id(),
+                    session_id: session_id(),
+                    circuit_code: 0x0102_0304,
+                },
+            }),
+        ),
+        (
+            "LogoutRequest",
+            vectors::LOGOUT_REQUEST,
+            Message::LogoutRequest(LogoutRequest {
+                agent_data: logout_request::AgentData { agent_id: agent_id(), session_id: session_id() },
+            }),
+        ),
+    ];
+    for (case, hex, message) in cases {
+        let expected = fixture(hex);
+        let packet = Packet::new(0x0102_0304, message.clone()).with_reliable();
 
-    assert_eq!(packet.encode().expect("encode packet"), expected);
-    let decoded = Packet::decode(&expected).expect("decode fixture");
-    assert_eq!(decoded.sequence(), 0x0102_0304);
-    assert_eq!(decoded.message(), &message);
-    assert_eq!(decoded.encode().expect("re-encode fixture"), expected);
+        assert_eq!(packet.encode().expect(case), expected, "{case}");
+        let decoded = Packet::decode(&expected).expect(case);
+        assert_eq!(decoded.sequence(), 0x0102_0304, "{case}");
+        assert_eq!(decoded.message(), &message, "{case}");
+        assert_eq!(decoded.encode().expect(case), expected, "{case}");
+    }
 }
 
 #[test]
@@ -113,33 +139,6 @@ fn handshake_reply_bytes() {
 
     let decoded = Packet::decode(&expected).expect("decode fixture");
     assert_eq!(decoded.sequence(), 0x0102_0304);
-    assert_eq!(decoded.message(), &message);
-    assert_eq!(decoded.encode().expect("re-encode fixture"), expected);
-}
-
-#[test]
-fn movement_round_trip() {
-    let expected = fixture(vectors::COMPLETE_AGENT_MOVEMENT);
-    let message = Message::CompleteAgentMovement(CompleteAgentMovement {
-        agent_data: complete_agent_movement::AgentData { agent_id: agent_id(), session_id: session_id(), circuit_code: 0x0102_0304 },
-    });
-    let packet = Packet::new(0x0102_0304, message.clone()).with_reliable();
-
-    assert_eq!(packet.encode().expect("encode packet"), expected);
-    let decoded = Packet::decode(&expected).expect("decode fixture");
-    assert_eq!(decoded.message(), &message);
-    assert_eq!(decoded.encode().expect("re-encode fixture"), expected);
-}
-
-#[test]
-fn logout_request_round_trip() {
-    let expected = fixture(vectors::LOGOUT_REQUEST);
-    let message =
-        Message::LogoutRequest(LogoutRequest { agent_data: logout_request::AgentData { agent_id: agent_id(), session_id: session_id() } });
-    let packet = Packet::new(0x0102_0304, message.clone()).with_reliable();
-
-    assert_eq!(packet.encode().expect("encode packet"), expected);
-    let decoded = Packet::decode(&expected).expect("decode fixture");
     assert_eq!(decoded.message(), &message);
     assert_eq!(decoded.encode().expect("re-encode fixture"), expected);
 }

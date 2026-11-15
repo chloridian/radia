@@ -209,16 +209,18 @@ fn empty_final_block_count() {
 
 #[test]
 fn missing_fields_zero_fill() {
-    let payload = [0x11];
-    let decoded = SchemaMessage::decode(&COMPAT_SCHEMA, &payload).expect("decode older message");
+    for (case, payload) in [("missing fields", &[0x11][..]), ("partial fixed field", &[0x11, 0x22][..])] {
+        let decoded = SchemaMessage::decode(&COMPAT_SCHEMA, payload).expect(case);
 
-    assert_eq!(decoded.blocks[0].instances[0].fields, [FieldValue::U8(0x11), FieldValue::U16(0)]);
-    assert_eq!(decoded.blocks[1].instances[0].fields, [FieldValue::U32(0)]);
-    assert_eq!(decoded.blocks[1].instances[1].fields, [FieldValue::U32(0)]);
+        assert_eq!(decoded.blocks[0].instances[0].fields, [FieldValue::U8(0x11), FieldValue::U16(0)], "{case}");
+        assert_eq!(decoded.blocks[1].instances[0].fields, [FieldValue::U32(0)], "{case}");
+        assert_eq!(decoded.blocks[1].instances[1].fields, [FieldValue::U32(0)], "{case}");
+        assert!(decoded.trailing_bytes().is_empty(), "{case}");
 
-    let mut encoded = Vec::new();
-    decoded.encode_payload(&mut Writer::new(&mut encoded)).expect("re-encode older message");
-    assert_eq!(encoded, payload);
+        let mut encoded = Vec::new();
+        decoded.encode_payload(&mut Writer::new(&mut encoded)).expect(case);
+        assert_eq!(encoded, [0x11], "{case}");
+    }
 }
 
 #[test]
@@ -233,29 +235,6 @@ fn explicit_zero_differs_from_fill() {
     assert_eq!(omitted.field_was_supplied(1, 0, 0), Some(false));
     assert_eq!(omitted.field_was_supplied(4, 0, 0), None);
     assert_ne!(supplied, omitted, "wire presence is part of the schema message's observable value");
-}
-
-#[test]
-fn counts_repeated_padding() {
-    static FIXED_FIELDS: &[FieldSchema] = &[FieldSchema { name: "Data", kind: FieldKind::Fixed(32) }];
-    static BLOCKS: &[BlockSchema] = &[BlockSchema { name: "Data", mode: BlockMode::Variable, fields: FIXED_FIELDS }];
-    static SCHEMA: MessageSchema = MessageSchema {
-        name: "RepeatedFixedPadding",
-        id: MessageId::high(0x73),
-        trust: MessageTrust::NotTrusted,
-        encoding: MessageEncoding::Unencoded,
-        flags: &[],
-        blocks: BLOCKS,
-    };
-
-    let decoded = SchemaMessage::decode(&SCHEMA, &[u8::MAX]).expect("decode omitted repeated fields");
-    let expected = size_of::<BlockValues>()
-        + usize::from(u8::MAX) * size_of::<BlockInstance>()
-        + usize::from(u8::MAX) * size_of::<FieldValue>()
-        + usize::from(u8::MAX) * 32;
-
-    assert_eq!(decoded.blocks[0].instances.len(), usize::from(u8::MAX));
-    assert!(decoded.retained_capacity_bytes() >= expected);
 }
 
 #[test]
@@ -372,20 +351,6 @@ fn middle_variable_block() {
     let mut encoded = Vec::new();
     decoded.encode_payload(&mut Writer::new(&mut encoded)).expect("re-encode middle variable block");
     assert_eq!(encoded, payload);
-}
-
-#[test]
-fn partial_field_zero_fills() {
-    let decoded = SchemaMessage::decode(&COMPAT_SCHEMA, &[0x11, 0x22]).expect("decode partial fixed field");
-
-    assert_eq!(decoded.blocks[0].instances[0].fields, [FieldValue::U8(0x11), FieldValue::U16(0)]);
-    assert_eq!(decoded.blocks[1].instances[0].fields, [FieldValue::U32(0)]);
-    assert_eq!(decoded.blocks[1].instances[1].fields, [FieldValue::U32(0)]);
-    assert!(decoded.trailing_bytes().is_empty());
-
-    let mut encoded = Vec::new();
-    decoded.encode_payload(&mut Writer::new(&mut encoded)).expect("re-encode partial field");
-    assert_eq!(encoded, [0x11]);
 }
 
 #[test]

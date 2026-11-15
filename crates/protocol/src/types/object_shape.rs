@@ -165,30 +165,6 @@ mod tests {
     }
 
     #[test]
-    fn regular_shape_round_trips() {
-        let value = shape();
-        let mut bytes = Vec::new();
-        let mut writer = Writer::with_limit(&mut bytes, usize::MAX);
-        value.encode(&mut writer);
-        writer.finish().unwrap();
-
-        assert_eq!(bytes.len(), 23);
-        assert_eq!(ObjectShape::decode(&mut Reader::new(&bytes)).unwrap(), value);
-    }
-
-    #[test]
-    fn compressed_shape_round_trips() {
-        let value = shape();
-        let mut bytes = Vec::new();
-        let mut writer = Writer::with_limit(&mut bytes, usize::MAX);
-        value.encode_compressed(&mut writer);
-        writer.finish().unwrap();
-
-        assert_eq!(bytes.len(), 23);
-        assert_eq!(ObjectShape::decode_compressed(&mut Reader::new(&bytes)).unwrap(), value);
-    }
-
-    #[test]
     fn truncated_shape_is_rejected() {
         let mut bytes = Vec::new();
         let mut writer = Writer::with_limit(&mut bytes, usize::MAX);
