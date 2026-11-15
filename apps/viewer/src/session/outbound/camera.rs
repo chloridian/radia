@@ -162,6 +162,9 @@ impl CameraUplink {
         let now = Instant::now();
         if let Some(movement) = movement {
             let state = (simulator, agent_id, session_id, movement.always_run);
+            if self.last_always_run == Some(state) {
+                self.always_run_retry_at = None;
+            }
             let retry_ready = self.always_run_retry_at.is_none_or(|deadline| now >= deadline);
             if self.last_always_run != Some(state) && retry_ready {
                 match send(UplinkMessage::SetAlwaysRun(agent::always_run(agent_id, session_id, movement.always_run)), Delivery::Reliable) {
@@ -329,7 +332,6 @@ mod tests {
     use network::Delivery;
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     use protocol::lludp::{Message, Packet};
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     use protocol::messages::SetAlwaysRun;
     use render::scene::Camera;
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -850,6 +852,84 @@ mod tests {
             },
         );
         assert_eq!(sent.len(), 2);
+    }
+
+    fn run_movement(always_run: bool) -> crate::agent_movement::MovementObservation {
+        crate::agent_movement::MovementObservation { control_flags: 0, body_rotation: Quat::IDENTITY, always_run, stop_sequence: 0 }
+    }
+
+    fn tick_runs(
+        uplink: &mut CameraUplink,
+        destination: (network::SimulatorId, Uuid, Uuid),
+        always_run: bool,
+        reject_run: bool,
+    ) -> Vec<SetAlwaysRun> {
+        let mut runs = Vec::new();
+        uplink.tick_with(
+            Some(destination),
+            Some(DVec3::ZERO),
+            Some(view(DVec3::ZERO, Vec3::X)),
+            Some(run_movement(always_run)),
+            |message, _| {
+                match message {
+                    UplinkMessage::SetAlwaysRun(_) if reject_run => return Err(network::Error::CommandQueueFull),
+                    UplinkMessage::SetAlwaysRun(run) => runs.push(run),
+                    UplinkMessage::AgentUpdate(_) => {}
+                }
+                Ok(())
+            },
+        );
+        runs
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reverted_run_disarms_retry() {
+        let destination = (simulator_id(), Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut uplink = CameraUplink::new();
+        assert_eq!(tick_runs(&mut uplink, destination, false, false).len(), 1);
+        advance(MIN_UPDATE_INTERVAL).await;
+        assert!(tick_runs(&mut uplink, destination, false, false).is_empty());
+
+        assert!(tick_runs(&mut uplink, destination, true, true).is_empty());
+        assert!(tick_runs(&mut uplink, destination, false, false).is_empty());
+        advance(MIN_UPDATE_INTERVAL).await;
+
+        assert!(uplink.next_tick().now_or_never().is_none(), "an obsolete retry must not keep the tick ready");
+        assert!(tick_runs(&mut uplink, destination, false, false).is_empty());
+        assert_eq!(uplink.next_deadline(), Some(uplink.last_sent_at.expect("sent update") + KEEPALIVE_INTERVAL));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_run_retries_once() {
+        let (agent_id, session_id) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let destination = (simulator_id(), agent_id, session_id);
+        let mut uplink = CameraUplink::new();
+        tick_runs(&mut uplink, destination, false, false);
+        advance(MIN_UPDATE_INTERVAL).await;
+        tick_runs(&mut uplink, destination, false, false);
+
+        assert!(tick_runs(&mut uplink, destination, true, true).is_empty());
+        advance(MIN_UPDATE_INTERVAL - Duration::from_millis(1)).await;
+        assert!(tick_runs(&mut uplink, destination, true, false).is_empty(), "retry waits for its deadline");
+        advance(Duration::from_millis(1)).await;
+        assert_eq!(tick_runs(&mut uplink, destination, true, false), [SetAlwaysRun { agent_id, session_id, always_run: true }]);
+        assert!(tick_runs(&mut uplink, destination, true, false).is_empty());
+        assert_eq!(uplink.always_run_retry_at, None);
+        assert!(uplink.next_tick().now_or_never().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn new_destination_resends_run() {
+        let simulator = simulator_id();
+        let first = (simulator, Uuid::from_u128(1), Uuid::from_u128(2));
+        let second = (simulator, Uuid::from_u128(1), Uuid::from_u128(3));
+        let mut uplink = CameraUplink::new();
+        tick_runs(&mut uplink, first, true, false);
+
+        assert_eq!(
+            tick_runs(&mut uplink, second, true, false),
+            [SetAlwaysRun { agent_id: second.1, session_id: second.2, always_run: true }]
+        );
     }
 
     #[test]
