@@ -22,7 +22,7 @@ fn limits(input: usize) -> Limits {
 
 pub fn legacy_request(id: AssetId) -> Result<Value, Failure> {
     let request = Value::Array(vec![Value::Binary(Binary::new(id.uuid().as_bytes().to_vec()))]);
-    let bytes = binary::to_vec(&request).map_err(|_| Failure::Malformed)?;
+    let bytes = binary::to_vec_headerless(&request).map_err(|_| Failure::Malformed)?;
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&bytes).map_err(|_| Failure::Malformed)?;
     let zipped = encoder.finish().map_err(|_| Failure::Malformed)?;
@@ -142,10 +142,10 @@ mod tests {
         let Some(Value::Binary(zipped)) = request.get("Zipped") else { unreachable!() };
         let mut decoded = Vec::new();
         ZlibDecoder::new(zipped.as_slice()).read_to_end(&mut decoded).unwrap();
-        assert_eq!(
-            binary::from_slice::<Value>(&decoded).unwrap(),
-            Value::Array(vec![Value::Binary(Binary::new(resource.id.uuid().as_bytes().to_vec()))])
-        );
+        let mut expected = b"[\0\0\0\x01b\0\0\0\x10".to_vec();
+        expected.extend_from_slice(resource.id.uuid().as_bytes());
+        expected.push(b']');
+        assert_eq!(decoded, expected);
         let mut record = b"[\0\0\0\x01{\0\0\0\x02k\0\0\0\x02IDb\0\0\0\x10".to_vec();
         record.extend_from_slice(resource.id.uuid().as_bytes());
         record.extend_from_slice(b"k\0\0\0\x08Material{\0\0\0\x01k\0\0\0\x04Names\0\0\0\x03oak}}]");

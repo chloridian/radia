@@ -27,6 +27,10 @@ pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
     crate::serialization::to_vec::<ser::Encoder, _>(value, None)
 }
 
+pub fn to_vec_headerless<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
+    crate::serialization::to_vec_headerless::<ser::Encoder, _>(value)
+}
+
 pub fn to_writer<T: Serialize + ?Sized, W: Write>(writer: W, value: &T) -> Result<()> {
     crate::serialization::to_writer::<ser::Encoder, _, _>(writer, value)
 }

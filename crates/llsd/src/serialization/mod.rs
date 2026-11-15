@@ -263,8 +263,16 @@ impl<'a, F: Format> ser::Serializer for &'a mut Serializer<F> {
 }
 
 pub(crate) fn to_vec<F: Format, T: Serialize + ?Sized>(value: &T, max_bytes: Option<usize>) -> Result<Vec<u8>> {
+    encode::<F, _>(value, max_bytes, F::PREFIX)
+}
+
+pub(crate) fn to_vec_headerless<F: Format, T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
+    encode::<F, _>(value, None, b"")
+}
+
+fn encode<F: Format, T: Serialize + ?Sized>(value: &T, max_bytes: Option<usize>, prefix: &[u8]) -> Result<Vec<u8>> {
     let mut serializer = Serializer::<F> { output: Output::new(max_bytes), depth: 0, _format: PhantomData };
-    serializer.output.append(F::PREFIX)?;
+    serializer.output.append(prefix)?;
     value.serialize(&mut serializer)?;
     serializer.output.append(F::SUFFIX)?;
     Ok(serializer.output.bytes)
