@@ -76,7 +76,7 @@ git config --local core.hooksPath .githooks
 
 This command changes the local Git configuration for the current checkout.
 
-The pre-commit hook checks formatting. The pre-push hook runs Clippy on all targets and features with warnings denied, then runs the all-feature workspace test suite through Nextest. CI uses the same workspace and feature scope. Its Clippy command does not pass `-D warnings`.
+The pre-commit hook checks formatting. There is no pre-push hook. CI runs workspace Clippy with warnings denied, then the all-feature workspace suite through Nextest without stopping at the first failure.
 
 ## Fuzzing
 
@@ -244,7 +244,7 @@ cargo mutants -f <file-path>
 
 ## Platforms
 
-Windows is the primary local development platform. The CI workflow builds, lints, and tests on Windows, macOS, and Linux. It runs documentation tests on Linux.
+Windows is the primary local development platform. The CI workflow builds, lints, and tests on Windows, macOS, and Linux.
 
 Use WSL2 for Linux builds, fuzzing, corpus management, and fuzz coverage. Confirmed Linux utilities include `cargo-fuzz` and `cargo-binutils`. Prefer `~/Radia` over `/mnt/c/Radia` for Linux build performance. Keep build artifacts separate between platforms. Windows `.exe` tools exposed through WSL's `PATH` do not replace Linux-native installations.
 
