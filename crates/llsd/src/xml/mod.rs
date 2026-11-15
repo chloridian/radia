@@ -44,6 +44,13 @@ pub fn to_writer<T: Serialize + ?Sized, W: Write>(writer: W, value: &T) -> Resul
     crate::serialization::to_writer::<ser::Encoder, _, _>(writer, value)
 }
 
+fn is_xml_char(character: char) -> bool {
+    matches!(
+        character,
+        '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'
+    )
+}
+
 fn normalized_text_len(text: &str) -> usize {
     if !text.as_bytes().contains(&b'\r') {
         return text.len();

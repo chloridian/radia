@@ -1,12 +1,16 @@
 use std::{borrow::Cow, str};
 
 use quick_xml::{
-    Reader, XmlVersion,
+    Reader,
     escape::resolve_predefined_entity,
-    events::{BytesStart, Event},
+    events::{BytesRef, BytesStart, Event},
 };
 
 use crate::{Error, Limits, Result};
+
+use super::is_xml_char;
+
+const MAX_BINARY_ATTRIBUTES: usize = 4096;
 
 #[derive(Debug)]
 pub(super) enum Token<'a> {
@@ -14,16 +18,7 @@ pub(super) enum Token<'a> {
     Empty(&'static str),
     End(&'static str),
     Text(Cow<'a, str>),
-    CharacterReference(Cow<'a, str>),
-}
-
-impl Token<'_> {
-    fn text(&self) -> Option<&str> {
-        match self {
-            Self::Text(text) | Self::CharacterReference(text) => Some(text),
-            _ => None,
-        }
-    }
+    CharacterReference(char),
 }
 
 pub(super) struct Tokens<'input> {
@@ -32,16 +27,18 @@ pub(super) struct Tokens<'input> {
     preserve_text: Vec<bool>,
     limits: Limits,
     count: usize,
-    text_run: bool,
     ended: bool,
 }
 
 impl<'input> Tokens<'input> {
     pub(super) fn new(input: &'input [u8], limits: Limits) -> Result<Self> {
         let input = str::from_utf8(input).map_err(|_| Error::InvalidUtf8)?;
+        if input.chars().any(|character| !is_xml_char(character)) {
+            return Err(Error::InvalidValue("input contains a character forbidden in XML 1.0".into()));
+        }
         let mut reader = Reader::from_str(input);
         reader.config_mut().trim_text(false);
-        Ok(Self { reader, pending: None, preserve_text: Vec::new(), limits, count: 0, text_run: false, ended: false })
+        Ok(Self { reader, pending: None, preserve_text: Vec::new(), limits, count: 0, ended: false })
     }
 
     pub(super) fn peek(&mut self) -> Result<Option<&Token<'input>>> {
@@ -70,11 +67,24 @@ impl<'input> Tokens<'input> {
         Ok(())
     }
 
+    fn count_event(&mut self) -> Result<()> {
+        if self.count >= self.limits.max_values.saturating_mul(8).saturating_add(16) {
+            return Err(Error::LimitExceeded("XML token count"));
+        }
+        self.count += 1;
+        Ok(())
+    }
+
     fn read(&mut self) -> Result<Option<Token<'input>>> {
         loop {
             self.check_next_name()?;
-            let token = match self.reader.read_event() {
-                Ok(Event::Start(element)) => {
+            let event = self
+                .reader
+                .read_event()
+                .map_err(|_| Error::InvalidValue(format!("malformed XML at byte {}", self.reader.error_position())))?;
+            self.count_event()?;
+            let token = match event {
+                Event::Start(element) => {
                     let name = tag_name(element.name().as_ref())?;
                     if name == "binary" {
                         validate_binary_encoding(&element)?;
@@ -82,52 +92,45 @@ impl<'input> Tokens<'input> {
                     self.preserve_text.push(!matches!(name, "llsd" | "array" | "map"));
                     Token::Start(name)
                 }
-                Ok(Event::Empty(element)) => {
+                Event::Empty(element) => {
                     let name = tag_name(element.name().as_ref())?;
                     if name == "binary" {
                         validate_binary_encoding(&element)?;
                     }
                     Token::Empty(name)
                 }
-                Ok(Event::End(element)) => {
+                Event::End(element) => {
                     self.preserve_text.pop();
                     Token::End(tag_name(element.name().as_ref())?)
                 }
-                Ok(Event::Text(text)) => Token::Text(text.into_inner()),
-                Ok(Event::GeneralRef(reference)) => {
-                    let text =
-                        match reference.resolve_char_ref().map_err(|_| Error::InvalidValue("invalid XML character reference".into()))? {
-                            Some(ch) => Cow::Owned(ch.to_string()),
-                            None => Cow::Borrowed(
-                                resolve_predefined_entity(reference.as_ref())
-                                    .ok_or_else(|| Error::InvalidValue("unknown XML entity".into()))?,
-                            ),
-                        };
-                    Token::CharacterReference(text)
+                Event::Text(text) => Token::Text(text.into_inner()),
+                Event::GeneralRef(reference) => {
+                    let character = reference
+                        .resolve_char_ref()
+                        .map_err(|_| Error::InvalidValue("invalid XML character reference".into()))?
+                        .or_else(|| resolve_predefined_entity(reference.as_ref()).and_then(|text| text.chars().next()))
+                        .ok_or_else(|| Error::InvalidValue("unknown XML entity".into()))?;
+                    if !is_xml_char(character) {
+                        return Err(Error::InvalidValue("character reference is forbidden in XML 1.0".into()));
+                    }
+                    Token::CharacterReference(character)
                 }
-                Ok(Event::CData(text)) => Token::Text(text.into_inner()),
-                Ok(Event::DocType(_)) => continue,
-                Ok(Event::Eof) => {
+                Event::CData(text) => Token::Text(text.into_inner()),
+                Event::DocType(_) => continue,
+                Event::Eof => {
                     self.ended = true;
                     return Ok(None);
                 }
-                Ok(Event::Decl(_) | Event::PI(_) | Event::Comment(_)) => continue,
-                Err(error) => return Err(Error::InvalidValue(error.to_string())),
+                Event::Decl(_) | Event::PI(_) | Event::Comment(_) => continue,
             };
-            if let Some(value) = token.text() {
-                let preserve_text = self.preserve_text.last().copied().unwrap_or_default();
-                if !preserve_text && value.bytes().all(|byte| byte.is_ascii_whitespace()) {
-                    continue;
+            let preserve_text = self.preserve_text.last().copied().unwrap_or_default();
+            if !preserve_text {
+                match &token {
+                    Token::Text(value) if value.bytes().all(|byte| byte.is_ascii_whitespace()) => continue,
+                    Token::CharacterReference(character) if character.is_ascii_whitespace() => continue,
+                    _ => {}
                 }
             }
-            let text = token.text().is_some();
-            if !text || !self.text_run {
-                if self.count >= self.limits.max_values.saturating_mul(8).saturating_add(16) {
-                    return Err(Error::LimitExceeded("XML token count"));
-                }
-                self.count += 1;
-            }
-            self.text_run = text;
             return Ok(Some(token));
         }
     }
@@ -153,18 +156,40 @@ fn tag_name(name: &str) -> Result<&'static str> {
 }
 
 fn validate_binary_encoding(element: &BytesStart<'_>) -> Result<()> {
-    for attribute in element.attributes().with_checks(true) {
-        let attribute = attribute.map_err(|error| Error::InvalidValue(error.to_string()))?;
+    for (index, attribute) in element.attributes().with_checks(true).enumerate() {
+        if index >= MAX_BINARY_ATTRIBUTES {
+            return Err(Error::LimitExceeded("XML attribute count"));
+        }
+        let attribute = attribute.map_err(|_| Error::InvalidValue("malformed LLSD binary attribute".into()))?;
         if attribute.key.as_ref() != "encoding" {
             continue;
         }
 
-        let encoding = attribute.normalized_value(XmlVersion::Implicit1_0).map_err(|error| Error::InvalidValue(error.to_string()))?;
-        if encoding != "base64" {
-            return Err(Error::InvalidValue(format!("unsupported LLSD binary encoding {encoding:?}")));
+        if !base64_encoding(attribute.value.as_ref()) {
+            return Err(Error::InvalidValue("unsupported LLSD binary encoding".into()));
         }
     }
     Ok(())
+}
+
+fn base64_encoding(mut text: &str) -> bool {
+    for expected in "base64".chars() {
+        if let Some(remaining) = text.strip_prefix(expected) {
+            text = remaining;
+            continue;
+        }
+        let Some(reference) = text.strip_prefix('&') else {
+            return false;
+        };
+        let Some((reference, remaining)) = reference.split_once(';') else {
+            return false;
+        };
+        if !BytesRef::new(reference).resolve_char_ref().is_ok_and(|character| character == Some(expected)) {
+            return false;
+        }
+        text = remaining;
+    }
+    text.is_empty()
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ use serde::de::{
     value::{BytesDeserializer, StringDeserializer},
 };
 use serde::forward_to_deserialize_any;
+use uuid::Uuid;
 
 use crate::{
     Date, Error, Limits, Result,
@@ -116,6 +117,12 @@ impl<'de> Deserializer<'de> {
             return Err(Error::UnexpectedEof);
         }
         self.cursor.take(length)
+    }
+
+    fn uuid_text(&mut self) -> Result<&'de str> {
+        let token = str::from_utf8(self.token()?).map_err(|_| Error::InvalidUtf8)?;
+        Uuid::parse_str(token).map_err(|error| Error::InvalidValue(error.to_string()))?;
+        Ok(token)
     }
 
     fn quoted(&mut self) -> Result<String> {
@@ -297,8 +304,10 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             b'0' | b'1' | b't' | b'T' | b'f' | b'F' => {
                 let token = self.token()?;
                 match token {
-                    b"1" | b"t" | b"T" | b"true" | b"TRUE" => visitor.visit_bool(true),
-                    b"0" | b"f" | b"F" | b"false" | b"FALSE" => visitor.visit_bool(false),
+                    b"1" | b"t" | b"T" => visitor.visit_bool(true),
+                    b"0" | b"f" | b"F" => visitor.visit_bool(false),
+                    value if value.eq_ignore_ascii_case(b"true") => visitor.visit_bool(true),
+                    value if value.eq_ignore_ascii_case(b"false") => visitor.visit_bool(false),
                     _ => Err(Error::InvalidValue("invalid LLSD boolean".into())),
                 }
             }
@@ -310,7 +319,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             b'r' => visitor.visit_f64(self.parse_real()?),
             b'u' => {
                 self.cursor.byte()?;
-                visitor.visit_string(str::from_utf8(self.token()?).map_err(|_| Error::InvalidUtf8)?.to_owned())
+                visitor.visit_string(self.uuid_text()?.to_owned())
             }
             b'd' => {
                 self.cursor.byte()?;
@@ -403,9 +412,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
                 if self.byte()? != b'u' {
                     return Err(Error::InvalidValue("expected LLSD UUID".into()));
                 }
-                visitor.visit_newtype_struct(StringDeserializer::<Error>::new(
-                    str::from_utf8(self.token()?).map_err(|_| Error::InvalidUtf8)?.to_owned(),
-                ))
+                visitor.visit_newtype_struct(StringDeserializer::<Error>::new(self.uuid_text()?.to_owned()))
             }
             Some(Wrapper::Uri) => {
                 self.count_value()?;
@@ -468,7 +475,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
                 _ => return Err(Error::InvalidValue("unknown LLSD notation value".into())),
             };
             let access = VariantAccess::new(self, Deserializer::consume_enum_unit, no_finish);
-            visitor.visit_enum(VariantEnumAccess::new(variant.to_owned(), access))
+            visitor.visit_enum(VariantEnumAccess::new(variant, access))
         } else {
             self.deserialize_plain_enum(visitor)
         }

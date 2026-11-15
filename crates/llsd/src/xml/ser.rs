@@ -6,6 +6,8 @@ use crate::{
     serialization::{Container, Format, Output, Text},
 };
 
+use super::is_xml_char;
+
 pub(super) struct Encoder;
 impl Format for Encoder {
     const PREFIX: &'static [u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><llsd>";
@@ -131,7 +133,7 @@ fn charge_xml_key(key: &str, budget: usize) -> Result<()> {
 fn xml_escaped_len(text: &str) -> Result<usize> {
     let mut length = 0usize;
     for character in text.chars() {
-        if matches!(character, '\u{0}'..='\u{8}' | '\u{b}'..='\u{c}' | '\u{e}'..='\u{1f}' | '\u{fffe}' | '\u{ffff}') {
+        if !is_xml_char(character) {
             return Err(Error::InvalidValue("text contains a character forbidden in XML 1.0".into()));
         }
         let escaped_len = match character {
