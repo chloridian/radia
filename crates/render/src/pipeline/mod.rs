@@ -9,5 +9,5 @@ mod water_tests;
 
 pub(crate) use postprocess::{PostProcess, SCENE_CLEAR};
 pub(crate) use sky::{Sky, TexturePair, blend_keys};
-pub(crate) use surface::{INSTANCE_BYTES, Pipeline, SurfacePipelines, VERTEX_BYTES, camera_view, projection};
+pub(crate) use surface::{FACE_INDEX_BYTES, INSTANCE_BYTES, Pipeline, SurfacePipelines, VERTEX_BYTES, camera_view, projection};
 pub(crate) use void_water::VoidWater;

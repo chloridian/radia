@@ -25,6 +25,7 @@ use uuid::Uuid;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
+    util::{BufferInitDescriptor, DeviceExt},
 };
 
 use world::{Entity, WorldTransform};
@@ -37,7 +38,7 @@ use self::mesh::GpuMesh;
 use self::storage::Storage;
 use crate::scene::{AgentPose, Camera, MAX_REGIONS, MeshId, ViewVersion};
 use crate::{
-    pipeline::{Sky, SurfacePipelines, VoidWater},
+    pipeline::{FACE_INDEX_BYTES, Pipeline, Sky, SurfacePipelines, VoidWater},
     texture::{GeometryTextureState, TextureCompletion, TextureJob, TextureState, Textures},
 };
 
@@ -281,6 +282,7 @@ pub(crate) struct GeometryRenderer {
     region_water_ids: [u128; MAX_REGIONS],
     region_water_count: usize,
     instances: Buffer,
+    face_indices: Buffer,
     indirect: Buffer,
     indirect_first_instance: bool,
     depth: Option<Depth>,
@@ -336,7 +338,14 @@ impl GeometryRenderer {
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
-        let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout, &textures);
+        let instances = buffer(device, "Face instances", INSTANCE_BUFFER_BYTES, BufferUsages::STORAGE);
+        let face_indices: Vec<u8> = (0..MAX_FACE_INSTANCES as u32).flat_map(u32::to_le_bytes).collect();
+        let face_indices = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Face indices"),
+            contents: &face_indices,
+            usage: BufferUsages::VERTEX,
+        });
+        let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout, &textures, &instances);
         let void_water = VoidWater::new(device, format, &textures);
         let sky = Sky::new(device, format, &textures);
         let indirect_bytes = MAX_FACE_INSTANCES * INDIRECT_DRAW_BYTES;
@@ -353,7 +362,8 @@ impl GeometryRenderer {
             region_water_count: 0,
             void_water,
             sky,
-            instances: buffer(device, "Face instances", INSTANCE_BUFFER_BYTES, BufferUsages::VERTEX),
+            instances,
+            face_indices,
             indirect: buffer(device, "Scene indexed draws", indirect_bytes, BufferUsages::INDIRECT),
             indirect_first_instance: device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
             depth: None,
@@ -504,7 +514,7 @@ impl GeometryRenderer {
                 pass.set_bind_group(1, self.textures.binding(draw.key.texture), &[]);
                 texture = Some(draw.key.texture);
             }
-            if draw.key.pipeline == crate::pipeline::Pipeline::Terrain {
+            if draw.key.pipeline == Pipeline::Terrain {
                 let key = draw.key.terrain.expect("terrain batch has detail texture bindings");
                 if terrain != Some(key) {
                     pass.set_bind_group(2, self.textures.terrain_binding(key), &[]);
@@ -517,19 +527,19 @@ impl GeometryRenderer {
                 pass.set_index_buffer(draw.buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
                 buffers = Some(page);
             }
-            let instance_slot = if draw.key.pipeline == crate::pipeline::Pipeline::Terrain { 2 } else { 1 };
-            if draw.key.pipeline == crate::pipeline::Pipeline::Terrain {
+            let face_slot = if draw.key.pipeline == Pipeline::Terrain { 2 } else { 1 };
+            if draw.key.pipeline == Pipeline::Terrain {
                 let composition = draw.buffers.composition.as_ref().expect("terrain buffer has composition attributes");
                 pass.set_vertex_buffer(1, composition.slice(..));
             }
             if self.indirect_first_instance {
-                pass.set_vertex_buffer(instance_slot, self.instances.slice(..));
+                pass.set_vertex_buffer(face_slot, self.face_indices.slice(..));
                 pass.multi_draw_indexed_indirect(&self.indirect, draw.offset, draw.count);
             } else {
                 for command in 0..draw.count {
                     let Some(first_instance) = self.draw_list.first_instance(draw.offset, command) else { continue };
-                    let start = u64::from(first_instance) * crate::pipeline::INSTANCE_BYTES as u64;
-                    pass.set_vertex_buffer(instance_slot, self.instances.slice(start..));
+                    let start = u64::from(first_instance) * FACE_INDEX_BYTES as u64;
+                    pass.set_vertex_buffer(face_slot, self.face_indices.slice(start..));
                     pass.draw_indexed_indirect(&self.indirect, draw.offset + u64::from(command) * INDIRECT_DRAW_BYTES as u64);
                 }
             }
