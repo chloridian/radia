@@ -404,11 +404,16 @@ async fn session_drop_cancels_active_saturated_session() {
     assert_eq!(reply, with_appended_ack(expected_fixture("region_handshake_reply.hex", reply_packet.sequence()), 22));
     simulator.send_to(&server_ack(23, reply_packet.sequence()), peer).await.expect("ack RegionHandshakeReply");
     simulator.send_to(&reliable_fixture("agent_movement_complete.hex", 24), peer).await.expect("send AgentMovementComplete");
-    loop {
+    let mut session_ready = false;
+    let mut movement_complete_received = false;
+    while !session_ready || !movement_complete_received {
         match next_event(&mut session.events).await {
             Event::SessionReady { session: agent_session, .. } => {
                 assert_eq!(agent_session.agent_id.to_string(), AGENT_ID);
-                break;
+                session_ready = true;
+            }
+            Event::SimulatorMessage { sequence: 24, message: Message::AgentMovementComplete(_), .. } => {
+                movement_complete_received = true;
             }
             Event::Failed(error) => panic!("client failed before session readiness: {error}"),
             _ => {}
