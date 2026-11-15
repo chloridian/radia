@@ -58,7 +58,7 @@ fn limit_for_watermark(watermark: u64, empty_cache_floor: u64) -> u64 {
     empty_cache_floor.saturating_add(usable_limit)
 }
 #[test]
-fn size_limit_evicts_least_recently_used() {
+fn size_limit_evicts_lru() {
     let single = tempdir().expect("single cache directory");
     let single_cache = Cache::open(single.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open single cache");
     single_cache.put(key(10), vec![1; 64 * 1024]).expect("store sample entry");
@@ -90,7 +90,7 @@ fn size_limit_evicts_least_recently_used() {
 }
 
 #[test]
-fn set_limit_enforces_once_per_writer_batch() {
+fn limits_enforce_once_per_batch() {
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     cache.put(key(100), vec![1; 1024]).expect("store first entry");
@@ -192,7 +192,7 @@ fn minimum_limit_keeps_small_entry() {
 }
 
 #[test]
-fn over_budget_put_keeps_feasible_siblings() {
+fn over_budget_put_keeps_siblings() {
     const ENTRIES: u16 = 40;
     const ENTRY_BYTES: usize = 1024;
     let directory = tempdir().expect("cache directory");
@@ -400,7 +400,7 @@ fn over_budget_put_preserves_entries() {
 }
 
 #[test]
-fn failed_limit_enforcement_keeps_the_previous_limit() {
+fn failed_limit_keeps_previous() {
     let single = tempdir().expect("single cache directory");
     let single_cache = Cache::open(single.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open single cache");
     single_cache.put(key(10), vec![1; 1024]).expect("store sample entry");
@@ -428,7 +428,7 @@ fn failed_limit_enforcement_keeps_the_previous_limit() {
 }
 
 #[test]
-fn maintenance_failure_backs_off_until_command() {
+fn failure_backs_off_until_command() {
     const ENTRIES: u16 = 256;
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
@@ -518,7 +518,7 @@ fn protection_tracks_live_keys() {
 }
 
 #[test]
-fn protected_scan_reaches_unprotected_beyond_four_turns() {
+fn protected_scan_finds_unprotected() {
     const ENTRY_BYTES: usize = 16 * 1024;
     const ENTRY_BYTES_U64: u64 = 16 * 1024;
     let directory = tempdir().expect("cache directory");
@@ -565,7 +565,7 @@ fn protected_scan_reaches_unprotected_beyond_four_turns() {
 }
 
 #[test]
-fn protected_scan_stops_after_one_full_cycle() {
+fn protected_scan_stops_after_cycle() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
     let mut protections = Vec::new();
@@ -592,7 +592,7 @@ fn protected_scan_stops_after_one_full_cycle() {
 }
 
 #[test]
-fn lru_eviction_stays_oldest_first_across_scan_windows() {
+fn eviction_stays_oldest_first() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
     for id in 0..256u16 {
@@ -684,7 +684,7 @@ fn protected_scan_latches_until_release() {
 }
 
 #[test]
-fn staged_replacement_can_be_evicted_and_restored_in_one_batch() {
+fn staged_replacement_evicts_and_restores() {
     const ENTRY_BYTES: usize = 256 * 1024;
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
