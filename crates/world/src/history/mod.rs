@@ -1,4 +1,5 @@
 pub(crate) mod address;
+pub(crate) mod retained;
 
 use std::{
     collections::VecDeque,

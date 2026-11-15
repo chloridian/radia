@@ -11,8 +11,8 @@ use crate::Kind::{Avatar, Object};
 use crate::OrderEvidence::Ordered;
 use crate::ParentUpdate::{Local, Root};
 use crate::{
-    Appearance, AttachmentPoint, FieldGroup, FieldRejection, ObjectObservation, ObjectPatch, Parent, ParentUpdate, Pose, Region,
-    RegionInfo, UpdateSource, World, WorldLimits,
+    Appearance, AttachmentPoint, FieldGroup, FieldRejection, ObjectObservation, ObjectPatch, Parent, ParentUpdate, PbrMaterialOverride,
+    PbrMaterialOverrides, Pose, Region, RegionInfo, UpdateSource, World, WorldLimits,
 };
 
 fn limits() -> WorldLimits {
@@ -177,5 +177,72 @@ fn cycle_checks_follow_parents_beyond_the_pose_limit() {
             assert_eq!(world.object(*entity).unwrap().parent(), Parent::Resolved(parent));
         }
         assert_eq!(world.check_invariants(), Ok(()));
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config { cases: 48, max_shrink_iters: 128, ..Default::default() })]
+
+    #[test]
+    fn override_retention_preserves_world_indexes(
+        operations in proptest::collection::vec((0_u8..4, 0_u8..2, 0_u8..8, 0_u8..8, 1_u8..32, 0_u8..4), 1..128)
+    ) {
+        let mut world_limits = limits();
+        world_limits.max_region_registrations = 256;
+        world_limits.max_entities = 16;
+        world_limits.max_entities_per_region = 16;
+        world_limits.max_tombstones_per_region = 4;
+        world_limits.max_tombstones = 6;
+        world_limits.max_tombstone_bytes_per_region = WorldLimits::tombstone_bytes_for_count(4);
+        world_limits.max_tombstone_bytes = WorldLimits::tombstone_bytes_for_count(6);
+        world_limits.max_journal_entries = 32;
+        world_limits.max_journal_changes = 512;
+        world_limits.max_recovery_targets = 16;
+        let mut world = World::new(world_limits);
+        let mut regions = [Region::new(900), Region::new(901)];
+        let mut next_region = 902;
+        for region in regions {
+            let _ = world.adopt_region(region).expect("adopt generated region");
+        }
+
+        for (ordinal, (operation, region_index, slot, identity, source_order, value)) in operations.into_iter().enumerate() {
+            let region = regions[usize::from(region_index)];
+            let local_id = local_id(u32::from(slot) + 1);
+            let source = UpdateSource::new(region, u32::from(source_order), Ordered(u64::from(source_order)), ordinal as u32);
+            match operation {
+                0 => {
+                    let faces = if value == 0 {
+                        Vec::new()
+                    } else {
+                        vec![(value, PbrMaterialOverride { roughness: Some(f32::from(value) / 4.0), ..PbrMaterialOverride::default() })]
+                    };
+                    let patch = ObjectPatch {
+                        pbr_material_overrides: Some(PbrMaterialOverrides::new(faces).expect("valid generated overrides")),
+                        ..ObjectPatch::new(source, local_id)
+                    };
+                    let _ = world.patch_object(patch).expect("apply valid override");
+                }
+                1 => {
+                    let observation = ObjectObservation {
+                        appearance: FieldUpdate::Set(Appearance::Surface),
+                        ..ObjectObservation::new(source, uuid(1_000 + u128::from(identity)), local_id, Object, Root)
+                    };
+                    let _ = world.observe_object(observation).expect("apply valid observation");
+                }
+                2 => {
+                    let _ = world.remove_object(source, local_id).expect("apply valid removal");
+                }
+                3 => {
+                    let _ = world.retire_region(region).expect("retire generated region");
+                    let replacement = Region::new(next_region);
+                    next_region += 1;
+                    let _ = world.adopt_region(replacement).expect("adopt replacement region");
+                    regions[usize::from(region_index)] = replacement;
+                }
+                4.. => panic!("operation generator is bounded to 0..4"),
+            }
+
+            proptest::prop_assert_eq!(world.check_invariants(), Ok(()));
+        }
     }
 }

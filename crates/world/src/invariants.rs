@@ -89,6 +89,9 @@ impl World {
         if !crate::history::address::tombstones_invariants_hold(&self.tombstones, &self.regions, &self.store) {
             return Err("tombstone indexes are inconsistent");
         }
+        if !crate::history::retained::retained_invariants_hold(&self.retained, &self.regions, &self.store) {
+            return Err("retained override indexes are inconsistent");
+        }
         if !crate::history::journal_invariants_hold(&self.journal) {
             return Err("change journal accounting is inconsistent");
         }

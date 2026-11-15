@@ -4,9 +4,10 @@ use utils::AssetId;
 use uuid::Uuid;
 use world::{
     Appearance,
-    ApplyOutcome::{Introduced, Unchanged, Updated},
-    FieldGroup, FieldRejectionReason, FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence, ParentUpdate,
-    PbrMaterialAssignments, PbrMaterialOverride, PbrMaterialOverrides, Region, UpdateAuthority, UpdateSource, World, WorldLimits,
+    ApplyOutcome::{Deferred, Introduced, TombstoneRecorded, Unchanged, Updated},
+    DeferredReason, FieldGroup, FieldRejectionReason, FieldUpdate, Kind, LocalAddress, ObjectObservation, ObjectPatch, OrderEvidence,
+    ParentUpdate, PbrMaterialAssignments, PbrMaterialOverride, PbrMaterialOverrides, Region, UpdateAuthority, UpdateSource, World,
+    WorldLimits,
 };
 
 fn source(region: Region, order: u64) -> UpdateSource {
@@ -261,4 +262,88 @@ fn surface_patches_use_accepted_classification() {
     assert!(cleared.rejections.is_empty());
     assert_eq!(world.object(entity).unwrap().pbr_materials(), None);
     assert_eq!(world.object(entity).unwrap().pbr_material_overrides(), None);
+}
+
+fn early_override(world: &mut World, source: UpdateSource, local_id_value: u32, overrides: PbrMaterialOverrides) {
+    let patch = ObjectPatch { pbr_material_overrides: Some(overrides), ..ObjectPatch::new(source, local_id(local_id_value)) };
+    let applied = world.patch_object(patch).unwrap();
+    assert_eq!(applied.outcome, Deferred(DeferredReason::UnknownObject));
+    assert_eq!(applied.recovery.requests, [LocalAddress::new(source.region(), local_id(local_id_value))]);
+}
+
+fn introduced_roughness(world: &mut World, observation: ObjectObservation) -> Option<f32> {
+    let applied = world.observe_object(observation).unwrap();
+    let Introduced(entity) = applied.outcome else { panic!("expected object introduction, got {:?}", applied.outcome) };
+    assert!(applied.rejections.is_empty(), "unexpected rejections: {:?}", applied.rejections);
+    world.object(entity).unwrap().pbr_material_overrides().map(|overrides| overrides.face(1).unwrap().roughness.unwrap())
+}
+
+#[test]
+fn early_override_applies_on_introduction() {
+    let region = Region::new(11);
+    let mut world = with_region(region);
+
+    early_override(&mut world, source(region, 2), 7, snapshot(1, 0.4));
+
+    assert_eq!(introduced_roughness(&mut world, object(source(region, 3), 17, 7, true)), Some(0.4));
+}
+
+#[test]
+fn kill_drops_older_retained_override() {
+    for (kill_order, expected) in [(3, None), (1, Some(0.4))] {
+        let region = Region::new(11);
+        let mut world = with_region(region);
+        early_override(&mut world, source(region, 2), 7, snapshot(1, 0.4));
+
+        let killed = world.remove_object(source(region, kill_order), local_id(7)).unwrap();
+
+        assert_eq!(killed.outcome, TombstoneRecorded(LocalAddress::new(region, local_id(7))));
+
+        assert_eq!(introduced_roughness(&mut world, object(source(region, 4), 18, 7, true)), expected, "kill order {kill_order}");
+    }
+}
+
+#[test]
+fn newest_retained_override_wins() {
+    for (updates, expected) in
+        [([(2, snapshot(1, 0.2)), (3, PbrMaterialOverrides::default())], None), ([(3, snapshot(1, 0.3)), (2, snapshot(1, 0.2))], Some(0.3))]
+    {
+        let region = Region::new(11);
+        let mut world = with_region(region);
+        for (order, overrides) in updates {
+            early_override(&mut world, source(region, order), 7, overrides);
+        }
+
+        assert_eq!(introduced_roughness(&mut world, object(source(region, 4), 17, 7, true)), expected);
+    }
+}
+
+#[test]
+fn crossing_consumes_retained_override() {
+    let first_region = Region::new(11);
+    let second_region = Region::new(12);
+    let mut world = with_region(first_region);
+    assert!(matches!(world.adopt_region(second_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let Introduced(entity) = world.observe_object(object(source(first_region, 1), 17, 7, true)).unwrap().outcome else {
+        panic!("expected object introduction")
+    };
+    early_override(&mut world, source(second_region, 2), 9, snapshot(1, 0.6));
+
+    assert_eq!(world.observe_object(object(source(second_region, 3), 17, 9, true)).unwrap().outcome, Updated(entity));
+    assert_eq!(world.object(entity).unwrap().pbr_material_overrides().unwrap().face(1).unwrap().roughness, Some(0.6));
+
+    assert_eq!(world.observe_object(object(source(second_region, 4), 17, 10, true)).unwrap().outcome, Updated(entity));
+    assert_eq!(introduced_roughness(&mut world, object(source(second_region, 5), 18, 9, true)), None);
+}
+
+#[test]
+fn full_region_evicts_oldest_retained_override() {
+    let region = Region::new(11);
+    let mut world = with_region(region);
+    for local in 1..=1025 {
+        early_override(&mut world, source(region, u64::from(local)), local, snapshot(1, 0.5));
+    }
+
+    assert_eq!(introduced_roughness(&mut world, object(source(region, 2000), 17, 1, true)), None);
+    assert_eq!(introduced_roughness(&mut world, object(source(region, 2001), 18, 2, true)), Some(0.5));
 }

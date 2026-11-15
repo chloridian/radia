@@ -7,6 +7,7 @@ use crate::FieldRejectionReason::UntrustedSource;
 use crate::UpdateAuthority::{Tracked, Untracked};
 use crate::history::WorldChange::EntityUpdated;
 use crate::history::WorldChangeClasses;
+use crate::history::retained::RetainedOverride;
 use crate::object::components::Fenced;
 use crate::object::relationships::ParentResolution;
 use crate::update::FieldStamp;
@@ -27,7 +28,13 @@ impl World {
             return Ok(self.defer(DeferredReason::AmbiguousOrder, address));
         };
         let Some(entity) = self.entity_at(address) else {
-            return Ok(self.unknown_address(address, stamp));
+            let applied = self.unknown_address(address, stamp);
+            if applied.outcome == ApplyOutcome::Deferred(DeferredReason::UnknownObject)
+                && let Some(overrides) = patch.pbr_material_overrides
+            {
+                self.retained.retain(address, RetainedOverride { stamp, expected_id: None, overrides });
+            }
+            return Ok(applied);
         };
         let origin = Origin { source, stamp };
         let (parent_update, mut fields) = Fields::patched(patch);

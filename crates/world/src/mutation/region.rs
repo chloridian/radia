@@ -80,6 +80,7 @@ impl World {
         self.parcel_bytes -= removed_region.parcels.retained_bytes();
         self.retired.insert(region);
         self.tombstones.remove_region(region);
+        self.retained.remove_region(region);
         self.floors.remove(&region);
         effects.changes.push(RegionRetired { region, entities_removed: removed });
         let revision = self.publish_changes(effects.changes).expect("retiring a region journals a change");
@@ -129,7 +130,11 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ApplyError::RevisionExhausted, WorldLimits, WorldRevision};
+    use std::num::NonZeroU32;
+
+    use crate::{
+        ApplyError::RevisionExhausted, ApplyOutcome, DeferredReason, ObjectPatch, PbrMaterialOverrides, WorldLimits, WorldRevision,
+    };
     fn limits() -> WorldLimits {
         WorldLimits {
             max_region_registrations: 2,
@@ -170,5 +175,21 @@ mod tests {
         assert!(matches!(world.retire_region(region), Err(RevisionExhausted)));
         assert!(world.region(region).is_some());
         assert!(!world.retired.contains(&region));
+    }
+    #[test]
+    fn retirement_clears_retained_overrides() {
+        let region = Region::new(1);
+        let mut world = World::new(limits());
+        let _ = world.adopt_region(region).unwrap();
+        let source = UpdateSource::new(region, 1, crate::OrderEvidence::Ordered(1), 0);
+        let patch = ObjectPatch {
+            pbr_material_overrides: Some(PbrMaterialOverrides::default()),
+            ..ObjectPatch::new(source, NonZeroU32::new(1).unwrap())
+        };
+        assert_eq!(world.patch_object(patch).unwrap().outcome, ApplyOutcome::Deferred(DeferredReason::UnknownObject));
+
+        std::assert_matches!(world.retire_region(region).unwrap().outcome, RegionOutcome::Retired { entities_removed: 0, .. });
+
+        assert_eq!(world.check_invariants(), Ok(()));
     }
 }

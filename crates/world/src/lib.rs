@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::history::Journal;
 use crate::history::address::Tombstones;
+use crate::history::retained::RetainedOverrides;
 use crate::identity::WorldId;
 use crate::object::components::{
     Binding, Fences, ObjectOrdering, ObjectRecord, ObjectState, ParentRejectionBarrier, RegionalStamp, newer_field, newer_region_field,
@@ -82,6 +83,7 @@ pub struct World {
     children: HashMap<Entity, BTreeMap<Uuid, Entity>>,
     pending_children: HashMap<LocalAddress, HashSet<Entity>>,
     tombstones: Tombstones,
+    retained: RetainedOverrides,
     floors: HashMap<Region, Stamp>,
     object_media_bytes: usize,
     terrain_patches: usize,
@@ -103,6 +105,7 @@ impl World {
             children: HashMap::new(),
             pending_children: HashMap::new(),
             tombstones: Tombstones::default(),
+            retained: RetainedOverrides::default(),
             floors: HashMap::new(),
             object_media_bytes: 0,
             terrain_patches: 0,
