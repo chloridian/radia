@@ -502,13 +502,10 @@ async fn overflow_keeps_sequence() {
             .await
             .expect("packet should fit in the reliable window");
         assert_eq!(sequence, expected_sequence);
-    }
-    assert!(crate::fixtures::circuit::send_message(&mut circuit, &client, complete_ping(4), Delivery::Reliable).await.is_err());
-
-    for expected_sequence in 1..=MAX_PENDING_PACKETS as u32 {
-        let (bytes, _) = receive(&simulator).await;
+        let (bytes, _) = receive_with_timeout(&simulator, SIMULATOR_TIMEOUT).await;
         assert_eq!(Packet::decode(&bytes).expect("decode queued packet").sequence(), expected_sequence);
     }
+    assert!(crate::fixtures::circuit::send_message(&mut circuit, &client, complete_ping(4), Delivery::Reliable).await.is_err());
     assert_no_datagram(&simulator);
 
     let ack = Packet::decode(&server_ack_many(50, &[1])).expect("decode fake simulator ACK");
@@ -519,7 +516,7 @@ async fn overflow_keeps_sequence() {
             .expect("ACK should free one slot"),
         MAX_PENDING_PACKETS as u32 + 1
     );
-    let (bytes, _) = receive(&simulator).await;
+    let (bytes, _) = receive_with_timeout(&simulator, SIMULATOR_TIMEOUT).await;
     assert_eq!(Packet::decode(&bytes).expect("decode packet after ACK").sequence(), MAX_PENDING_PACKETS as u32 + 1);
 }
 
