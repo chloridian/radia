@@ -7,12 +7,14 @@ use protocol::messages::{
 };
 use world::{LocalAddress, OrderEvidence, Region, UpdateSource};
 
-use crate::session::inbound::{ObjectBatch, ObjectMediaRequest, ObjectOperation, decode_cached_object, object_media_requests};
+use crate::session::inbound::{
+    ObjectBatch, ObjectMediaRequest, ObjectOperation, decode_cached_object, decode_pbr_overrides, object_media_requests,
+};
 use crate::session::object_cache::storage::make_access_submission;
 use crate::session::object_cache::validation::{decode_entry, set_region_data, stored_entry};
 use crate::session::object_cache::{
-    CacheScope, EncodedEntry, LoadedRegion, MAX_REGION_BYTES, MAX_REGION_ENTRIES, MAX_TOTAL_BYTES, MAX_TOTAL_ENTRIES, ObjectCacheSession,
-    StoredEntry, now_millis,
+    CacheScope, CachedOverride, EncodedEntry, LoadedRegion, MAX_REGION_BYTES, MAX_REGION_ENTRIES, MAX_REGION_OVERRIDE_BYTES,
+    MAX_REGION_OVERRIDES, MAX_TOTAL_BYTES, MAX_TOTAL_ENTRIES, ObjectCacheSession, OverrideWrite, StoredScope, now_millis,
 };
 use crate::session::world::MAX_OBJECTS_PER_INTAKE_QUANTUM;
 
@@ -28,9 +30,11 @@ impl ObjectCacheSession {
         is_live: impl Fn(LocalAddress) -> bool,
         update: &ObjectUpdateCached,
         mut batch: ObjectBatch,
-    ) -> (ObjectBatch, Vec<ObjectMediaRequest>) {
+    ) -> (ObjectBatch, Vec<ObjectMediaRequest>, Vec<CachedOverride>) {
         let scope = self.identities.get(&simulator_id).cloned();
         let mut stale = HashSet::new();
+        let mut stale_overrides = Vec::new();
+        let mut cached_overrides = Vec::new();
         let mut media_requests = Vec::new();
         let mut invalid_fields = 0;
         for (index, operation) in batch.blocks.iter_mut().enumerate() {
@@ -45,11 +49,9 @@ impl ObjectCacheSession {
                 continue;
             }
             let reference = update.objects.get(index).copied();
-            let entry = self
-                .loaded_regions
-                .get(&simulator_id)
-                .filter(|region| scope.as_ref() == Some(&region.scope))
-                .and_then(|region| region.entries.get(&local_id.get()));
+            let loaded = self.loaded_regions.get(&simulator_id).filter(|region| scope.as_ref() == Some(&region.scope));
+            let entry = loaded.and_then(|region| region.entries.get(&local_id.get()));
+            let stored_override = loaded.and_then(|region| region.overrides.get(&local_id.get()));
             let mut cache_miss_type = Full;
             let recovered = reference.zip(entry).and_then(|(reference, entry)| {
                 let Some(crc) = u32::try_from(entry.crc).ok() else {
@@ -84,6 +86,23 @@ impl ObjectCacheSession {
                 }
                 operation
             });
+            if let Some(stored) = stored_override {
+                let observed_id = match &recovered {
+                    Some(ObjectOperation::Observe(observation)) => Some(observation.id),
+                    _ => None,
+                };
+                match decode_pbr_overrides(&stored.payload) {
+                    Ok(decoded) if decoded.local_id == local_id && observed_id.is_none_or(|id| id == stored.object_id) => {
+                        cached_overrides.push(CachedOverride {
+                            source,
+                            local_id,
+                            expected_id: stored.object_id,
+                            overrides: decoded.overrides,
+                        });
+                    }
+                    _ => stale_overrides.push(OverrideWrite::Delete(local_id.get())),
+                }
+            }
             *operation = match recovered {
                 Some(operation) => Some(operation),
                 None => Some(ObjectOperation::Cached { source, local_id, cache_miss_type }),
@@ -96,10 +115,13 @@ impl ObjectCacheSession {
             self.touch_loaded_region(simulator_id, &scope);
             self.remove_loaded_entries(simulator_id, &stale);
             if !stale.is_empty() {
-                self.enqueue(make_access_submission(scope, stale, now_millis()));
+                self.enqueue(make_access_submission(scope.clone(), stale, now_millis()));
+            }
+            if !stale_overrides.is_empty() {
+                self.write_overrides(simulator_id, scope, stale_overrides);
             }
         }
-        (batch, media_requests)
+        (batch, media_requests, cached_overrides)
     }
 
     pub(super) fn remember_entries(&mut self, simulator_id: SimulatorId, scope: CacheScope, entries: &[EncodedEntry]) {
@@ -142,22 +164,35 @@ impl ObjectCacheSession {
         }
     }
 
-    fn ensure_loaded_region(&mut self, simulator_id: SimulatorId, scope: CacheScope) {
+    pub(super) fn ensure_loaded_region(&mut self, simulator_id: SimulatorId, scope: CacheScope) {
         if self.loaded_regions.get(&simulator_id).is_some_and(|region| region.scope == scope) {
             return;
         }
         self.remove_loaded_region(simulator_id);
         let last_used = self.next_use();
-        self.loaded_regions.insert(simulator_id, LoadedRegion { scope, entries: HashMap::new(), bytes: 0, last_used, complete: false });
+        self.loaded_regions.insert(
+            simulator_id,
+            LoadedRegion { scope, entries: HashMap::new(), overrides: HashMap::new(), bytes: 0, last_used, complete: false },
+        );
     }
 
-    pub(super) fn merge_partial_region(&mut self, simulator_id: SimulatorId, scope: &CacheScope, entries: &mut HashMap<u32, StoredEntry>) {
+    pub(super) fn merge_partial_region(&mut self, simulator_id: SimulatorId, scope: &CacheScope, stored: &mut StoredScope) {
         let Some(partial) = self.loaded_regions.remove(&simulator_id) else { return };
-        self.loaded_entries = self.loaded_entries.saturating_sub(partial.entries.len());
+        self.loaded_entries = self.loaded_entries.saturating_sub(partial.entries.len() + partial.overrides.len());
         self.loaded_bytes = self.loaded_bytes.saturating_sub(partial.bytes);
         if partial.scope != *scope {
             return;
         }
+        let mut override_bytes = stored.overrides.values().map(|stored| stored.payload.len()).sum::<usize>();
+        for (local_id, latest) in partial.overrides {
+            let previous_bytes = stored.overrides.get(&local_id).map_or(0, |previous| previous.payload.len());
+            let bytes_after = override_bytes.saturating_sub(previous_bytes).saturating_add(latest.payload.len());
+            if (previous_bytes > 0 || stored.overrides.len() < MAX_REGION_OVERRIDES) && bytes_after <= MAX_REGION_OVERRIDE_BYTES {
+                stored.overrides.insert(local_id, latest);
+                override_bytes = bytes_after;
+            }
+        }
+        let entries = &mut stored.entries;
         let mut bytes = entries
             .values()
             .map(|entry| usize::try_from(entry.payload_bytes).unwrap_or(usize::MAX))
@@ -177,30 +212,37 @@ impl ObjectCacheSession {
         }
     }
 
-    pub(super) fn install_loaded_region(&mut self, simulator_id: SimulatorId, scope: CacheScope, entries: HashMap<u32, StoredEntry>) {
-        if entries.len() > MAX_REGION_ENTRIES {
+    pub(super) fn install_loaded_region(&mut self, simulator_id: SimulatorId, scope: CacheScope, stored: StoredScope) {
+        let StoredScope { entries, overrides } = stored;
+        if entries.len() > MAX_REGION_ENTRIES || overrides.len() > MAX_REGION_OVERRIDES {
             return;
         }
-        let bytes =
+        let entry_bytes =
             entries.values().map(|entry| usize::try_from(entry.payload_bytes).unwrap_or(usize::MAX)).try_fold(0_usize, usize::checked_add);
-        let Some(bytes) = bytes.filter(|bytes| *bytes <= MAX_REGION_BYTES) else { return };
-        self.make_loaded_room(simulator_id, entries.len(), bytes);
-        if entries.len() > MAX_TOTAL_ENTRIES
+        let Some(entry_bytes) = entry_bytes.filter(|bytes| *bytes <= MAX_REGION_BYTES) else { return };
+        let override_bytes = overrides.values().map(|stored| stored.payload.len()).sum::<usize>();
+        if override_bytes > MAX_REGION_OVERRIDE_BYTES {
+            return;
+        }
+        let rows = entries.len() + overrides.len();
+        let bytes = entry_bytes + override_bytes;
+        self.make_loaded_room(simulator_id, rows, bytes);
+        if rows > MAX_TOTAL_ENTRIES
             || bytes > MAX_TOTAL_BYTES
-            || self.loaded_entries.saturating_add(entries.len()) > MAX_TOTAL_ENTRIES
+            || self.loaded_entries.saturating_add(rows) > MAX_TOTAL_ENTRIES
             || self.loaded_bytes.saturating_add(bytes) > MAX_TOTAL_BYTES
         {
             return;
         }
         let last_used = self.next_use();
-        self.loaded_entries += entries.len();
+        self.loaded_entries += rows;
         self.loaded_bytes += bytes;
-        self.loaded_regions.insert(simulator_id, LoadedRegion { scope, entries, bytes, last_used, complete: true });
+        self.loaded_regions.insert(simulator_id, LoadedRegion { scope, entries, overrides, bytes, last_used, complete: true });
     }
 
     pub(super) fn remove_loaded_region(&mut self, simulator_id: SimulatorId) {
         if let Some(region) = self.loaded_regions.remove(&simulator_id) {
-            self.loaded_entries = self.loaded_entries.saturating_sub(region.entries.len());
+            self.loaded_entries = self.loaded_entries.saturating_sub(region.entries.len() + region.overrides.len());
             self.loaded_bytes = self.loaded_bytes.saturating_sub(region.bytes);
         }
     }
@@ -224,7 +266,7 @@ impl ObjectCacheSession {
         }
     }
 
-    fn make_loaded_room(&mut self, current: SimulatorId, rows: usize, bytes: usize) {
+    pub(super) fn make_loaded_room(&mut self, current: SimulatorId, rows: usize, bytes: usize) {
         while (self.loaded_entries.saturating_add(rows) > MAX_TOTAL_ENTRIES || self.loaded_bytes.saturating_add(bytes) > MAX_TOTAL_BYTES)
             && let Some(oldest) = self
                 .loaded_regions
@@ -237,7 +279,7 @@ impl ObjectCacheSession {
         }
     }
 
-    fn next_use(&mut self) -> u64 {
+    pub(super) fn next_use(&mut self) -> u64 {
         self.use_clock = self.use_clock.saturating_add(1);
         self.use_clock
     }
@@ -347,7 +389,7 @@ mod tests {
             let cached = cached_message(region_data, references);
             let sequence = 90 + u32::try_from(index).expect("two fixture indexes fit u32");
             let batch = decoded_cached_batch(&cached, sequence);
-            let (resolved, requests) = cache
+            let (resolved, requests, _) = cache
                 .resolve_cached(SIMULATOR, REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), |_| false, &cached, batch)
                 .await;
 
@@ -378,7 +420,7 @@ mod tests {
 
         let cached = cached_message(region_data, references);
         let batch = decoded_cached_batch(&cached, 80);
-        let (batch, _) = cache.resolve_cached(SIMULATOR, REGION, 80, OrderEvidence::Ordered(80), |_| false, &cached, batch).await;
+        let (batch, _, _) = cache.resolve_cached(SIMULATOR, REGION, 80, OrderEvidence::Ordered(80), |_| false, &cached, batch).await;
         let mut world = region_world();
         let summary = world.apply_object_batch(SIMULATOR, batch).expect("registered simulator applies the cached hit");
         assert!(summary.blocks.iter().all(|block| block.applied().is_some()));
@@ -595,7 +637,7 @@ mod tests {
                 .expect("cached update decodes into World operations");
             decode_us += started.elapsed().as_micros();
             let started = Instant::now();
-            let (batch, _) = warm_cache.resolve_cached(
+            let (batch, _, _) = warm_cache.resolve_cached(
                 SIMULATOR,
                 REGION,
                 sequence,

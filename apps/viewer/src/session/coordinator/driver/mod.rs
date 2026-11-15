@@ -257,6 +257,7 @@ impl SessionDriver {
     async fn run(mut self) {
         loop {
             self.reads.publish(self.session_world.world());
+            self.object_cache.persist_overrides(&self.session_world);
             self.media.flush(&self.session_world);
             let terrain_full = self.terrain.is_full();
             let event = async { if terrain_full { pending::<Option<Event>>().await } else { self.session.recv_event().await } };

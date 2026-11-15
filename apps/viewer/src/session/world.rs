@@ -13,6 +13,7 @@ use world::{
 
 use super::{
     inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation, SitTargetUpdate},
+    object_cache::CachedOverride,
     object_media::ObjectMediaTarget,
     recovery::MAX_RECOVERY_OBJECTS_PER_REQUEST,
     terrain::DecodedTerrain,
@@ -540,6 +541,13 @@ impl SessionWorld {
         patch.object_media = Some(update);
         let result = self.world.patch_object(patch);
         Some(result)
+    }
+
+    pub(super) fn retain_cached_overrides(&mut self, overrides: Vec<CachedOverride>) -> Result<(), ApplyError> {
+        for cached in overrides {
+            drop(self.world.retain_pbr_material_overrides(cached.source, cached.local_id, cached.expected_id, cached.overrides)?);
+        }
+        Ok(())
     }
 
     pub(super) fn apply_sit_target_update(

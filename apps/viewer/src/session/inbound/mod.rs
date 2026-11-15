@@ -7,3 +7,4 @@ pub(super) use avatar::{AvatarAppearanceMessage, SitTargetUpdate, decode_avatar_
 pub(crate) use chat::{ChatMessage, display_message, format_avatar_name};
 pub(in crate::session) use object::decode_cached_object;
 pub(super) use object::{ObjectBatch, ObjectMediaRequest, ObjectOperation, decode_object_message, object_media_requests};
+pub(in crate::session) use pbr::{decode_payload as decode_pbr_overrides, encode_payload as encode_pbr_overrides};

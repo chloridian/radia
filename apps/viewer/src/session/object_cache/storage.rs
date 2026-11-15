@@ -14,10 +14,12 @@ use network::Grid;
 use rusqlite::{Connection, Error as RusqliteError, OptionalExtension, Transaction, params};
 #[cfg(test)]
 use tokio::runtime::Handle;
+use uuid::Uuid;
 
 use super::{
     CacheScope, EncodedEntry, MAX_DATABASE_PAGES, MAX_ENTRY_BATCH_ROWS, MAX_GLOBAL_PRUNE_ROWS, MAX_OBJECT_CACHE_ENTRY_BYTES,
-    MAX_REGION_BYTES, MAX_REGION_DELETE_BATCHES, MAX_REGION_ENTRIES, MAX_TOTAL_BYTES, MAX_TOTAL_ENTRIES, SCHEMA_VERSION, StoredEntry,
+    MAX_OVERRIDE_BATCH_ROWS, MAX_REGION_BYTES, MAX_REGION_DELETE_BATCHES, MAX_REGION_ENTRIES, MAX_REGION_OVERRIDE_BYTES,
+    MAX_REGION_OVERRIDES, MAX_TOTAL_BYTES, MAX_TOTAL_ENTRIES, OverrideWrite, SCHEMA_VERSION, StoredEntry, StoredOverride, StoredScope,
 };
 #[cfg(test)]
 use super::{CacheWriteWorker, ObjectCacheEvent, ObjectCacheSession};
@@ -40,6 +42,18 @@ const OBJECT_ENTRIES_SCHEMA: &str = "CREATE TABLE object_entries (
     payload BLOB NOT NULL CHECK(length(payload) >= 64 AND length(payload) <= 10000),
     PRIMARY KEY (grid_id, region_id, cache_id, local_id)
 ) WITHOUT ROWID";
+const PBR_OVERRIDES_SCHEMA: &str = "CREATE TABLE pbr_overrides (
+    grid_id TEXT NOT NULL,
+    region_id BLOB NOT NULL CHECK(length(region_id) = 16),
+    cache_id BLOB NOT NULL CHECK(length(cache_id) = 16),
+    local_id INTEGER NOT NULL CHECK(local_id > 0 AND local_id <= 4294967295),
+    object_id BLOB NOT NULL CHECK(length(object_id) = 16),
+    payload BLOB NOT NULL CHECK(length(payload) >= 1 AND length(payload) <= 7168),
+    PRIMARY KEY (grid_id, region_id, cache_id, local_id)
+) WITHOUT ROWID";
+const REGION_SCOPES_DELETE_OVERRIDES_TRIGGER: &str = "CREATE TRIGGER region_scopes_delete_overrides AFTER DELETE ON region_scopes BEGIN
+    DELETE FROM pbr_overrides WHERE grid_id = OLD.grid_id AND region_id = OLD.region_id AND cache_id = OLD.cache_id;
+END";
 const OBJECT_CACHE_TOTALS_SCHEMA: &str = "CREATE TABLE object_cache_totals (
     singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
     entry_count INTEGER NOT NULL CHECK(entry_count >= 0),
@@ -58,6 +72,32 @@ WHEN length(OLD.payload) != length(NEW.payload) BEGIN
     UPDATE object_cache_totals SET payload_bytes = payload_bytes + length(NEW.payload) - length(OLD.payload)
     WHERE singleton = 1;
 END";
+const PBR_OVERRIDES_TOTALS_INSERT_TRIGGER: &str = "CREATE TRIGGER pbr_overrides_totals_insert AFTER INSERT ON pbr_overrides BEGIN
+    UPDATE object_cache_totals SET entry_count = entry_count + 1, payload_bytes = payload_bytes + length(NEW.payload)
+    WHERE singleton = 1;
+END";
+const PBR_OVERRIDES_TOTALS_DELETE_TRIGGER: &str = "CREATE TRIGGER pbr_overrides_totals_delete AFTER DELETE ON pbr_overrides BEGIN
+    UPDATE object_cache_totals SET entry_count = entry_count - 1, payload_bytes = payload_bytes - length(OLD.payload)
+    WHERE singleton = 1;
+END";
+const PBR_OVERRIDES_TOTALS_UPDATE_TRIGGER: &str = "CREATE TRIGGER pbr_overrides_totals_update AFTER UPDATE OF payload ON pbr_overrides
+WHEN length(OLD.payload) != length(NEW.payload) BEGIN
+    UPDATE object_cache_totals SET payload_bytes = payload_bytes + length(NEW.payload) - length(OLD.payload)
+    WHERE singleton = 1;
+END";
+const SCHEMA: [(&str, &str, &str); 11] = [
+    ("table", "region_scopes", REGION_SCOPES_SCHEMA),
+    ("table", "object_entries", OBJECT_ENTRIES_SCHEMA),
+    ("table", "pbr_overrides", PBR_OVERRIDES_SCHEMA),
+    ("table", "object_cache_totals", OBJECT_CACHE_TOTALS_SCHEMA),
+    ("trigger", "region_scopes_delete_overrides", REGION_SCOPES_DELETE_OVERRIDES_TRIGGER),
+    ("trigger", "object_entries_totals_insert", OBJECT_ENTRIES_TOTALS_INSERT_TRIGGER),
+    ("trigger", "object_entries_totals_delete", OBJECT_ENTRIES_TOTALS_DELETE_TRIGGER),
+    ("trigger", "object_entries_totals_update", OBJECT_ENTRIES_TOTALS_UPDATE_TRIGGER),
+    ("trigger", "pbr_overrides_totals_insert", PBR_OVERRIDES_TOTALS_INSERT_TRIGGER),
+    ("trigger", "pbr_overrides_totals_delete", PBR_OVERRIDES_TOTALS_DELETE_TRIGGER),
+    ("trigger", "pbr_overrides_totals_update", PBR_OVERRIDES_TOTALS_UPDATE_TRIGGER),
+];
 
 pub(super) struct PendingSubmission {
     pub(super) batches: Vec<SqliteBatch>,
@@ -78,15 +118,10 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError>
     match version {
         0 => {
             let transaction = connection.transaction()?;
-            transaction.execute_batch(REGION_SCOPES_SCHEMA)?;
-            transaction.execute_batch(OBJECT_ENTRIES_SCHEMA)?;
-            install_global_stats(&transaction, false)?;
-            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            transaction.commit()?;
-        }
-        1 => {
-            let transaction = connection.transaction()?;
-            install_global_stats(&transaction, true)?;
+            for (_, _, sql) in SCHEMA {
+                transaction.execute_batch(sql)?;
+            }
+            transaction.execute("INSERT INTO object_cache_totals (singleton, entry_count, payload_bytes) VALUES (1, 0, 0)", [])?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             transaction.commit()?;
         }
@@ -102,15 +137,7 @@ fn validate_current_schema(connection: &Connection) -> Result<(), MigrationError
     let objects = statement
         .query_map([], |row| Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), row.get::<_, Option<String>>(2)?)))?
         .collect::<Result<HashMap<_, _>, _>>()?;
-    let required = [
-        ("table", "region_scopes", REGION_SCOPES_SCHEMA),
-        ("table", "object_entries", OBJECT_ENTRIES_SCHEMA),
-        ("table", "object_cache_totals", OBJECT_CACHE_TOTALS_SCHEMA),
-        ("trigger", "object_entries_totals_insert", OBJECT_ENTRIES_TOTALS_INSERT_TRIGGER),
-        ("trigger", "object_entries_totals_delete", OBJECT_ENTRIES_TOTALS_DELETE_TRIGGER),
-        ("trigger", "object_entries_totals_update", OBJECT_ENTRIES_TOTALS_UPDATE_TRIGGER),
-    ];
-    if required.iter().any(|(kind, name, expected)| {
+    if SCHEMA.iter().any(|(kind, name, expected)| {
         objects
             .get(&(kind.to_string(), name.to_string()))
             .and_then(Option::as_deref)
@@ -120,8 +147,13 @@ fn validate_current_schema(connection: &Connection) -> Result<(), MigrationError
     }
     drop(statement);
 
-    let actual: (i64, i64) = connection
-        .query_row("SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) FROM object_entries", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let actual: (i64, i64) = connection.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) FROM (
+            SELECT payload FROM object_entries UNION ALL SELECT payload FROM pbr_overrides
+         )",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
     let totals_rows: i64 = connection.query_row("SELECT COUNT(*) FROM object_cache_totals", [], |row| row.get(0))?;
     let stored: Option<(i64, i64)> = connection
         .query_row("SELECT entry_count, payload_bytes FROM object_cache_totals WHERE singleton = 1", [], |row| {
@@ -131,23 +163,6 @@ fn validate_current_schema(connection: &Connection) -> Result<(), MigrationError
     if totals_rows != 1 || stored != Some(actual) {
         return Err(MigrationError::SchemaMismatch);
     }
-    Ok(())
-}
-
-fn install_global_stats(connection: &Connection, backfill: bool) -> Result<(), MigrationError> {
-    connection.execute_batch(OBJECT_CACHE_TOTALS_SCHEMA)?;
-    if backfill {
-        connection.execute(
-            "INSERT INTO object_cache_totals (singleton, entry_count, payload_bytes)
-             SELECT 1, COUNT(*), COALESCE(SUM(length(payload)), 0) FROM object_entries",
-            [],
-        )?;
-    } else {
-        connection.execute("INSERT INTO object_cache_totals (singleton, entry_count, payload_bytes) VALUES (1, 0, 0)", [])?;
-    }
-    connection.execute_batch(OBJECT_ENTRIES_TOTALS_INSERT_TRIGGER)?;
-    connection.execute_batch(OBJECT_ENTRIES_TOTALS_DELETE_TRIGGER)?;
-    connection.execute_batch(OBJECT_ENTRIES_TOTALS_UPDATE_TRIGGER)?;
     Ok(())
 }
 
@@ -165,44 +180,69 @@ pub(super) fn open_for_test(path: impl AsRef<Path>, grid: Grid) -> ObjectCacheSe
     cache
 }
 
-pub(super) fn queue_scope_load(db: &SqliteDb, scope: CacheScope) -> Result<SqliteReceipt<HashMap<u32, StoredEntry>>, SqliteError> {
+pub(super) fn queue_scope_load(db: &SqliteDb, scope: CacheScope) -> Result<SqliteReceipt<StoredScope>, SqliteError> {
     db.read(0, move |transaction| {
-        let (row_count, bytes) = scope_stats(transaction, &scope)?;
-        if row_count > MAX_REGION_ENTRIES || bytes > MAX_REGION_BYTES {
-            return Ok(HashMap::new());
-        }
-        let mut statement = transaction.prepare(
-            "SELECT local_id, crc, update_kind, update_flags, length(payload),
-                    CASE WHEN length(payload) <= ?1 THEN payload ELSE NULL END
-             FROM object_entries WHERE grid_id = ?2 AND region_id = ?3 AND cache_id = ?4 ORDER BY local_id",
-        )?;
-        let row_iter = statement.query_map(
-            params![
-                MAX_OBJECT_CACHE_ENTRY_BYTES as i64,
-                scope.grid_id,
-                scope.region_id.as_bytes().as_slice(),
-                scope.cache_id.as_bytes().as_slice()
-            ],
-            |row| {
-                Ok(StoredEntry {
-                    local_id: row.get(0)?,
-                    crc: row.get(1)?,
-                    update_kind: row.get(2)?,
-                    update_flags: row.get(3)?,
-                    payload_bytes: row.get(4)?,
-                    payload: row.get::<_, Option<Vec<u8>>>(5)?.map(Arc::from),
-                })
-            },
-        )?;
-        let mut entries = HashMap::with_capacity(row_count);
-        for row in row_iter {
-            let entry = row?;
-            if let Ok(local_id) = u32::try_from(entry.local_id) {
-                entries.insert(local_id, entry);
-            }
-        }
-        Ok(entries)
+        Ok(StoredScope { entries: load_entries(transaction, &scope)?, overrides: load_overrides(transaction, &scope)? })
     })
+}
+
+fn load_entries(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<HashMap<u32, StoredEntry>, RusqliteError> {
+    let (row_count, bytes) = scope_stats(transaction, scope)?;
+    if row_count > MAX_REGION_ENTRIES || bytes > MAX_REGION_BYTES {
+        return Ok(HashMap::new());
+    }
+    let mut statement = transaction.prepare(
+        "SELECT local_id, crc, update_kind, update_flags, length(payload),
+                CASE WHEN length(payload) <= ?1 THEN payload ELSE NULL END
+         FROM object_entries WHERE grid_id = ?2 AND region_id = ?3 AND cache_id = ?4 ORDER BY local_id",
+    )?;
+    let row_iter = statement.query_map(
+        params![
+            MAX_OBJECT_CACHE_ENTRY_BYTES as i64,
+            scope.grid_id,
+            scope.region_id.as_bytes().as_slice(),
+            scope.cache_id.as_bytes().as_slice()
+        ],
+        |row| {
+            Ok(StoredEntry {
+                local_id: row.get(0)?,
+                crc: row.get(1)?,
+                update_kind: row.get(2)?,
+                update_flags: row.get(3)?,
+                payload_bytes: row.get(4)?,
+                payload: row.get::<_, Option<Vec<u8>>>(5)?.map(Arc::from),
+            })
+        },
+    )?;
+    let mut entries = HashMap::with_capacity(row_count);
+    for row in row_iter {
+        let entry = row?;
+        if let Ok(local_id) = u32::try_from(entry.local_id) {
+            entries.insert(local_id, entry);
+        }
+    }
+    Ok(entries)
+}
+
+fn load_overrides(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<HashMap<u32, StoredOverride>, RusqliteError> {
+    let (row_count, bytes) = scope_override_stats(transaction, scope)?;
+    if row_count > MAX_REGION_OVERRIDES || bytes > MAX_REGION_OVERRIDE_BYTES {
+        return Ok(HashMap::new());
+    }
+    let mut statement = transaction
+        .prepare("SELECT local_id, object_id, payload FROM pbr_overrides WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3")?;
+    let rows = statement
+        .query_map(params![scope.grid_id, scope.region_id.as_bytes().as_slice(), scope.cache_id.as_bytes().as_slice()], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?))
+        })?;
+    let mut overrides = HashMap::with_capacity(row_count);
+    for row in rows {
+        let (local_id, object_id, payload) = row?;
+        if let (Ok(local_id), Ok(object_id)) = (u32::try_from(local_id), Uuid::from_slice(&object_id)) {
+            overrides.insert(local_id, StoredOverride { object_id, payload: Arc::from(payload) });
+        }
+    }
+    Ok(overrides)
 }
 
 pub(super) fn make_write_batches(scope: CacheScope, entries: Arc<[EncodedEntry]>, last_used: i64) -> Result<Vec<SqliteBatch>, SqliteError> {
@@ -323,26 +363,90 @@ pub(super) fn make_access_submission(scope: CacheScope, stale: HashSet<u32>, las
                 params![scope.grid_id, scope.region_id.as_bytes().as_slice(), scope.cache_id.as_bytes().as_slice(), i64::from(local_id)],
             )?;
         }
-        let has_entries = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM object_entries WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3)",
-            params![scope.grid_id, scope.region_id.as_bytes().as_slice(), scope.cache_id.as_bytes().as_slice()],
-            |row| row.get::<_, bool>(0),
+        transaction.execute(
+            "UPDATE region_scopes SET last_used = MAX(last_used, ?4) WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3",
+            params![scope.grid_id, scope.region_id.as_bytes().as_slice(), scope.cache_id.as_bytes().as_slice(), last_used],
         )?;
-        if has_entries {
-            transaction.execute(
-                "UPDATE region_scopes SET last_used = MAX(last_used, ?4) WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3",
-                params![scope.grid_id, scope.region_id.as_bytes().as_slice(), scope.cache_id.as_bytes().as_slice(), last_used],
-            )?;
-        } else {
-            transaction.execute(
-                "DELETE FROM region_scopes WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3",
-                params![scope.grid_id, scope.region_id.as_bytes().as_slice(), scope.cache_id.as_bytes().as_slice()],
-            )?;
-        }
-        Ok(())
+        remove_empty_scope(transaction, &scope)
     })
     .expect("cache access batch fits SQLite limits");
     PendingSubmission { batches: vec![batch], rows, bytes }
+}
+
+pub(super) fn make_override_submission(scope: CacheScope, writes: Vec<OverrideWrite>, last_used: i64) -> PendingSubmission {
+    let mut submission = PendingSubmission { batches: Vec::new(), rows: 0, bytes: 0 };
+    let mut writes = writes.into_iter().peekable();
+    while writes.peek().is_some() {
+        let chunk = writes.by_ref().take(MAX_OVERRIDE_BATCH_ROWS).collect::<Vec<_>>();
+        let rows = chunk.len().saturating_add(2);
+        let bytes = chunk.iter().map(|write| write.payload_bytes().saturating_add(64)).sum::<usize>().saturating_add(128);
+        let scope = scope.clone();
+        let batch = SqliteBatch::new(rows, bytes, move |transaction| write_override_chunk(transaction, &scope, &chunk, last_used))
+            .expect("override batch fits SQLite limits");
+        submission.batches.push(batch);
+        submission.rows = submission.rows.saturating_add(rows);
+        submission.bytes = submission.bytes.saturating_add(bytes);
+    }
+    submission
+}
+
+fn write_override_chunk(
+    transaction: &Transaction<'_>,
+    scope: &CacheScope,
+    writes: &[OverrideWrite],
+    last_used: i64,
+) -> Result<(), RusqliteError> {
+    if writes.iter().any(|write| matches!(write, OverrideWrite::Upsert(..))) {
+        upsert_scope(transaction, scope, last_used)?;
+    }
+    let (mut rows, mut bytes) = scope_override_stats(transaction, scope)?;
+    for write in writes {
+        let local_id = i64::from(write.local_id());
+        let existing = transaction
+            .query_row(
+                "SELECT length(payload) FROM pbr_overrides WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3 AND local_id = ?4",
+                params![scope.grid_id, scope.region_id.as_bytes().as_slice(), scope.cache_id.as_bytes().as_slice(), local_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(|length| usize::try_from(length).unwrap_or(usize::MAX));
+        let rows_without = rows.saturating_sub(usize::from(existing.is_some()));
+        let bytes_without = bytes.saturating_sub(existing.unwrap_or(0));
+        let fits = rows_without < MAX_REGION_OVERRIDES && bytes_without.saturating_add(write.payload_bytes()) <= MAX_REGION_OVERRIDE_BYTES;
+        match write {
+            OverrideWrite::Upsert(_, stored) if fits => {
+                transaction.execute(
+                    "INSERT INTO pbr_overrides (grid_id, region_id, cache_id, local_id, object_id, payload)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT (grid_id, region_id, cache_id, local_id) DO UPDATE SET
+                        object_id = excluded.object_id,
+                        payload = excluded.payload
+                     WHERE pbr_overrides.object_id != excluded.object_id OR pbr_overrides.payload != excluded.payload",
+                    params![
+                        scope.grid_id,
+                        scope.region_id.as_bytes().as_slice(),
+                        scope.cache_id.as_bytes().as_slice(),
+                        local_id,
+                        stored.object_id.as_bytes().as_slice(),
+                        stored.payload.as_ref(),
+                    ],
+                )?;
+                rows = rows_without.saturating_add(1);
+                bytes = bytes_without.saturating_add(stored.payload.len());
+            }
+            OverrideWrite::Upsert(..) | OverrideWrite::Delete(_) => {
+                if existing.is_some() {
+                    transaction.execute(
+                        "DELETE FROM pbr_overrides WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3 AND local_id = ?4",
+                        params![scope.grid_id, scope.region_id.as_bytes().as_slice(), scope.cache_id.as_bytes().as_slice(), local_id],
+                    )?;
+                }
+                rows = rows_without;
+                bytes = bytes_without;
+            }
+        }
+    }
+    remove_empty_scope(transaction, scope)
 }
 
 fn upsert_scope(transaction: &Transaction<'_>, scope: &CacheScope, last_used: i64) -> Result<(), RusqliteError> {
@@ -396,6 +500,9 @@ fn prune_global_chunk(transaction: &Transaction<'_>) -> Result<(), RusqliteError
                  WHERE EXISTS (
                     SELECT 1 FROM object_entries e
                     WHERE e.grid_id = region_scopes.grid_id AND e.region_id = region_scopes.region_id AND e.cache_id = region_scopes.cache_id
+                 ) OR EXISTS (
+                    SELECT 1 FROM pbr_overrides o
+                    WHERE o.grid_id = region_scopes.grid_id AND o.region_id = region_scopes.region_id AND o.cache_id = region_scopes.cache_id
                  )
                  ORDER BY last_used, grid_id, region_id, cache_id LIMIT 1",
                 [],
@@ -405,35 +512,36 @@ fn prune_global_chunk(transaction: &Transaction<'_>) -> Result<(), RusqliteError
         let Some((grid_id, region_id, cache_id)) = oldest else { break };
         let limit = i64::try_from(MAX_GLOBAL_PRUNE_ROWS - deleted).unwrap_or(i64::MAX);
         let mut statement = transaction.prepare(
-            "SELECT local_id, length(payload) FROM object_entries WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3
-             ORDER BY length(payload) DESC, local_id LIMIT ?4",
+            "SELECT is_override, local_id, bytes FROM (
+                SELECT 0 AS is_override, local_id, length(payload) AS bytes FROM object_entries
+                WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3
+                UNION ALL
+                SELECT 1, local_id, length(payload) FROM pbr_overrides
+                WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3
+             )
+             ORDER BY is_override, bytes DESC, local_id LIMIT ?4",
         )?;
-        let local_ids = statement
-            .query_map(params![grid_id, region_id, cache_id, limit], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        let rows = statement
+            .query_map(params![grid_id, region_id, cache_id, limit], |row| {
+                Ok((row.get::<_, bool>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
-        if local_ids.is_empty() {
+        if rows.is_empty() {
             break;
         }
-        for (local_id, payload_bytes) in &local_ids {
-            transaction.execute(
-                "DELETE FROM object_entries WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3 AND local_id = ?4",
-                params![grid_id, region_id, cache_id, local_id],
-            )?;
+        for (is_override, local_id, payload_bytes) in &rows {
+            let sql = if *is_override {
+                "DELETE FROM pbr_overrides WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3 AND local_id = ?4"
+            } else {
+                "DELETE FROM object_entries WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3 AND local_id = ?4"
+            };
+            transaction.execute(sql, params![grid_id, region_id, cache_id, local_id])?;
             remaining_rows = remaining_rows.saturating_sub(1);
             remaining_bytes = remaining_bytes.saturating_sub(usize::try_from(*payload_bytes).unwrap_or(usize::MAX));
         }
-        deleted += local_ids.len();
-        if !transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM object_entries WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3)",
-            params![grid_id, region_id, cache_id],
-            |row| row.get::<_, bool>(0),
-        )? {
-            transaction.execute(
-                "DELETE FROM region_scopes WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3",
-                params![grid_id, region_id, cache_id],
-            )?;
-        }
+        deleted += rows.len();
+        remove_empty_scope_key(transaction, &grid_id, &region_id, &cache_id)?;
     }
     Ok(())
 }
@@ -456,25 +564,49 @@ fn delete_scope_chunk(transaction: &Transaction<'_>, scope: &CacheScope) -> Resu
         })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    for local_id in local_ids {
+    for local_id in &local_ids {
         transaction.execute(
             "DELETE FROM object_entries WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3 AND local_id = ?4",
             params![scope.grid_id, scope.region_id.as_bytes().as_slice(), scope.cache_id.as_bytes().as_slice(), local_id],
         )?;
     }
-    remove_empty_scope(transaction, scope)
+    if local_ids.len() < 255 {
+        transaction.execute(
+            "DELETE FROM region_scopes WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3",
+            params![scope.grid_id, scope.region_id.as_bytes().as_slice(), scope.cache_id.as_bytes().as_slice()],
+        )?;
+    }
+    Ok(())
 }
 
 fn remove_empty_scope(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(), RusqliteError> {
+    remove_empty_scope_key(transaction, &scope.grid_id, scope.region_id.as_bytes(), scope.cache_id.as_bytes())
+}
+
+fn remove_empty_scope_key(transaction: &Transaction<'_>, grid_id: &str, region_id: &[u8], cache_id: &[u8]) -> Result<(), RusqliteError> {
     transaction.execute(
         "DELETE FROM region_scopes WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3
          AND NOT EXISTS (
             SELECT 1 FROM object_entries e
             WHERE e.grid_id = region_scopes.grid_id AND e.region_id = region_scopes.region_id AND e.cache_id = region_scopes.cache_id
+         )
+         AND NOT EXISTS (
+            SELECT 1 FROM pbr_overrides o
+            WHERE o.grid_id = region_scopes.grid_id AND o.region_id = region_scopes.region_id AND o.cache_id = region_scopes.cache_id
          )",
-        params![scope.grid_id, scope.region_id.as_bytes().as_slice(), scope.cache_id.as_bytes().as_slice()],
+        params![grid_id, region_id, cache_id],
     )?;
     Ok(())
+}
+
+fn scope_override_stats(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(usize, usize), RusqliteError> {
+    let (rows, bytes): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) FROM pbr_overrides
+         WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3",
+        params![scope.grid_id, scope.region_id.as_bytes().as_slice(), scope.cache_id.as_bytes().as_slice()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok((usize::try_from(rows).unwrap_or(usize::MAX), usize::try_from(bytes).unwrap_or(usize::MAX)))
 }
 
 fn scope_stats(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(usize, usize), RusqliteError> {
@@ -491,73 +623,53 @@ fn scope_stats(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(usi
 mod tests {
     use super::*;
     use crate::session::object_cache::test_support::*;
-    #[tokio::test]
-    async fn schema_v1_migration_backfills_incremental_global_totals() {
-        let directory = tempfile::tempdir().expect("create isolated cache directory");
-        let path = directory.path().join("objects.sqlite");
-        let connection = Connection::open(&path).expect("create version one cache");
-        connection
-            .execute_batch(
-                "CREATE TABLE region_scopes (
-                grid_id TEXT NOT NULL,
-                region_id BLOB NOT NULL CHECK(length(region_id) = 16),
-                cache_id BLOB NOT NULL CHECK(length(cache_id) = 16),
-                last_used INTEGER NOT NULL,
-                PRIMARY KEY (grid_id, region_id, cache_id)
-            ) WITHOUT ROWID;
-            CREATE TABLE object_entries (
-                grid_id TEXT NOT NULL,
-                region_id BLOB NOT NULL CHECK(length(region_id) = 16),
-                cache_id BLOB NOT NULL CHECK(length(cache_id) = 16),
-                local_id INTEGER NOT NULL CHECK(local_id > 0 AND local_id <= 4294967295),
-                crc INTEGER NOT NULL CHECK(crc >= 0 AND crc <= 4294967295),
-                update_kind INTEGER NOT NULL CHECK(update_kind IN (0, 1)),
-                update_flags INTEGER NOT NULL CHECK(update_flags >= 0 AND update_flags <= 4294967295),
-                payload BLOB NOT NULL CHECK(length(payload) >= 64 AND length(payload) <= 10000),
-                PRIMARY KEY (grid_id, region_id, cache_id, local_id)
-            ) WITHOUT ROWID;",
-            )
-            .expect("create version one schema");
-        connection
-            .execute(
-                "INSERT INTO object_entries (grid_id, region_id, cache_id, local_id, crc, update_kind, update_flags, payload)
-             VALUES (?1, ?2, ?3, 7, 8, 0, 9, zeroblob(64))",
-                params![Grid::Agni.id(), REGION_ID.as_bytes().as_slice(), CACHE_ID.as_bytes().as_slice()],
-            )
-            .expect("add a version one object entry");
-        connection.pragma_update(None, "user_version", 1).expect("set version one schema marker");
-        drop(connection);
+    #[test]
+    fn other_schema_versions_recreate_database() {
+        for version in [2, 7] {
+            let directory = tempfile::tempdir().expect("create isolated cache directory");
+            let path = directory.path().join("objects.sqlite");
+            let connection = Connection::open(&path).expect("create isolated SQLite database");
+            connection.execute_batch("CREATE TABLE object_entries (local_id INTEGER);").expect("create foreign schema");
+            connection.pragma_update(None, "user_version", version).expect("set foreign schema version");
+            drop(connection);
 
-        let (db, status) = open_at(&path).expect("migrate version one cache");
-        assert_eq!(cache_totals(&db).await, (1, 64, 1, 64));
-        let mut cache = ObjectCacheSession::new(Grid::Agni);
-        let db = std::sync::Arc::new(db);
-        let writer = CacheWriteWorker::start(std::sync::Arc::clone(&db), Handle::current()).expect("start cache writer");
-        assert!(cache.handle_event(ObjectCacheEvent::Ready { db, status, writer }).is_none());
-        cache.close().await;
+            let (db, status) = open_at(&path).expect("recreate foreign schema");
+
+            std::assert_matches!(status, OpenStatus::Recreated(::storage::sqlite::RecoveryReason::SchemaMismatch));
+            db.shutdown().expect("close recreated database");
+            let connection = Connection::open(&path).expect("reopen recreated database");
+            let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).expect("read schema version");
+            assert_eq!(version, SCHEMA_VERSION);
+        }
     }
 
-    #[test]
-    fn schema_v1_migration_rolls_back_after_a_partial_upgrade_failure() {
+    #[tokio::test]
+    async fn override_writes_respect_scope_limits() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
-        let path = directory.path().join("objects.sqlite");
-        let connection = Connection::open(&path).expect("create isolated SQLite database");
-        connection
-            .execute_batch("CREATE TABLE object_entries (local_id INTEGER); PRAGMA user_version = 1;")
-            .expect("create partial v1 schema");
-        drop(connection);
+        let mut cache = open_cache(directory.path().join("objects.sqlite"));
+        let scope = cache.identities.get(&SIMULATOR).expect("simulator has a cache scope").clone();
+        let upserts = |count: u32, bytes: usize| {
+            (1..=count)
+                .map(|local_id| {
+                    let object_id = Uuid::from_u128(u128::from(local_id));
+                    OverrideWrite::Upsert(local_id, StoredOverride { object_id, payload: Arc::from(vec![b'x'; bytes]) })
+                })
+                .collect::<Vec<_>>()
+        };
 
-        assert!(open_at(&path).is_err());
-        let connection = Connection::open(&path).expect("reopen database after failed migration");
-        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).expect("read schema version");
-        let totals_table_exists: bool = connection
-            .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'object_cache_totals')", [], |row| {
-                row.get(0)
-            })
-            .expect("check whether migration table remains");
+        let rows = u32::try_from(MAX_REGION_OVERRIDES).expect("override row limit fits u32") + 1;
+        assert!(cache.enqueue(make_override_submission(scope.clone(), upserts(rows, 8), 1)));
+        flush(&mut cache).await;
+        assert_eq!(override_rows(cache.db.as_ref().expect("cache database is open")).await.len(), MAX_REGION_OVERRIDES);
 
-        assert_eq!(version, 1);
-        assert!(!totals_table_exists);
+        assert!(cache.enqueue(make_override_submission(scope, upserts(200, 7_168), 2)));
+        flush(&mut cache).await;
+        let (rows, bytes, total_rows, total_bytes) = cache_totals(cache.db.as_ref().expect("cache database is open")).await;
+        assert!(usize::try_from(rows).expect("row count fits usize") <= MAX_REGION_OVERRIDES);
+        assert!(usize::try_from(bytes).expect("byte count fits usize") <= MAX_REGION_OVERRIDE_BYTES);
+        assert!(bytes > i64::try_from(MAX_REGION_OVERRIDE_BYTES).expect("byte limit fits i64") - 7_168 - 8 * 2_048);
+        assert_eq!((rows, bytes), (total_rows, total_bytes));
+        cache.close().await;
     }
 
     #[test]
