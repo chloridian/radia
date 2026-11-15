@@ -339,9 +339,6 @@ async fn disconnect_after_promotion_with_full_reliable_window() {
             .await
             .expect("reliable send should finish while filling the window")
             .expect("send_to should not fail before the reliable window is full");
-    }
-
-    for local_id in 0..MAX_PENDING_PACKETS {
         let (_, packet) =
             receive_client_message(&destination, destination_peer, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
         assert!(packet.is_reliable());
