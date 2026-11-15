@@ -1,8 +1,9 @@
 use std::assert_matches;
 use std::{fmt::Write, hint::black_box};
 
-use llsd::{Limits, Value, xml};
+use llsd::{Error, Limits, Value, binary, notation, xml};
 use test_support::allocation::{self, CountingAllocator, live_bytes};
+use uuid::Uuid;
 
 #[global_allocator]
 static ALLOC: CountingAllocator = CountingAllocator;
@@ -10,6 +11,12 @@ static ALLOC: CountingAllocator = CountingAllocator;
 fn measure<T>(operation: impl FnOnce() -> T) -> (T, i128, i128) {
     let (value, allocations) = allocation::measure(operation);
     (value, allocations.live_bytes, allocations.peak_bytes)
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+struct UuidField {
+    #[serde(with = "llsd::uuid")]
+    id: Uuid,
 }
 
 #[test]
@@ -85,4 +92,160 @@ fn oversized_keys_stay_bounded() {
         assert_eq!((small_live, large_live), (0, 0), "failed decode retained storage for {name}");
         assert!(large_peak <= small_peak + 4096, "oversized key was copied for {name}: {small_peak} -> {large_peak}");
     }
+}
+
+#[test]
+fn xml_binary_text_stays_bounded() {
+    let limits = Limits { max_binary_bytes: 1, ..Limits::default() };
+    let small = b"<llsd><binary>AA==</binary></llsd>";
+    let whitespace = format!("<llsd><binary>{}AA==</binary></llsd>", " \t\r\n".repeat(1024 * 1024));
+    let (small_result, _, small_peak) = measure(|| xml::from_slice_with_limits::<Value>(small, limits));
+    let (large_result, _, large_peak) = measure(|| xml::from_slice_with_limits::<Value>(whitespace.as_bytes(), limits));
+
+    assert_eq!(small_result.expect("decode one byte"), Value::Binary(vec![0].into()));
+    assert_eq!(large_result.expect("decode whitespace-wrapped one byte"), Value::Binary(vec![0].into()));
+    assert!(large_peak <= small_peak + 4096, "binary whitespace was copied: {small_peak} -> {large_peak}");
+
+    let small_oversized = b"<llsd><binary>AAAAA</binary></llsd>";
+    let oversized = format!("<llsd><binary>{}</binary></llsd>", "A".repeat(4 * 1024 * 1024));
+    let (small_result, _, small_peak) = measure(|| xml::from_slice_with_limits::<Value>(small_oversized, limits));
+    let (large_result, _, large_peak) = measure(|| xml::from_slice_with_limits::<Value>(oversized.as_bytes(), limits));
+
+    assert_matches!(small_result, Err(Error::LimitExceeded("binary bytes")));
+    assert_matches!(large_result, Err(Error::LimitExceeded("binary bytes")));
+    assert!(large_peak <= small_peak + 4096, "oversized base64 text was copied: {small_peak} -> {large_peak}");
+}
+
+#[test]
+fn notation_uuid_keeps_spelling() {
+    let canonical = "12345678-90ab-cdef-0123-456789abcdef";
+    let expected = Uuid::parse_str(canonical).expect("valid UUID");
+    let limits = Limits { max_string_bytes: 0, ..Limits::default() };
+    for spelling in [canonical, "1234567890abcdef0123456789abcdef"] {
+        let encoded = format!("u{spelling}");
+        assert_eq!(
+            notation::from_slice_with_limits::<String>(encoded.as_bytes(), limits).expect("decode UUID text"),
+            spelling,
+            "UUID text changed for {spelling}"
+        );
+        assert_eq!(
+            notation::from_slice_with_limits::<Value>(encoded.as_bytes(), limits).expect("decode UUID value"),
+            Value::Uuid(expected),
+            "UUID value changed for {spelling}"
+        );
+
+        let encoded_field = format!("{{'id':u{spelling}}}");
+        assert_eq!(
+            notation::from_slice_with_limits::<UuidField>(encoded_field.as_bytes(), limits).expect("decode typed UUID"),
+            UuidField { id: expected },
+            "typed UUID changed for {spelling}"
+        );
+    }
+}
+
+#[test]
+fn invalid_uuid_tokens_stay_bounded() {
+    let limits = Limits { max_string_bytes: 1, ..Limits::default() };
+    let large = format!("u{}", "x".repeat(1024 * 1024));
+    let baseline = live_bytes();
+    let (small_result, _, small_peak) = measure(|| notation::from_slice_with_limits::<Value>(b"unot-a-uuid", limits));
+    let (large_result, _, large_peak) = measure(|| notation::from_slice_with_limits::<Value>(large.as_bytes(), limits));
+
+    assert_matches!(&small_result, Err(Error::InvalidValue(_)));
+    assert_matches!(&large_result, Err(Error::InvalidValue(_)));
+    assert!(large_peak <= small_peak + 4096, "oversized UUID token was copied: {small_peak} -> {large_peak}");
+    drop((small_result, large_result));
+    assert_eq!(live_bytes(), baseline);
+
+    assert_matches!(notation::from_slice_with_limits::<Value>(b"u\xff", limits), Err(Error::InvalidUtf8));
+    assert_matches!(notation::from_slice_with_limits::<UuidField>(b"{'id':unot-a-uuid}", limits), Err(Error::InvalidValue(_)));
+    assert_matches!(notation::from_slice_with_limits::<UuidField>(b"{'id':u\xff}", limits), Err(Error::InvalidUtf8));
+}
+
+#[test]
+fn integer_arrays_avoid_tag_allocations() {
+    const ITEMS: usize = 4096;
+
+    let notation_input = format!("[{}]", vec!["i1"; ITEMS].join(","));
+    let mut binary_input = vec![b'['];
+    binary_input.extend((ITEMS as u32).to_be_bytes());
+    for _ in 0..ITEMS {
+        binary_input.push(b'i');
+        binary_input.extend(1_i32.to_be_bytes());
+    }
+    binary_input.push(b']');
+
+    let (notation_value, notation_allocations) =
+        allocation::measure(|| notation::from_slice::<Value>(notation_input.as_bytes()).expect("decode notation integers"));
+    let (binary_value, binary_allocations) =
+        allocation::measure(|| binary::from_slice::<Value>(&binary_input).expect("decode binary integers"));
+
+    assert_eq!(notation_value.as_array().map(<[Value]>::len), Some(ITEMS));
+    assert_eq!(binary_value.as_array().map(<[Value]>::len), Some(ITEMS));
+    assert!(notation_allocations.allocation_calls + notation_allocations.reallocation_calls < ITEMS / 8);
+    assert!(binary_allocations.allocation_calls + binary_allocations.reallocation_calls < ITEMS / 8);
+}
+
+#[test]
+fn binary_attributes_stay_bounded() {
+    let limits = Limits { max_string_bytes: 6, max_binary_bytes: 1, ..Limits::default() };
+    for (name, small, large, valid) in [
+        (
+            "numeric reference",
+            "<llsd><binary encoding=\"&#x62;ase64\">AA==</binary></llsd>",
+            format!("<llsd><binary encoding=\"&#x{}62;ase64\">AA==</binary></llsd>", "0".repeat(4 * 1024 * 1024)),
+            true,
+        ),
+        (
+            "unknown entity",
+            "<llsd><binary encoding=\"&unknown;\">AA==</binary></llsd>",
+            format!("<llsd><binary encoding=\"&{};\">AA==</binary></llsd>", "x".repeat(4 * 1024 * 1024)),
+            false,
+        ),
+        (
+            "normalized whitespace",
+            "<llsd><binary encoding=\"\tbase64\">AA==</binary></llsd>",
+            format!("<llsd><binary encoding=\"{}base64\">AA==</binary></llsd>", "\t".repeat(4 * 1024 * 1024)),
+            false,
+        ),
+    ] {
+        let baseline = live_bytes();
+        let (small_result, small_allocations) = allocation::measure(|| xml::from_slice_with_limits::<Value>(small.as_bytes(), limits));
+        let (large_result, large_allocations) = allocation::measure(|| xml::from_slice_with_limits::<Value>(large.as_bytes(), limits));
+        if valid {
+            let expected = Value::Binary(vec![0].into());
+            assert_eq!(small_result.as_ref().expect("valid small encoding"), &expected);
+            assert_eq!(large_result.as_ref().expect("valid large encoding"), &expected);
+        } else {
+            assert_matches!(&small_result, Err(Error::InvalidValue(_)));
+            assert_matches!(&large_result, Err(Error::InvalidValue(_)));
+        }
+        assert!(
+            large_allocations.peak_bytes <= small_allocations.peak_bytes + 4096,
+            "binary attribute was copied for {name}: {} -> {}",
+            small_allocations.peak_bytes,
+            large_allocations.peak_bytes
+        );
+        drop((small_result, large_result));
+        assert_eq!(live_bytes(), baseline);
+    }
+}
+
+#[test]
+fn binary_capacity_stays_bounded() {
+    const BYTES: usize = 256 * 1024;
+    let expected = Value::Binary(vec![0; BYTES].into());
+    let input = xml::to_vec(&expected).expect("encode bounded binary input");
+    let limits = Limits { max_binary_bytes: BYTES, ..Limits::default() };
+    let baseline = live_bytes();
+    let (result, allocations) = allocation::measure(|| xml::from_slice_with_limits::<Value>(&input, limits));
+    assert_eq!(result.as_ref().expect("decode binary at the limit"), &expected);
+    let encoded_bytes = BYTES.div_ceil(3) * 4;
+    assert!(
+        allocations.peak_bytes <= (encoded_bytes + BYTES + 4096) as i128,
+        "binary parsing overreserved its encoded buffer: {}",
+        allocations.peak_bytes
+    );
+    drop(result);
+    assert_eq!(live_bytes(), baseline);
 }

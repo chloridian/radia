@@ -45,7 +45,11 @@ impl<'input> Deserializer<'input> {
     }
 
     fn skip_space(&mut self) -> Result<()> {
-        while matches!(self.tokens.peek()?, Some(Token::Text(value) | Token::CharacterReference(value)) if value.trim().is_empty()) {
+        while match self.tokens.peek()? {
+            Some(Token::Text(value)) => value.trim().is_empty(),
+            Some(Token::CharacterReference(character)) => character.is_whitespace(),
+            _ => false,
+        } {
             self.tokens.take()?;
         }
         Ok(())
@@ -87,11 +91,11 @@ impl<'input> Deserializer<'input> {
                     append_normalized_xml_text(&mut value, text);
                     self.tokens.take()?;
                 }
-                Some(Token::CharacterReference(text)) => {
-                    if value.len().checked_add(text.len()).is_none_or(|length| length > limit) {
+                Some(Token::CharacterReference(character)) => {
+                    if value.len().checked_add(character.len_utf8()).is_none_or(|length| length > limit) {
                         return Err(Error::LimitExceeded(limit_name));
                     }
-                    value.push_str(text);
+                    value.push(*character);
                     self.tokens.take()?;
                 }
                 Some(Token::End(end)) if *end == tag => {
@@ -188,19 +192,54 @@ impl<'input> Deserializer<'input> {
     }
 
     fn parse_binary(&mut self, tag: &str, empty: bool) -> Result<Vec<u8>> {
-        let text = self.text_value_with_limit(tag, empty, self.budget.limits.max_bytes, "input bytes")?;
-        let max_encoded_len = self.budget.limits.max_binary_bytes.div_ceil(3).saturating_mul(4);
-        let mut compact = Vec::with_capacity(text.len().min(max_encoded_len));
-        for byte in text.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
-            if compact.len() == max_encoded_len {
-                return Err(Error::LimitExceeded("binary bytes"));
-            }
-            compact.push(byte);
+        if empty {
+            return Ok(Vec::new());
         }
+
+        let max_encoded_len = self.budget.limits.max_binary_bytes.div_ceil(3).saturating_mul(4);
+        let mut compact = Vec::new();
+        loop {
+            match self.tokens.peek()? {
+                Some(Token::Text(text)) => {
+                    Self::append_base64_bytes(&mut compact, text.as_bytes(), max_encoded_len)?;
+                    self.tokens.take()?;
+                }
+                Some(Token::CharacterReference(character)) => {
+                    let mut bytes = [0; 4];
+                    Self::append_base64_bytes(&mut compact, character.encode_utf8(&mut bytes).as_bytes(), max_encoded_len)?;
+                    self.tokens.take()?;
+                }
+                Some(Token::End(end)) if *end == tag => {
+                    self.tokens.take()?;
+                    break;
+                }
+                Some(Token::Start(_)) | Some(Token::Empty(_)) => return Err(Error::InvalidValue("nested elements in LLSD scalar".into())),
+                Some(Token::End(_)) => return Err(Error::InvalidValue("mismatched LLSD XML element".into())),
+                None => return Err(Error::UnexpectedEof),
+            }
+        }
+
         if base64_decoded_len(&compact)? > self.budget.limits.max_binary_bytes {
             return Err(Error::LimitExceeded("binary bytes"));
         }
         STANDARD.decode(compact).map_err(|error| Error::InvalidValue(error.to_string()))
+    }
+
+    fn append_base64_bytes(output: &mut Vec<u8>, bytes: &[u8], max_encoded_len: usize) -> Result<()> {
+        for &byte in bytes {
+            if byte.is_ascii_whitespace() {
+                continue;
+            }
+            if output.len() >= max_encoded_len {
+                return Err(Error::LimitExceeded("binary bytes"));
+            }
+            if output.len() == output.capacity() {
+                let capacity = output.capacity().saturating_mul(2).clamp(max_encoded_len.min(8), max_encoded_len);
+                output.try_reserve_exact(capacity - output.len()).map_err(|_| Error::InvalidValue("LLSD allocation failed".into()))?;
+            }
+            output.push(byte);
+        }
+        Ok(())
     }
 }
 
@@ -249,7 +288,7 @@ impl<'de, 'input> de::Deserializer<'de> for &mut Deserializer<'input> {
             "binary" => visitor.visit_byte_buf(self.parse_binary(tag, empty)?),
             "array" => {
                 if empty {
-                    return visitor.visit_seq(EmptySeqAccess);
+                    return self.container(|_| visitor.visit_seq(EmptySeqAccess));
                 }
                 self.container(|de| {
                     let mut access = XmlSeqAccess { de, ended: false, count: 0 };
@@ -265,7 +304,7 @@ impl<'de, 'input> de::Deserializer<'de> for &mut Deserializer<'input> {
             }
             "map" => {
                 if empty {
-                    return visitor.visit_map(EmptyMapAccess);
+                    return self.container(|_| visitor.visit_map(EmptyMapAccess));
                 }
                 self.container(|de| {
                     let mut access = XmlMapAccess { de, ended: false, expects_value: false, count: 0 };
@@ -393,7 +432,7 @@ impl<'de, 'input> de::Deserializer<'de> for &mut Deserializer<'input> {
                 _ => return Err(Error::UnexpectedEof),
             };
             let access = VariantAccess::new(self, Deserializer::consume_enum_unit, no_finish);
-            visitor.visit_enum(VariantEnumAccess::new(variant.to_owned(), access))
+            visitor.visit_enum(VariantEnumAccess::new(variant, access))
         } else {
             self.deserialize_plain_enum(visitor)
         }

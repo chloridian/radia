@@ -50,7 +50,7 @@ mod tests {
     }
 
     #[test]
-    fn byte_limit_counts_header_and_leading_whitespace() {
+    fn byte_limit_counts_header() {
         let input = b"  <? LLSD/XML ?>
 <llsd><string>sky</string></llsd>";
         let limits = Limits { max_bytes: input.len() - 1, ..Limits::default() };

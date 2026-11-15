@@ -434,6 +434,63 @@ fn xml_entity_references() {
 }
 
 #[test]
+fn xml_allows_xml_10_boundaries() {
+    let literal = "<llsd><string>\t\n\r \u{d7ff}\u{e000}\u{fffd}\u{10000}\u{10ffff}</string></llsd>";
+    assert_eq!(
+        xml::from_str::<String>(literal).expect("decode allowed XML characters"),
+        "\t\n\n \u{d7ff}\u{e000}\u{fffd}\u{10000}\u{10ffff}"
+    );
+
+    let references = "<llsd><string>&#x9;&#xa;&#xd;&#x20;&#xd7ff;&#xe000;&#xfffd;&#x10000;&#x10ffff;</string></llsd>";
+    assert_eq!(
+        xml::from_str::<String>(references).expect("decode allowed XML character references"),
+        "\t\n\r \u{d7ff}\u{e000}\u{fffd}\u{10000}\u{10ffff}"
+    );
+}
+
+#[test]
+fn xml_rejects_forbidden_xml_literals() {
+    for codepoint in [0x0, 0x8, 0xb, 0xc, 0xe, 0x1f, 0xfffe, 0xffff] {
+        let input = format!("<llsd><string>{}</string></llsd>", char::from_u32(codepoint).expect("Unicode scalar"));
+        assert_matches!(xml::from_str::<String>(&input), Err(Error::InvalidValue(_)), "U+{codepoint:04X}");
+    }
+}
+
+#[test]
+fn xml_rejects_forbidden_xml_references() {
+    for codepoint in [0x0, 0x8, 0xb, 0xc, 0xe, 0x1f, 0xfffe, 0xffff] {
+        let input = format!("<llsd><string>&#x{codepoint:x};</string></llsd>");
+        assert_matches!(xml::from_str::<String>(&input), Err(Error::InvalidValue(_)), "U+{codepoint:04X}");
+    }
+}
+
+#[test]
+fn xml_rejects_forbidden_xml_markup() {
+    let forbidden = '\u{1}';
+    let inputs = [
+        format!("<llsd><string><![CDATA[{forbidden}]]></string></llsd>"),
+        format!("<!--{forbidden}--><llsd><undef/></llsd>"),
+        format!("<llsd ignored=\"{forbidden}\"><undef/></llsd>"),
+    ];
+
+    for input in inputs {
+        assert_matches!(xml::from_str::<Value>(&input), Err(Error::InvalidValue(_)));
+    }
+}
+
+#[test]
+fn xml_character_reference_string_bytes() {
+    let input = b"<llsd><string>a&#x1f642;</string></llsd>";
+    let limits = Limits { max_string_bytes: 5, ..Limits::default() };
+
+    assert_eq!(xml::from_slice_with_limits::<String>(input, limits).expect("multibyte reference fits"), "a🙂");
+    assert_matches!(
+        xml::from_slice_with_limits::<String>(input, Limits { max_string_bytes: 4, ..limits }),
+        Err(Error::LimitExceeded("string bytes"))
+    );
+}
+
+#[test]
 fn xml_escapes_carriage_returns() {
     let value = Value::String("before\rafter".into());
     let encoded = xml::to_vec(&value).expect("encode carriage return");
@@ -466,7 +523,7 @@ fn xml_combines_text_and_cdata() {
 }
 
 #[test]
-fn xml_preserves_character_reference_line_endings() {
+fn xml_reference_keeps_carriage_return() {
     let input = "<llsd><array><string>crlf\r\ncr\rlf</string><string>ref&#13;char</string><string><![CDATA[crlf\r\ncr\rlf]]></string></array></llsd>";
     let value = xml::from_str::<Value>(input).expect("decode XML line endings");
 
@@ -554,6 +611,30 @@ fn decode_limits_match_formats() {
             Limits { max_binary_bytes: 1, ..Limits::default() },
         ),
     ];
+
+    let empty_array = Value::Array(Vec::new());
+    let empty_map = Value::Map(BTreeMap::new());
+    let depth_0 = Limits { max_depth: 0, ..Limits::default() };
+    let depth_1 = Limits { max_depth: 1, ..Limits::default() };
+    let depth_2 = Limits { max_depth: 2, ..Limits::default() };
+    cases.extend([
+        limit_case("nesting depth", [b"<llsd><array/></llsd>", b"[\0\0\0\0]", b"[]"], empty_array.clone(), depth_1, depth_0),
+        limit_case("nesting depth", [b"<llsd><map/></llsd>", b"{\0\0\0\0}", b"{}"], empty_map.clone(), depth_1, depth_0),
+        limit_case(
+            "nesting depth",
+            [b"<llsd><array><array/></array></llsd>", b"[\0\0\0\x01[\0\0\0\0]]", b"[[]]"],
+            Value::Array(vec![empty_array]),
+            depth_2,
+            depth_1,
+        ),
+        limit_case(
+            "nesting depth",
+            [b"<llsd><array><map/></array></llsd>", b"[\0\0\0\x01{\0\0\0\0}]", b"[{}]"],
+            Value::Array(vec![empty_map]),
+            depth_2,
+            depth_1,
+        ),
+    ]);
 
     let input_bytes = array_inputs.map(|input| input.to_vec());
     let input_bytes_at_limit = std::array::from_fn(|index| Limits { max_bytes: input_bytes[index].len(), ..Limits::default() });
@@ -870,20 +951,27 @@ fn preambles_accept_optional_line_endings() {
 }
 
 #[test]
-fn xml_tokens_count_coalesced_text() {
+fn xml_event_budget_counts_references() {
     let map = (0..24).map(|index| (format!("key_{index:02}"), Value::String(format!("value_{index:02}")))).collect::<Map>();
     let expected = Value::Map(map);
     let xml = xml::to_vec(&expected).expect("encode map-heavy XML");
     let limits = Limits { max_values: 25, max_container_items: 24, ..Limits::default() };
     assert_eq!(xml::from_slice_with_limits::<Value>(&xml, limits).expect("decode within value and item limits"), expected);
 
-    let entities = "&amp;".repeat(64);
+    let entities = "&amp;".repeat(20);
     let xml = format!("<llsd><string>{entities}</string></llsd>");
-    let limits = Limits { max_values: 2, max_string_bytes: 64, ..Limits::default() };
-    assert_eq!(xml::from_slice_with_limits::<String>(xml.as_bytes(), limits).expect("decode entity-heavy text"), "&".repeat(64));
+    let limits = Limits { max_values: 2, max_string_bytes: 20, ..Limits::default() };
+    assert_eq!(xml::from_slice_with_limits::<String>(xml.as_bytes(), limits).expect("decode entity-heavy text"), "&".repeat(20));
     assert_matches!(
-        xml::from_slice_with_limits::<String>(xml.as_bytes(), Limits { max_string_bytes: 63, ..limits }),
+        xml::from_slice_with_limits::<String>(xml.as_bytes(), Limits { max_string_bytes: 19, ..limits }),
         Err(Error::LimitExceeded("string bytes"))
+    );
+
+    let limits = Limits { max_values: 1, ..Limits::default() };
+    let within_budget = format!("<llsd><string>{}</string></llsd>", "&amp;".repeat(19));
+    assert_eq!(
+        xml::from_slice_with_limits::<String>(within_budget.as_bytes(), limits).expect("references fit event budget"),
+        "&".repeat(19)
     );
 
     let over_limit = b"<llsd><array><undef/><undef/></array></llsd>";
@@ -891,6 +979,22 @@ fn xml_tokens_count_coalesced_text() {
         xml::from_slice_with_limits::<Value>(over_limit, Limits { max_values: 2, ..limits }),
         Err(Error::LimitExceeded("value count"))
     );
+
+    let over_budget = format!("<llsd><string>{}</string></llsd>", "&amp;".repeat(20));
+    assert_matches!(xml::from_slice_with_limits::<String>(over_budget.as_bytes(), limits), Err(Error::LimitExceeded("XML token count")));
+}
+
+#[test]
+fn xml_budget_counts_ignored_events() {
+    let limits = Limits { max_values: 1, ..Limits::default() };
+    let within_budget = format!("{}<llsd><undef/></llsd>", "<!--ignored-->".repeat(20));
+    assert_eq!(
+        xml::from_slice_with_limits::<Value>(within_budget.as_bytes(), limits).expect("ignored events fit event budget"),
+        Value::Undefined
+    );
+
+    let over_budget = format!("{}<llsd><undef/></llsd>", "<!--ignored-->".repeat(21));
+    assert_matches!(xml::from_slice_with_limits::<Value>(over_budget.as_bytes(), limits), Err(Error::LimitExceeded("XML token count")));
 }
 
 #[test]
@@ -940,13 +1044,90 @@ fn binary_length_limit() {
 fn xml_binary_encoding() {
     let expected = Value::Binary(Binary::from(vec![0, 1, 0xff]));
 
-    for input in [&b"<llsd><binary>AAH/</binary></llsd>"[..], &b"<llsd><binary encoding=\"base64\">AAH/</binary></llsd>"[..]] {
+    for input in [
+        &b"<llsd><binary>AAH/</binary></llsd>"[..],
+        &b"<llsd><binary encoding=\"base64\">AAH/</binary></llsd>"[..],
+        &b"<llsd><binary encoding=\"b&#97;se64\">AAH/</binary></llsd>"[..],
+        &b"<llsd><binary encoding=\"&#x00062;ase64\">AAH/</binary></llsd>"[..],
+        &b"<llsd><binary encoding=\"&#00098;&#97;&#115;&#101;&#54;&#52;\">AAH/</binary></llsd>"[..],
+    ] {
         assert_eq!(xml::from_slice::<Value>(input).expect("decode base64 binary"), expected);
     }
 
-    for input in [&b"<llsd><binary encoding=\"base16\">AAH/</binary></llsd>"[..], &b"<llsd><binary encoding=\"base16\"/></llsd>"[..]] {
+    for input in
+        [&b"<llsd><binary>A<![CDATA[A]]>&#x48;/</binary></llsd>"[..], &b"<llsd><binary> A\r\nA&#x9; \t<![CDATA[H/]]></binary></llsd>"[..]]
+    {
+        assert_eq!(xml::from_slice::<Value>(input).expect("decode concatenated base64 text"), expected);
+    }
+
+    for input in [&b"<llsd><binary/> </llsd>"[..], &b"<llsd><binary></binary></llsd>"[..]] {
+        assert_eq!(xml::from_slice::<Value>(input).expect("decode empty binary"), Value::Binary(Binary::default()));
+    }
+
+    for input in [
+        &b"<llsd><binary encoding=\"base16\">AAH/</binary></llsd>"[..],
+        &b"<llsd><binary encoding=\"base16\"/></llsd>"[..],
+        &b"<llsd><binary encoding=\"\"/></llsd>"[..],
+        &b"<llsd><binary encoding=\"BASE64\"/></llsd>"[..],
+        &b"<llsd><binary encoding=\"base64 \"/></llsd>"[..],
+        &b"<llsd><binary encoding=\"&unknown;\"/></llsd>"[..],
+        &b"<llsd><binary encoding=base64/></llsd>"[..],
+        &b"<llsd><binary encoding=\"base64\" encoding=\"base64\"/></llsd>"[..],
+        &b"<llsd><binary note=\"x\" note=\"y\"/></llsd>"[..],
+    ] {
         assert_matches!(xml::from_slice::<Value>(input), Err(Error::InvalidValue(_)));
     }
+
+    assert_matches!(xml::from_slice::<Value>(b"<llsd><binary>AA</binary></llsd>"), Err(Error::InvalidValue(_)));
+    assert_matches!(xml::from_slice::<Value>(b"<llsd><binary>AA<undef/>==</binary></llsd>"), Err(Error::InvalidValue(_)));
+    assert_matches!(xml::from_slice::<Value>(b"<llsd><binary>AA==</uuid></llsd>"), Err(Error::InvalidValue(_)));
+    assert_matches!(xml::from_slice::<Value>(b"<llsd><binary>AA=="), Err(Error::UnexpectedEof));
+}
+
+#[test]
+fn xml_binary_attribute_limit() {
+    for count in [4096, 4097] {
+        let attributes = (0..count - 1).map(|index| format!("a{index}=\"x\" ")).collect::<String>();
+        let input = format!("<llsd><binary {attributes}encoding=\"base64\">AA==</binary></llsd>");
+        let result = xml::from_str::<Value>(&input);
+        if count == 4096 {
+            assert_eq!(result.expect("attributes at the limit"), Value::Binary(vec![0].into()));
+        } else {
+            assert_matches!(result, Err(Error::LimitExceeded("XML attribute count")));
+        }
+    }
+}
+
+#[test]
+fn xml_errors_omit_input() {
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Empty {}
+
+    let secret = "private-capability-token".repeat(40_000);
+    for input in [format!("<llsd><binary encoding=\"{secret}\"/></llsd>"), format!("<llsd><binary encoding=\"&{secret};\"/></llsd>")] {
+        let error = xml::from_str::<Value>(&input).expect_err("invalid encoding");
+        assert_matches!(error, Error::InvalidValue(_));
+        let diagnostic = error.to_string();
+        assert!(diagnostic.len() <= 256, "XML diagnostic retained {} input bytes", diagnostic.len());
+        assert!(!diagnostic.contains("private-capability-token"));
+    }
+    let scalar = format!("<llsd><string>{secret}</string></llsd>");
+    let error = xml::from_str::<u32>(&scalar).expect_err("a string is not an integer");
+    assert_matches!(error, Error::InvalidValue(_));
+    assert!(error.to_string().len() <= 256);
+    assert!(!error.to_string().contains("private-capability-token"));
+
+    let error = xml::from_str::<WireEnum>(&scalar).expect_err("unknown enum variant");
+    assert_matches!(error, Error::InvalidValue(_));
+    assert!(error.to_string().len() <= 256);
+    assert!(!error.to_string().contains("private-capability-token"));
+
+    let field = format!("<llsd><map><key>{}</key><undef/></map></llsd>", "private-capability-token".repeat(1000));
+    let error = xml::from_str::<Empty>(&field).expect_err("unknown record field");
+    assert_matches!(error, Error::InvalidValue(_));
+    assert!(error.to_string().len() <= 256);
+    assert!(!error.to_string().contains("private-capability-token"));
 }
 
 #[test]

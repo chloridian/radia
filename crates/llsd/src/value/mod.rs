@@ -1,19 +1,17 @@
 mod binary;
 mod date;
+mod de;
 mod uri;
 pub mod uuid;
+
+use std::{collections::BTreeMap, mem::size_of};
+
+use ::uuid::Uuid;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub use self::binary::Binary;
 pub use self::date::Date;
 pub use self::uri::Uri;
-
-use std::{collections::BTreeMap, fmt};
-
-use ::uuid::Uuid;
-use serde::{
-    Deserialize, Deserializer, Serialize, Serializer,
-    de::{EnumAccess, VariantAccess, Visitor},
-};
 
 pub(crate) const UUID_NEWTYPE: &str = "llsd::UUID";
 pub(crate) const URI_NEWTYPE: &str = "llsd::URI";
@@ -39,6 +37,31 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn deserialize_with_heap_limit<'de, D: Deserializer<'de>>(
+        deserializer: D,
+        max_heap_bytes: usize,
+    ) -> std::result::Result<Self, D::Error> {
+        de::deserialize_with_heap_limit(deserializer, max_heap_bytes)
+    }
+
+    pub fn estimated_heap_bytes(&self) -> usize {
+        match self {
+            Self::String(value) => value.capacity(),
+            Self::Uri(value) => value.capacity(),
+            Self::Binary(value) => value.capacity(),
+            Self::Array(values) => values
+                .capacity()
+                .saturating_mul(size_of::<Value>())
+                .saturating_add(values.iter().fold(0usize, |size, value| size.saturating_add(value.estimated_heap_bytes()))),
+            Self::Map(values) => map_heap_bytes(values.len()).saturating_add(
+                values
+                    .iter()
+                    .fold(0usize, |size, (key, value)| size.saturating_add(key.capacity()).saturating_add(value.estimated_heap_bytes())),
+            ),
+            Self::Undefined | Self::Boolean(_) | Self::Integer(_) | Self::Real(_) | Self::Uuid(_) | Self::Date(_) => 0,
+        }
+    }
+
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Boolean(value) => Some(*value),
@@ -140,45 +163,18 @@ impl Serialize for Value {
 
 impl<'de> Deserialize<'de> for Value {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        deserializer.deserialize_enum(VALUE_ENUM, &[], ValueVisitor)
+        de::deserialize_with_heap_limit(deserializer, usize::MAX)
     }
 }
 
-struct ValueVisitor;
-
-impl<'de> Visitor<'de> for ValueVisitor {
-    type Value = Value;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("an LLSD value")
+fn map_heap_bytes(len: usize) -> usize {
+    if len == 0 {
+        return 0;
     }
-
-    fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> std::result::Result<Self::Value, A::Error> {
-        let (variant, value) = data.variant::<String>()?;
-        match variant.as_str() {
-            "Undefined" => {
-                value.unit_variant()?;
-                Ok(Value::Undefined)
-            }
-            "Boolean" => value.newtype_variant().map(Value::Boolean),
-            "Integer" => value.newtype_variant().map(Value::Integer),
-            "Real" => value.newtype_variant().map(Value::Real),
-            "UUID" => {
-                let value = value.newtype_variant::<String>()?;
-                Uuid::parse_str(&value).map(Value::Uuid).map_err(serde::de::Error::custom)
-            }
-            "String" => value.newtype_variant().map(Value::String),
-            "Date" => value.newtype_variant().map(Value::Date),
-            "URI" => value.newtype_variant().map(Value::Uri),
-            "Binary" => value.newtype_variant().map(Value::Binary),
-            "Array" => value.newtype_variant().map(Value::Array),
-            "Map" => value.newtype_variant().map(Value::Map),
-            _ => Err(serde::de::Error::unknown_variant(
-                &variant,
-                &["Undefined", "Boolean", "Integer", "Real", "UUID", "String", "Date", "URI", "Binary", "Array", "Map"],
-            )),
-        }
-    }
+    let entry_size = size_of::<(String, Value)>();
+    len.saturating_mul(entry_size.saturating_mul(3))
+        .saturating_add(entry_size.saturating_mul(11))
+        .saturating_add(size_of::<usize>().saturating_mul(12))
 }
 
 #[cfg(test)]

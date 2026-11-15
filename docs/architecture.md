@@ -55,7 +55,11 @@ The persistent cache covers textures, PBR materials, legacy materials, environme
 
 ### `crates/llsd`
 
-Owns LLSD values, Serde integration, and XML, binary, and notation codecs. Decode limits bound document size, nesting, value counts, and scalar or container sizes; callers can tighten them for their own admission budgets. The binary codec can decode one value from a prefix and report its consumed byte count. Whole-document decoding still rejects trailing bytes. Simulator messages and domain semantics belong to higher layers.
+Owns LLSD values, Serde integration, and XML, binary, and notation codecs. Decode limits bound document size, nesting, value counts, and scalar or container sizes; callers can tighten them for their own admission budgets. Simulator messages and domain semantics belong to higher layers.
+
+Value construction can enforce a caller's limit using the same conservative heap estimate exposed for retained-data accounting. The budget applies while building values, including intermediate duplicate-field values; it does not bound upstream deserializer buffers or process memory. Binary-element attributes have a fixed count ceiling, and encoding references are matched without a normalization buffer.
+
+The binary codec can decode one value from a prefix and report its consumed byte count. Whole-document decoding still rejects trailing bytes.
 
 ### `crates/inventory`
 
