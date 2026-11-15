@@ -64,6 +64,9 @@ impl World {
             return Ok(applied);
         }
         let mut fields = Fields::observed(observation);
+        if kind == Kind::Object {
+            fields.facets.pbr_material_overrides = self.retained.applicable(&address, id).cloned();
+        }
         let rejections = fields.validate(current.and_then(|state| state.transform.rotation()));
         let observed = Observed { id, kind, parent, address, origin: Origin { source, stamp }, fields, rejections };
         match existing {
@@ -108,6 +111,7 @@ impl World {
         self.tombstones.remove(&address);
         let facets = facets.map(|changes| changes.after).unwrap_or_default();
         let entity = self.store.insert(ObjectRecord { id, kind, state }, facets, ordering);
+        self.retained.remove(&address);
         self.apply_parent(entity, parent, &mut effects);
         self.resolve_waiting_children(address, entity, id, &mut effects);
         effects.changes.push(EntityAdded { id, entity, address });
@@ -225,6 +229,7 @@ impl World {
         }
         self.store.commit(entity, state, facets, ordering);
         if binding_changed {
+            self.retained.remove(&address);
             self.insert_tombstone(old_binding.address, if transfer { old_binding.fence() } else { origin.stamp });
         }
         if parent_changed {
@@ -277,9 +282,12 @@ mod tests {
     use math::Vec3;
     use uuid::Uuid;
 
+    use crate::history::retained::RetainedOverride;
+    use crate::update::Stamp;
     use crate::{
-        ApplyError, ApplyError::RevisionExhausted, ApplyOutcome, Kind, LinearMotion, LocalAddress, MotionUpdateKind, ObjectObservation,
-        ObjectPatch, OrderEvidence::Ordered, ParentUpdate::Root, Pose, Region, UpdateSource, WorldRevision,
+        Appearance, ApplyError, ApplyError::RevisionExhausted, ApplyOutcome, FieldUpdate, Kind, LinearMotion, LocalAddress,
+        MotionUpdateKind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate::Root, PbrMaterialOverride,
+        PbrMaterialOverrides, Pose, Region, UpdateSource, WorldRevision,
     };
 
     use crate::mutation::tests::{observation, test_world};
@@ -442,5 +450,32 @@ mod tests {
         assert_eq!(world.entity_at(old_address), Some(first));
         assert_eq!(world.entity_at(occupied_address), Some(displaced));
         assert_eq!(world.object_count(), 2);
+    }
+
+    #[test]
+    fn retained_override_matches_expected_id() {
+        let region = Region::new(30);
+        let mut world = test_world(&[region]);
+        let overrides =
+            PbrMaterialOverrides::new(vec![(1, PbrMaterialOverride { roughness: Some(0.4), ..PbrMaterialOverride::default() })]).unwrap();
+        for (local_id, observed_id, expected) in [(1, 300, Some(&overrides)), (2, 301, None)] {
+            let address = LocalAddress::new(region, NonZeroU32::new(local_id).unwrap());
+            let entry = RetainedOverride {
+                stamp: Stamp { order: 1, block_ordinal: 0 },
+                expected_id: Some(Uuid::from_u128(300)),
+                overrides: overrides.clone(),
+            };
+            world.retained.retain(address, entry);
+            let mut object = observation(region, observed_id, local_id, 2);
+            object.appearance = FieldUpdate::Set(Appearance::Surface);
+
+            let ApplyOutcome::Introduced(entity) = world.observe_object(object).unwrap().outcome else {
+                panic!("expected object introduction")
+            };
+
+            assert_eq!(world.object(entity).unwrap().pbr_material_overrides(), expected, "observed UUID {observed_id}");
+            assert_eq!(world.retained.applicable(&address, Uuid::from_u128(300)), None, "observed UUID {observed_id}");
+            assert_eq!(world.check_invariants(), Ok(()));
+        }
     }
 }

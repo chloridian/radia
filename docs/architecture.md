@@ -27,7 +27,7 @@ Transport coverage loss and scene recovery are separate concerns. Session intake
 
 ## State and execution
 
-The session intake task is the single owner of mutable World state. It services admitted read requests alongside incoming events; consumers receive bounded replies and revision notifications rather than locking World. Session and region identities, ordering clocks, and tombstones protect updates across deletion, local-ID reuse, and handoff.
+The session intake task is the single owner of mutable World state. It services admitted read requests alongside incoming events; consumers receive bounded replies and revision notifications rather than locking World. Session and region identities, ordering clocks, and tombstones protect updates across deletion, local-ID reuse, and handoff. World also retains a bounded, region-scoped set of material overrides that arrive before their object, applies each when its object is introduced, and drops it when a newer kill or region retirement makes it stale.
 
 `main` creates the Tokio service runtime and starts GPUI. Networking owns a separate runtime and network thread. The scene viewport owns its window/event-loop thread, `SceneView`, and renderer. Asset fetching and scene reconciliation run on service tasks; decoding, mesh generation, and texture preparation use blocking workers. Bounded queues, admission limits, cancellation, and generation checks keep slow or stale work from crossing lifecycle boundaries.
 
