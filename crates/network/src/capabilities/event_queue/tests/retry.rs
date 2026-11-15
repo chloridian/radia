@@ -511,7 +511,7 @@ async fn chunked_event_limit() {
     let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
     let client = http::Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
 
-    let error = match post_event_queue(&client, &server.url("/event-queue"), &Value::Undefined, 5).await {
+    let error = match post_event_queue(&client, &server.url("/event-queue"), &Value::Undefined, 5, Arc::new(Semaphore::new(1))).await {
         Err(error) => error,
         Ok(_) => panic!("chunked response exceeds limit"),
     };

@@ -12,6 +12,7 @@ use reqwest::{
     redirect::Policy,
 };
 use tokio::time::{self, Instant};
+use tracing::{Instrument, Span};
 
 #[derive(Clone)]
 pub(crate) struct Client {
@@ -51,7 +52,7 @@ impl Client {
 
     pub(crate) async fn get(&self, operation: &str, url: &Url, max_response_bytes: usize) -> Result<Response, Error> {
         validate_http_url(url)?;
-        self.execute(operation, self.client.get(url.clone()), max_response_bytes).await
+        self.send_headers(operation, self.client.get(url.clone()), max_response_bytes).await?.read().await
     }
 
     pub(crate) async fn get_with_accept(
@@ -62,7 +63,7 @@ impl Client {
         max_response_bytes: usize,
     ) -> Result<Response, Error> {
         validate_http_url(url)?;
-        self.execute(operation, self.client.get(url.clone()).header(ACCEPT, accept), max_response_bytes).await
+        self.send_headers(operation, self.client.get(url.clone()).header(ACCEPT, accept), max_response_bytes).await?.read().await
     }
 
     pub(crate) async fn get_with_accept_and_redirect_policy(
@@ -78,7 +79,7 @@ impl Client {
             RedirectPolicy::None => &self.client,
             RedirectPolicy::ViewerAsset => &self.viewer_asset_client,
         };
-        self.execute(operation, client.get(url.clone()).header(ACCEPT, accept), max_response_bytes).await
+        self.send_headers(operation, client.get(url.clone()).header(ACCEPT, accept), max_response_bytes).await?.read().await
     }
 
     pub(crate) async fn get_with_redirect_policy(
@@ -93,7 +94,7 @@ impl Client {
             RedirectPolicy::None => &self.client,
             RedirectPolicy::ViewerAsset => &self.viewer_asset_client,
         };
-        self.execute(operation, client.get(url.clone()), max_response_bytes).await
+        self.send_headers(operation, client.get(url.clone()), max_response_bytes).await?.read().await
     }
 
     pub(crate) async fn get_range_with_redirect_policy(
@@ -109,7 +110,10 @@ impl Client {
             RedirectPolicy::None => &self.client,
             RedirectPolicy::ViewerAsset => &self.viewer_asset_client,
         };
-        self.execute(operation, client.get(url.clone()).header(RANGE, range).header(ACCEPT_ENCODING, "identity"), max_response_bytes).await
+        self.send_headers(operation, client.get(url.clone()).header(RANGE, range).header(ACCEPT_ENCODING, "identity"), max_response_bytes)
+            .await?
+            .read()
+            .await
     }
 
     pub(crate) async fn post(
@@ -121,12 +125,24 @@ impl Client {
         body: Vec<u8>,
         max_response_bytes: usize,
     ) -> Result<Response, Error> {
+        self.post_headers(operation, url, content_type, accept, body, max_response_bytes).await?.read().await
+    }
+
+    pub(crate) async fn post_headers(
+        &self,
+        operation: &str,
+        url: &Url,
+        content_type: &str,
+        accept: Option<&str>,
+        body: Vec<u8>,
+        max_response_bytes: usize,
+    ) -> Result<IncomingResponse, Error> {
         validate_http_url(url)?;
         let mut request = self.client.post(url.clone()).header(CONTENT_TYPE, content_type).body(body);
         if let Some(accept) = accept {
             request = request.header(ACCEPT, accept);
         }
-        self.execute(operation, request, max_response_bytes).await
+        self.send_headers(operation, request, max_response_bytes).await
     }
 
     pub(crate) async fn patch(
@@ -143,7 +159,7 @@ impl Client {
         if let Some(accept) = accept {
             request = request.header(ACCEPT, accept);
         }
-        self.execute(operation, request, max_response_bytes).await
+        self.send_headers(operation, request, max_response_bytes).await?.read().await
     }
 
     pub(crate) async fn delete(
@@ -158,50 +174,85 @@ impl Client {
         if let Some(accept) = accept {
             request = request.header(ACCEPT, accept);
         }
-        self.execute(operation, request, max_response_bytes).await
+        self.send_headers(operation, request, max_response_bytes).await?.read().await
     }
 
     #[tracing::instrument(
         name = "http.execute", level = "debug", skip_all,
         fields(operation = %operation, response_limit = max_response_bytes)
     )]
-    async fn execute(&self, operation: &str, mut request: RequestBuilder, max_response_bytes: usize) -> Result<Response, Error> {
+    async fn send_headers(&self, operation: &str, request: RequestBuilder, max_response_bytes: usize) -> Result<IncomingResponse, Error> {
         let started = Instant::now();
-        let deadline = self.timeout.map(|timeout| time::Instant::now() + timeout);
-        if let Some(deadline) = deadline {
-            request = request.timeout(deadline.saturating_duration_since(time::Instant::now()));
-        }
+        let deadline = self.timeout.map(|timeout| started + timeout);
         let response = match send_with_deadline(request.send(), deadline, started).await {
             Ok(response) => response,
             Err(error) => {
-                tracing::debug!(operation, error = %error, elapsed_ms = started.elapsed().as_millis(), "HTTP request failed");
+                tracing::debug!(error = %error, elapsed_ms = started.elapsed().as_millis(), "HTTP request failed");
                 return Err(error);
             }
         };
-        let status = response.status();
-        let headers = response.headers().clone();
-        let retry_after = response_retry_after(&headers);
-        let body = match read_bounded_body(response, max_response_bytes, deadline, started).await {
-            Ok(body) => body,
-            Err(error) => {
-                tracing::debug!(
-                    operation,
-                    http_status = status.as_u16(),
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "HTTP response body rejected"
-                );
-                return Err(error.with_response(status, retry_after, started.elapsed()));
-            }
-        };
-        let elapsed = started.elapsed();
-        tracing::debug!(
-            operation,
-            http_status = status.as_u16(),
-            response_bytes = body.len(),
-            elapsed_ms = elapsed.as_millis(),
-            "HTTP response received"
-        );
-        Ok(Response { status, headers, body, elapsed })
+        let retry_after = response_retry_after(response.headers());
+        let incoming = IncomingResponse { response, started, deadline, max_response_bytes, retry_after, span: Span::current() };
+        incoming.check_deadline()?;
+        Ok(incoming)
+    }
+}
+
+pub(crate) struct IncomingResponse {
+    response: reqwest::Response,
+    started: Instant,
+    deadline: Option<Instant>,
+    max_response_bytes: usize,
+    retry_after: Option<Duration>,
+    span: Span,
+}
+
+impl IncomingResponse {
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    pub(crate) fn timeout_error(&self) -> Error {
+        Error::deadline(
+            self.started,
+            Some(self.response.status()),
+            self.retry_after,
+            "The HTTP operation exceeded its deadline after receiving response headers.",
+        )
+    }
+
+    fn check_deadline(&self) -> Result<(), Error> {
+        if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) { Err(self.timeout_error()) } else { Ok(()) }
+    }
+
+    pub(crate) async fn read(self) -> Result<Response, Error> {
+        let span = self.span.clone();
+        async move {
+            let mut incoming = self;
+            let status = incoming.response.status();
+            let headers = incoming.response.headers().clone();
+            let body = match read_bounded_body(&mut incoming).await {
+                Ok(body) => body,
+                Err(error) => {
+                    tracing::debug!(
+                        http_status = status.as_u16(),
+                        elapsed_ms = incoming.started.elapsed().as_millis(),
+                        "HTTP response body rejected"
+                    );
+                    return Err(error);
+                }
+            };
+            let elapsed = incoming.started.elapsed();
+            tracing::debug!(
+                http_status = status.as_u16(),
+                response_bytes = body.len(),
+                elapsed_ms = elapsed.as_millis(),
+                "HTTP response received"
+            );
+            Ok(Response { status, headers, body, elapsed })
+        }
+        .instrument(span)
+        .await
     }
 }
 
@@ -383,58 +434,53 @@ where
     result.map_err(|error| Error::request(error, started.elapsed()))
 }
 
-async fn read_bounded_body(
-    mut response: reqwest::Response,
-    max_size: usize,
-    deadline: Option<time::Instant>,
-    started: Instant,
-) -> Result<Vec<u8>, Error> {
-    let status = response.status();
-    let retry_after = response_retry_after(response.headers());
-    if let Some(length) = response.content_length()
-        && usize::try_from(length).map_or(true, |length| length > max_size)
+async fn read_bounded_body(incoming: &mut IncomingResponse) -> Result<Vec<u8>, Error> {
+    let status = incoming.response.status();
+    if let Some(length) = incoming.response.content_length()
+        && usize::try_from(length).map_or(true, |length| length > incoming.max_response_bytes)
     {
-        return Err(Error::resource_exhausted(format!("HTTP response body exceeds the {max_size}-byte limit.")).with_response(
-            status,
-            retry_after,
-            started.elapsed(),
-        ));
+        return Err(Error::resource_exhausted(format!("HTTP response body exceeds the {}-byte limit.", incoming.max_response_bytes))
+            .with_response(status, incoming.retry_after, incoming.started.elapsed()));
     }
 
     let mut body = Vec::new();
     loop {
-        let next = if let Some(deadline) = deadline {
-            time::timeout_at(deadline, response.chunk()).await.map_err(|_| {
-                Error::deadline(
-                    started,
-                    Some(status),
-                    retry_after,
-                    "The HTTP operation exceeded its deadline while reading the response body.",
-                )
-            })?
+        incoming.check_deadline()?;
+        let next = if let Some(deadline) = incoming.deadline() {
+            match time::timeout_at(deadline, incoming.response.chunk()).await {
+                Ok(next) => next,
+                Err(_) => return Err(incoming.timeout_error()),
+            }
         } else {
-            response.chunk().await
+            incoming.response.chunk().await
         };
-        let Some(chunk) =
-            next.map_err(|error| Error::request(error, started.elapsed()).with_response(status, retry_after, started.elapsed()))?
+        let Some(chunk) = next.map_err(|error| {
+            let elapsed = incoming.started.elapsed();
+            Error::request(error, elapsed).with_response(status, incoming.retry_after, elapsed)
+        })?
         else {
             break;
         };
-        let required = body.len().checked_add(chunk.len()).filter(|size| *size <= max_size).ok_or_else(|| {
-            Error::resource_exhausted(format!("HTTP response body exceeds the {max_size}-byte limit.")).with_response(
-                status,
-                retry_after,
-                started.elapsed(),
-            )
-        })?;
-        if required > body.capacity() {
-            body.try_reserve(required - body.len()).map_err(|_| {
-                Error::resource_exhausted("Could not grow the HTTP response body.").with_response(status, retry_after, started.elapsed())
-            })?;
-        }
-        body.extend_from_slice(&chunk);
+        let elapsed = incoming.started.elapsed();
+        append_bounded_body(&mut body, &chunk, incoming.max_response_bytes)
+            .map_err(|error| error.with_response(status, incoming.retry_after, elapsed))?;
     }
     Ok(body)
+}
+
+fn append_bounded_body(body: &mut Vec<u8>, chunk: &[u8], max_size: usize) -> Result<(), Error> {
+    let required = body
+        .len()
+        .checked_add(chunk.len())
+        .filter(|size| *size <= max_size)
+        .ok_or_else(|| Error::resource_exhausted(format!("HTTP response body exceeds the {max_size}-byte limit.")))?;
+    if required > body.capacity() {
+        let target_capacity = required.max(body.capacity().saturating_mul(2)).min(max_size);
+        body.try_reserve_exact(target_capacity - body.len())
+            .map_err(|_| Error::resource_exhausted("Could not grow the HTTP response body."))?;
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
 }
 
 pub(crate) fn validate_http_url(url: &Url) -> Result<(), Error> {

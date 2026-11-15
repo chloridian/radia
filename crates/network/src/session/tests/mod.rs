@@ -426,8 +426,8 @@ async fn connected_neighbor_with_options(seed: Url) -> NeighborHarness {
     )
     .await
     .expect("connect primary simulator");
-    let packet_memory = connection.packet_memory.clone();
-    let coverage = connection.coverage_losses.clone();
+    let packet_memory = connection.state.packet_memory.clone();
+    let coverage = connection.state.coverage_losses.clone();
     let (session_events, relay, _) = relay_handshake_events(event_sender.clone(), commands.clone(), TEST_EVENT_CAPACITY);
     let terminal = session_events.clone().reserve_owned().await.expect("reserve terminal event");
     let client = spawn(connection.run(command_receiver, session_events, disconnect_requested, terminal));

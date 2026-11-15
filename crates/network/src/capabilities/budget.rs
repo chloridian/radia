@@ -3,8 +3,9 @@ use std::{
     time::Duration,
 };
 
+use llsd::Limits;
 use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::Semaphore,
     task::{JoinError, spawn_blocking},
 };
 
@@ -25,6 +26,8 @@ pub(crate) const MAX_CONCURRENT_ASSET_REQUESTS: usize = 40;
 pub(crate) const MAX_CONCURRENT_EVENT_QUEUES: usize = 9;
 pub(super) const MAX_CONCURRENT_PRIMARY_EVENT_QUEUES: usize = 1;
 pub(super) const MAX_CONCURRENT_NEIGHBOR_EVENT_QUEUES: usize = MAX_CONCURRENT_EVENT_QUEUES - MAX_CONCURRENT_PRIMARY_EVENT_QUEUES;
+pub(super) const MAX_CONCURRENT_PRIMARY_EVENT_BODIES: usize = 1;
+pub(super) const MAX_CONCURRENT_NEIGHBOR_EVENT_BODIES: usize = 2;
 pub(crate) const MAX_CAPABILITY_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_CAPABILITY_NAMES: usize = 256;
 pub(super) const MAX_CAPABILITY_NAME_BYTES: usize = 128;
@@ -36,6 +39,8 @@ pub(crate) struct CapabilityBudget {
     pub(super) asset_requests: Arc<Semaphore>,
     pub(super) primary_event_queues: Arc<Semaphore>,
     pub(super) neighbor_event_queues: Arc<Semaphore>,
+    pub(super) primary_event_bodies: Arc<Semaphore>,
+    pub(super) neighbor_event_bodies: Arc<Semaphore>,
     pub(super) queued_event_bytes: Arc<Semaphore>,
     http_client: Arc<OnceLock<Result<http::Client, Arc<reqwest::Error>>>>,
 }
@@ -47,6 +52,8 @@ impl CapabilityBudget {
             asset_requests: Arc::new(Semaphore::new(MAX_CONCURRENT_ASSET_REQUESTS)),
             primary_event_queues: Arc::new(Semaphore::new(MAX_CONCURRENT_PRIMARY_EVENT_QUEUES)),
             neighbor_event_queues: Arc::new(Semaphore::new(MAX_CONCURRENT_NEIGHBOR_EVENT_QUEUES)),
+            primary_event_bodies: Arc::new(Semaphore::new(MAX_CONCURRENT_PRIMARY_EVENT_BODIES)),
+            neighbor_event_bodies: Arc::new(Semaphore::new(MAX_CONCURRENT_NEIGHBOR_EVENT_BODIES)),
             queued_event_bytes: Arc::new(Semaphore::new(MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES)),
             http_client: Arc::new(OnceLock::new()),
         }
@@ -60,12 +67,22 @@ impl CapabilityBudget {
     }
 }
 
-pub(crate) async fn spawn_blocking_with_permit<T>(
-    permit: OwnedSemaphorePermit,
-    work: impl FnOnce() -> T + Send + 'static,
-) -> Result<(T, OwnedSemaphorePermit), JoinError>
+pub(super) fn capability_llsd_limits(max_bytes: usize) -> Limits {
+    Limits {
+        max_bytes,
+        max_depth: MAX_LLSD_NESTING_DEPTH,
+        max_values: MAX_LLSD_XML_ELEMENTS,
+        max_container_items: MAX_LLSD_XML_ELEMENTS,
+        max_string_bytes: max_bytes,
+        max_map_key_bytes: max_bytes,
+        max_binary_bytes: max_bytes,
+    }
+}
+
+pub(crate) async fn spawn_blocking_with_permit<T, P>(permit: P, work: impl FnOnce() -> T + Send + 'static) -> Result<(T, P), JoinError>
 where
     T: Send + 'static,
+    P: Send + 'static,
 {
     let span = tracing::Span::current();
     spawn_blocking(move || span.in_scope(|| (work(), permit))).await
@@ -85,10 +102,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cancellation_keeps_permit_until_blocking_work_finishes() {
         let slots = Arc::new(Semaphore::new(1));
+        let bodies = Arc::new(Semaphore::new(1));
         let permit = Arc::clone(&slots).acquire_owned().await.expect("request slot");
+        let body_permit = Arc::clone(&bodies).acquire_owned().await.expect("body slot");
         let (entered, entered_rx) = oneshot::channel();
         let (release, release_rx) = mpsc::channel();
-        let task = spawn(spawn_blocking_with_permit(permit, move || {
+        let task = spawn(spawn_blocking_with_permit((permit, body_permit), move || {
             entered.send(()).expect("blocking work receiver is alive");
             release_rx.recv().expect("release blocking work");
         }));
@@ -97,9 +116,12 @@ mod tests {
         task.abort();
         assert!(task.await.expect_err("waiter must be canceled").is_cancelled());
         assert_eq!(slots.available_permits(), 0, "cancellation cannot release work admission early");
+        assert_eq!(bodies.available_permits(), 0, "cancellation cannot admit another body while decoding");
 
         release.send(()).expect("unblock running work");
         let permit = slots.acquire().await.expect("blocking work completion releases its permit");
+        drop(permit);
+        let permit = bodies.acquire().await.expect("blocking work completion releases body admission");
         drop(permit);
     }
 }

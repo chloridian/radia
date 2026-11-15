@@ -332,12 +332,13 @@ async fn neighbor_task_limit_preserves_current() {
     };
     let target_region = 0x1000_0000_0000_1000;
     let mut sockets = Vec::with_capacity(MAX_NEIGHBOR_CONNECTION_TASKS + 1);
-    let root_simulator_id = connection.simulator_id;
+    let root_simulator_id = connection.state.simulator_id;
 
     for index in 0..MAX_NEIGHBOR_SIMULATORS {
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
         let region_handle = if index == 0 { target_region } else { 0x2000_0000_0000_0000 + index as u64 };
         connection
+            .state
             .start_neighbor(root_simulator_id, region_handle, socket.local_addr().expect("neighbor address"), None, &mut setup)
             .await
             .expect("start a neighbor circuit");
@@ -352,7 +353,11 @@ async fn neighbor_task_limit_preserves_current() {
     for _ in 0..MAX_NEIGHBOR_SIMULATORS {
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind replacement simulator");
         let endpoint = socket.local_addr().expect("replacement address");
-        connection.start_neighbor(root_simulator_id, target_region, endpoint, None, &mut setup).await.expect("replace target neighbor");
+        connection
+            .state
+            .start_neighbor(root_simulator_id, target_region, endpoint, None, &mut setup)
+            .await
+            .expect("replace target neighbor");
         let (bytes, peer) = receive(&socket).await;
         std::assert_matches!(Packet::decode(&bytes).expect("decode replacement bootstrap").message(), Message::UseCircuitCode(_));
         current_peer = Some(peer);
@@ -365,6 +370,7 @@ async fn neighbor_task_limit_preserves_current() {
     let rejected = UdpSocket::bind("127.0.0.1:0").await.expect("bind rejected simulator");
     let rejected_endpoint = rejected.local_addr().expect("rejected endpoint");
     connection
+        .state
         .start_neighbor(root_simulator_id, target_region, rejected_endpoint, None, &mut setup)
         .await
         .expect("reject a replacement at the task cap");
@@ -405,6 +411,7 @@ async fn neighbor_task_limit_preserves_current() {
     let recovered = UdpSocket::bind("127.0.0.1:0").await.expect("bind recovered simulator");
     let recovered_endpoint = recovered.local_addr().expect("recovered endpoint");
     connection
+        .state
         .start_neighbor(root_simulator_id, target_region, recovered_endpoint, None, &mut setup)
         .await
         .expect("task capacity should recover after canceled workers are joined");
@@ -424,7 +431,7 @@ async fn neighbor_simulator_limit_is_bounded() {
         .await
         .expect("connect primary circuit");
     let _ = receive(&primary).await;
-    let root_simulator_id = connection.simulator_id;
+    let root_simulator_id = connection.state.simulator_id;
 
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(32);
     let mut run_state = RunState::new();
@@ -443,6 +450,7 @@ async fn neighbor_simulator_limit_is_bounded() {
         let endpoint = socket.local_addr().expect("neighbor address");
         let region_handle = 0x1000_0000_0000_0000 + index as u64;
         connection
+            .state
             .start_neighbor(root_simulator_id, region_handle, endpoint, None, &mut setup)
             .await
             .expect("process neighbor announcement");

@@ -1,20 +1,28 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    time::Duration,
+};
 
 use protocol::lludp::Message;
 use tokio::{sync::mpsc, time::Instant};
 
-use super::simulators::MAX_PENDING_REGION_HANDSHAKE_REPLIES;
 use super::teleport::is_teleport_cancel;
 use super::{
-    ConnectionQueueFailure, EVENT_BACKLOG_WARNING_INTERVAL, EVENT_BACKLOG_WARNING_THRESHOLD, MAX_PENDING_LIFECYCLE_EVENTS,
-    MAX_PENDING_SESSION_EVENTS, MAX_PRECONNECT_EVENTS, RuntimeAction, SessionDispatcher, SessionError, SimulatorCommand,
+    ConnectionQueueFailure, MAX_PRECONNECT_EVENTS, RuntimeAction, SessionDispatcher, SessionError, SimulatorCommand,
     queue_connection_message, queue_primary_message,
 };
 use crate::{
+    circuit::{MAX_PENDING_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS, admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY},
     error::Error,
     event::{Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY, SimulatorId},
     session::Command,
 };
+
+const EVENT_BACKLOG_WARNING_THRESHOLD: usize = MAX_PENDING_SIMULATOR_EVENTS / 2;
+const EVENT_BACKLOG_WARNING_INTERVAL: Duration = Duration::from_secs(10);
+const MAX_PENDING_LIFECYCLE_EVENTS: usize = 32;
+pub(super) const MAX_PENDING_REGION_HANDSHAKE_REPLIES: usize = MAX_SIMULATOR_CONNECTIONS;
+pub(super) const MAX_PENDING_SESSION_EVENTS: usize = SESSION_APPLICATION_EVENT_CREDIT_CAPACITY + MAX_PENDING_LIFECYCLE_EVENTS;
 
 #[derive(Default)]
 pub(super) struct PrimaryEventBacklog {
@@ -396,10 +404,9 @@ mod tests {
     };
 
     use super::{
-        MAX_PENDING_LIFECYCLE_EVENTS, MAX_PENDING_REGION_HANDSHAKE_REPLIES, MAX_PENDING_SESSION_EVENTS, PrimaryEventBacklog,
-        flush_handshake_reply_queue, primary_event_queue_size, queue_handshake_reply, queue_simulator_event,
+        EVENT_BACKLOG_WARNING_THRESHOLD, MAX_PENDING_LIFECYCLE_EVENTS, MAX_PENDING_REGION_HANDSHAKE_REPLIES, MAX_PENDING_SESSION_EVENTS,
+        PrimaryEventBacklog, flush_handshake_reply_queue, primary_event_queue_size, queue_handshake_reply, queue_simulator_event,
     };
-    use crate::session::EVENT_BACKLOG_WARNING_THRESHOLD;
 
     #[test]
     fn backlog_warning_is_rate_limited() {

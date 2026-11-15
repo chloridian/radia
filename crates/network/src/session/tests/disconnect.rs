@@ -168,7 +168,7 @@ async fn root_disconnect_skips_remote_logout_wait() {
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
-    let outcome = timeout(Duration::from_millis(200), connection.disconnect_once(false))
+    let outcome = timeout(Duration::from_millis(200), connection.state.disconnect_once(false))
         .await
         .expect("root logout send should be bounded")
         .expect("local logout send should succeed");
@@ -223,10 +223,10 @@ async fn disconnect_reports_closed_primary() {
     receive(&simulator).await;
     let (logout, receiver) = mpsc::channel(1);
     drop(receiver);
-    connection.primary.logout = logout;
+    connection.state.primary.logout = logout;
 
     assert_eq!(
-        connection.disconnect_once(false).await.expect("closed route is an unavailable logout"),
+        connection.state.disconnect_once(false).await.expect("closed route is an unavailable logout"),
         LogoutOutcome::Unavailable(LogoutUnavailable::ConnectionClosed)
     );
     assert_no_datagram(&simulator);
@@ -242,8 +242,8 @@ async fn disconnect_logout_respects_deadline() {
     let (logout, _logout_receiver) = mpsc::channel(1);
     let (queued_logout, _queued_response) = oneshot::channel();
     logout.try_send(queued_logout).expect("fill the destination logout queue");
-    connection.primary.logout = logout;
-    let disconnect = spawn(async move { connection.disconnect_once(false).await });
+    connection.state.primary.logout = logout;
+    let disconnect = spawn(async move { connection.state.disconnect_once(false).await });
 
     yield_now().await;
     time::advance(LOGOUT_TIMEOUT).await;
@@ -261,10 +261,10 @@ async fn failed_root_disconnect_reports_no_send() {
         .await
         .expect("connect root simulator circuit");
     receive(&simulator).await;
-    connection.root_connection_failed = true;
+    connection.state.root_connection_failed = true;
 
     assert_eq!(
-        connection.disconnect_once(false).await.expect("failed root connection is an unavailable logout"),
+        connection.state.disconnect_once(false).await.expect("failed root connection is an unavailable logout"),
         LogoutOutcome::Unavailable(LogoutUnavailable::ConnectionClosed)
     );
     assert_no_datagram(&simulator);
