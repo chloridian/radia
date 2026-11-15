@@ -24,7 +24,6 @@ pub struct PbrMaterial {
     pub emissive_factor: [f32; 3],
     pub normal_scale: f32,
     pub occlusion_strength: f32,
-    pub unlit: bool,
     pub alpha_mode: PbrAlphaMode,
     pub alpha_cutoff: f32,
     pub double_sided: bool,
@@ -44,7 +43,6 @@ impl Default for PbrMaterial {
             emissive_factor: [0.0; 3],
             normal_scale: 1.0,
             occlusion_strength: 1.0,
-            unlit: false,
             alpha_mode: PbrAlphaMode::Opaque,
             alpha_cutoff: 0.5,
             double_sided: false,
@@ -184,12 +182,6 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
         return Ok(MaterialDescription::Pbr(result));
     };
     let material = object(material)?;
-    if let Some(extensions) = material.get("extensions")
-        && let Some(unlit) = object(extensions)?.get("KHR_materials_unlit")
-    {
-        object(unlit)?;
-        result.unlit = true;
-    }
     if let Some(mode) = material.get("alphaMode") {
         result.alpha_mode = match mode.as_str().ok_or(Failure::Malformed)? {
             "OPAQUE" => PbrAlphaMode::Opaque,
@@ -280,6 +272,7 @@ mod tests {
 
     const CHANNELS: &str = r#"{
         "asset":{"version":"2.0"},
+        "extensionsRequired":["KHR_materials_unlit"],
         "images":[
             {"uri":"00000000-0000-0000-0000-000000000001"},
             {"uri":"00000000-0000-0000-0000-000000000002"},
@@ -320,7 +313,6 @@ mod tests {
         assert_eq!(material.emissive_factor, [0.1, 0.2, 0.3]);
         assert_eq!(material.normal_scale, -0.5);
         assert_eq!(material.occlusion_strength, 0.4);
-        assert!(material.unlit);
         assert_eq!(material.normal.tex_coord, 2);
         assert_eq!(material.normal.sampler, Sampler::default());
         let info = material.metallic_roughness;
@@ -347,7 +339,6 @@ mod tests {
             ("\"roughnessFactor\":0.7", "\"roughnessFactor\":null"),
             ("\"emissiveFactor\":[0.1,0.2,0.3]", "\"emissiveFactor\":[0.1,0.2]"),
             ("\"texCoord\":2", "\"texCoord\":4294967296"),
-            ("\"KHR_materials_unlit\":{}", "\"KHR_materials_unlit\":false"),
             ("\"sampler\":0", "\"sampler\":1"),
             ("\"magFilter\":9728", "\"magFilter\":9987"),
             ("\"minFilter\":9987", "\"minFilter\":0"),

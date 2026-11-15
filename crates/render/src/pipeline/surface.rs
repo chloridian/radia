@@ -23,7 +23,7 @@ use super::{
     water::water_surface_values,
 };
 
-pub(crate) const INSTANCE_BYTES: usize = 192;
+pub(crate) const INSTANCE_BYTES: usize = 240;
 pub(crate) const FACE_INDEX_BYTES: usize = size_of::<u32>();
 pub(crate) const VERTEX_BYTES: usize = 32;
 const CAMERA_BYTES: usize = 128;

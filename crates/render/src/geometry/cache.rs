@@ -2172,7 +2172,7 @@ fn animated_face_indices(object: &Object, faces: &[CachedFace]) -> Vec<usize> {
     faces
         .iter()
         .enumerate()
-        .filter_map(|(index, face)| (animation.targets_face(face.order.3) && face.base_params.texture.is_some()).then_some(index))
+        .filter_map(|(index, face)| (animation.targets_face(face.order.3) && face.base_params.textures.has_images()).then_some(index))
         .collect()
 }
 

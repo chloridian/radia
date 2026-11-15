@@ -108,7 +108,7 @@ Environment evaluation combines World region/parcel assignments, ordered experie
 
 Terrain composition uses region settings, height, globally positioned noise, and the reference ramp. Sampling and normals account for loaded neighboring patches and regions. Terrain and legacy surfaces share atmosphere-aware shading; missing detail textures use fallbacks. All surfaces use the same infinite reversed-Z projection. Scene color stays linear through composition, then exposure, tone mapping, and sRGB encoding apply at the output boundary. Opaque fullbright surfaces take the exposure class of the surface behind them, as in the official viewer. Transparent surfaces preserve the depth owner's scene classification, and post-processing does not apply water fog twice.
 
-PBR emissive and texture-entry glow are not rendered. Distant terrain appearance also lacks the legacy viewer's cached low-resolution composite. These are compatibility limits, not completed rendering features.
+PBR emissive radiance joins lit color before atmospheric haze, for opaque and blended surfaces alike. Until a referenced emissive image arrives, a mid-grey placeholder stands in for it. PBR materials that declare `KHR_materials_unlit` render lit, as in the official viewer. Texture-entry glow is not rendered, and distant terrain appearance lacks the legacy viewer's cached low-resolution composite. These two are compatibility limits, not completed rendering features.
 
 ### `crates/storage`
 

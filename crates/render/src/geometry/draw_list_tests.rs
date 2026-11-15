@@ -20,6 +20,7 @@ use crate::{
         fixtures,
         instance::{instance_base, parameter_part, scene_origin},
         items::{CachedFace, CachedItem, ItemId, ItemIndex, ItemSlab, MeshInfo},
+        texture_bindings::MaterialImages,
     },
     material::FaceParams,
     pipeline::Pipeline,
@@ -668,24 +669,25 @@ fn new_face(
     params.blend = blend;
     params.double_sided = double_sided;
     params.fullbright = fullbright;
-    params.texture = texture.as_ref().map(|handle| TextureKey { id: handle.id(), sampler: Sampler::default() });
+    params.textures.base = texture.as_ref().map(|handle| TextureKey { id: handle.id(), sampler: Sampler::default() });
+    let images = MaterialImages { base: texture, emissive: None };
     params.color = [0.3 + f32::from(style) * 0.05, 0.4, 0.5, 1.0];
     let key = DrawKey {
         mesh: mesh.id(),
         start: mesh_face.indices.start,
         end: mesh_face.indices.end,
         pipeline,
-        texture: params.texture,
+        textures: params.textures,
         terrain: None,
     };
-    let group = list.intern_face(key, texture.as_ref(), None).expect("test draw group ID");
+    let group = list.intern_face(key, &images, None).expect("test draw group ID");
     CachedFace {
         order: (id.0, id.1, id.2, mesh_face.slot),
         indices: mesh_face.indices.clone(),
         center,
         base_params: params,
         params,
-        texture,
+        images,
         material_index: None,
         texture_entry_transform: Default::default(),
         group,
@@ -709,7 +711,7 @@ fn assert_matches_fresh(list: &DrawList, items: &ItemSlab, visible: &[ItemIndex]
             start: draw.indices.start,
             end: draw.indices.end,
             pipeline: draw.pipeline,
-            texture: draw.texture,
+            textures: draw.textures,
             terrain: draw.terrain,
         };
         for slot in draw.first..draw.first.saturating_add(draw.count) {

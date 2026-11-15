@@ -5,6 +5,8 @@ struct Camera {
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var image: texture_2d<f32>;
 @group(1) @binding(1) var image_sampler: sampler;
+@group(1) @binding(2) var emissive_image: texture_2d<f32>;
+@group(1) @binding(3) var emissive_sampler: sampler;
 struct SurfaceAtmosphere {
     atmosphere: Atmosphere,
 }
@@ -21,6 +23,9 @@ struct Face {
     v: vec4<f32>,
     params: vec4<f32>,
     scale: vec4<f32>,
+    emissive: vec4<f32>,
+    emissive_u: vec4<f32>,
+    emissive_v: vec4<f32>,
 }
 @group(0) @binding(6) var<storage, read> faces: array<Face>;
 
@@ -40,6 +45,8 @@ struct Output {
     @location(4) uv: vec2<f32>,
     @location(5) @interpolate(flat) params: vec4<f32>,
     @location(6) camera_relative_position: vec3<f32>,
+    @location(7) emissive_uv: vec2<f32>,
+    @location(8) @interpolate(flat) emissive: vec3<f32>,
 }
 fn transform(v: Input) -> Output {
     var out: Output;
@@ -65,6 +72,8 @@ fn transform(v: Input) -> Output {
         uv = vec2<f32>(0.5 + 2.0 * dot(binormal, point), 0.5 - 2.0 * dot(tangent, point));
     }
     out.uv = vec2<f32>(dot(face.u.xyz, vec3<f32>(uv, 1.0)), dot(face.v.xyz, vec3<f32>(uv, 1.0)));
+    out.emissive_uv = vec2<f32>(dot(face.emissive_u.xyz, vec3<f32>(uv, 1.0)), dot(face.emissive_v.xyz, vec3<f32>(uv, 1.0)));
+    out.emissive = face.emissive.xyz;
     out.params = face.params;
     return out;
 }
@@ -151,6 +160,7 @@ struct Surface {
 
 fn shade_face(v: Output, front: bool) -> Surface {
     let color = textureSample(image, image_sampler, v.uv) * v.color;
+    let emissive = v.emissive * textureSample(emissive_image, emissive_sampler, v.emissive_uv).rgb;
     if v.params.y == 1.0 && color.a < v.params.z { discard; }
     let alpha = select(1.0, clamp(color.a, 0.0, 1.0), v.params.y == 2.0);
     var normal_eye = safe_normalize(v.normal);
@@ -161,6 +171,7 @@ fn shade_face(v: Output, front: bool) -> Surface {
     let light_norm_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_norm.xyz, 0.0)).xyz;
     let fogged = shade_surface(
         color.rgb,
+        emissive,
         v.position_view,
         normal_eye,
         light_direction_eye,

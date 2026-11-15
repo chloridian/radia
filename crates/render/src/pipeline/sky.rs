@@ -555,9 +555,9 @@ fn uniform_binding(device: &Device, label: &str, layout: &BindGroupLayout, unifo
     })
 }
 
-pub(crate) fn blend_keys(device: &Device, blend: TextureBlend, view: &SceneView, textures: &mut Textures) -> TexturePair {
-    let mut current = resident_key(device, blend.current, view, textures);
-    let mut next = resident_key(device, blend.next, view, textures);
+pub(crate) fn blend_keys(blend: TextureBlend, view: &SceneView, textures: &Textures) -> TexturePair {
+    let mut current = resident_key(blend.current, view, textures);
+    let mut next = resident_key(blend.next, view, textures);
     if current.is_none() {
         current = next.take();
     }
@@ -567,11 +567,10 @@ pub(crate) fn blend_keys(device: &Device, blend: TextureBlend, view: &SceneView,
     TexturePair { current, next, factor: if current == next { 0.0 } else { blend.factor } }
 }
 
-fn resident_key(device: &Device, id: Option<utils::AssetId>, view: &SceneView, textures: &mut Textures) -> Option<TextureKey> {
+fn resident_key(id: Option<utils::AssetId>, view: &SceneView, textures: &Textures) -> Option<TextureKey> {
     let id = id?;
     let handle = view.environment_texture(id)?;
-    let key = TextureKey { id: handle.id(), sampler: Sampler::default() };
-    textures.resident(device, key)
+    textures.is_resident(handle.id()).then_some(TextureKey { id: handle.id(), sampler: Sampler::default() })
 }
 
 fn append<const N: usize>(target: &mut [f32; UNIFORM_FLOATS], offset: &mut usize, values: [f32; N]) {
