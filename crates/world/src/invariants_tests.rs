@@ -185,7 +185,7 @@ proptest::proptest! {
 
     #[test]
     fn override_retention_preserves_world_indexes(
-        operations in proptest::collection::vec((0_u8..4, 0_u8..2, 0_u8..8, 0_u8..8, 1_u8..32, 0_u8..4), 1..128)
+        operations in proptest::collection::vec((0_u8..5, 0_u8..2, 0_u8..8, 0_u8..8, 1_u8..32, 0_u8..4), 1..128)
     ) {
         let mut world_limits = limits();
         world_limits.max_region_registrations = 256;
@@ -209,17 +209,15 @@ proptest::proptest! {
             let region = regions[usize::from(region_index)];
             let local_id = local_id(u32::from(slot) + 1);
             let source = UpdateSource::new(region, u32::from(source_order), Ordered(u64::from(source_order)), ordinal as u32);
+            let faces = if value == 0 {
+                Vec::new()
+            } else {
+                vec![(value, PbrMaterialOverride { roughness: Some(f32::from(value) / 4.0), ..PbrMaterialOverride::default() })]
+            };
+            let overrides = PbrMaterialOverrides::new(faces).expect("valid generated overrides");
             match operation {
                 0 => {
-                    let faces = if value == 0 {
-                        Vec::new()
-                    } else {
-                        vec![(value, PbrMaterialOverride { roughness: Some(f32::from(value) / 4.0), ..PbrMaterialOverride::default() })]
-                    };
-                    let patch = ObjectPatch {
-                        pbr_material_overrides: Some(PbrMaterialOverrides::new(faces).expect("valid generated overrides")),
-                        ..ObjectPatch::new(source, local_id)
-                    };
+                    let patch = ObjectPatch { pbr_material_overrides: Some(overrides), ..ObjectPatch::new(source, local_id) };
                     let _ = world.patch_object(patch).expect("apply valid override");
                 }
                 1 => {
@@ -239,7 +237,11 @@ proptest::proptest! {
                     let _ = world.adopt_region(replacement).expect("adopt replacement region");
                     regions[usize::from(region_index)] = replacement;
                 }
-                4.. => panic!("operation generator is bounded to 0..4"),
+                4 => {
+                    let expected_id = uuid(1_000 + u128::from(identity));
+                    let _ = world.retain_pbr_material_overrides(source, local_id, expected_id, overrides).expect("retain valid override");
+                }
+                5.. => panic!("operation generator is bounded to 0..5"),
             }
 
             proptest::prop_assert_eq!(world.check_invariants(), Ok(()));

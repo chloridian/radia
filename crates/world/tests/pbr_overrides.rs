@@ -347,3 +347,65 @@ fn full_region_evicts_oldest_retained_override() {
     assert_eq!(introduced_roughness(&mut world, object(source(region, 2000), 17, 1, true)), None);
     assert_eq!(introduced_roughness(&mut world, object(source(region, 2001), 18, 2, true)), Some(0.5));
 }
+
+#[test]
+fn cached_override_applies_only_to_expected_object() {
+    for (observed_id, expected) in [(17, Some(0.4)), (18, None)] {
+        let region = Region::new(11);
+        let mut world = with_region(region);
+        let retained = world.retain_pbr_material_overrides(source(region, 2), local_id(7), Uuid::from_u128(17), snapshot(1, 0.4)).unwrap();
+        assert_eq!(retained.outcome, Deferred(DeferredReason::UnknownObject));
+        assert!(retained.recovery.requests.is_empty());
+
+        assert_eq!(introduced_roughness(&mut world, object(source(region, 3), observed_id, 7, true)), expected, "observed {observed_id}");
+    }
+}
+
+#[test]
+fn cached_override_keeps_session_override() {
+    let region = Region::new(11);
+    let mut world = with_region(region);
+    early_override(&mut world, source(region, 2), 7, snapshot(1, 0.6));
+
+    let retained = world.retain_pbr_material_overrides(source(region, 3), local_id(7), Uuid::from_u128(17), snapshot(1, 0.4)).unwrap();
+
+    assert_eq!(retained.outcome, Unchanged);
+    assert_eq!(introduced_roughness(&mut world, object(source(region, 4), 17, 7, true)), Some(0.6));
+}
+
+#[test]
+fn cached_override_skips_live_object() {
+    let region = Region::new(11);
+    let mut world = with_region(region);
+    let Introduced(entity) = world.observe_object(object(source(region, 1), 17, 7, true)).unwrap().outcome else {
+        panic!("expected object introduction")
+    };
+
+    let retained = world.retain_pbr_material_overrides(source(region, 2), local_id(7), Uuid::from_u128(17), snapshot(1, 0.4)).unwrap();
+
+    assert_eq!(retained.outcome, Unchanged);
+    assert_eq!(world.object(entity).unwrap().pbr_material_overrides(), None);
+}
+
+#[test]
+fn override_changes_carry_their_class() {
+    let region = Region::new(11);
+    let mut world = with_region(region);
+    let Introduced(entity) = world.observe_object(object(source(region, 1), 17, 7, true)).unwrap().outcome else {
+        panic!("expected object introduction")
+    };
+    let mut overrides = ObjectPatch::new(source(region, 2), local_id(7));
+    overrides.pbr_material_overrides = Some(snapshot(1, 0.4));
+    let mut materials = ObjectPatch::new(source(region, 3), local_id(7));
+    materials.pbr_materials = Some(PbrMaterialAssignments::new(vec![(1, AssetId::new(Uuid::from_u128(31)))]).unwrap());
+
+    for (patch, expected) in [(overrides, true), (materials, false)] {
+        let cursor = world.read_barrier().changes;
+        assert_eq!(world.patch_object(patch).unwrap().outcome, Updated(entity));
+        let page = world.change_page(cursor, 8).unwrap();
+        let [record] = page.records.as_slice() else { panic!("expected one change, got {:?}", page.records) };
+        let world::WorldChange::EntityUpdated { classes, .. } = record.change else { panic!("expected an entity update") };
+        assert_eq!(classes.contains(world::WorldChangeClasses::PBR_MATERIAL_OVERRIDES), expected);
+        assert!(classes.contains(world::WorldChangeClasses::APPEARANCE));
+    }
+}

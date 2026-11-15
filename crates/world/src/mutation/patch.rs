@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use uuid::Uuid;
 
 use super::Effects;
@@ -13,7 +15,7 @@ use crate::object::relationships::ParentResolution;
 use crate::update::FieldStamp;
 use crate::{
     Applied, ApplyError, ApplyOutcome, AvatarAppearance, DeferredReason, FieldGroup, FieldRejectionReason, LocalAddress, ObjectPatch,
-    Recovery, Rejections, SitTarget, UpdateSource,
+    PbrMaterialOverrides, Recovery, Rejections, SitTarget, UpdateSource,
 };
 use crate::{RegionalStamp, World, newer_field, newer_region_field};
 
@@ -108,6 +110,25 @@ impl World {
         }
         let outcome = if change_classes.is_empty() { ApplyOutcome::Unchanged } else { ApplyOutcome::Updated(entity) };
         Ok(self.finish(outcome, effects).with_rejections(rejections).with_recovery_satisfied(parent.is_some()))
+    }
+
+    pub fn retain_pbr_material_overrides(
+        &mut self,
+        source: UpdateSource,
+        local_id: NonZeroU32,
+        expected_id: Uuid,
+        overrides: PbrMaterialOverrides,
+    ) -> Result<Applied, ApplyError> {
+        self.require_active_region(source.region)?;
+        let address = LocalAddress::new(source.region, local_id);
+        let unknown = ApplyOutcome::Deferred(DeferredReason::UnknownObject);
+        let Some(stamp) = source.stamp() else { return Ok(Applied::unchanged()) };
+        if self.entity_at(address).is_some() || self.retained.contains(&address) || self.unknown_address(address, stamp).outcome != unknown
+        {
+            return Ok(Applied::unchanged());
+        }
+        self.retained.retain(address, RetainedOverride { stamp, expected_id: Some(expected_id), overrides });
+        Ok(Applied::new(unknown))
     }
 
     pub fn patch_sit_target(&mut self, source: UpdateSource, id: Uuid, target: Option<SitTarget>) -> Result<Applied, ApplyError> {
