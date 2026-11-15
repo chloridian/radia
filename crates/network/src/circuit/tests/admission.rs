@@ -562,7 +562,14 @@ async fn ack_queue_full_retries() {
             .expect("encode reliable ping response");
         simulator.send_to(&bytes, peer).await.expect("send reliable ping response");
         if sequence % 128 == 0 {
-            yield_now().await;
+            let mut drained = parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("parse chat fixture");
+            drained[1..5].copy_from_slice(&sequence.to_be_bytes());
+            simulator.send_to(&drained, peer).await.expect("send unreliable drain marker");
+            while !matches!(
+                received_events.recv().await.expect("neighbor events remain open"),
+                SimulatorEvent::Simulator(envelope)
+                    if matches!(envelope.event, Event::SimulatorMessage { sequence: marked, .. } if marked == sequence)
+            ) {}
         }
     }
     let mut rejected = parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("parse chat fixture");
