@@ -11,7 +11,7 @@ use rusqlite::Transaction;
 use storage::sqlite::{SqliteBatch, SqliteDb};
 pub(super) use test_support::lludp::vectors;
 use test_support::parse_hex_fixture;
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, task::spawn_blocking};
 use uuid::Uuid;
 use world::{OrderEvidence, Region, RegionHandle};
 
@@ -56,15 +56,20 @@ pub(super) fn open_cache(path: impl AsRef<Path>) -> ObjectCacheSession {
 }
 
 pub(super) async fn load_region(cache: &mut ObjectCacheSession) -> u32 {
-    if let Some(flags) = cache.begin_region_load(SIMULATOR, &Handle::current()) {
-        return flags;
-    }
-    loop {
-        let event = cache.next_event().await.expect("region cache load completes");
-        if let Some((_, flags)) = cache.handle_event(event) {
-            return flags;
-        }
-    }
+    let (release_clock, clock_released) = std::sync::mpsc::channel();
+    let clock_hold = spawn_blocking(move || clock_released.recv());
+    let flags = match cache.begin_region_load(SIMULATOR, &Handle::current()) {
+        Some(flags) => flags,
+        None => loop {
+            let event = cache.next_event().await.expect("region cache load completes");
+            if let Some((_, flags)) = cache.handle_event(event) {
+                break flags;
+            }
+        },
+    };
+    release_clock.send(()).expect("release the paused clock");
+    clock_hold.await.expect("join the paused clock hold").expect("the paused clock hold is released");
+    flags
 }
 
 pub(super) fn cached_references(message: &Message) -> (protocol::messages::object::RegionData, Vec<CachedObjectReference>) {

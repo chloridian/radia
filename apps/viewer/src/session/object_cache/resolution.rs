@@ -258,7 +258,7 @@ mod tests {
     use crate::session::inbound::decode_object_message;
     use crate::session::object_cache::ObjectCacheEvent;
     use crate::session::object_cache::test_support::*;
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn full_and_compressed_payloads_survive_restart_and_resolve_as_hits() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let path = directory.path().join("objects.sqlite");
@@ -313,7 +313,7 @@ mod tests {
         reopened.close().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cached_full_and_compressed_hits_restore_media_requests() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let mut cache = open_cache(directory.path().join("objects.sqlite"));
@@ -360,7 +360,7 @@ mod tests {
         cache.close().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cached_hit_uses_reference_physics_flag() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let mut cache = open_cache(directory.path().join("objects.sqlite"));
@@ -387,7 +387,7 @@ mod tests {
         cache.close().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn crc_mismatch_requests_refresh_and_missing_objects_request_full_updates() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let mut cache = open_cache(directory.path().join("objects.sqlite"));
@@ -421,7 +421,7 @@ mod tests {
         cache.close().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cached_probes_before_region_load_are_misses() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let path = directory.path().join("objects.sqlite");
@@ -450,7 +450,7 @@ mod tests {
         cache.close().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn corrupt_entries_are_misses_and_removed() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let path = directory.path().join("objects.sqlite");
@@ -487,7 +487,7 @@ mod tests {
         cache.close().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn semantically_invalid_entries_are_removed() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let mut cache = open_cache(directory.path().join("objects.sqlite"));
@@ -510,7 +510,7 @@ mod tests {
         cache.close().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn terse_updates_remove_cached_entries_before_later_probes() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let mut cache = open_cache(directory.path().join("objects.sqlite"));
@@ -540,7 +540,7 @@ mod tests {
         cache.close().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cache_id_change_invalidates_the_old_region_scope() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let mut cache = open_cache(directory.path().join("objects.sqlite"));

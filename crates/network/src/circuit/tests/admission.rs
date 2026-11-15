@@ -332,7 +332,7 @@ use protocol::{
 };
 use std::time::Duration;
 use test_support::{lludp::vectors, parse_hex_fixture};
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::spawn_blocking};
 
 const WAIT: Duration = Duration::from_secs(2);
 
@@ -551,6 +551,8 @@ async fn ack_queue_full_retries() {
         }
     };
 
+    let (release_clock, clock_released) = std::sync::mpsc::channel();
+    let clock_hold = spawn_blocking(move || clock_released.recv());
     let first_sequence = 10_000;
     let rejected_sequence = first_sequence + NEW_RELIABLE_ACK_CAPACITY as u32;
     for sequence in first_sequence..rejected_sequence {
@@ -560,7 +562,14 @@ async fn ack_queue_full_retries() {
             .expect("encode reliable ping response");
         simulator.send_to(&bytes, peer).await.expect("send reliable ping response");
         if sequence % 128 == 0 {
-            yield_now().await;
+            let mut drained = parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("parse chat fixture");
+            drained[1..5].copy_from_slice(&sequence.to_be_bytes());
+            simulator.send_to(&drained, peer).await.expect("send unreliable drain marker");
+            while !matches!(
+                received_events.recv().await.expect("neighbor events remain open"),
+                SimulatorEvent::Simulator(envelope)
+                    if matches!(envelope.event, Event::SimulatorMessage { sequence: marked, .. } if marked == sequence)
+            ) {}
         }
     }
     let mut rejected = parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("parse chat fixture");
@@ -583,6 +592,8 @@ async fn ack_queue_full_retries() {
     );
 
     advance(ACK_INTERVAL).await;
+    release_clock.send(()).expect("release the paused clock");
+    clock_hold.await.expect("join the paused clock hold").expect("the paused clock hold is released");
     let mut acknowledged = HashSet::with_capacity(NEW_RELIABLE_ACK_CAPACITY + 1);
     while acknowledged.len() < NEW_RELIABLE_ACK_CAPACITY + 1 {
         let (packet, _) = receive_packet(&simulator).await;
