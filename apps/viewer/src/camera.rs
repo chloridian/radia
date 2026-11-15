@@ -12,10 +12,10 @@ use winit::event::ElementState;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use winit::keyboard::Key;
 
-use crate::DEFAULT_DRAW_DISTANCE;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::agent_movement::{HeldControls, KeyBinding};
 
+pub(crate) const DEFAULT_DRAW_DISTANCE: f32 = 512.0;
 const FOCUS_TIME: Duration = Duration::from_millis(400);
 const FOLLOW_SMOOTHING_HALF_LIFE: f64 = 0.02;
 const MAX_FOLLOW_SMOOTH_DISTANCE: f64 = 50.0;
@@ -448,7 +448,7 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn movement_key_release_does_not_change_camera_mode() {
-        use crate::agent_movement::MovementKey;
+        use crate::agent_movement::input::MovementKey;
 
         let mut mode = CameraMode::Free;
         let mut controls = HeldControls::default();

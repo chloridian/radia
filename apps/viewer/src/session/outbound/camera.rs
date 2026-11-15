@@ -19,6 +19,7 @@ const CAMERA_POSITION_THRESHOLD: f64 = 0.01;
 const CAMERA_AXIS_THRESHOLD: f32 = 0.1f32.to_radians();
 
 pub(crate) struct CameraUplink {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     camera: watch::Sender<Option<Camera>>,
     observations: watch::Receiver<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
@@ -65,9 +66,13 @@ enum UplinkMessage {
 
 impl CameraUplink {
     pub(crate) fn new() -> Self {
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         let (camera, observations) = watch::channel(None);
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        let (_, observations) = watch::channel(None);
         let (movement, movements) = watch::channel(None);
         Self {
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             camera,
             observations,
             movement,
@@ -83,10 +88,12 @@ impl CameraUplink {
         }
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn sender(&self) -> watch::Sender<Option<Camera>> {
         self.camera.clone()
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn movement_sender(&self) -> watch::Sender<Option<MovementObservation>> {
         self.movement.clone()
     }
@@ -104,7 +111,7 @@ impl CameraUplink {
     pub(crate) async fn next_tick(&mut self) -> Instant {
         let deadline = self.next_deadline();
         tokio::select! {
-            _ = self.observations.changed() => Instant::now(),
+            _ = changed(&mut self.observations) => Instant::now(),
             _ = self.movements.changed() => Instant::now(),
             _ = async {
                 if let Some(deadline) = deadline {
@@ -298,6 +305,12 @@ fn camera_axes(direction: Vec3) -> (Vec3, Vec3) {
     (left, direction.cross(left))
 }
 
+async fn changed<T>(receiver: &mut watch::Receiver<T>) {
+    if receiver.changed().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
 fn rotation_changed(previous: Quat, current: Quat) -> bool {
     previous.dot(current).abs() < BODY_ROTATION_DOT_THRESHOLD
 }
@@ -334,7 +347,7 @@ mod tests {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     use crate::{
-        agent_movement::{HeldControls, KeyBinding, MovementKey},
+        agent_movement::{HeldControls, KeyBinding, input::MovementKey},
         camera::FollowCamera,
         session::world::{SessionWorld, viewer_world_limits},
     };
