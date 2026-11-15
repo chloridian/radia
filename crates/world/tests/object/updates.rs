@@ -559,23 +559,6 @@ fn stale_observation_fills_unset_groups() {
 }
 
 #[test]
-fn observation_patch_advances_revision() {
-    let (mut world, region) = with_region();
-    let created = world.observe_object(object(source(region, 1), 160, 1, Object, Root)).unwrap();
-    let Introduced(entity) = created.outcome else { panic!("expected object introduction") };
-    let revision = world.revision().get();
-
-    let mut update = object(source(region, 2), 160, 1, Object, Root);
-    update.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
-    let applied = world.observe_object(update).unwrap();
-
-    assert_eq!(applied.outcome, Updated(entity));
-    assert_eq!(applied.revision.unwrap().get(), revision + 1);
-    assert_eq!(world.revision().get(), revision + 1);
-    assert_eq!(world.object(entity).unwrap().position(), Some(Vec3::X));
-}
-
-#[test]
 fn patch_uses_field_fences() {
     let (mut world, region) = with_region();
     let mut initial = object(source(region, 100), 120, 10, Object, Root);

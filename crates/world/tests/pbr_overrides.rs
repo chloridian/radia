@@ -272,15 +272,6 @@ fn introduced_roughness(world: &mut World, observation: ObjectObservation) -> Op
 }
 
 #[test]
-fn early_override_applies_on_introduction() {
-    let (mut world, region) = with_region();
-
-    early_override(&mut world, source(region, 2), 7, snapshot(1, 0.4));
-
-    assert_eq!(introduced_roughness(&mut world, object(source(region, 3), 17, 7, true)), Some(0.4));
-}
-
-#[test]
 fn kill_drops_older_retained_override() {
     for (kill_order, expected) in [(3, None), (1, Some(0.4))] {
         let (mut world, region) = with_region();

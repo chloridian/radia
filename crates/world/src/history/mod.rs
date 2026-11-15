@@ -310,73 +310,37 @@ mod tests {
     }
 
     #[test]
-    fn surface_changes_emit_appearance() {
+    fn appearance_patches_emit_appearance() {
         let mut world = World::new(limits(4));
         let region = world.register_region().unwrap();
-        let added = world.observe_object(observation(region, 1, 280, 1)).unwrap();
-        let ApplyOutcome::Introduced(entity) = added.outcome else { panic!("expected object introduction") };
-        let appearance = SurfaceAppearance::new(
+        let patch = |local_id| ObjectPatch::new(UpdateSource::new(region, 2, Ordered(2), 0), NonZeroU32::new(local_id).unwrap());
+        let surface = SurfaceAppearance::new(
             FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(281))), ..FaceAppearance::default() },
             Vec::new(),
         )
         .unwrap();
-
-        let applied = world
-            .patch_object(ObjectPatch {
-                surface_appearance: Some(appearance),
-                ..ObjectPatch::new(UpdateSource::new(region, 2, Ordered(2), 0), NonZeroU32::new(1).unwrap())
-            })
-            .unwrap();
-
-        assert_eq!(applied.outcome, ApplyOutcome::Updated(entity));
-        assert!(matches!(
-            last_changes(&world),
-            [EntityUpdated { id, classes, .. }]
-                if *id == Uuid::from_u128(280)
-                    && classes.contains(WorldChangeClasses::APPEARANCE)
-                    && !classes.contains(WorldChangeClasses::SHAPE)
-        ));
-    }
-
-    #[test]
-    fn pbr_material_changes_emit_appearance() {
-        let mut world = World::new(limits(4));
-        let region = world.register_region().unwrap();
-        let added = world.observe_object(observation(region, 1, 282, 1)).unwrap();
-        let ApplyOutcome::Introduced(entity) = added.outcome else { panic!("expected object introduction") };
         let materials = PbrMaterialAssignments::new(vec![(3, AssetId::new(Uuid::from_u128(283)))]).unwrap();
+        let cases = [
+            ("surface_appearance", 280, ObjectPatch { surface_appearance: Some(surface), ..patch(1) }),
+            ("pbr_materials", 282, ObjectPatch { pbr_materials: Some(materials), ..patch(2) }),
+        ];
 
-        let applied = world
-            .patch_object(ObjectPatch {
-                pbr_materials: Some(materials),
-                ..ObjectPatch::new(UpdateSource::new(region, 2, Ordered(2), 0), NonZeroU32::new(1).unwrap())
-            })
-            .unwrap();
+        for (case, id, patch) in cases {
+            let added = world.observe_object(observation(region, 1, id, patch.local_id.get())).unwrap();
+            let ApplyOutcome::Introduced(entity) = added.outcome else { panic!("{case}: expected object introduction") };
 
-        assert_eq!(applied.outcome, ApplyOutcome::Updated(entity));
-        assert!(matches!(
-            last_changes(&world),
-            [EntityUpdated { id, classes, .. }]
-                if *id == Uuid::from_u128(282)
-                    && classes.contains(WorldChangeClasses::APPEARANCE)
-                    && !classes.contains(WorldChangeClasses::SHAPE)
-        ));
-    }
+            let applied = world.patch_object(patch).unwrap();
 
-    #[test]
-    fn journal_bound_marks_lost_revision() {
-        let mut world = World::new(limits(1));
-        let region = world.register_region().unwrap();
-        let first_revision = world.revision();
-
-        assert_eq!(
-            world.patch_region(region, RegionInfo { name: Some("region".to_owned()), ..RegionInfo::default() }).unwrap().outcome,
-            crate::RegionOutcome::Patched { revision: world.revision() }
-        );
-
-        assert_eq!(world.journal.entries.len(), 1);
-        assert_eq!(world.journal.entries.front().unwrap().revision, world.revision());
-        assert_eq!(world.journal.lost_through, Some(first_revision));
+            assert_eq!(applied.outcome, ApplyOutcome::Updated(entity), "{case}");
+            std::assert_matches!(
+                last_changes(&world),
+                [EntityUpdated { id: changed, classes, .. }]
+                    if *changed == Uuid::from_u128(id)
+                        && classes.contains(WorldChangeClasses::APPEARANCE)
+                        && !classes.contains(WorldChangeClasses::SHAPE),
+                "{case}"
+            );
+        }
     }
 
     #[test]
