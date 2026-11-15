@@ -26,9 +26,8 @@ use super::{
     timing::{FrameTimes, next_frame_deadline, redraw_interval, refresh_interval},
 };
 use crate::{
-    DEFAULT_DRAW_DISTANCE,
     agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
-    camera::{CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input},
+    camera::{CameraMode, DEFAULT_DRAW_DISTANCE, FollowCamera, OrbitCamera, handle_keyboard_input},
     scene_feed::SceneFeed,
 };
 

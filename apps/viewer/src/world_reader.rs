@@ -256,6 +256,7 @@ impl WorldReadHost {
         Self { receiver, revisions, reader: WorldReader { sender, revisions: observed, budget, runtime }, consecutive_intake: 0 }
     }
 
+    #[cfg(any(test, target_os = "windows", target_os = "linux"))]
     pub(crate) fn reader(&self) -> WorldReader {
         self.reader.clone()
     }
