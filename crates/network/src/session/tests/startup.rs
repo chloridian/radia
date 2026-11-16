@@ -1,5 +1,4 @@
 use super::*;
-use crate::capabilities::EventQueueRoleHandle;
 use crate::fixtures::event_with_retained_bytes;
 
 async fn terminal_after_full_queue(result: Result<(), crate::session::SessionError>) -> (Event, SimulatorId, SocketAddr) {
@@ -121,17 +120,13 @@ async fn retired_capability_requests_are_waited_for() {
     let mut connection = connect_runtime(login_session(endpoint), ResponseData::default()).await.expect("connect runtime");
     let client = connection.state.new_capability_client(seed.clone()).expect("track capability requests");
     let id = SimulatorId::allocate().expect("neighbor ID");
-    let mut capabilities = HashMap::from([(
-        id,
-        SimulatorCapabilitySession {
-            endpoint,
-            seed_capability: seed,
-            client: client.clone(),
-            event_queue_role: EventQueueRoleHandle::channel(false).0,
-            event_queue_task: None,
-            event_queue_running: false,
-        },
-    )]);
+    let connection_task = spawn(pending::<()>());
+    let (commands, _) = mpsc::channel(1);
+    let mut record = test_simulator_record(endpoint, Some(1), connection_task.abort_handle(), commands);
+    drop(connection_task);
+    record.capabilities =
+        Some(SimulatorCapabilitySession { seed_capability: seed, client: client.clone(), event_queue: EventQueueLifecycle::NotStarted });
+    connection.state.simulators.insert(id, record);
     let request = spawn({
         let client = client.clone();
         async move { client.request_capabilities(&["TestCapability"]).await }
@@ -140,8 +135,8 @@ async fn retired_capability_requests_are_waited_for() {
     let mut bytes = [0; 1024];
     assert!(timeout(WAIT, socket.read(&mut bytes)).await.expect("read held request").expect("HTTP request bytes") > 0);
     assert_eq!(connection.state.capability_request_waiters.len(), 2, "root and neighbor capability requests stay tracked");
-    crate::session::remove_simulator_capability(&mut capabilities, id);
-    assert!(capabilities.is_empty());
+    crate::session::remove_simulator_capability(&mut connection.state.simulators, id);
+    assert!(connection.state.simulators.get(&id).is_some_and(|simulator| simulator.capabilities.is_none()));
     timeout(WAIT, connection.state.finish_capability_request_waiters()).await.expect("wait for retired and root capability requests");
     assert!(connection.state.capability_request_waiters.is_empty());
     let result = timeout(WAIT, request).await.expect("closed request resolves").expect("request task");
@@ -351,7 +346,8 @@ async fn full_queue_keeps_control_responsive() {
     .expect("primary must ACK reliable data and answer pings while application delivery is blocked");
     assert!(!run.is_finished(), "simulator should stay active until shutdown");
     disconnect.send_replace(true);
-    receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
+    let logout = receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
+    send_logout_reply(&simulator, peer, &logout, 3).await;
     assert!(timeout(WAIT, run).await.expect("shutdown should finish with a full event queue").expect("simulator task").is_ok());
     std::assert_matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::Failed(message)) if message == "fill event queue");
     std::assert_matches!(
@@ -412,7 +408,7 @@ async fn capability_events_wait_for_simulator_connection() {
             assert_eq!(queued_bytes.available_permits(), 10, "recv_event handoff must release retained bytes");
         }
     }
-    assert!(run_state.preconnect_events.take(simulator_id).is_empty());
+    assert!(connection.state.simulators.get(&simulator_id).expect("primary record").preconnect_events.is_empty());
 }
 
 #[tokio::test]

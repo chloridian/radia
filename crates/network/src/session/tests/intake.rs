@@ -309,6 +309,7 @@ async fn preflight_loss_gates_later_event() {
     drop(session);
     let (_, logout) = receive_client_message(&simulator, peer, |message| matches!(message, Message::LogoutRequest(_))).await;
     assert!(logout.is_reliable());
+    send_logout_reply(&simulator, peer, &logout, 27).await;
     assert!(timeout(CLIENT_TIMEOUT, worker).await.expect("network worker should stop").expect("client task").is_ok());
     assert_eq!(http_task.await.expect("fake HTTP server should stop").len(), 3);
 }
@@ -515,6 +516,7 @@ async fn session_drop_cancels_active_saturated_session() {
     drop(session);
     let (_, logout) = receive_client_message(&simulator, peer, |message| matches!(message, Message::LogoutRequest(_))).await;
     assert!(logout.is_reliable());
+    send_logout_reply(&simulator, peer, &logout, 27).await;
     assert!(
         timeout(Duration::from_secs(2), worker).await.expect("active worker should stop after Session drop").expect("client task").is_ok()
     );

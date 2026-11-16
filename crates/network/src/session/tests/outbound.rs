@@ -91,6 +91,7 @@ async fn session_handle_send_reaches_the_simulator() {
     let disconnect = spawn(async move { disconnecting.disconnect().await });
     let (_, logout) = receive_client_message(&simulator, peer, |message| matches!(message, Message::LogoutRequest(_))).await;
     simulator.send_to(&server_ack(103, logout.sequence()), peer).await.expect("acknowledge logout");
+    send_logout_reply(&simulator, peer, &logout, 104).await;
     disconnect.await.expect("disconnect task");
     assert_eq!(http_server.finish().len(), 2);
     drop(session);

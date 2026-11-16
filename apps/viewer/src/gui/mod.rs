@@ -157,13 +157,13 @@ fn login_options(cx: &App) -> WindowOptions {
     }
 }
 
-fn shutdown(cx: &mut App) {
+fn shutdown(cx: &mut App) -> bool {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     let background_executor = cx.background_executor().clone();
     let session_lifecycle = {
         let lifecycle = cx.global_mut::<AppLifecycle>();
         if lifecycle.quitting {
-            return;
+            return false;
         }
         lifecycle.quitting = true;
         Arc::clone(&lifecycle.session_lifecycle)
@@ -186,6 +186,7 @@ fn shutdown(cx: &mut App) {
         cx.update(|app| app.quit());
     })
     .detach();
+    true
 }
 
 async fn disconnect_session(session_lifecycle: &SessionLifecycle) {
@@ -255,7 +256,7 @@ fn set_dark_theme(cx: &mut App) {
 mod tests {
     use std::sync::Arc;
 
-    use super::{AppLifecycle, SessionLifecycle, install_lifecycle};
+    use super::{AppLifecycle, SessionLifecycle, install_lifecycle, shutdown};
 
     #[gpui::test]
     fn main_window_owns_shutdown(cx: &mut gpui::TestAppContext) {
@@ -271,6 +272,18 @@ mod tests {
         cx.read_global::<AppLifecycle, _>(|lifecycle, _| assert!(!lifecycle.quitting));
         cx.add_empty_window();
         main.update(cx, |_, window, _| window.remove_window()).expect("close main window");
+        cx.run_until_parked();
+        cx.read_global::<AppLifecycle, _>(|lifecycle, _| assert!(lifecycle.quitting));
+    }
+
+    #[gpui::test]
+    fn repeated_shutdown_starts_once(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            install_lifecycle(Arc::new(SessionLifecycle::default()), cx);
+            assert!(shutdown(cx));
+            assert!(!shutdown(cx));
+        });
         cx.run_until_parked();
         cx.read_global::<AppLifecycle, _>(|lifecycle, _| assert!(lifecycle.quitting));
     }

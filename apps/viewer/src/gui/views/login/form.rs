@@ -85,8 +85,9 @@ impl LoginScreen {
             })
     }
 
-    fn render_grid_selection(&self, form_disabled: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_grid_selection(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let foreground = Theme::global(cx).colors.foreground;
+        let grid = self.credential_load.grid();
         div().flex().items_center().justify_between().child(div().text_size(px(13.)).text_color(foreground).child("Grid")).child(
             div()
                 .flex()
@@ -94,17 +95,17 @@ impl LoginScreen {
                 .child(
                     Button::new("grid-agni")
                         .label("Main grid")
-                        .with_variant(if self.grid == Grid::Agni { ButtonVariant::Primary } else { ButtonVariant::Secondary })
+                        .with_variant(if grid == Grid::Agni { ButtonVariant::Primary } else { ButtonVariant::Secondary })
                         .h(px(34.))
-                        .disabled(form_disabled)
+                        .disabled(!self.login_phase.allows_grid_selection())
                         .on_click(cx.listener(|this, _event, window, cx| this.select_grid(Grid::Agni, window, cx))),
                 )
                 .child(
                     Button::new("grid-aditi")
                         .label("Beta grid")
-                        .with_variant(if self.grid == Grid::Aditi { ButtonVariant::Primary } else { ButtonVariant::Secondary })
+                        .with_variant(if grid == Grid::Aditi { ButtonVariant::Primary } else { ButtonVariant::Secondary })
                         .h(px(34.))
-                        .disabled(form_disabled)
+                        .disabled(!self.login_phase.allows_grid_selection())
                         .on_click(cx.listener(|this, _event, window, cx| this.select_grid(Grid::Aditi, window, cx))),
                 ),
         )
@@ -129,7 +130,7 @@ impl LoginScreen {
                                     state.set_items(spawn_options(&[]), window, cx);
                                     state.set_selected_value(&SpawnChoice::Last, window, cx);
                                 });
-                                let grid = this.grid;
+                                let grid = this.credential_load.grid();
                                 let generation = this.session_generation;
                                 let write_lock = this.credential_write_lock.clone();
                                 let background = cx.background_executor().clone();
@@ -215,13 +216,13 @@ impl Render for LoginScreen {
         let show_region_input = self.spawn_choice == SpawnChoice::Region;
         let connecting = matches!(self.login_phase, LoginPhase::Connecting | LoginPhase::VerifyingMfa);
         let show_mfa = matches!(self.login_phase, LoginPhase::MfaRequired(_) | LoginPhase::VerifyingMfa);
-        let can_submit = !self.storage_loading
+        let can_submit = !self.credential_load.is_loading()
             && match self.login_phase {
                 LoginPhase::Idle => !username.trim().is_empty() && !password.is_empty(),
                 LoginPhase::MfaRequired(_) => !mfa_code.trim().is_empty(),
                 LoginPhase::Connecting | LoginPhase::VerifyingMfa => false,
             };
-        let form_disabled = self.storage_loading || !matches!(self.login_phase, LoginPhase::Idle);
+        let form_disabled = self.credential_load.is_loading() || !matches!(self.login_phase, LoginPhase::Idle);
 
         let theme = Theme::global(cx).colors;
         let content = div().size_full().flex().flex_col().bg(theme.background).text_color(theme.foreground);
@@ -254,7 +255,7 @@ impl Render for LoginScreen {
                             .child(self.render_credentials_form(form_disabled, cx))
                             .child(self.render_mfa_prompt(show_mfa, connecting, cx))
                             .child(self.render_spawn_selection(form_disabled, show_region_input, cx))
-                            .child(self.render_grid_selection(form_disabled, cx))
+                            .child(self.render_grid_selection(cx))
                             .child(self.render_remember_control(form_disabled, cx)),
                     )
                     .child(self.render_status(form_disabled, cx))

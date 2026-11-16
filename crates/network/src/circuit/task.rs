@@ -6,12 +6,12 @@ use std::{
 
 use protocol::lludp::Message;
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{mpsc, watch},
     time::{self, Instant},
 };
 
 use super::{
-    ACK_INTERVAL, ConnectionError, ConnectionRole, ConnectionTask, LOGOUT_TIMEOUT, MAX_PENDING_SEND_NOTIFICATIONS,
+    ACK_INTERVAL, ConnectionError, ConnectionRole, ConnectionTask, LOGOUT_TIMEOUT, LogoutCommand, MAX_PENDING_SEND_NOTIFICATIONS,
     MAX_QUEUED_SIMULATOR_EVENTS, MAX_SEND_AGE, PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorMemoryBudget, SimulatorRequest,
     active_queue_class, expire_deferred_retries, expire_pending_send, fail_queued_on_close, flush_send_notifications,
     lifecycle::{LogoutAction, Phase, RunControl},
@@ -34,7 +34,7 @@ enum SelectedEvent {
     Sent(Result<(Instant, PreparedDatagram), ConnectionError>),
     Shutdown,
     EventReceiverClosed,
-    Logout(Option<oneshot::Sender<Result<(), Error>>>),
+    Logout(Option<LogoutCommand>),
     TeardownDeadline,
     KeepaliveTimeout,
     PrimaryStateChanged(Result<(), watch::error::RecvError>),
@@ -296,7 +296,7 @@ impl ConnectionTask {
                 if self.phase.is_established()
                     && self.phase.has_region_handshake()
                     && self.connection.region_handshake_reply_sent
-                    && self.connection.handoff.is_some()
+                    && self.connection.handoff.target().is_some()
                 {
                     self.connection.queue_handoff_movement(&mut self.outbound, self.pending_send.as_ref())?;
                 }
@@ -346,13 +346,13 @@ impl ConnectionTask {
                 if let Some(queued) = &completed.queued_message {
                     match queued.movement {
                         MovementSend::Initial => self.connection.initial_movement_sent = true,
-                        MovementSend::Handoff => self.connection.movement_requested = true,
+                        MovementSend::Handoff => self.connection.handoff.mark_movement_sent(),
                         MovementSend::None => {}
                     }
                     if self.phase.is_established()
                         && self.phase.has_region_handshake()
                         && self.connection.region_handshake_reply_sent
-                        && self.connection.handoff.is_some()
+                        && self.connection.handoff.target().is_some()
                     {
                         self.connection.queue_handoff_movement(&mut self.outbound, self.pending_send.as_ref())?;
                     }
@@ -379,12 +379,12 @@ impl ConnectionTask {
         Ok(RunControl::Continue)
     }
 
-    fn logout_command(&mut self, command: Option<oneshot::Sender<Result<(), Error>>>) -> Result<RunControl, ConnectionError> {
-        let Some(completed) = command else {
+    fn logout_command(&mut self, command: Option<LogoutCommand>) -> Result<RunControl, ConnectionError> {
+        let Some(command) = command else {
             self.logout_commands = None;
             return Ok(RunControl::Continue);
         };
-        match self.phase.request_logout(completed) {
+        match self.phase.request_logout(command) {
             LogoutAction::Queue(completed) => {
                 if let Some(mut canceled) = self.pending_send.take()
                     && let Some(queued) = canceled.queued_message.take()
@@ -415,7 +415,8 @@ impl ConnectionTask {
         Ok(RunControl::Continue)
     }
 
-    fn teardown_deadline(&self) -> RunControl {
+    fn teardown_deadline(&mut self) -> RunControl {
+        self.phase.expire_logout();
         RunControl::Finish(self.phase.close_reason())
     }
 
@@ -513,7 +514,7 @@ impl ConnectionTask {
                             if self.phase.is_established()
                                 && self.phase.has_region_handshake()
                                 && self.connection.region_handshake_reply_sent
-                                && self.connection.handoff.is_some()
+                                && self.connection.handoff.target().is_some()
                             {
                                 self.connection.queue_handoff_movement(&mut self.outbound, self.pending_send.as_ref())?;
                             }
@@ -603,13 +604,13 @@ impl ConnectionTask {
                 }
                 let role_generation = self.connection.current_primary_state().role_generation();
                 self.connection.invalidate_stale_handoff(role_generation, &mut self.outbound, &mut self.pending_send);
-                if self.connection.handoff.as_ref() == Some(&target) {
+                if self.connection.handoff.target() == Some(&target) {
                     return Ok(RunControl::Continue);
                 }
                 self.connection.clear_handoff(&mut self.outbound, &mut self.pending_send);
                 self.connection.session.seed_capability = target.seed_capability.clone();
-                self.connection.handoff = Some(target);
-                self.connection.handoff_role_generation = Some(role_generation);
+                self.connection.handoff =
+                    super::CircuitHandoff::Preparing { target, role_generation, movement: super::HandoffMovement::Unsent };
                 if self.phase.is_established() && self.phase.has_region_handshake() && self.connection.region_handshake_reply_sent {
                     self.connection.queue_handoff_movement(&mut self.outbound, self.pending_send.as_ref())?;
                 }
@@ -644,7 +645,7 @@ pub(super) async fn run(
     shutdown: watch::Receiver<bool>,
     neighbor_requests: mpsc::Sender<SimulatorRequest>,
     commands: mpsc::Receiver<SimulatorCommand>,
-    logout_commands: mpsc::Receiver<oneshot::Sender<Result<(), Error>>>,
+    logout_commands: mpsc::Receiver<LogoutCommand>,
     packet_memory: SimulatorMemoryBudget,
 ) -> Result<(), ConnectionError> {
     let mut ack_timer = time::interval_at(Instant::now() + ACK_INTERVAL, ACK_INTERVAL);

@@ -297,6 +297,47 @@ async fn demoted_primary_times_out() {
     std::assert_matches!(result, Err(ConnectionError::KeepaliveTimeout));
 }
 
+#[tokio::test]
+async fn stale_role_generation_cancels_queued_handoff_movement() {
+    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
+    let simulator_id = SimulatorId::allocate().expect("simulator ID");
+    let budget = OutboundBudget::new(crate::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
+    let (primary_state, primary_state_receiver) = watch::channel(PrimaryState::Ready { generation: 1 });
+    let mut connection = connect_test_primary_with_state(
+        simulator_id,
+        session(simulator.local_addr().expect("simulator address")),
+        CoverageLossLedger::new(),
+        primary_state_receiver,
+        budget.handle(),
+        None,
+    )
+    .await
+    .expect("connect primary");
+    let handoff = HandoffTarget {
+        agent_id: connection.session.agent_id,
+        session_id: connection.session.session_id,
+        region_handle: 42,
+        endpoint: simulator.local_addr().expect("simulator address"),
+        seed_capability: connection.session.seed_capability.clone(),
+    };
+    crate::circuit::test_values::set_handoff(&mut connection, handoff);
+    connection.region_handshake_reply_sent = true;
+    let mut outbound = OutboundQueue::new();
+    let mut pending_send = None;
+    connection.queue_handoff_movement(&mut outbound, None).expect("queue handoff movement");
+    assert!(outbound.has_handoff_movement());
+
+    primary_state.send_replace(PrimaryState::Ready { generation: 2 });
+    connection.invalidate_stale_handoff(connection.current_primary_state().role_generation(), &mut outbound, &mut pending_send);
+
+    assert!(connection.handoff.target().is_none(), "stale handoff authorization is cleared");
+    assert!(!outbound.has_handoff_movement(), "queued movement is discarded when its role generation goes stale");
+    assert!(outbound.messages.is_empty());
+    assert_eq!(outbound.charged_bytes, 0);
+    drop(connection);
+    budget.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn promoted_logout_bypasses_full_queue() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
@@ -354,22 +395,29 @@ async fn promoted_logout_bypasses_full_queue() {
 
     pause_sends.send_replace(true);
     let (logout_completed, logout_response) = oneshot::channel();
-    logout_commands.send(logout_completed).await.expect("request priority logout");
+    let (logout_receipt, mut logout_receipt_response) = oneshot::channel();
+    logout_commands.send(LogoutCommand { sent: logout_completed, receipt: logout_receipt }).await.expect("request priority logout");
     timeout(WAIT, send_entered.notified()).await.expect("logout should reach the paused local send");
 
-    let (repeated_logout_completed, mut repeated_logout_response) = oneshot::channel();
-    logout_commands.send(repeated_logout_completed).await.expect("repeat priority logout");
-    assert!(timeout(Duration::from_millis(25), &mut repeated_logout_response).await.is_err());
+    let (repeated_logout_completed, repeated_logout_response) = oneshot::channel();
+    let (repeated_logout_receipt, repeated_logout_receipt_response) = oneshot::channel();
+    logout_commands
+        .send(LogoutCommand { sent: repeated_logout_completed, receipt: repeated_logout_receipt })
+        .await
+        .expect("repeat priority logout");
 
     pause_sends.send_replace(false);
     let (logout_packet, _) = receive_packet(&simulator).await;
     std::assert_matches!(logout_packet.message(), Message::LogoutRequest(_));
     assert!(logout_response.await.expect("logout completion").is_ok(), "logout local send completes despite a full ordinary queue");
     assert!(repeated_logout_response.await.expect("repeated logout completion").is_ok());
+    assert!(matches!(logout_receipt_response.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
     std::assert_matches!(pending_response.await, Ok(Err(Error::SimulatorConnectionClosed)));
 
     shutdown.send_replace(true);
     assert!(timeout(WAIT, worker).await.expect("stop connection worker").expect("join connection worker").is_ok());
+    assert_eq!(logout_receipt_response.await.expect("disconnect reports logout receipt"), LogoutReceipt::ConnectionEnded);
+    assert_eq!(repeated_logout_receipt_response.await.expect("repeated disconnect reports logout receipt"), LogoutReceipt::ConnectionEnded);
     budget.shutdown().await;
 }
 

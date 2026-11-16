@@ -12,7 +12,7 @@ use egui_wgpu::{RendererOptions, ScreenDescriptor};
 use math::DVec3;
 use wgpu::{
     AdapterInfo, Backends, Color, CommandEncoderDescriptor, CreateSurfaceError, CurrentSurfaceTexture, Device, DeviceDescriptor,
-    ErrorFilter, InstanceDescriptor, LoadOp, Operations, PollError, PollType, PowerPreference, PresentMode, Queue,
+    ErrorFilter, Instance, InstanceDescriptor, LoadOp, Operations, PollError, PollType, PowerPreference, PresentMode, Queue,
     RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPassTimestampWrites, RequestAdapterError,
     RequestAdapterOptions, RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureFormat, TextureViewDescriptor,
 };
@@ -115,84 +115,6 @@ impl Renderer {
             redraw_at,
         })
     }
-    pub async fn new(target: impl Into<SurfaceTarget<'static>>, width: u32, height: u32) -> Result<Self, Error> {
-        let instance =
-            wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
-        let surface = instance.create_surface(target).map_err(Error::Surface)?;
-        let adapter = instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                ..Default::default()
-            })
-            .await
-            .map_err(Error::Adapter)?;
-        let info = adapter.get_info();
-        let supported_features = adapter.features();
-        let timestamp_features = supported_features & wgpu::Features::TIMESTAMP_QUERY;
-        let (device, queue) = adapter
-            .request_device(&DeviceDescriptor {
-                label: Some("Radia scene"),
-                required_features: (supported_features
-                    & (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::INDIRECT_FIRST_INSTANCE))
-                    | timestamp_features,
-                ..Default::default()
-            })
-            .await
-            .map_err(Error::Device)?;
-        let lost = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&lost);
-        device.set_device_lost_callback(move |_, _| {
-            flag.store(true, Ordering::Release);
-        });
-        let failure = Arc::new(Mutex::new(None));
-        let reported_failure = Arc::clone(&failure);
-        device.on_uncaptured_error(Arc::new(move |error| {
-            let mut reported = reported_failure.lock().unwrap_or_else(PoisonError::into_inner);
-            if reported.is_none() {
-                *reported = Some(error);
-            }
-        }));
-        let mut config = surface.get_default_config(&adapter, width.max(1), height.max(1)).ok_or(Error::UnsupportedSurface)?;
-        let capabilities = surface.get_capabilities(&adapter);
-        config.format = capabilities.formats.into_iter().find(|format| format.is_srgb()).ok_or(Error::UnsupportedColorFormat)?;
-        config.present_mode =
-            if capabilities.present_modes.contains(&PresentMode::Mailbox) { PresentMode::Mailbox } else { PresentMode::Fifo };
-        config.desired_maximum_frame_latency = 1;
-        tracing::info!(
-            present_mode = ?config.present_mode,
-            maximum_frame_latency = config.desired_maximum_frame_latency,
-            timestamp_queries = !timestamp_features.is_empty(),
-            "scene presentation configured"
-        );
-        let scope = device.push_error_scope(ErrorFilter::Validation);
-        let overlay = egui_wgpu::Renderer::new(&device, config.format, RendererOptions::default());
-        let geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float);
-        let gpu_timings = if timestamp_features.is_empty() { None } else { GpuTimings::new(&device, queue.get_timestamp_period()) };
-        let postprocess = PostProcess::new(&device, &queue, config.format);
-        if let Some(error) = scope.pop().await {
-            return Err(Error::Gpu(error));
-        }
-        let mut renderer = Self {
-            surface,
-            device,
-            queue,
-            config,
-            size: [0, 0],
-            info,
-            lost,
-            failure,
-            overlay,
-            geometry,
-            gpu_timings,
-            postprocess,
-            last_frame: Instant::now(),
-        };
-        renderer.resize(width, height);
-        Ok(renderer)
-    }
-
     pub fn adapter_info(&self) -> &AdapterInfo {
         &self.info
     }
@@ -412,6 +334,97 @@ pub struct Progress {
     pub redraw: bool,
     pub pending: bool,
     pub redraw_at: Option<Instant>,
+}
+
+pub struct RendererInit {
+    instance: Instance,
+    surface: Surface<'static>,
+    width: u32,
+    height: u32,
+}
+
+impl RendererInit {
+    pub fn new(target: impl Into<SurfaceTarget<'static>>, width: u32, height: u32) -> Result<Self, Error> {
+        let instance = Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
+        let surface = instance.create_surface(target).map_err(Error::Surface)?;
+        Ok(Self { instance, surface, width, height })
+    }
+
+    pub async fn finish(self) -> Result<Renderer, Error> {
+        let Self { instance, surface, width, height } = self;
+        let adapter = instance
+            .request_adapter(&RequestAdapterOptions {
+                power_preference: PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+                ..Default::default()
+            })
+            .await
+            .map_err(Error::Adapter)?;
+        let info = adapter.get_info();
+        let supported_features = adapter.features();
+        let timestamp_features = supported_features & wgpu::Features::TIMESTAMP_QUERY;
+        let (device, queue) = adapter
+            .request_device(&DeviceDescriptor {
+                label: Some("Radia scene"),
+                required_features: (supported_features
+                    & (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::INDIRECT_FIRST_INSTANCE))
+                    | timestamp_features,
+                ..Default::default()
+            })
+            .await
+            .map_err(Error::Device)?;
+        let lost = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&lost);
+        device.set_device_lost_callback(move |_, _| {
+            flag.store(true, Ordering::Release);
+        });
+        let failure = Arc::new(Mutex::new(None));
+        let reported_failure = Arc::clone(&failure);
+        device.on_uncaptured_error(Arc::new(move |error| {
+            let mut reported = reported_failure.lock().unwrap_or_else(PoisonError::into_inner);
+            if reported.is_none() {
+                *reported = Some(error);
+            }
+        }));
+        let mut config = surface.get_default_config(&adapter, width.max(1), height.max(1)).ok_or(Error::UnsupportedSurface)?;
+        let capabilities = surface.get_capabilities(&adapter);
+        config.format = capabilities.formats.into_iter().find(|format| format.is_srgb()).ok_or(Error::UnsupportedColorFormat)?;
+        config.present_mode =
+            if capabilities.present_modes.contains(&PresentMode::Mailbox) { PresentMode::Mailbox } else { PresentMode::Fifo };
+        config.desired_maximum_frame_latency = 1;
+        tracing::info!(
+            present_mode = ?config.present_mode,
+            maximum_frame_latency = config.desired_maximum_frame_latency,
+            timestamp_queries = !timestamp_features.is_empty(),
+            "scene presentation configured"
+        );
+        let scope = device.push_error_scope(ErrorFilter::Validation);
+        let overlay = egui_wgpu::Renderer::new(&device, config.format, RendererOptions::default());
+        let geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float);
+        let gpu_timings = if timestamp_features.is_empty() { None } else { GpuTimings::new(&device, queue.get_timestamp_period()) };
+        let postprocess = PostProcess::new(&device, &queue, config.format);
+        if let Some(error) = scope.pop().await {
+            return Err(Error::Gpu(error));
+        }
+        let mut renderer = Renderer {
+            surface,
+            device,
+            queue,
+            config,
+            size: [0, 0],
+            info,
+            lost,
+            failure,
+            overlay,
+            geometry,
+            gpu_timings,
+            postprocess,
+            last_frame: Instant::now(),
+        };
+        renderer.resize(width, height);
+        Ok(renderer)
+    }
 }
 
 pub struct Retirement {

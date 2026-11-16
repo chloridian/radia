@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     time::Duration,
 };
 
@@ -8,8 +8,8 @@ use tokio::{sync::mpsc, time::Instant};
 
 use super::teleport::is_teleport_cancel;
 use super::{
-    ConnectionQueueFailure, MAX_PRECONNECT_EVENTS, RuntimeAction, SessionDispatcher, SessionError, SimulatorCommand,
-    queue_connection_message, queue_primary_message,
+    ConnectionQueueFailure, RuntimeAction, SessionDispatcher, SessionError, SimulatorCommand, queue_connection_message,
+    queue_primary_message,
 };
 use crate::{
     circuit::{MAX_PENDING_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS, admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY},
@@ -57,39 +57,6 @@ impl PrimaryEventBacklog {
     }
 }
 
-#[derive(Default)]
-pub(super) struct PreconnectEvents {
-    by_simulator: HashMap<SimulatorId, VecDeque<EventEnvelope>>,
-    len: usize,
-}
-
-impl PreconnectEvents {
-    pub(super) fn push(&mut self, simulator_id: SimulatorId, event: EventEnvelope) -> bool {
-        if self.len >= MAX_PRECONNECT_EVENTS {
-            return false;
-        }
-        self.by_simulator.entry(simulator_id).or_default().push_back(event);
-        self.len += 1;
-        true
-    }
-
-    pub(super) fn take(&mut self, simulator_id: SimulatorId) -> VecDeque<EventEnvelope> {
-        let events = self.by_simulator.remove(&simulator_id).unwrap_or_default();
-        self.len -= events.len();
-        events
-    }
-
-    pub(super) fn remove(&mut self, simulator_id: SimulatorId) -> VecDeque<EventEnvelope> {
-        self.take(simulator_id)
-    }
-}
-
-pub(super) enum PreconnectOutcome {
-    Ready(EventEnvelope),
-    Buffered,
-    Full,
-}
-
 #[derive(Debug)]
 pub(super) enum EventQueueOutcome {
     Queued,
@@ -109,14 +76,7 @@ impl SessionDispatcher<'_> {
     }
 
     fn simulator_commands(&self, simulator_id: SimulatorId) -> Option<mpsc::Sender<SimulatorCommand>> {
-        if simulator_id == self.state.primary.simulator_id && !self.state.root_connection_failed {
-            return Some(self.state.primary.commands.clone());
-        }
-        self.run_state
-            .neighbor_connections
-            .values()
-            .find(|connection| connection.simulator_id == simulator_id)
-            .map(|connection| connection.commands.clone())
+        self.state.simulators.get(&simulator_id).filter(|simulator| simulator.is_current()).map(|simulator| simulator.commands.clone())
     }
 
     fn has_pending_handshake_reply(&self, simulator_id: SimulatorId) -> bool {
@@ -131,15 +91,8 @@ impl SessionDispatcher<'_> {
     }
 
     fn abort_simulator_connection(&self, simulator_id: SimulatorId) {
-        let abort = self
-            .run_state
-            .neighbor_connections
-            .values()
-            .find(|connection| connection.simulator_id == simulator_id)
-            .map(|connection| connection.abort.clone())
-            .or_else(|| (simulator_id == self.state.simulator_id).then(|| self.state.root_connection_abort.clone()).flatten());
-        if let Some(abort) = abort {
-            abort.abort();
+        if let Some(simulator) = self.state.simulators.get(&simulator_id) {
+            simulator.abort_connection();
         }
     }
 
@@ -159,8 +112,8 @@ impl SessionDispatcher<'_> {
                 self.state.event_backlog.update_pending(self.run_state.pending_events.len(), Instant::now());
                 Ok(RuntimeAction::Continue)
             }
-            Err(_) if self.run_state.logout_deadline.is_none() => {
-                self.state.disconnect_once(false).await?;
+            Err(_) if self.state.logout.deadline().is_none() => {
+                self.state.disconnect_once().await?;
                 Ok(RuntimeAction::Exit(Ok(())))
             }
             Err(_) => Ok(RuntimeAction::Continue),
@@ -169,7 +122,7 @@ impl SessionDispatcher<'_> {
 
     pub(super) async fn handle_command(&mut self, command: Option<Command>) -> Result<RuntimeAction, SessionError> {
         if *self.disconnect_requested.borrow() {
-            self.state.graceful_disconnect(false).await?;
+            self.state.graceful_disconnect().await?;
             return Ok(RuntimeAction::Exit(Ok(())));
         }
         match command {
@@ -185,7 +138,8 @@ impl SessionDispatcher<'_> {
                         .await?;
                     return Ok(RuntimeAction::Continue);
                 }
-                if self.has_pending_handshake_reply(self.state.primary.simulator_id) {
+                let primary_id = self.state.primary_id;
+                if self.has_pending_handshake_reply(primary_id) {
                     self.state
                         .publish_event(&self.events, &mut self.run_state, Event::SendFailed(Error::SimulatorCommandQueueFull.to_string()))
                         .await?;
@@ -193,7 +147,7 @@ impl SessionDispatcher<'_> {
                 }
 
                 let result = queue_primary_message(
-                    &self.state.primary.commands,
+                    &self.state.primary().commands,
                     self.state.session.agent_id,
                     self.state.session.session_id,
                     message,
@@ -205,18 +159,15 @@ impl SessionDispatcher<'_> {
                 }
             }
             Some(Command::SendTo { simulator_id, message, delivery, completed }) => {
-                let cancel_handoff = simulator_id == self.state.primary.simulator_id
+                let cancel_handoff = simulator_id == self.state.primary_id
                     && is_teleport_cancel(&message, self.state.session.agent_id, self.state.session.session_id);
                 let cancel_target = cancel_handoff.then(|| self.handoff_state.cancellation()).flatten();
                 let commands = self
-                    .run_state
-                    .neighbor_connections
-                    .values()
-                    .find(|connection| {
-                        connection.simulator_id == simulator_id
-                            && (simulator_id != self.state.simulator_id || !self.state.root_connection_failed)
-                    })
-                    .map(|connection| &connection.commands);
+                    .state
+                    .simulators
+                    .get(&simulator_id)
+                    .filter(|simulator| simulator.is_current())
+                    .map(|simulator| &simulator.commands);
                 let mut completion = Some(completed);
                 let result = if simulator_id == self.state.simulator_id && !self.startup.is_ready() {
                     Err(ConnectionQueueFailure { error: Error::SimulatorNotReady, completion: completion.take() })
@@ -246,7 +197,7 @@ impl SessionDispatcher<'_> {
                 self.queue_handshake_reply(simulator_id, command);
             }
             None => {
-                self.state.graceful_disconnect(self.state.logout_request_sent).await?;
+                self.state.graceful_disconnect().await?;
                 return Ok(RuntimeAction::Exit(Ok(())));
             }
         }
@@ -326,18 +277,6 @@ fn flush_handshake_reply_queue(
             }
         }
     }
-}
-
-pub(super) fn queue_until_connected(
-    connected: &HashSet<SimulatorId>,
-    pending: &mut PreconnectEvents,
-    simulator_id: SimulatorId,
-    event: EventEnvelope,
-) -> PreconnectOutcome {
-    if connected.contains(&simulator_id) {
-        return PreconnectOutcome::Ready(event);
-    }
-    if pending.push(simulator_id, event) { PreconnectOutcome::Buffered } else { PreconnectOutcome::Full }
 }
 
 pub(super) fn queue_simulator_event(

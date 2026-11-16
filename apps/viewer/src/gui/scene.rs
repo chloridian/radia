@@ -114,7 +114,10 @@ pub(crate) fn login_content(_: bool, login_body: AnyElement, _: AnyElement) -> A
 }
 
 fn start_scene(generation: u64, cx: &mut App) -> bool {
-    if !cx.has_global::<AppLifecycle>() || cx.global::<AppLifecycle>().scene.main.blocks_start(generation) {
+    if !cx.has_global::<AppLifecycle>()
+        || cx.global::<AppLifecycle>().quitting
+        || cx.global::<AppLifecycle>().scene.main.blocks_start(generation)
+    {
         return false;
     }
     let login_window = cx.global::<AppLifecycle>().login_window;
@@ -173,6 +176,10 @@ fn connect_world(
 fn viewport_event(event: crate::gui::views::viewport::ViewportEvent, cx: &mut App) {
     use crate::gui::views::viewport::ViewportEvent;
 
+    if cx.global::<AppLifecycle>().quitting {
+        return;
+    }
+
     let main = cx.global::<AppLifecycle>().scene.main;
     if matches!(event, ViewportEvent::Chat(_))
         && let Some(viewport) = &cx.global::<AppLifecycle>().scene.viewport
@@ -190,7 +197,9 @@ fn viewport_event(event: crate::gui::views::viewport::ViewportEvent, cx: &mut Ap
             }
         }
         ViewportEvent::Chat(generation) if main == MainWindow::Scene(generation) => show_chat(true, cx),
-        ViewportEvent::Closed(generation) if main.is_current(generation) => shutdown(cx),
+        ViewportEvent::Closed(generation) if main.is_current(generation) => {
+            shutdown(cx);
+        }
         ViewportEvent::Failed(generation, error) => scene_failed(generation, error, cx),
         _ => {}
     }
@@ -308,7 +317,7 @@ impl Render for ChatWindow {
 mod tests {
     use std::sync::Arc;
 
-    use super::{MainWindow, start_scene, viewport_event};
+    use super::{MainWindow, end_session, start_scene, viewport_event};
     use crate::gui::{
         AppLifecycle, install_lifecycle,
         views::{
@@ -363,6 +372,50 @@ mod tests {
             assert_eq!(cx.global::<AppLifecycle>().controller.as_ref().unwrap().entity_id(), controller.entity_id());
             viewport_event(ViewportEvent::Closed(2), cx);
             assert!(cx.global::<AppLifecycle>().quitting, "closing the current scene owns shutdown");
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn end_before_viewport_ready_rejects_ready(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            install_lifecycle(Arc::new(crate::gui::SessionLifecycle::default()), cx);
+        });
+        let login = cx.add_empty_window().update(|window, _| window.window_handle());
+        cx.update(|cx| {
+            let lifecycle = cx.global_mut::<AppLifecycle>();
+            lifecycle.login_window = Some(login);
+            lifecycle.scene.main = MainWindow::Starting(2);
+            end_session(2, cx);
+            viewport_event(ViewportEvent::Ready(2), cx);
+            let lifecycle = cx.global::<AppLifecycle>();
+            assert_eq!(lifecycle.scene.main, MainWindow::Login);
+            assert!(lifecycle.scene.chat_window.is_none());
+            assert!(!lifecycle.quitting);
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn close_during_start_discards_late_ready(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            install_lifecycle(Arc::new(crate::gui::SessionLifecycle::default()), cx);
+        });
+        let login = cx.add_empty_window().update(|window, _| window.window_handle());
+        cx.update(|cx| {
+            let lifecycle = cx.global_mut::<AppLifecycle>();
+            lifecycle.login_window = Some(login);
+            lifecycle.scene.main = MainWindow::Starting(2);
+            viewport_event(ViewportEvent::Closed(2), cx);
+            viewport_event(ViewportEvent::Ready(2), cx);
+            assert!(!start_scene(2, cx));
+            let lifecycle = cx.global::<AppLifecycle>();
+            assert!(lifecycle.quitting);
+            assert_eq!(lifecycle.scene.main, MainWindow::Starting(2));
+            assert!(lifecycle.scene.viewport.is_none());
+            assert!(lifecycle.scene.chat_window.is_none());
         });
         cx.run_until_parked();
     }
