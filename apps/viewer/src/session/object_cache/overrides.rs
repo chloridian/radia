@@ -286,7 +286,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn restart_restores_overrides_on_a_cache_hit() {
+    async fn cache_hit_restores_overrides() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let path = directory.path().join("objects.sqlite");
         persisted_session(&path, OBJECT_ID).await;
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn terse_eviction_keeps_overrides_for_a_miss_and_later_full_update() {
+    async fn terse_eviction_keeps_overrides() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let path = directory.path().join("objects.sqlite");
         let mut viewer = Viewer::open(&path).await;
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn empty_overrides_and_kill_delete_the_row() {
+    async fn clear_or_kill_deletes_row() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let mut viewer = Viewer::open(&directory.path().join("objects.sqlite")).await;
         viewer.ingest(full_update(OBJECT_ID, 11)).await;
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn mismatched_object_does_not_receive_overrides_and_drops_the_row() {
+    async fn mismatched_object_drops_overrides() {
         for hit in [true, false] {
             let directory = tempfile::tempdir().expect("create isolated cache directory");
             let path = directory.path().join("objects.sqlite");
