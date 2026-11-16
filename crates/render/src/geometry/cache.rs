@@ -544,11 +544,6 @@ impl GeometryRenderer {
         self.cache.rebuild.as_mut().map(|rebuild| rebuild.note_camera(camera))
     }
 
-    #[cfg(test)]
-    pub(super) fn update_cache(&mut self, view: &SceneView) -> CacheUpdate {
-        self.update_cache_inner(view, false)
-    }
-
     pub(super) fn update_cache_for_frame(&mut self, view: &SceneView, defer_recovery: bool) -> CacheUpdate {
         self.update_cache_inner(view, defer_recovery)
     }
