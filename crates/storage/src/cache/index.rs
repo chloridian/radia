@@ -13,7 +13,7 @@ use super::{
     UnavailableReason, valid_extension, valid_namespace,
 };
 
-const INDEX_VERSION: i64 = 5;
+const INDEX_VERSION: i64 = 1;
 pub(super) const MAX_ENTRIES: usize = 262_144;
 const ROW_BYTES: u64 = 96;
 pub(super) const INDEX_BASE_BYTES: u64 = 16 * 1024;
