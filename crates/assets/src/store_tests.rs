@@ -702,7 +702,7 @@ fn decoded_payloads_round_trip_disk() {
     let legacy = Resource { id: AssetId::new(Uuid::from_u128(102)), kind: Kind::LegacyMaterial };
     let environment = Resource { id: AssetId::new(Uuid::from_u128(103)), kind: Kind::Environment };
     round_trip(&cache, pbr, material_envelope(PBR_JSON));
-    round_trip(&cache, legacy, legacy_envelope(legacy.id));
+    round_trip(&cache, legacy, legacy_material());
     round_trip(&cache, environment, b"{'type':'sky'}".to_vec());
     assert_eq!(cache.stats().hits, 3);
     assert_eq!(cache.stats().misses, 0);
@@ -1286,21 +1286,8 @@ fn material_envelope(json: &str) -> Vec<u8> {
     bytes
 }
 
-fn legacy_envelope(id: AssetId) -> Vec<u8> {
-    use flate2::{Compression, write::ZlibEncoder};
-    use std::io::Write;
-    let record = binary::to_vec(&llsd::Value::Array(vec![llsd::Value::Map(
-        [
-            ("ID".into(), llsd::Value::Binary(llsd::Binary::new(id.uuid().as_bytes().to_vec()))),
-            ("Material".into(), llsd::Value::Map(legacy_fields(2, 128))),
-        ]
-        .into(),
-    )]))
-    .unwrap();
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&record).unwrap();
-    let zipped = encoder.finish().unwrap();
-    llsd::xml::to_vec(&llsd::Value::Map([("Zipped".into(), llsd::Value::Binary(llsd::Binary::new(zipped)))].into())).unwrap()
+fn legacy_material() -> Vec<u8> {
+    binary::to_vec(&llsd::Value::Map(legacy_fields(2, 128))).unwrap()
 }
 
 #[test]
@@ -2369,7 +2356,7 @@ fn retired_material_cannot_publish() {
     let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(budget.clone());
     let resource = Resource { id: AssetId::new(Uuid::from_u128(3)), kind: Kind::LegacyMaterial };
     let old = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
-    let input = fetch(&mut store, now, legacy_envelope(resource.id));
+    let input = fetch(&mut store, now, legacy_material());
     let job = store.start_decode(input).expect("decode admission");
     assert_eq!(store.running_texture_decodes + store.running_other_decodes, 1);
     let prepared = job.run();
@@ -2380,7 +2367,7 @@ fn retired_material_cannot_publish() {
     assert_eq!(budget.stats().charged_bytes, 0);
     let route = store.register_route().unwrap();
     let current = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
-    let input = fetch(&mut store, now, legacy_envelope(resource.id));
+    let input = fetch(&mut store, now, legacy_material());
     let job = store.start_decode(input).expect("decode admission");
     let result = job.run();
     store.complete(result, now);
