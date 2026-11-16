@@ -375,6 +375,22 @@ fn packet_header_is_typed() {
 }
 
 #[test]
+fn zero_coding_includes_extra_header() {
+    let id = MessageId::high(0x71);
+    let message = Message::Unknown { id, payload: vec![0xaa] };
+    let packet = Packet::new(0x0102_0304, message.clone()).with_extra_header(vec![0; 3]).with_zero_coding(true);
+    let expected = [0x80, 1, 2, 3, 4, 3, 0, 3, 0x71, 0xaa];
+
+    assert_eq!(packet.encode().expect("encode zero-coded packet"), expected);
+    assert_eq!(Packet::inspect(&expected).expect("inspect packet").message_id(), Ok(id));
+
+    let decoded = Packet::decode(&expected).expect("decode zero-coded extra header");
+    assert_eq!(decoded.extra_header(), [0, 0, 0]);
+    assert_eq!(decoded.message(), &message);
+    assert_eq!(decoded.encode().expect("re-encode zero-coded packet"), expected);
+}
+
+#[test]
 fn header_bits_survive_round_trip() {
     let mut bytes = Packet::new(1, complete_ping(9)).with_zero_coding(false).encode().expect("encode packet");
     bytes[0] |= 0x01;

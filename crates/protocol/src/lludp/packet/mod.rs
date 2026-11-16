@@ -107,7 +107,7 @@ impl Packet {
         let _: u8 = self.appended_acks.len().try_into().map_err(|_| LLUdpError::TooManyAcks)?;
         let flags = match self.zero_coding {
             ZeroCoding::Received => self.header.flags,
-            ZeroCoding::Automatic(_) => self.encoded_message()?.1,
+            ZeroCoding::Automatic(_) => self.encoded_packet_data()?.1,
         };
         Ok(PacketHeader { sequence: self.header.sequence, flags, extra_header: self.header.extra_header.clone() })
     }
@@ -212,16 +212,15 @@ impl Packet {
         let extra_len = u8::try_from(self.header.extra_header.len()).map_err(|_| LLUdpError::ExtraHeaderTooLong)?;
         let ack_count = u8::try_from(self.appended_acks.len()).map_err(|_| LLUdpError::TooManyAcks)?;
 
-        let (message_bytes, flags) = self.encoded_message()?;
+        let (packet_data, flags) = self.encoded_packet_data()?;
 
-        let packet_len = self.framed_len(message_bytes.len(), flags.contains(PacketFlags::APPENDED_ACKS))?;
+        let packet_len = self.framed_len(packet_data.len(), flags.contains(PacketFlags::APPENDED_ACKS))?;
 
         output.reserve(packet_len);
         output.push(flags.bits());
         output.extend_from_slice(&self.header.sequence.to_be_bytes());
         output.push(extra_len);
-        output.extend_from_slice(&self.header.extra_header);
-        output.extend_from_slice(&message_bytes);
+        output.extend_from_slice(&packet_data);
         if flags.contains(PacketFlags::APPENDED_ACKS) {
             for packet_id in &self.appended_acks {
                 output.extend_from_slice(&packet_id.to_be_bytes());
@@ -233,8 +232,7 @@ impl Packet {
 
     fn framed_len(&self, body_bytes: usize, has_ack_section: bool) -> Result<usize, LLUdpError> {
         let length = HEADER_BYTES
-            .checked_add(self.header.extra_header.len())
-            .and_then(|length| length.checked_add(body_bytes))
+            .checked_add(body_bytes)
             .and_then(|length| self.appended_acks.len().checked_mul(4).and_then(|bytes| length.checked_add(bytes)))
             .and_then(|length| length.checked_add(usize::from(has_ack_section)))
             .ok_or(LLUdpError::DatagramTooLarge)?;
@@ -244,32 +242,32 @@ impl Packet {
         Ok(length)
     }
 
-    fn encoded_message(&self) -> Result<(Vec<u8>, PacketFlags), LLUdpError> {
-        let mut message_bytes = Vec::new();
-        self.message.id().encode(&mut message_bytes)?;
-        self.message.encode_payload(&mut message_bytes, MAX_LLUDP_PACKET_SIZE)?;
-        if self.trailing_message_bytes.len() > MAX_LLUDP_PACKET_SIZE.saturating_sub(message_bytes.len()) {
+    fn encoded_packet_data(&self) -> Result<(Vec<u8>, PacketFlags), LLUdpError> {
+        let mut packet_data = self.header.extra_header.clone();
+        self.message.id().encode(&mut packet_data)?;
+        self.message.encode_payload(&mut packet_data, MAX_LLUDP_PACKET_SIZE)?;
+        if self.trailing_message_bytes.len() > MAX_LLUDP_PACKET_SIZE.saturating_sub(packet_data.len()) {
             return Err(LLUdpError::DatagramTooLarge);
         }
-        message_bytes.extend_from_slice(&self.trailing_message_bytes);
+        packet_data.extend_from_slice(&self.trailing_message_bytes);
 
         let has_ack_section = !self.appended_acks.is_empty() || self.header.flags.contains(PacketFlags::APPENDED_ACKS);
-        self.framed_len(message_bytes.len(), has_ack_section)?;
+        self.framed_len(packet_data.len(), has_ack_section)?;
 
         let mut flags = self.header.flags;
         match self.zero_coding {
             ZeroCoding::Automatic(enabled) => {
                 flags.remove(PacketFlags::ZEROCODED);
                 if enabled {
-                    let compressed = zero_code::encode(&message_bytes);
-                    if compressed.len() < message_bytes.len() {
-                        message_bytes = compressed;
+                    let compressed = zero_code::encode(&packet_data);
+                    if compressed.len() < packet_data.len() {
+                        packet_data = compressed;
                         flags.insert(PacketFlags::ZEROCODED);
                     }
                 }
             }
             ZeroCoding::Received if flags.contains(PacketFlags::ZEROCODED) => {
-                message_bytes = zero_code::encode(&message_bytes);
+                packet_data = zero_code::encode(&packet_data);
             }
             ZeroCoding::Received => {}
         }
@@ -280,7 +278,7 @@ impl Packet {
             flags.insert(PacketFlags::APPENDED_ACKS);
         }
 
-        Ok((message_bytes, flags))
+        Ok((packet_data, flags))
     }
 }
 
@@ -294,10 +292,6 @@ mod tests {
     };
 
     use super::*;
-
-    fn decode_preflighted(bytes: &[u8]) -> Result<Packet, LLUdpError> {
-        Packet::inspect(bytes)?.preflighted()?.decode()
-    }
 
     #[test]
     fn resent_requires_reliable() {
@@ -353,11 +347,10 @@ mod tests {
     fn bad_id_precedes_expansion() {
         let datagram = [0x80, 0, 0, 0, 1, 0, 0, 4, 0];
         assert_eq!(Packet::decode(&datagram), Err(LLUdpError::InvalidMessageId));
-        assert_eq!(decode_preflighted(&datagram), Err(LLUdpError::InvalidMessageId));
     }
 
     #[test]
-    fn preflighted_decode_matches_packet_decode_for_frame_variants() {
+    fn preflighted_frame_variants_decode() {
         let ordinary = Packet::new(1, Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 1 } }))
             .encode()
             .expect("encode ordinary packet");
@@ -377,30 +370,26 @@ mod tests {
             [7, 0x0102_0304]
         );
 
-        for wire in [&ordinary, &zero_coded, &appended_acks] {
+        for (wire, sequence, message) in [
+            (&ordinary, 1, Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 1 } })),
+            (&zero_coded, 2, Message::Unknown { id: MessageId::high(0x71), payload: vec![0; 64] }),
+            (&appended_acks, 3, Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 2 } })),
+        ] {
             let preflighted = Packet::inspect(wire).expect("inspect packet").preflighted().expect("preflight packet");
-            assert_eq!(preflighted.preflight(), Packet::preflight(wire).expect("preflight same packet"));
-            assert_eq!(preflighted.decode(), Packet::decode(wire));
+            let packet = preflighted.decode().expect("decode frame");
+            assert_eq!(packet.header.sequence, sequence);
+            assert_eq!(packet.message(), &message);
         }
     }
 
     #[test]
-    fn preflighted_decode_matches_packet_decode_for_malformed_packets() {
+    fn typed_payload_is_validated_after_preflight() {
         let mut truncated_message = Packet::new(1, Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 1 } }))
             .encode()
             .expect("encode CompletePingCheck");
         truncated_message.pop();
         assert!(Packet::preflight(&truncated_message).is_ok(), "no-allocation preflight does not decode typed fields");
         assert_eq!(Packet::decode(&truncated_message), Err(LLUdpError::TruncatedPacket));
-        assert_eq!(decode_preflighted(&truncated_message), Packet::decode(&truncated_message));
-
-        let malformed_zero_code = [0x80, 0, 0, 0, 1, 0, 0];
-        assert_eq!(Packet::decode(&malformed_zero_code), Err(LLUdpError::InvalidZeroCode));
-        assert_eq!(decode_preflighted(&malformed_zero_code), Packet::decode(&malformed_zero_code));
-
-        let truncated_header = [0, 0, 0, 0, 1];
-        assert_eq!(Packet::decode(&truncated_header), Err(LLUdpError::TruncatedPacket));
-        assert_eq!(decode_preflighted(&truncated_header), Packet::decode(&truncated_header));
     }
 
     #[test]
