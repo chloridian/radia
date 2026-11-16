@@ -50,6 +50,7 @@ struct ScheduleKey {
 enum DeadlineKind {
     Demand,
     Retry,
+    Recovery,
     CacheRetry,
 }
 
@@ -441,6 +442,7 @@ struct RouteState {
     deadline: Instant,
     demand_deadline_indexed: bool,
     retry_deadline_indexed: bool,
+    recovery_deadline_indexed: bool,
     leases: Vec<Weak<Lease>>,
 }
 
@@ -451,7 +453,7 @@ impl RouteState {
 
     fn restart(&mut self, deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, route: Route, now: Instant) {
         remove_demand_deadline(deadlines, key, route, self);
-        remove_retry_deadline(deadlines, key, route, self);
+        remove_failure_deadlines(deadlines, key, route, self);
         self.eligibility = RouteEligibility::Eligible { attempts: 0 };
         self.deadline = now + DEMAND_DEADLINE;
     }
@@ -475,7 +477,7 @@ impl RouteState {
         ready: Option<&Content>,
     ) {
         let attempts = self.attempts();
-        remove_retry_deadline(deadlines, key, route, self);
+        remove_failure_deadlines(deadlines, key, route, self);
         self.eligibility = match retry_at {
             Some(retry_at) => RouteEligibility::RetryAt { attempts, failure, retry_at, expires: now + NEGATIVE_TTL },
             None => RouteEligibility::Failed { attempts, failure, expires: now + NEGATIVE_TTL },
@@ -498,9 +500,17 @@ impl RouteState {
         }
     }
 
+    fn recovery_at(&self) -> Option<Instant> {
+        match self.eligibility {
+            RouteEligibility::RetryAt { failure: Failure::Transient { .. }, expires, .. }
+            | RouteEligibility::Failed { failure: Failure::Transient { .. }, expires, .. } => Some(expires),
+            RouteEligibility::Eligible { .. } | RouteEligibility::RetryAt { .. } | RouteEligibility::Failed { .. } => None,
+        }
+    }
+
     fn begin_attempt(&mut self, deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, route: Route) {
         let attempts = self.attempts().saturating_add(1);
-        remove_retry_deadline(deadlines, key, route, self);
+        remove_failure_deadlines(deadlines, key, route, self);
         self.eligibility = RouteEligibility::Eligible { attempts };
     }
 
@@ -1086,6 +1096,7 @@ impl Store {
                 deadline: now + DEMAND_DEADLINE,
                 demand_deadline_indexed: false,
                 retry_deadline_indexed: false,
+                recovery_deadline_indexed: false,
                 leases: Vec::new(),
             }
         });
@@ -1153,6 +1164,11 @@ impl Store {
                             view.retry_deadline_indexed = false;
                         }
                     }
+                    (DeadlineKind::Recovery, Some(route)) => {
+                        if let Some(view) = entry.views.get_mut(&route) {
+                            view.recovery_deadline_indexed = false;
+                        }
+                    }
                     _ => {}
                 }
                 self.dirty_signals.mark(deadline.key, &entry.dirty);
@@ -1217,6 +1233,9 @@ impl Store {
             }
             (DeadlineKind::Retry, Some(route)) => {
                 entry.views.get(&route).is_some_and(|view| view.retry_deadline_indexed && view.retry_at() == Some(deadline.at))
+            }
+            (DeadlineKind::Recovery, Some(route)) => {
+                entry.views.get(&route).is_some_and(|view| view.recovery_deadline_indexed && view.recovery_at() == Some(deadline.at))
             }
             (DeadlineKind::CacheRetry, None) => entry.indexed_cache_retry == Some(deadline.at),
             _ => false,
@@ -1339,12 +1358,15 @@ impl Store {
 
     fn refresh_deadline_index(deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, entry: &mut AssetEntry, now: Instant) {
         let running = matches!(entry.phase, LoadPhase::Running { .. });
+        let idle = matches!(entry.phase, LoadPhase::Idle);
         for (route, view) in &mut entry.views {
             let demand_deadline =
                 (view.count() > 0 && (entry.priority == Priority::Visible || running) && view.deadline > now).then_some(view.deadline);
             update_route_deadline(deadlines, key, *route, DeadlineKind::Demand, view, demand_deadline);
             let retry_at = view.retry_at().filter(|retry_at| view.count() > 0 && *retry_at > now);
             update_route_deadline(deadlines, key, *route, DeadlineKind::Retry, view, retry_at);
+            let recovery_at = view.recovery_at().filter(|recovery_at| view.count() > 0 && !idle && *recovery_at > now);
+            update_route_deadline(deadlines, key, *route, DeadlineKind::Recovery, view, recovery_at);
         }
         let cache_retry = match entry.cache_eligibility {
             CacheEligibility::RetryAt(retry_at) if entry.has_active_demand() && retry_at > now => Some(retry_at),
@@ -1355,7 +1377,7 @@ impl Store {
 
     fn remove_route_deadlines(deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, route: Route, view: &mut RouteState) {
         remove_demand_deadline(deadlines, key, route, view);
-        remove_retry_deadline(deadlines, key, route, view);
+        remove_failure_deadlines(deadlines, key, route, view);
     }
 
     pub fn next_job(&mut self, now: Instant) -> Option<LoadJob> {
@@ -1926,6 +1948,7 @@ fn update_route_deadline(
     let (previous, indexed) = match kind {
         DeadlineKind::Demand => (Some(view.deadline), &mut view.demand_deadline_indexed),
         DeadlineKind::Retry => (view.retry_at(), &mut view.retry_deadline_indexed),
+        DeadlineKind::Recovery => (view.recovery_at(), &mut view.recovery_deadline_indexed),
         DeadlineKind::CacheRetry => return,
     };
     if *indexed && previous == next {
@@ -1955,12 +1978,18 @@ fn remove_demand_deadline(deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, r
     }
 }
 
-fn remove_retry_deadline(deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, route: Route, view: &mut RouteState) {
+fn remove_failure_deadlines(deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, route: Route, view: &mut RouteState) {
     if view.retry_deadline_indexed {
         if let Some(at) = view.retry_at() {
             deadlines.remove(&DeadlineKey { at, key, route: Some(route), kind: DeadlineKind::Retry });
         }
         view.retry_deadline_indexed = false;
+    }
+    if view.recovery_deadline_indexed {
+        if let Some(at) = view.recovery_at() {
+            deadlines.remove(&DeadlineKey { at, key, route: Some(route), kind: DeadlineKind::Recovery });
+        }
+        view.recovery_deadline_indexed = false;
     }
 }
 
@@ -2000,6 +2029,18 @@ fn reconcile_entry(
             if now >= view.deadline && restart {
                 view.restart(deadlines, key, *route, now);
             }
+        }
+    }
+    if !matches!(entry.phase, LoadPhase::Idle) {
+        let mut recovered = false;
+        for (route, view) in &mut entry.views {
+            if view.count() > 0 && view.recovery_at().is_some_and(|recovery_at| recovery_at <= now) {
+                view.restart(deadlines, key, *route, now);
+                recovered = true;
+            }
+        }
+        if recovered && !matches!(entry.phase, LoadPhase::Running { .. }) {
+            entry.phase = LoadPhase::Queued;
         }
     }
     entry.priority = priority;
