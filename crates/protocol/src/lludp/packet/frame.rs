@@ -7,8 +7,8 @@ use crate::lludp::{
 pub struct PacketFrame<'a> {
     sequence: u32,
     flags: PacketFlags,
-    extra_header: &'a [u8],
-    wire_body: &'a [u8],
+    extra_header_len: usize,
+    wire_data: &'a [u8],
     appended_ack_bytes: &'a [u8],
 }
 
@@ -19,11 +19,13 @@ impl<'a> PacketFrame<'a> {
 
     pub fn message_id(&self) -> Result<MessageId, LLUdpError> {
         if self.flags.contains(PacketFlags::ZEROCODED) {
-            let mut prefix = [0; 4];
-            let prefix_len = zero_code::decode_prefix(self.wire_body, &mut prefix)?;
-            MessageId::decode(&prefix[..prefix_len]).map(|(id, _)| id)
+            let mut prefix = [0; u8::MAX as usize + 4];
+            let prefix_len = zero_code::decode_prefix(self.wire_data, &mut prefix[..self.extra_header_len + 4])?;
+            let message_bytes = prefix.get(self.extra_header_len..prefix_len).ok_or(LLUdpError::TruncatedPacket)?;
+            MessageId::decode(message_bytes).map(|(id, _)| id)
         } else {
-            MessageId::decode(self.wire_body).map(|(id, _)| id)
+            let message_bytes = self.wire_data.get(self.extra_header_len..).ok_or(LLUdpError::TruncatedPacket)?;
+            MessageId::decode(message_bytes).map(|(id, _)| id)
         }
     }
 
@@ -50,31 +52,31 @@ impl<'a> PacketFrame<'a> {
 
     fn preflight_values(&self) -> Result<(PacketPreflight, usize, usize), LLUdpError> {
         let (id, allocation_bytes, decoded_body_len, id_len) = if self.flags.contains(PacketFlags::ZEROCODED) {
-            let mut id_prefix = [0; 4];
-            let prefix_len = zero_code::decode_prefix(self.wire_body, &mut id_prefix)?;
-            let (id, id_len) = MessageId::decode(&id_prefix[..prefix_len])?;
+            let mut id_prefix = [0; u8::MAX as usize + 4];
+            let prefix_len = zero_code::decode_prefix(self.wire_data, &mut id_prefix[..self.extra_header_len + 4])?;
+            let message_prefix = id_prefix.get(self.extra_header_len..prefix_len).ok_or(LLUdpError::TruncatedPacket)?;
+            let (id, id_len) = MessageId::decode(message_prefix)?;
             let max_decoded_body_size = MAX_LLUDP_PACKET_SIZE
-                .checked_sub(
-                    HEADER_BYTES
-                        + self.extra_header.len()
-                        + self.appended_ack_bytes.len()
-                        + usize::from(self.flags.contains(PacketFlags::APPENDED_ACKS)),
-                )
+                .checked_sub(HEADER_BYTES + self.appended_ack_bytes.len() + usize::from(self.flags.contains(PacketFlags::APPENDED_ACKS)))
                 .ok_or(LLUdpError::DatagramTooLarge)?;
-            let mut decoded_body = [0; MAX_LLUDP_PACKET_SIZE];
-            let decoded_len = zero_code::decode_to_slice(self.wire_body, &mut decoded_body[..max_decoded_body_size])?;
-            let payload = &decoded_body[id_len..decoded_len];
+            let mut decoded_data = [0; MAX_LLUDP_PACKET_SIZE];
+            let decoded_len = zero_code::decode_to_slice(self.wire_data, &mut decoded_data[..max_decoded_body_size])?;
+            let message_start = self.extra_header_len;
+            let message_end = decoded_len;
+            let message_bytes = decoded_data.get(message_start..message_end).ok_or(LLUdpError::TruncatedPacket)?;
+            let payload = message_bytes.get(id_len..).ok_or(LLUdpError::TruncatedPacket)?;
             let (_, allocation_bytes) = Message::allocation_bound(id, payload)?;
             (id, allocation_bytes, decoded_len, id_len)
         } else {
-            let (id, id_len) = MessageId::decode(self.wire_body)?;
-            let payload = &self.wire_body[id_len..];
+            let message_bytes = self.wire_data.get(self.extra_header_len..).ok_or(LLUdpError::TruncatedPacket)?;
+            let (id, id_len) = MessageId::decode(message_bytes)?;
+            let payload = message_bytes.get(id_len..).ok_or(LLUdpError::TruncatedPacket)?;
             let (_, allocation_bytes) = Message::allocation_bound(id, payload)?;
-            (id, allocation_bytes, self.wire_body.len(), id_len)
+            (id, allocation_bytes, self.wire_data.len(), id_len)
         };
 
         let packet_allocation_bytes = allocation_bytes
-            .checked_add(self.extra_header.len())
+            .checked_add(self.extra_header_len)
             .and_then(|bytes| bytes.checked_add(self.appended_ack_bytes.len()))
             .ok_or(LLUdpError::AllocationBoundOverflow)?;
         let retained_capacity_upper_bound = packet_allocation_bytes;
@@ -140,18 +142,26 @@ impl PreflightedPacketFrame<'_> {
         let Self { frame, preflight, message_id_len, decoded_body_len } = self;
         let flags = frame.flags;
         let sequence = frame.sequence;
-        let decode_payload = |message_bytes: &[u8]| Message::decode(preflight.message_id, &message_bytes[message_id_len..]);
-        let (message, trailing_message_bytes) = if flags.contains(PacketFlags::ZEROCODED) {
-            let mut decoded_body = Vec::with_capacity(decoded_body_len);
-            zero_code::decode_into(frame.wire_body, &mut decoded_body, decoded_body_len)?;
-            decode_payload(&decoded_body)?
+        let decode_payload = |data: &[u8]| {
+            let message_bytes = data.get(frame.extra_header_len..).ok_or(LLUdpError::TruncatedPacket)?;
+            let payload = message_bytes.get(message_id_len..).ok_or(LLUdpError::TruncatedPacket)?;
+            Message::decode(preflight.message_id, payload)
+        };
+        let (message, trailing_message_bytes, extra_header) = if flags.contains(PacketFlags::ZEROCODED) {
+            let mut decoded_data = Vec::with_capacity(decoded_body_len);
+            zero_code::decode_into(frame.wire_data, &mut decoded_data, decoded_body_len)?;
+            let extra_header = decoded_data.get(..frame.extra_header_len).ok_or(LLUdpError::TruncatedPacket)?.to_vec();
+            let (message, trailing_message_bytes) = decode_payload(&decoded_data)?;
+            (message, trailing_message_bytes, extra_header)
         } else {
-            decode_payload(frame.wire_body)?
+            let extra_header = frame.wire_data.get(..frame.extra_header_len).ok_or(LLUdpError::TruncatedPacket)?.to_vec();
+            let (message, trailing_message_bytes) = decode_payload(frame.wire_data)?;
+            (message, trailing_message_bytes, extra_header)
         };
         let mut appended_acks = Vec::with_capacity(frame.appended_ack_bytes.len() / 4);
         appended_acks.extend(frame.appended_acks());
         let packet = Packet {
-            header: PacketHeader { sequence, flags, extra_header: frame.extra_header.to_vec() },
+            header: PacketHeader { sequence, flags, extra_header },
             message,
             trailing_message_bytes,
             appended_acks,
@@ -178,9 +188,11 @@ impl Packet {
             return Err(LLUdpError::InvalidPacketFlags);
         }
         let sequence = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-        let extra_len = usize::from(bytes[5]);
-        let body_start = HEADER_BYTES.checked_add(extra_len).ok_or(LLUdpError::TruncatedPacket)?;
-        if bytes.len() < body_start {
+        let extra_header_len = usize::from(bytes[5]);
+        let data_start = HEADER_BYTES;
+        if !flags.contains(PacketFlags::ZEROCODED)
+            && bytes.len() < data_start.checked_add(extra_header_len).ok_or(LLUdpError::TruncatedPacket)?
+        {
             return Err(LLUdpError::TruncatedPacket);
         }
 
@@ -189,7 +201,12 @@ impl Packet {
             let trailer_len =
                 count.checked_mul(4).and_then(|length| length.checked_add(1)).ok_or(LLUdpError::InvalidAcknowledgementList)?;
             let end = bytes.len().checked_sub(trailer_len).ok_or(LLUdpError::InvalidAcknowledgementList)?;
-            if end < body_start {
+            let minimum_body_end = if flags.contains(PacketFlags::ZEROCODED) {
+                data_start
+            } else {
+                data_start.checked_add(extra_header_len).ok_or(LLUdpError::InvalidAcknowledgementList)?
+            };
+            if end < minimum_body_end {
                 return Err(LLUdpError::InvalidAcknowledgementList);
             }
             end
@@ -198,13 +215,7 @@ impl Packet {
         };
         let appended_ack_bytes = if flags.contains(PacketFlags::APPENDED_ACKS) { &bytes[body_end..bytes.len() - 1] } else { &[] };
 
-        Ok(PacketFrame {
-            sequence,
-            flags,
-            extra_header: &bytes[HEADER_BYTES..body_start],
-            wire_body: &bytes[body_start..body_end],
-            appended_ack_bytes,
-        })
+        Ok(PacketFrame { sequence, flags, extra_header_len, wire_data: &bytes[data_start..body_end], appended_ack_bytes })
     }
 
     pub fn preflight(bytes: &[u8]) -> Result<PacketPreflight, LLUdpError> {
@@ -239,17 +250,17 @@ mod tests {
         ] {
             let bytes = parse_hex_fixture(fixture).expect("typed fixture is valid hex");
             let frame = Packet::inspect(&bytes).expect("inspect schema-shaped typed fixture");
-            let message_bytes = if frame.flags.contains(PacketFlags::ZEROCODED) {
+            let data = if frame.flags.contains(PacketFlags::ZEROCODED) {
                 let max_size = MAX_LLUDP_PACKET_SIZE
                     - HEADER_BYTES
-                    - frame.extra_header.len()
                     - frame.appended_ack_bytes.len()
                     - usize::from(frame.flags.contains(PacketFlags::APPENDED_ACKS));
-                zero_code::decode(frame.wire_body, max_size).expect("decode fixture zero coding")
+                zero_code::decode(frame.wire_data, max_size).expect("decode fixture zero coding")
             } else {
-                frame.wire_body.to_vec()
+                frame.wire_data.to_vec()
             };
-            let (id, id_len) = MessageId::decode(&message_bytes).expect("decode fixture message ID");
+            let message_bytes = data.get(frame.extra_header_len..).expect("decoded extra header has its declared size");
+            let (id, id_len) = MessageId::decode(message_bytes).expect("decode fixture message ID");
             let metadata = crate::schema::find_by_id(id).expect("typed fixture has generated schema");
             let schema_bound = crate::lludp::schema_message::SchemaMessage::allocation_bound(metadata, &message_bytes[id_len..])
                 .expect("generated schema bounds typed message body");

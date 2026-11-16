@@ -1095,6 +1095,43 @@ mod tests {
     }
 
     #[test]
+    fn unknown_key_limit_is_accepted() {
+        let owner = Uuid::from_u128(1);
+        let folder = Uuid::from_u128(2);
+        let mut fields = match category(folder, None, 0) {
+            Value::Map(fields) => fields,
+            _ => unreachable!(),
+        };
+        fields.insert("agent_id".into(), Value::Uuid(owner));
+        fields.insert("x".repeat(128), Value::String("ignored".into()));
+
+        let decoded = decode_ais_children(&encode(&Value::Map(fields)), folder, owner).expect("128-byte unknown key is accepted");
+
+        assert_eq!(decoded.id, folder);
+        assert_eq!(decoded.owner_id, Some(owner));
+        assert_eq!(decoded.parent_id, None);
+        assert_eq!(decoded.name, "folder");
+        assert_eq!(decoded.version, Some(4));
+        assert_eq!(decoded.descendent_count, None);
+        assert_eq!(decoded.preferred_folder_type, None);
+        assert_eq!(decoded.children, None);
+    }
+
+    #[test]
+    fn oversized_unknown_key_is_too_large() {
+        let owner = Uuid::from_u128(1);
+        let folder = Uuid::from_u128(2);
+        let mut fields = match category(folder, None, 0) {
+            Value::Map(fields) => fields,
+            _ => unreachable!(),
+        };
+        fields.insert("agent_id".into(), Value::Uuid(owner));
+        fields.insert("x".repeat(129), Value::String("ignored".into()));
+
+        assert_eq!(decode_ais_children(&encode(&Value::Map(fields)), folder, owner), Err(DecodeError::TooLarge));
+    }
+
+    #[test]
     fn ais_created_at_requires_unix_integer_shape() {
         let owner = Uuid::from_u128(1);
         let root = Uuid::from_u128(2);
