@@ -13,7 +13,7 @@ fn assert_rgba_near(actual: [u8; 4], expected: [u8; 4], tolerance: u8) {
 }
 
 #[test]
-fn exposure_and_tonemap_defaults_follow_sky_ambiance() {
+fn defaults_follow_sky_ambiance() {
     let sources = Sources {
         base: None,
         schedule: Schedule::default(),
@@ -35,7 +35,7 @@ fn exposure_and_tonemap_defaults_follow_sky_ambiance() {
 }
 
 #[test]
-fn exposure_requests_frames_only_while_settling() {
+fn exposure_redraws_only_while_settling() {
     let now = Instant::now();
     assert!(exposure_needs_frame(Some(now + EXPOSURE_SETTLE_TIME), now));
     assert!(!exposure_needs_frame(Some(now), now));
@@ -43,8 +43,8 @@ fn exposure_requests_frames_only_while_settling() {
 }
 
 #[test]
-#[ignore = "requires Vulkan; run with cargo test -p render --lib tonemap_matches_aces_and_keeps_depth_zero_scene_linear -- --ignored"]
-fn tonemap_matches_aces_and_keeps_depth_zero_scene_linear() {
+#[ignore = "requires Vulkan; run with cargo test -p render --lib tonemap_matches_aces_curve -- --ignored"]
+fn tonemap_matches_aces_curve() {
     let instance =
         wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
     let (device, queue) = block_on(async {
@@ -58,8 +58,8 @@ fn tonemap_matches_aces_and_keeps_depth_zero_scene_linear() {
 }
 
 #[test]
-#[ignore = "requires Vulkan; run with cargo test -p render --lib exposure_uses_diffuse_scale_and_centered_crop -- --ignored"]
-fn exposure_uses_diffuse_scale_and_centered_crop() {
+#[ignore = "requires Vulkan; run with cargo test -p render --lib exposure_uses_scale_and_crop -- --ignored"]
+fn exposure_uses_scale_and_crop() {
     let instance =
         wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
     let (device, queue) = block_on(async {
@@ -75,8 +75,8 @@ fn exposure_uses_diffuse_scale_and_centered_crop() {
 }
 
 #[test]
-#[ignore = "requires Vulkan; run with cargo test -p render --lib exposure_keeps_depth_zero_luminance_linear -- --ignored"]
-fn exposure_keeps_depth_zero_luminance_linear() {
+#[ignore = "requires Vulkan; run with cargo test -p render --lib exposure_keeps_zero_depth_linear -- --ignored"]
+fn exposure_keeps_zero_depth_linear() {
     let instance =
         wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
     let (device, queue) = block_on(async {

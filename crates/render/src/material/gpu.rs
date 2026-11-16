@@ -145,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn pbr_and_texture_entry_transforms_compose() {
+    fn pbr_texture_transforms_compose() {
         let material_transform = UvTransform { offset: [0.25, -0.125], scale: [2.0, 3.0], rotation: FRAC_PI_2 };
         let texture_entry_transform = UvTransform { offset: [-0.25, 0.125], scale: [0.5, 1.5], rotation: FRAC_PI_2 };
         let face = FaceMaterial {

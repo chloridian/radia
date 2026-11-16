@@ -848,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn caps_without_triangles_keep_finite_normals() {
+    fn empty_caps_keep_finite_normals() {
         let point = Point { position: Vec2::ZERO, t: 0.0 };
         let ring = Ring { position: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec2::ONE, t: 0.0 };
         let make_cap = |inner: Vec<Point>, open: bool, top: bool| {
@@ -972,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn face_slots_and_uvs_follow_reference() {
+    fn slots_and_uvs_match_reference() {
         let shapes = [
             PrimShape { profile_curve: 0, ..PrimShape::default() },
             PrimShape { path_curve: 0x20, profile_curve: 5, ..PrimShape::default() },
@@ -1008,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_profile_faces_keep_hard_normals() {
+    fn flat_faces_keep_hard_normals() {
         let mesh = generate(PrimShape { path_twist: 50, ..PrimShape::default() });
         let first = vertex_at(&mesh, 1, Vec2::new(1.0, 0.0));
         let next = vertex_at(&mesh, 2, Vec2::ZERO);
@@ -1054,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn triangle_cut_faces_keep_uv_ranges() {
+    fn triangle_cut_keeps_uv_ranges() {
         let mesh = generate(PrimShape { profile_curve: 2, profile_begin: 12500, profile_end: 12500, ..PrimShape::default() });
         assert_eq!(mesh.faces().len(), 7);
         for (slot, expected) in [(1, [0.75, 1.0]), (2, [0.0, 1.0]), (3, [0.0, 0.25])] {
@@ -1089,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_hollow_faces_match_reference_counts() {
+    fn flat_hollow_matches_reference_counts() {
         let shape = PrimShape { profile_hollow: 25000, ..PrimShape::default() };
         for (detail, vertices, indices) in [(Detail::Lowest, 56, 126), (Detail::High, 220, 810)] {
             let mesh = generate_at(shape, detail);
@@ -1179,7 +1179,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_prims_have_no_boundary_edges() {
+    fn closed_prims_lack_boundary_edges() {
         for (name, shape) in [
             ("box", PrimShape::default()),
             ("cylinder", PrimShape { profile_curve: 0, ..PrimShape::default() }),

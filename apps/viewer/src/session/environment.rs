@@ -873,7 +873,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_queue_parcel_properties_update_current_state_and_reject_stale_sequences() {
+    async fn parcel_events_reject_stale_sequences() {
         let mut world = SessionWorld::new(viewer_world_limits());
         let simulator = simulator_id();
         let region = world.register_simulator(simulator, None).unwrap();
@@ -905,7 +905,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delayed_sequence_zero_lludp_reply_cannot_overwrite_newer_event_queue_properties() {
+    async fn zero_sequence_keeps_event_queue() {
         let mut world = SessionWorld::new(viewer_world_limits());
         let simulator = simulator_id();
         let region = world.register_simulator(simulator, None).unwrap();
@@ -936,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn event_queue_parcel_properties_bound_untrusted_urls() {
+    fn parcel_event_bounds_urls() {
         let mut value = parcel_properties_event(1, 2, "Parcel");
         let Value::Map(body) = &mut value else { panic!("event body must be a map") };
         let Some(Value::Array(blocks)) = body.get_mut("ParcelData") else { panic!("parcel data block missing") };

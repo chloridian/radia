@@ -370,7 +370,7 @@ fn apply_and_acknowledge(
 }
 
 #[tokio::test]
-async fn ais_recursively_decodes_folders_items_and_hypermedia_metadata() {
+async fn ais_decodes_recursive_listing() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let capability = CapabilityUrl::parse(peer.url("/ais").as_str()).expect("valid AIS URL");
@@ -452,7 +452,7 @@ async fn ais_recursively_decodes_folders_items_and_hypermedia_metadata() {
 }
 
 #[tokio::test]
-async fn ais_item_endpoint_decodes_a_link_target_only_when_requested() {
+async fn item_endpoint_decodes_requested_link() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let capability = CapabilityUrl::parse(peer.url("/ais").as_str()).expect("valid AIS URL");
@@ -511,7 +511,7 @@ async fn ais_item_endpoint_decodes_a_link_target_only_when_requested() {
 }
 
 #[tokio::test]
-async fn fallback_uses_personal_and_library_descendents_capabilities() {
+async fn fallback_uses_descendents_capabilities() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let personal_owner = InventoryOwner::new(Uuid::from_u128(1));
@@ -838,7 +838,7 @@ async fn foreground_aux_target_resolves_later() {
 }
 
 #[tokio::test]
-async fn fallback_batches_no_more_than_ten_folders_per_request() {
+async fn fallback_batches_ten_folders() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let owner = InventoryOwner::new(Uuid::from_u128(1));
@@ -901,7 +901,7 @@ async fn fallback_batches_no_more_than_ten_folders_per_request() {
 }
 
 #[tokio::test]
-async fn recursive_403_reduces_depth_until_the_server_accepts_the_request() {
+async fn recursive_403_reduces_depth() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let capability = CapabilityUrl::parse(peer.url("/ais").as_str()).expect("valid AIS URL");
@@ -927,7 +927,7 @@ async fn recursive_403_reduces_depth_until_the_server_accepts_the_request() {
 }
 
 #[tokio::test]
-async fn a_depth_zero_403_is_reported_as_a_too_large_folder() {
+async fn depth_zero_403_too_large() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let capability = CapabilityUrl::parse(peer.url("/ais").as_str()).expect("valid AIS URL");
@@ -944,7 +944,7 @@ async fn a_depth_zero_403_is_reported_as_a_too_large_folder() {
 }
 
 #[tokio::test]
-async fn transient_http_failure_retries_and_succeeds() {
+async fn transient_failure_retries() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let capability = CapabilityUrl::parse(peer.url("/ais").as_str()).expect("valid AIS URL");
@@ -1053,7 +1053,7 @@ async fn missing_folder_keeps_walk_retryable() {
 }
 
 #[tokio::test]
-async fn stale_live_response_requeues_incomplete_folder() {
+async fn stale_response_requeues_folder() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let owner = InventoryOwner::new(Uuid::from_u128(1));
@@ -1126,7 +1126,7 @@ async fn stale_live_response_requeues_incomplete_folder() {
 }
 
 #[tokio::test]
-async fn unrelated_folder_change_keeps_fetch_fresh() {
+async fn unrelated_change_keeps_fetch_fresh() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let owner = InventoryOwner::new(Uuid::from_u128(51));
@@ -1174,7 +1174,7 @@ async fn unrelated_folder_change_keeps_fetch_fresh() {
 }
 
 #[tokio::test]
-async fn recursive_child_refetches_after_parent_update() {
+async fn parent_update_stales_child() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let owner = InventoryOwner::new(Uuid::from_u128(61));
@@ -1244,7 +1244,7 @@ async fn recursive_child_refetches_after_parent_update() {
 }
 
 #[tokio::test]
-async fn rejected_folder_can_be_requested_again() {
+async fn rejected_folder_retries() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let owner = InventoryOwner::new(Uuid::from_u128(1));
@@ -1285,7 +1285,7 @@ async fn rejected_folder_can_be_requested_again() {
 }
 
 #[tokio::test]
-async fn refetch_signal_fetches_a_folder_the_scheduler_knows_as_complete() {
+async fn refetch_signal_fetches_complete_folder() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let owner = InventoryOwner::new(Uuid::from_u128(1));
@@ -1328,7 +1328,7 @@ async fn refetch_signal_fetches_a_folder_the_scheduler_knows_as_complete() {
 }
 
 #[tokio::test]
-async fn parent_response_requeues_a_completed_child_when_its_new_count_is_unknown() {
+async fn parent_metadata_requeues_child() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let owner = InventoryOwner::new(Uuid::from_u128(1));
@@ -1382,7 +1382,7 @@ async fn parent_response_requeues_a_completed_child_when_its_new_count_is_unknow
 }
 
 #[tokio::test]
-async fn foreground_request_preempts_in_flight_background_folders() {
+async fn foreground_preempts_background() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let (mut inventory, root, first, second) = inventory_with_children();
@@ -1448,7 +1448,7 @@ async fn cancellation_drops_foreground_completion() {
 }
 
 #[tokio::test]
-async fn one_hundred_thousand_items_load_with_bounded_responses_and_concurrency() {
+async fn huge_inventory_stays_bounded() {
     const ITEMS_PER_FOLDER: usize = 50_000;
     const _: () = assert!(MAX_INVENTORY_ITEMS >= ITEMS_PER_FOLDER * 2);
     let mut peer = LoopbackPeer::start().await;
@@ -1520,7 +1520,7 @@ async fn one_hundred_thousand_items_load_with_bounded_responses_and_concurrency(
 }
 
 #[tokio::test]
-async fn owner_refresh_reconciles_deep_personal_and_library_folders() {
+async fn owner_refresh_reconciles_deep_folders() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let personal = InventoryOwner::new(Uuid::from_u128(701));

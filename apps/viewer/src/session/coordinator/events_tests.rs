@@ -140,7 +140,7 @@ async fn await_cache_write(cache: &mut ObjectCacheSession) {
 }
 
 #[tokio::test]
-async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
+async fn interleaved_updates_preserve_indexes() {
     let directory = tempfile::tempdir().expect("create isolated cache directory");
     let simulator = simulator_id();
     let mut cache = crate::session::object_cache::open_for_test(directory.path().join("objects.sqlite"), network::Grid::Agni);
@@ -315,7 +315,7 @@ async fn different_cached_identity_requests_full() {
 }
 
 #[tokio::test]
-async fn recovered_cached_object_media_reaches_session_handoff() {
+async fn recovered_media_reaches_handoff() {
     let directory = tempfile::tempdir().expect("create isolated cache directory");
     let simulator = simulator_id();
     let mut cache = crate::session::object_cache::open_for_test(directory.path().join("objects.sqlite"), network::Grid::Agni);
@@ -425,7 +425,7 @@ fn region_connection_lifecycle() {
 }
 
 #[test]
-fn authenticated_primary_movement_complete_resolves_region_origin() {
+fn primary_movement_resolves_origin() {
     let primary_simulator = simulator_id();
     let other_simulator = simulator_id();
     let packet = fixture_packet(vectors::AGENT_MOVEMENT_COMPLETE);
@@ -457,7 +457,7 @@ fn authenticated_primary_movement_complete_resolves_region_origin() {
 }
 
 #[test]
-fn destination_movement_complete_waits_for_promotion() {
+fn destination_movement_awaits_promotion() {
     let packet = fixture_packet(vectors::AGENT_MOVEMENT_COMPLETE);
     let Message::AgentMovementComplete(mut movement) = packet.message().clone() else { panic!("movement-complete fixture") };
     let agent_id = movement.agent_data.agent_id;
@@ -964,7 +964,7 @@ fn object_update_order_schedules_recovery() {
 }
 
 #[test]
-fn synthetic_ordered_object_message_replay_preserves_detach_and_reuse_fences() {
+fn ordered_replay_preserves_fences() {
     let simulator_id = simulator_id();
     let region_handle = 0x3333_0000_0000_0003;
     let endpoint = "127.0.0.1:13000".parse().expect("endpoint");

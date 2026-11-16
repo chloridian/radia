@@ -512,7 +512,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detail_reads_resume_deep_visibility_work() {
+    async fn detail_reads_resume_deep_work() {
         let depth = MAX_OBJECT_DETAIL_WORK_ITEMS + 12;
         let object_count = (depth + 1) * 2;
         let mut world = World::new(WorldLimits {
@@ -603,7 +603,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replaced_detail_request_cannot_restore_an_old_cursor() {
+    async fn replaced_request_drops_old_cursor() {
         let depth = MAX_OBJECT_DETAIL_WORK_ITEMS * 3 + 132;
         let object_count = depth + 2;
         let mut world = World::new(WorldLimits {

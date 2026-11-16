@@ -496,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn retries_coalesce_and_stop_after_the_send_limit() {
+    fn retries_coalesce_until_send_limit() {
         let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
         let target = address(regions[0], 8);
@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_completions_cannot_change_replaced_or_degraded_work() {
+    fn stale_completions_are_ignored() {
         let (_region_world, regions) = registered_regions(1);
         let source = simulator_id();
         let destination = simulator_id();
@@ -566,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn simulator_retirement_clears_only_its_current_routes() {
+    fn retirement_clears_only_own_routes() {
         let (_region_world, regions) = registered_regions(1);
         let source = simulator_id();
         let destination = simulator_id();
@@ -592,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn losing_route_or_session_context_stops_an_existing_recovery() {
+    fn lost_context_stops_recovery() {
         let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
         let target = address(regions[0], 9);
@@ -609,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_batches_are_bounded_disjoint_and_simulator_local() {
+    fn batches_are_bounded_and_local() {
         let simulators = [simulator_id(), simulator_id()];
         let (_region_world, regions) = registered_regions(simulators.len());
         let now = Instant::now();
@@ -639,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn transient_failures_back_off_without_spending_the_send_limit() {
+    fn transient_failure_keeps_send_budget() {
         let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
         let target = address(regions[0], 8);
@@ -659,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn age_limit_suppresses_repeated_misses_until_an_object_update() {
+    fn age_limit_suppresses_until_update() {
         let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
         let target = address(regions[0], 8);
@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_never_sends_expired_work_left_by_bounded_cleanup() {
+    fn dispatch_skips_expired_work() {
         let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
         let now = Instant::now();
@@ -696,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_bounds_active_and_degraded_targets_together() {
+    fn admission_bounds_active_and_degraded() {
         let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
         let now = Instant::now();
@@ -720,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn requests_fetch_full_data_and_fit_the_wire_budget() {
+    fn requests_fetch_full_within_budget() {
         let (_region_world, regions) = registered_regions(1);
         let targets = [address(regions[0], 10), address(regions[0], 11)];
         let request = recovery_request(agent_data(), &targets);

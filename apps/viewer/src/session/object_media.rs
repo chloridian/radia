@@ -526,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn version_marker_requires_version_and_agent() {
+    fn marker_requires_version_and_agent() {
         assert_eq!(media_version("x-mv:12/00000000-0000-0000-0000-000000000001"), Some(12));
         assert_eq!(media_version("https://example.test/media"), None);
         assert_eq!(media_version("x-mv:bad/00000000-0000-0000-0000-000000000001"), None);
@@ -553,7 +553,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn older_marker_does_not_replace_retry() {
+    async fn older_marker_keeps_retry() {
         let (active, _) = replacement_targets().await;
         let latest = ObjectMediaTarget { version: 8, ..active };
         let older = ObjectMediaTarget { version: 7, ..active };

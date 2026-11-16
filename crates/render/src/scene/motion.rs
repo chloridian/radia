@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn receipt_time_sample_uses_ping_and_frame_lead() {
+    fn sample_uses_ping_and_lead() {
         let (_region_world, region) = crate::test_support::registered_region();
         let received_at = Instant::now();
         let mut sample = sample(region, DVec3::ZERO, Vec3::X * 2.0, Vec3::ZERO, Vec3::ZERO, false);
@@ -516,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn render_prediction_recovers_from_taper_position() {
+    fn prediction_recovers_from_taper() {
         let (_region_world, region) = crate::test_support::registered_region();
         let sampled_at = Instant::now();
         let phase_out_at = sampled_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn update_rebases_position_and_keeps_target_spin() {
+    fn update_rebases_keeps_spin() {
         let (_region_world, region) = crate::test_support::registered_region();
         let now = Instant::now();
         let mut old = sample(region, DVec3::ZERO, Vec3::X * 2.0, Vec3::ZERO, Vec3::Z * 2.0, false);
@@ -609,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn scale_update_keeps_motion_prediction_clock() {
+    fn scale_update_keeps_clock() {
         let (_region_world, region) = crate::test_support::registered_region();
         let now = Instant::now();
         let moving = sample(region, DVec3::ZERO, Vec3::X * 2.0, Vec3::ZERO, Vec3::Z, false);
@@ -666,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn full_zero_omega_resets_rotation_to_base() {
+    fn zero_omega_resets_rotation() {
         let (_region_world, region) = crate::test_support::registered_region();
         let received_at = Instant::now();
         let moving = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z, false);
@@ -706,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn physical_rate_update_resets_spin_offset() {
+    fn physical_update_resets_spin() {
         let (_region_world, region) = crate::test_support::registered_region();
         let now = Instant::now();
         let moving = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z, true);
@@ -770,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn linkset_child_follows_parent_without_drawable_dimensions() {
+    fn child_follows_parent_without_size() {
         for scale in [None, Some(Vec3::ZERO)] {
             let (_world, _scene, view) = child_scene(scale);
             let root = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("root is published");
@@ -841,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn motion_keeps_extrapolating_past_three_seconds() {
+    fn extrapolation_continues_past_three_seconds() {
         let (_world, _scene, view) = child_scene(None);
         let root = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("root is published");
         let entity = root.detail().summary.entity;
@@ -856,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn falling_avatar_clamps_to_terrain_plus_half_height() {
+    fn falling_avatar_clamps_to_terrain() {
         let (world, _scene, view) = child_scene(None);
         let region = world.region_page(None, 64).expect("fixture region page").regions[0].region;
         let now = Instant::now();
@@ -871,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn object_prediction_clamps_to_region_max_height() {
+    fn prediction_clamps_to_max_height() {
         let (world, _scene, view) = child_scene(None);
         let region = world.region_page(None, 64).expect("fixture region page").regions[0].region;
         let now = Instant::now();
@@ -884,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn angular_only_object_keeps_authoritative_height() {
+    fn angular_only_keeps_height() {
         let (world, _scene, view) = child_scene(None);
         let region = world.region_page(None, 64).expect("fixture region page").regions[0].region;
         let now = Instant::now();
@@ -897,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn redraw_stops_for_stationary_or_invisible_transforms() {
+    fn stationary_transforms_stop_redraw() {
         let stationary = WorldTransform { pose: WorldPose { position: DVec3::ZERO, rotation: Quat::IDENTITY }, scale: Vec3::ONE };
         let moving = WorldTransform { pose: WorldPose { position: DVec3::X, rotation: Quat::IDENTITY }, scale: Vec3::ONE };
         let spinning = WorldTransform { pose: WorldPose { position: DVec3::ZERO, rotation: Quat::from_rotation_z(0.1) }, scale: Vec3::ONE };
@@ -909,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn region_crossing_stops_at_one_second() {
+    fn crossing_stops_at_one_second() {
         let (_region_world, regions) = crate::test_support::registered_regions(2);
         let region = regions[0];
         let second_region = regions[1];
@@ -924,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn loaded_neighbor_still_clips_at_the_next_missing_region() {
+    fn loaded_neighbor_clips_next_missing() {
         let (_region_world, regions) = crate::test_support::registered_regions(2);
         let region = regions[0];
         let second_region = regions[1];
@@ -940,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn sample_outside_assigned_region_starts_from_loaded_neighbor() {
+    fn outside_sample_starts_from_neighbor() {
         let (_region_world, regions) = crate::test_support::registered_regions(2);
         let region = regions[0];
         let second_region = regions[1];
@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_neighbor_clips_at_region_edge() {
+    fn missing_neighbor_clips_edge() {
         let (_region_world, region) = crate::test_support::registered_region();
         let now = Instant::now();
         let moving = sample(region, DVec3::new(255.0, 20.0, 0.0), Vec3::X * 100.0, Vec3::ZERO, Vec3::ZERO, false);

@@ -58,7 +58,7 @@ mod tests {
     }
 
     #[test]
-    fn formats_avatar_names_and_hides_typing() {
+    fn formats_names_hides_typing() {
         let one_name =
             display_message(chat("\"researched\" Resident", Audible::Fully, ChatType::Normal, "hello"), None).expect("fully audible chat");
         let two_names =

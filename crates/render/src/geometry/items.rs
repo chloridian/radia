@@ -275,7 +275,7 @@ mod tests {
     };
 
     #[test]
-    fn first_face_pipeline_tracks_mirror_and_invert() {
+    fn first_face_pipeline_follows_flips() {
         let (_scene, view, _) = crate::geometry::fixtures::scene(255);
         let object = view.objects().next().expect("mesh fixture object");
         let (_, mesh) = object.mesh().expect("mesh fixture geometry");

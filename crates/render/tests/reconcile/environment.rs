@@ -6,7 +6,7 @@ use super::support::{
 use render::environment::Schedule;
 
 #[test]
-fn unrepresentable_transition_leaves_no_pending_work() {
+fn bad_transition_leaves_no_work() {
     let world = world();
     let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -41,7 +41,7 @@ fn unrepresentable_transition_leaves_no_pending_work() {
 }
 
 #[test]
-fn parcel_environment_precedes_region_and_inherit_falls_through() {
+fn parcel_precedes_region_inherit() {
     let mut world = world();
     let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -85,7 +85,7 @@ fn parcel_environment_precedes_region_and_inherit_falls_through() {
 }
 
 #[test]
-fn asset_and_inline_assignments_publish_decoded_settings() {
+fn assignments_publish_decoded_settings() {
     let mut world = world();
     let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -113,7 +113,7 @@ fn asset_and_inline_assignments_publish_decoded_settings() {
 }
 
 #[test]
-fn environment_identity_tracks_only_settings_and_schedule() {
+fn identity_tracks_settings_schedule() {
     let mut world = world();
     let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -165,7 +165,7 @@ fn environment_identity_tracks_only_settings_and_schedule() {
 }
 
 #[test]
-fn stale_asset_completion_is_ignored_and_previous_value_stays_until_replacement() {
+fn stale_completion_keeps_previous() {
     let mut world = world();
     let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -201,7 +201,7 @@ fn stale_asset_completion_is_ignored_and_previous_value_stays_until_replacement(
 }
 
 #[test]
-fn parcel_failure_falls_back_to_region_then_none() {
+fn parcel_failure_falls_back() {
     let mut world = world();
     let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -231,7 +231,7 @@ fn parcel_failure_falls_back_to_region_then_none() {
 }
 
 #[test]
-fn retryable_failure_keeps_waiting_for_the_store() {
+fn retryable_failure_keeps_waiting() {
     let mut world = world();
     let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -264,7 +264,7 @@ fn retryable_failure_keeps_waiting_for_the_store() {
 }
 
 #[test]
-fn stale_session_releases_ticket_without_falling_back() {
+fn stale_session_releases_ticket() {
     let mut world = world();
     let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -295,7 +295,7 @@ fn stale_session_releases_ticket_without_falling_back() {
 }
 
 #[test]
-fn retirement_releases_environment_ticket_and_source_charge() {
+fn retirement_releases_ticket_charge() {
     let (mut world, regions) = world_with_region_count(2);
     let region = regions[0];
     let other_region = regions[1];
@@ -327,7 +327,7 @@ fn retirement_releases_environment_ticket_and_source_charge() {
 }
 
 #[test]
-fn reset_and_close_release_pending_environment_assets() {
+fn reset_and_close_release_assets() {
     let mut world = world();
     let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());

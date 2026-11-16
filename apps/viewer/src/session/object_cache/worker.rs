@@ -556,7 +556,7 @@ mod tests {
     use crate::session::object_cache::test_support::*;
     use crate::session::object_cache::{CacheWriteJob, CacheWriteOperation, MAX_REGION_ENTRIES, ObjectCacheEvent, ObjectCacheSession};
     #[tokio::test]
-    async fn region_reset_deletes_writes_already_queued_for_the_previous_scope() {
+    async fn region_reset_drops_queued_writes() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let path = directory.path().join("objects.sqlite");
         let mut cache = open_cache(&path);

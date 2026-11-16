@@ -47,7 +47,7 @@ fn assert_placeholder_normals(mesh: &Mesh, sculpt_type: SculptType) {
 }
 
 #[test]
-fn stitched_samples_match_hand_derived_reference_for_all_flags() {
+fn stitched_samples_match_reference() {
     let rgba = sample_map();
     for sculpt_type in [SculptType::Sphere, SculptType::Torus, SculptType::Plane, SculptType::Cylinder] {
         for (invert, mirror) in [(false, false), (true, false), (false, true), (true, true)] {
@@ -153,7 +153,7 @@ fn placeholder_normals_follow_sphere_layout() {
 }
 
 #[test]
-fn resolution_matches_detail_and_aspect_ratio() {
+fn resolution_follows_detail_aspect() {
     let rgba = map([64, 64], |x, y| [(x * 3) as u8, (y * 3) as u8, 128, 255]);
     for (detail, sides) in [(Detail::Lowest, 6), (Detail::Low, 8), (Detail::Medium, 16), (Detail::High, 32)] {
         let mesh = tessellate_sculpt([64, 64], &rgba, SculptType::Plane, SculptFlags::default(), detail).unwrap();
@@ -186,7 +186,7 @@ fn resolution_matches_detail_and_aspect_ratio() {
 }
 
 #[test]
-fn degenerate_map_uses_placeholder_above_lowest_lod() {
+fn degenerate_map_uses_placeholder() {
     let rgba = vec![127; 8 * 8 * 4];
     let mesh = tessellate_sculpt([8, 8], &rgba, SculptType::Cylinder, SculptFlags::default(), Detail::High).unwrap();
     assert_placeholder_normals(&mesh, SculptType::Cylinder);
@@ -235,7 +235,7 @@ fn normals_follow_winding_and_stitches() {
 }
 
 #[test]
-fn sculpt_key_tracks_map_generation_inputs() {
+fn key_tracks_generation_inputs() {
     let base = SculptMeshKey {
         asset_id: AssetId::new(uuid::Uuid::from_u128(1)),
         sculpt_type: SculptType::Sphere,

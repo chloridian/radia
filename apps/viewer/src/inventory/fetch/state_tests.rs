@@ -53,7 +53,7 @@ fn inventory_with_children(count: u128) -> (Inventory, CategoryKey, Vec<Category
 }
 
 #[test]
-fn legacy_selection_caps_batch_at_ten() {
+fn legacy_batch_caps_at_ten() {
     let (inventory, _, children) = inventory_with_children(11);
     let snapshot = inventory.snapshot();
     let mut background = children.iter().map(|folder| BackgroundRequest { folder: *folder, depth: 0 }).collect::<VecDeque<_>>();
@@ -68,7 +68,7 @@ fn legacy_selection_caps_batch_at_ten() {
 }
 
 #[test]
-fn selection_skips_complete_in_flight_and_failed() {
+fn selection_skips_ineligible_folders() {
     let (inventory, root, children) = inventory_with_children(3);
     let snapshot = inventory.snapshot();
     let requests = [root, children[0], children[1], children[2]];
@@ -86,7 +86,7 @@ fn selection_skips_complete_in_flight_and_failed() {
 }
 
 #[test]
-fn latest_snapshot_requeues_child_made_incomplete_by_parent_metadata() {
+fn latest_snapshot_requeues_child() {
     let owner = InventoryOwner::new(Uuid::from_u128(1));
     let root = key(owner, 1);
     let child = key(owner, 2);
@@ -119,7 +119,7 @@ fn latest_snapshot_requeues_child_made_incomplete_by_parent_metadata() {
 }
 
 #[test]
-fn in_flight_folder_stays_queued_until_its_request_finishes() {
+fn in_flight_stays_queued() {
     let (inventory, _, children) = inventory_with_children(1);
     let child = children[0];
     let snapshot = inventory.snapshot();

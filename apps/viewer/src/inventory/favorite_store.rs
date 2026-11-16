@@ -355,7 +355,7 @@ mod tests {
     };
 
     #[test]
-    fn store_round_trips_favorites_by_grid_and_agent() {
+    fn round_trips_by_grid_agent() {
         let test_directory = tempdir().expect("create temporary login locations directory");
         let path = login_locations_path_under(test_directory.path());
         let mut favorites = FavoriteStore::default();
@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_favorite_refresh_keeps_memory_and_disk_snapshots() {
+    fn failed_refresh_keeps_snapshots() {
         let test_directory = tempdir().expect("create temporary login locations directory");
         let path = login_locations_path_under(test_directory.path());
         let agent_id = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
@@ -409,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_favorite_refresh_keeps_previous_snapshot() {
+    fn too_many_favorites_keep_snapshot() {
         let agent_id = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
         let saved = vec![FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }];
         let mut store = FavoriteStore::default();
@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_store_refresh_keeps_previous_snapshot() {
+    fn oversized_store_keeps_snapshot() {
         let test_directory = tempdir().expect("create temporary login locations directory");
         let path = login_locations_path_under(test_directory.path());
         let agent_id = Uuid::from_u128(0);
@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn load_rejects_oversized_store_before_parsing() {
+    fn load_rejects_oversized_file() {
         let test_directory = tempdir().expect("create temporary login locations directory");
         let path = login_locations_path_under(test_directory.path());
         fs::create_dir_all(path.parent().expect("login locations have a parent directory")).expect("create login locations directory");
@@ -553,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn save_rejects_favorite_names_outside_storage_limits() {
+    fn save_rejects_long_name() {
         let test_directory = tempdir().expect("create temporary login locations directory");
         let path = login_locations_path_under(test_directory.path());
         let oversized = FavoriteStore {

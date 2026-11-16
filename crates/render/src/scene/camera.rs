@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn mesh_lod_matches_viewer_mesh_scale_bias_and_close_ramp() {
+    fn mesh_lod_bias_matches_viewer() {
         let camera = Camera::new(DVec3::ZERO, Vec3::X, PI / 3.0, [1000, 1000]).unwrap();
         assert_eq!(camera.mesh_lod(DVec3::X * 20.0, Vec3::ONE, None), Some(MeshLod::Low));
         assert_eq!(camera.mesh_lod(DVec3::X * 1.5, Vec3::splat(0.1), None), Some(MeshLod::Medium));

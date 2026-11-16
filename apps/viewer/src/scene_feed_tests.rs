@@ -182,7 +182,7 @@ fn dead_reckoning_uses_timestep_acceleration() {
 }
 
 #[test]
-fn dead_reckoning_applies_half_ping_lead_with_time_dilation() {
+fn dead_reckoning_leads_half_ping() {
     let received_at = Instant::now();
     let (_region_world, mut sample) = motion_sample(received_at);
     sample.velocity = Vec3::X * 2.0;
@@ -197,7 +197,7 @@ fn dead_reckoning_applies_half_ping_lead_with_time_dilation() {
 }
 
 #[test]
-fn dead_reckoning_stops_at_an_unloaded_region_edge() {
+fn dead_reckoning_stops_at_edge() {
     let received_at = Instant::now();
     let (_region_world, mut sample) = motion_sample(received_at);
     sample.position = DVec3::new(255.0, 20.0, 10.0);
@@ -265,7 +265,7 @@ fn disconnect_tapers_agent_early() {
 }
 
 #[test]
-fn dead_reckoning_recovers_from_displayed_position() {
+fn dead_reckoning_resumes_from_display() {
     let received_at = Instant::now();
     let phase_out_at = received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
     let phase_out_duration = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
@@ -298,7 +298,7 @@ fn negligible_motion_is_idle() {
 }
 
 #[test]
-fn non_finite_sample_does_not_replace_valid_state() {
+fn non_finite_sample_keeps_state() {
     let received_at = Instant::now();
     let (_region_world, valid) = motion_sample(received_at);
     let mut dead_reckoning = DeadReckoning::default();
@@ -311,7 +311,7 @@ fn non_finite_sample_does_not_replace_valid_state() {
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 #[tokio::test]
-async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
+async fn motion_seeds_camera_before_avatar() {
     let agent_id = Uuid::from_u128(1);
     let now = Instant::now();
     let (_region_world, region) = crate::test_helpers::registered_region();
@@ -510,7 +510,7 @@ async fn terrain_clamp_respects_parenting() {
 }
 
 #[tokio::test]
-async fn pending_texture_size_wins_before_acquisition() {
+async fn pending_size_wins_before_acquisition() {
     let (_region_world, region) = crate::test_helpers::registered_region();
     let id = AssetId::new(Uuid::from_u128(101));
     let (mut scene, _) = Reconciler::new(Budget::default());

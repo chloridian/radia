@@ -626,7 +626,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn queue_full_retries_region_id_lookup() {
+    async fn queue_full_retries_lookup() {
         let lookup_slot = Arc::new(Mutex::new(None::<RegionLookup>));
         let slot = lookup_slot.clone();
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -672,7 +672,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn queue_full_retries_are_bounded_and_exponential() {
+    async fn queue_full_backoff_is_bounded() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let send_attempts = attempts.clone();
         let (attempt_sender, mut attempt_receiver) = unbounded_channel();
@@ -706,7 +706,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn permanent_send_error_is_not_retried() {
+    async fn permanent_error_is_not_retried() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let send_attempts = attempts.clone();
         let (attempt_sender, mut attempt_receiver) = unbounded_channel();
@@ -727,7 +727,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn cancel_stops_retry_and_allows_replacement() {
+    async fn cancel_stops_retry_allows_replacement() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let send_attempts = attempts.clone();
         let (attempt_sender, mut attempt_receiver) = unbounded_channel();
