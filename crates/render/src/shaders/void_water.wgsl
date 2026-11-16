@@ -2,6 +2,7 @@ struct VoidWaterUniform {
     inverse: mat4x4<f32>,
     view: mat4x4<f32>,
     plane: vec4<f32>,
+    camera: vec4<f32>,
     surface: WaterSurface,
     atmosphere: Atmosphere,
     regions: array<vec4<f32>, 33>,
@@ -46,9 +47,10 @@ struct VoidWaterOutput {
     if (void_water.plane.x < 0.0 && direction.z >= 0.0) || (void_water.plane.x > 0.0 && direction.z <= 0.0) {
         discard;
     }
+    let point = true_intersection.xy + void_water.camera.xy;
     for (var index = 0u; index < u32(void_water.plane.y); index += 1u) {
         let region = void_water.regions[index];
-        if all(true_intersection.xy >= region.xy) && all(true_intersection.xy < region.xy + region.zw) {
+        if all(point >= region.xy) && all(point < region.xy + region.zw) {
             discard;
         }
     }

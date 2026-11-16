@@ -279,8 +279,8 @@ pub(crate) struct GeometryRenderer {
     visible_textures: HashSet<TextureId>,
     visible_texture_requests: Vec<TextureHandle>,
     region_water_bounds: [Vec4; MAX_REGIONS],
-    region_water_ids: [u128; MAX_REGIONS],
     region_water_count: usize,
+    region_water_origin: Option<DVec3>,
     instances: Buffer,
     face_indices: Buffer,
     indirect: Buffer,
@@ -359,8 +359,8 @@ impl GeometryRenderer {
             visible_textures: HashSet::new(),
             visible_texture_requests: Vec::new(),
             region_water_bounds: [Vec4::ZERO; MAX_REGIONS],
-            region_water_ids: [0; MAX_REGIONS],
             region_water_count: 0,
+            region_water_origin: None,
             void_water,
             sky,
             instances,
@@ -441,6 +441,7 @@ impl GeometryRenderer {
             self.restore_agent_pose(agent_id);
         }
         self.prepared = None;
+        self.region_water_origin = None;
         self.cache.camera = None;
         self.cache.candidates.clear();
         self.cache.next_candidates.clear();

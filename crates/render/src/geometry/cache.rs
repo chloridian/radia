@@ -322,6 +322,8 @@ pub(super) struct FrameCache {
     pub(super) next_preparation_replacements: HashSet<ItemIndex>,
     pub(super) visible: Vec<ItemIndex>,
     pub(super) next_visible: Vec<ItemIndex>,
+    pub(super) region_water: HashMap<Region, ItemIndex>,
+    pub(super) region_water_changed: bool,
     pub(super) mesh_order: BTreeSet<MeshDemandOrder>,
     pub(super) preparation_mesh_order: BTreeSet<MeshDemandOrder>,
     pub(super) mesh_order_by_id: HashMap<MeshId, MeshDemandOrder>,
@@ -374,15 +376,30 @@ impl FrameCache {
         let id = item.id;
         if let Some(index) = self.index(id) {
             if let Some(slot) = self.items.get_mut(index) {
+                let water = (item.surface_kind == Some(SurfaceKind::RegionWater)).then_some(item.region);
                 *slot = item;
+                self.note_region_water(index, water);
                 return Some(index);
             }
             self.item_indices.remove(&id);
         }
+        let water = (item.surface_kind == Some(SurfaceKind::RegionWater)).then_some(item.region);
         let index = self.items.insert(item)?;
         self.item_indices.insert(id, index);
         self.item_order_dirty = true;
+        self.note_region_water(index, water);
         Some(index)
+    }
+
+    fn note_region_water(&mut self, index: ItemIndex, region: Option<Region>) {
+        if let Some(region) = region {
+            self.region_water.insert(region, index);
+            self.region_water_changed = true;
+        }
+    }
+
+    pub(super) fn contains(&self, set: &[ItemIndex], index: ItemIndex) -> bool {
+        self.items.get(index).is_some_and(|item| contains_id(set, &self.items, item.id))
     }
 
     pub(super) fn slot_count(&self) -> usize {
@@ -405,6 +422,10 @@ impl FrameCache {
         self.next_replacement_visible.remove(&index);
         self.preparation_replacements.remove(&index);
         self.next_preparation_replacements.remove(&index);
+        if self.region_water.get(&item.region) == Some(&index) {
+            self.region_water.remove(&item.region);
+            self.region_water_changed = true;
+        }
         self.item_order_dirty = true;
         Some((item, was_visible))
     }
@@ -426,6 +447,8 @@ impl FrameCache {
         self.item_order.clear();
         self.item_order_dirty = true;
         self.replacements.clear();
+        self.region_water.clear();
+        self.region_water_changed = true;
         self.replacement_visible.clear();
         self.next_replacement_visible.clear();
         self.candidates.clear();

@@ -1,4 +1,4 @@
-use math::{Mat4, Vec4};
+use math::{Mat4, Vec3, Vec4};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindingResource, BindingType, Buffer, BufferBindingType,
     BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction, DepthStencilState, Device, FragmentState,
@@ -18,7 +18,7 @@ use crate::{
 use super::TexturePair;
 
 const VOID_WATER_REGION_FLOATS: usize = MAX_REGIONS * 4;
-const VOID_WATER_UNIFORM_FLOATS: usize = 32 + 4 + 36 + ATMOSPHERE_FLOATS + VOID_WATER_REGION_FLOATS;
+const VOID_WATER_UNIFORM_FLOATS: usize = 32 + 4 + 4 + 36 + ATMOSPHERE_FLOATS + VOID_WATER_REGION_FLOATS;
 const VOID_WATER_UNIFORM_BYTES: usize = VOID_WATER_UNIFORM_FLOATS * 4;
 
 pub(crate) struct VoidWater {
@@ -121,6 +121,7 @@ impl VoidWater {
         scroll: [f32; 4],
         region_water_bounds: &[Vec4; MAX_REGIONS],
         region_water_count: usize,
+        camera_offset: Vec3,
     ) {
         self.active = false;
         let keys = [normal_map.current, normal_map.next];
@@ -141,6 +142,7 @@ impl VoidWater {
         append(&mut values, &mut offset, inverse.to_cols_array());
         append(&mut values, &mut offset, camera_view(camera).to_cols_array());
         append(&mut values, &mut offset, [relative_water_height, count as f32, near, 0.0]);
+        append(&mut values, &mut offset, [camera_offset.x, camera_offset.y, 0.0, 0.0]);
         append(
             &mut values,
             &mut offset,
