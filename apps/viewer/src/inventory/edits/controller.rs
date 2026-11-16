@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use ::inventory::{
     CategoryKey, FolderType, InventoryNodeId, InventoryNodeKey, InventoryOwner, InventorySnapshot, ItemKey, MAX_INVENTORY_NAME_BYTES,
@@ -146,12 +146,6 @@ impl InventoryEditController {
     }
 }
 
-#[derive(Clone)]
-struct EditCapabilities {
-    ais: Option<CapabilityUrl>,
-    legacy_create: Option<CapabilityUrl>,
-}
-
 enum PreparedEdit {
     Noop,
     CreateFolder { parent: CategoryKey, name: String, preferred_type: FolderType },
@@ -171,7 +165,6 @@ async fn run_edits(
     cancellation: Cancellation,
     mut stop: oneshot::Receiver<()>,
 ) {
-    let mut capabilities = None;
     loop {
         let request = tokio::select! {
             _ = &mut stop => break,
@@ -179,7 +172,7 @@ async fn run_edits(
             request = requests.recv() => request,
         };
         let Some(request) = request else { break };
-        let process = process_request(&client, &session, transport.as_ref(), &model, &events, &mut capabilities, request.operation);
+        let process = process_request(&client, &session, transport.as_ref(), &model, &events, request.operation);
         tokio::pin!(process);
         let outcome = tokio::select! {
             _ = &mut stop => break,
@@ -198,7 +191,6 @@ async fn process_request(
     transport: &dyn MoveTransport,
     model: &watch::Receiver<Option<InventorySnapshot>>,
     events: &mpsc::Sender<InventoryEditEvent>,
-    capabilities: &mut Option<EditCapabilities>,
     operation: EditOperation,
 ) -> InventoryEditOutcome {
     let Some(snapshot) = model.borrow().clone() else { return InventoryEditOutcome::ServerError };
@@ -214,7 +206,7 @@ async fn process_request(
         PreparedEdit::Noop => InventoryEditOutcome::Applied,
         prepared => {
             let folders = affected_folders(&operation, &snapshot, owner);
-            execute_edit(client, session, transport, events, capabilities, snapshot, owner, operation, prepared, folders).await
+            execute_edit(client, session, transport, events, snapshot, owner, operation, prepared, folders).await
         }
     }
 }
@@ -342,7 +334,6 @@ async fn execute_edit(
     session: &EditSession,
     transport: &dyn MoveTransport,
     events: &mpsc::Sender<InventoryEditEvent>,
-    capabilities: &mut Option<EditCapabilities>,
     snapshot: InventorySnapshot,
     owner: InventoryOwner,
     operation: EditOperation,
@@ -352,11 +343,11 @@ async fn execute_edit(
     match prepared {
         PreparedEdit::Move(expectation) => execute_move(transport, session, events, expectation).await,
         PreparedEdit::CreateFolder { parent, name, preferred_type } => {
-            let capabilities = match get_capabilities(client, capabilities).await {
+            let capabilities = match edit_capabilities(client).await {
                 Ok(capabilities) => capabilities,
                 Err(outcome) => return outcome,
             };
-            let response = if let Some(ais) = capabilities.ais.as_ref() {
+            let response = if let Some(ais) = capabilities.get("InventoryAPIv3") {
                 let url = match ais.with_path_segments(&["category", &parent.id().uuid().to_string()]) {
                     Ok(url) => url.with_query_pair("tid", &Uuid::new_v4().to_string()),
                     Err(_) => return InventoryEditOutcome::ServerError,
@@ -377,7 +368,7 @@ async fn execute_edit(
                     Err(_) => return InventoryEditOutcome::ServerError,
                 }
             } else {
-                let Some(legacy) = capabilities.legacy_create.as_ref() else { return InventoryEditOutcome::ServerError };
+                let Some(legacy) = capabilities.get("CreateInventoryCategory") else { return InventoryEditOutcome::ServerError };
                 let folder_id = Uuid::new_v4();
                 let body = legacy_create_body(folder_id, parent, preferred_type, &name);
                 let response_body = match edit_response(
@@ -423,7 +414,7 @@ async fn execute_edit(
             apply_confirmation(events, confirmation, outcome).await
         }
         PreparedEdit::RenameCategory { category, name } => {
-            let capabilities = match require_ais(client, capabilities).await {
+            let capabilities = match require_ais(client).await {
                 Ok(capability) => capability,
                 Err(outcome) => return outcome,
             };
@@ -450,7 +441,7 @@ async fn execute_edit(
             apply_confirmation(events, confirmation, InventoryEditOutcome::Applied).await
         }
         PreparedEdit::RenameItem { item, name } => {
-            let capabilities = match require_ais(client, capabilities).await {
+            let capabilities = match require_ais(client).await {
                 Ok(capability) => capability,
                 Err(outcome) => return outcome,
             };
@@ -477,7 +468,7 @@ async fn execute_edit(
             apply_confirmation(events, confirmation, InventoryEditOutcome::Applied).await
         }
         PreparedEdit::EmptyTrash(trash) => {
-            let capabilities = match require_ais(client, capabilities).await {
+            let capabilities = match require_ais(client).await {
                 Ok(capability) => capability,
                 Err(outcome) => return outcome,
             };
@@ -538,21 +529,12 @@ async fn edit_response(
     }
 }
 
-async fn get_capabilities(client: &Client, cached: &mut Option<EditCapabilities>) -> Result<EditCapabilities, InventoryEditOutcome> {
-    if let Some(capabilities) = cached {
-        return Ok(capabilities.clone());
-    }
-    let discovered = client.request_capabilities(&["InventoryAPIv3", "CreateInventoryCategory"]).await.map_err(request_outcome)?;
-    let capabilities = EditCapabilities {
-        ais: discovered.get("InventoryAPIv3").cloned(),
-        legacy_create: discovered.get("CreateInventoryCategory").cloned(),
-    };
-    *cached = Some(capabilities.clone());
-    Ok(capabilities)
+async fn edit_capabilities(client: &Client) -> Result<HashMap<String, CapabilityUrl>, InventoryEditOutcome> {
+    client.request_capabilities(&["InventoryAPIv3", "CreateInventoryCategory"]).await.map_err(request_outcome)
 }
 
-async fn require_ais(client: &Client, cached: &mut Option<EditCapabilities>) -> Result<CapabilityUrl, InventoryEditOutcome> {
-    get_capabilities(client, cached).await?.ais.ok_or(InventoryEditOutcome::ServerError)
+async fn require_ais(client: &Client) -> Result<CapabilityUrl, InventoryEditOutcome> {
+    edit_capabilities(client).await?.remove("InventoryAPIv3").ok_or(InventoryEditOutcome::ServerError)
 }
 
 fn create_folder_body(name: &str, preferred_type: FolderType) -> Value {

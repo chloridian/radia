@@ -20,7 +20,7 @@ use network::{
     capabilities::{CapabilityUrl, Client, ContentRange, HttpErrorKind, RangeResponse, RedirectPolicy},
 };
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{OnceCell, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::{
     runtime::Handle,
     task::{AbortHandle, JoinError, JoinHandle},
@@ -35,37 +35,31 @@ const MAX_MATERIALS_PER_POST: usize = 50;
 const MATERIALS_POST_INTERVAL: Duration = Duration::from_secs(1);
 static UNEXPECTED_HTTP_STATUS_WARNED: AtomicU8 = AtomicU8::new(0);
 
-type Grants = Arc<OnceCell<HashMap<String, CapabilityUrl>>>;
 type MaterialReply = oneshot::Sender<Result<Vec<u8>, Failure>>;
 
 #[derive(Clone)]
 struct CapabilityTransport {
     client: Client,
-    grants: Grants,
     materials: MaterialBatcher,
 }
 
 impl CapabilityTransport {
     fn new(client: Client) -> Self {
-        let grants = Grants::default();
         let materials = {
             let client = client.clone();
-            let grants = Arc::clone(&grants);
             MaterialBatcher::spawn(move |ids| {
                 let client = client.clone();
-                let grants = Arc::clone(&grants);
                 async move {
-                    let grants = resolve_grants(&client, &grants, Kind::LegacyMaterial).await?;
-                    let grant = grants.get("RenderMaterials").ok_or(Failure::MissingCapability)?;
+                    let grant = request_grant(&client, "RenderMaterials", Kind::LegacyMaterial).await?;
                     let request = legacy_request(&ids)?;
                     client
-                        .post_bytes_with_response_limit(grant, &request, Kind::LegacyMaterial.max_response_bytes())
+                        .post_bytes_with_response_limit(&grant, &request, Kind::LegacyMaterial.max_response_bytes())
                         .await
                         .map_err(|error| classify_network_error(error, Kind::LegacyMaterial))
                 }
             })
         };
-        Self { client, grants, materials }
+        Self { client, materials }
     }
 
     async fn fetch(&self, job: &FetchJob) -> Result<FetchResponse, Failure> {
@@ -74,8 +68,7 @@ impl CapabilityTransport {
         let limit = if resource.kind == Kind::Mesh { job.response_limit() } else { resource.kind.max_response_bytes() };
         match resource.kind {
             Kind::Texture | Kind::PbrMaterial | Kind::Environment | Kind::Mesh => {
-                let grants = resolve_grants(&self.client, &self.grants, resource.kind).await?;
-                let grant = grants.get("ViewerAsset").ok_or(Failure::MissingCapability)?;
+                let grant = request_grant(&self.client, "ViewerAsset", resource.kind).await?;
                 let field = match resource.kind {
                     Kind::Texture => "texture_id",
                     Kind::PbrMaterial => "material_id",
@@ -288,12 +281,10 @@ where
     }
 }
 
-async fn resolve_grants<'a>(client: &Client, grants: &'a Grants, kind: Kind) -> Result<&'a HashMap<String, CapabilityUrl>, Failure> {
-    grants
-        .get_or_try_init(|| async {
-            client.request_capabilities(&["ViewerAsset", "RenderMaterials"]).await.map_err(|error| classify_network_error(error, kind))
-        })
-        .await
+async fn request_grant(client: &Client, name: &str, kind: Kind) -> Result<CapabilityUrl, Failure> {
+    let mut grants =
+        client.request_capabilities(&["ViewerAsset", "RenderMaterials"]).await.map_err(|error| classify_network_error(error, kind))?;
+    grants.remove(name).ok_or(Failure::MissingCapability)
 }
 
 fn content_range_matches(content_range: ContentRange, requested: &std::ops::Range<u64>, total: u64, body_len: usize) -> bool {
