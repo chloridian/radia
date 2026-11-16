@@ -154,27 +154,31 @@ fn landmark_asset_request_failure_rejects_partial_results() {
 }
 
 #[test]
-fn malformed_landmark_is_skipped_with_valid_peer() {
-    let runtime = Runtime::new().expect("create local Tokio runtime");
-    let server = LocalServer::start_with_asset_responses(
-        landmark_folder_response(2),
-        vec![("200 OK", "Landmark version 1\nglobal_pos 256000 512000 30\n"), ("200 OK", "not a landmark asset")],
-    );
-    let seed = server.seed_url();
-    let capabilities = runtime.block_on(async { Client::new(seed).expect("active Tokio runtime") });
-    let agent_id = Uuid::parse_str(AGENT_ID).expect("valid fixture UUID");
-    let folder_id = Uuid::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
+fn malformed_landmark_preserves_valid_peer() {
+    for malformed in
+        ["not a landmark asset", "Landmark version 2\nregion_id 00000000-0000-0000-0000-000000000000\nlocal_pos <128, 64, 30>\n"]
+    {
+        let runtime = Runtime::new().expect("create local Tokio runtime");
+        let server = LocalServer::start_with_asset_responses(
+            landmark_folder_response(2),
+            vec![("200 OK", "Landmark version 1\nglobal_pos 256000 512000 30\n"), ("200 OK", malformed)],
+        );
+        let seed = server.seed_url();
+        let capabilities = runtime.block_on(async { Client::new(seed).expect("active Tokio runtime") });
+        let agent_id = Uuid::parse_str(AGENT_ID).expect("valid fixture UUID");
+        let folder_id = Uuid::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
 
-    let landmarks = runtime
-        .block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id))
-        .expect("one unreadable asset must not discard a readable landmark");
-    assert_eq!(landmarks.len(), 1);
+        let landmarks = runtime
+            .block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id))
+            .expect("one unreadable asset must not discard a readable landmark");
+        assert_eq!(landmarks.len(), 1);
 
-    let requests = server.finish();
-    assert_eq!(requests.len(), 4);
-    let valid_asset_index = requested_asset_index(&requests[2]);
-    assert_eq!(landmarks[0].name(), format!("Landmark {valid_asset_index:02}"));
-    assert_eq!(landmarks[0].destination(), LandmarkDestination::Global([256000.0, 512000.0, 30.0]));
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4);
+        let valid_asset_index = requested_asset_index(&requests[2]);
+        assert_eq!(landmarks[0].name(), format!("Landmark {valid_asset_index:02}"));
+        assert_eq!(landmarks[0].destination(), LandmarkDestination::Global([256000.0, 512000.0, 30.0]));
+    }
 }
 
 #[test]

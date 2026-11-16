@@ -6,12 +6,13 @@ mod window_geometry;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use futures::FutureExt;
 use gpui::{
     AnyWindowHandle, App, AppContext, ColorExt, Entity, Global, QuitMode, Subscription, TitlebarOptions, WindowBounds, WindowOptions, px,
     rgb, rgb_to_hsla, size,
 };
 use gpui_component::{Root, Theme, ThemeMode};
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, task::JoinHandle};
 
 use crate::{gui::views::login::LoginScreen, gui::window_geometry::restore_bounds};
 
@@ -22,10 +23,61 @@ struct AppLifecycle {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     scene: scene::State,
     quitting: bool,
-    session: Arc<Mutex<Option<network::SessionHandle>>>,
+    session_lifecycle: Arc<SessionLifecycle>,
 }
 
 impl Global for AppLifecycle {}
+
+#[derive(Default)]
+struct SessionLifecycle {
+    state: Mutex<SessionState>,
+}
+
+#[derive(Default)]
+struct SessionState {
+    active: Option<network::SessionHandle>,
+    drains: Vec<JoinHandle<()>>,
+}
+
+impl SessionLifecycle {
+    fn set_active(&self, active: Option<network::SessionHandle>) {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).active = active;
+    }
+
+    fn active(&self) -> Option<network::SessionHandle> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).active.clone()
+    }
+
+    fn track_drain(&self, drain: JoinHandle<()>) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.drains.retain_mut(|drain| {
+            if !drain.is_finished() {
+                return true;
+            }
+            match drain.now_or_never() {
+                Some(Ok(())) => false,
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "session drain task failed");
+                    false
+                }
+                None => true,
+            }
+        });
+        state.drains.push(drain);
+    }
+
+    async fn wait_for_drains(&self) {
+        let drains = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::take(&mut state.drains)
+        };
+        for drain in drains {
+            if let Err(error) = drain.await {
+                tracing::warn!(%error, "session drain task failed");
+            }
+        }
+    }
+}
 
 struct ServiceRuntime {
     runtime: Handle,
@@ -43,19 +95,19 @@ pub(crate) fn asset_cache(cx: &App) -> Option<Arc<assets::cache::AssetCache>> {
 }
 
 pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<assets::cache::AssetCache>>) {
-    let shutdown_session: Arc<Mutex<Option<network::SessionHandle>>> = Arc::new(Mutex::new(None));
+    let session_lifecycle = Arc::new(SessionLifecycle::default());
     cx.set_global(ServiceRuntime { runtime: services, asset_cache });
     cx.set_quit_mode(QuitMode::Explicit);
 
     gpui_component::init(cx);
     set_dark_theme(cx);
 
-    install_lifecycle(Arc::clone(&shutdown_session), cx);
+    install_lifecycle(Arc::clone(&session_lifecycle), cx);
 
     let main_window = cx
         .open_window(login_options(cx), move |window, cx| {
             cx.new(|cx| {
-                let login = cx.new(|cx| LoginScreen::new(window, cx, shutdown_session));
+                let login = cx.new(|cx| LoginScreen::new(window, cx, session_lifecycle));
                 cx.global_mut::<AppLifecycle>().controller = Some(login.clone());
                 Root::new(login, window, cx)
             })
@@ -65,7 +117,7 @@ pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<assets::cach
     cx.activate(true);
 }
 
-fn install_lifecycle(session: Arc<Mutex<Option<network::SessionHandle>>>, cx: &mut App) {
+fn install_lifecycle(session_lifecycle: Arc<SessionLifecycle>, cx: &mut App) {
     let window_closed = cx.on_window_closed(|cx, closed_window_id| {
         let lifecycle = cx.global_mut::<AppLifecycle>();
         let closing_main = lifecycle.login_window.is_some_and(|window| window.window_id() == closed_window_id);
@@ -76,7 +128,7 @@ fn install_lifecycle(session: Arc<Mutex<Option<network::SessionHandle>>>, cx: &m
         if lifecycle.scene.window_closed(closed_window_id) {
             return;
         }
-        if should_shutdown(closing_main, cx.windows().len()) {
+        if closing_main || cx.windows().is_empty() {
             shutdown(cx);
         }
     });
@@ -87,7 +139,7 @@ fn install_lifecycle(session: Arc<Mutex<Option<network::SessionHandle>>>, cx: &m
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         scene: scene::State::new(),
         quitting: false,
-        session,
+        session_lifecycle,
     });
 }
 
@@ -105,43 +157,45 @@ fn login_options(cx: &App) -> WindowOptions {
     }
 }
 
-fn should_shutdown(closing_main_window: bool, open_windows: usize) -> bool {
-    closing_main_window || open_windows == 0
-}
-
 fn shutdown(cx: &mut App) {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     let background_executor = cx.background_executor().clone();
-    let lifecycle = cx.global_mut::<AppLifecycle>();
-    if lifecycle.quitting {
-        return;
+    let session_lifecycle = {
+        let lifecycle = cx.global_mut::<AppLifecycle>();
+        if lifecycle.quitting {
+            return;
+        }
+        lifecycle.quitting = true;
+        Arc::clone(&lifecycle.session_lifecycle)
+    };
+    if cx.has_global::<ServiceRuntime>() {
+        drop(cx.global_mut::<ServiceRuntime>().asset_cache.take());
     }
-    lifecycle.quitting = true;
-    let session = Arc::clone(&lifecycle.session);
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    let scene_shutdown = lifecycle.scene.shutdown(background_executor);
+    let scene_shutdown = cx.global_mut::<AppLifecycle>().scene.shutdown(background_executor);
     for window in cx.windows() {
         if window.update(cx, |_, window, _| window.remove_window()).is_err() {
             tracing::trace!("window was already unavailable during shutdown");
         }
     }
     cx.spawn(async move |cx| {
-        disconnect_session(session).await;
+        disconnect_session(&session_lifecycle).await;
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         scene_shutdown.await;
+        session_lifecycle.wait_for_drains().await;
         cx.update(|app| app.quit());
     })
     .detach();
 }
 
-async fn disconnect_session(session_slot: Arc<Mutex<Option<network::SessionHandle>>>) {
-    let client = session_slot.lock().unwrap_or_else(PoisonError::into_inner).clone();
+async fn disconnect_session(session_lifecycle: &SessionLifecycle) {
+    let client = session_lifecycle.active();
     let Some(client) = client else {
         return;
     };
 
     client.disconnect().await;
-    session_slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+    session_lifecycle.set_active(None);
 }
 
 fn set_dark_theme(cx: &mut App) {
@@ -199,20 +253,62 @@ fn set_dark_theme(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::should_shutdown;
+    use std::sync::Arc;
 
-    #[test]
-    fn tool_close_keeps_app_open() {
-        assert!(!should_shutdown(false, 1));
+    use super::{AppLifecycle, SessionLifecycle, install_lifecycle};
+
+    #[gpui::test]
+    fn main_window_owns_shutdown(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            install_lifecycle(Arc::new(SessionLifecycle::default()), cx);
+        });
+        let main = cx.add_empty_window().update(|window, _| window.window_handle());
+        let tool = cx.add_empty_window().update(|window, _| window.window_handle());
+        cx.update(|cx| cx.global_mut::<AppLifecycle>().login_window = Some(main));
+        tool.update(cx, |_, window, _| window.remove_window()).expect("close tool window");
+        cx.run_until_parked();
+        cx.read_global::<AppLifecycle, _>(|lifecycle, _| assert!(!lifecycle.quitting));
+        cx.add_empty_window();
+        main.update(cx, |_, window, _| window.remove_window()).expect("close main window");
+        cx.run_until_parked();
+        cx.read_global::<AppLifecycle, _>(|lifecycle, _| assert!(lifecycle.quitting));
     }
 
-    #[test]
-    fn main_close_shuts_down() {
-        assert!(should_shutdown(true, 1));
-    }
+    #[tokio::test]
+    async fn session_drains_survive_relogin() {
+        let lifecycle = SessionLifecycle::default();
 
-    #[test]
-    fn last_window_close_shuts_down() {
-        assert!(should_shutdown(false, 0));
+        let (old_started_tx, old_started_rx) = tokio::sync::oneshot::channel();
+        let (old_release_tx, old_release_rx) = tokio::sync::oneshot::channel();
+        let old_drain = tokio::spawn(async move {
+            old_started_tx.send(()).expect("old drain start is observed");
+            old_release_rx.await.expect("old drain is released");
+        });
+        lifecycle.track_drain(old_drain);
+        old_started_rx.await.expect("old drain started");
+
+        let (new_started_tx, new_started_rx) = tokio::sync::oneshot::channel();
+        let (new_release_tx, new_release_rx) = tokio::sync::oneshot::channel();
+        let (new_finished_tx, new_finished_rx) = tokio::sync::oneshot::channel();
+        let new_drain = tokio::spawn(async move {
+            new_started_tx.send(()).expect("new drain start is observed");
+            new_release_rx.await.expect("new drain is released");
+            new_finished_tx.send(()).expect("new drain completion is observed");
+        });
+        lifecycle.track_drain(new_drain);
+        new_started_rx.await.expect("new drain started");
+
+        let mut wait = Box::pin(lifecycle.wait_for_drains());
+
+        new_release_tx.send(()).expect("new drain is waiting");
+        tokio::select! {
+            biased;
+            _ = &mut wait => panic!("shutdown finished before the old drain"),
+            result = new_finished_rx => result.expect("new drain completed"),
+        }
+
+        old_release_tx.send(()).expect("old drain is waiting");
+        wait.await;
     }
 }

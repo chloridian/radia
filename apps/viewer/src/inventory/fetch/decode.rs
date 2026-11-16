@@ -8,7 +8,7 @@ use protocol::inventory::{Category as WireCategory, Item as WireItem};
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
-use super::{FolderFetch, InventoryFetchError};
+use super::{FolderFetch, FolderFetchProvenance, InventoryFetchError};
 
 pub(super) fn ais_folders(root: &WireCategory, requested: CategoryKey) -> Result<Vec<FolderFetch>, InventoryFetchError> {
     if root.id != requested.id().uuid() {
@@ -45,6 +45,7 @@ pub(super) fn append_ais_folder(
         version: ServerVersion::from_raw(wire.version.unwrap_or(-1)),
         descendent_count: wire.descendent_count,
         children,
+        provenance: FolderFetchProvenance::Untracked,
     };
     folders.push(fetch);
     for category in child_categories {

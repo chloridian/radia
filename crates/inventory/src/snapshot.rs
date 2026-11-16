@@ -19,6 +19,10 @@ impl InventorySnapshot {
         self.state.revision
     }
 
+    pub fn folder_generation(&self, key: CategoryKey) -> Option<InventoryRevision> {
+        self.state.folder_generations.get(&key).copied()
+    }
+
     pub fn roots(&self) -> crate::InventoryRoots {
         self.state.roots
     }

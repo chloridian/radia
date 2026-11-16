@@ -31,7 +31,10 @@ use super::{
     BACKGROUND_CONCURRENCY, ForegroundRequest, InventoryFetchHandle, InventoryFetchOutcome, InventoryLoadingStatus, MAX_AIS_DEPTH,
     REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, run_scheduler,
 };
-use crate::inventory::fetch::{FolderApplyOutcome, FolderFetch, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais};
+use crate::inventory::fetch::{
+    FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais,
+};
+use crate::session::{FolderFetchApply, apply_inventory_fetch};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(45);
 type SchedulerTask = (
@@ -232,6 +235,17 @@ fn ais_category(category_id: Uuid, owner_id: Uuid, parent_id: Option<Uuid>, name
     ]))
 }
 
+fn ais_item(folder: CategoryKey, item_id: Uuid) -> Value {
+    Value::Map(Map::from([
+        ("item_id".into(), Value::Uuid(item_id)),
+        ("parent_id".into(), Value::Uuid(folder.id().uuid())),
+        ("name".into(), Value::String(format!("item-{}", item_id.as_u128()))),
+        ("created_at".into(), Value::Integer(0)),
+        ("type".into(), Value::Integer(7)),
+        ("inv_type".into(), Value::Integer(7)),
+    ]))
+}
+
 fn ais_root_response(root: CategoryKey, categories: Map) -> Vec<u8> {
     let mut response = ais_category(root.id().uuid(), root.owner().id(), None, format!("folder-{}", root.id().uuid().as_u128()), 2);
     let Value::Map(fields) = &mut response else { unreachable!() };
@@ -299,12 +313,12 @@ fn empty_folder_response(folder: CategoryKey, version: i32) -> Vec<u8> {
     xml::to_vec(&response).expect("encode empty folder response")
 }
 
-fn full_folder_response(folder: CategoryKey, item_count: usize, id_prefix: u128) -> Vec<u8> {
+fn folder_response(folder: CategoryKey, item_count: usize, id_prefix: u128, version: i32) -> Vec<u8> {
     assert!(item_count <= MAX_FOLDER_FETCH_CHILDREN);
     let mut body = String::with_capacity(item_count.saturating_mul(240).saturating_add(256));
     write!(
         body,
-        "<llsd><map><key>_base_uri</key><string>https://inventory.example.invalid/</string><key>_links</key><map><key>self</key><map><key>href</key><string>https://inventory.example.invalid/category/{}</string><key>name</key><string>link</string></map></map><key>agent_id</key><uuid>{}</uuid><key>category_id</key><uuid>{}</uuid><key>name</key><string>large</string><key>parent_id</key><uuid>00000000-0000-0000-0000-000000000000</uuid><key>type_default</key><integer>-1</integer><key>version</key><integer>1</integer><key>_embedded</key><map><key>categories</key><map/><key>links</key><map/><key>items</key><map>",
+        "<llsd><map><key>_base_uri</key><string>https://inventory.example.invalid/</string><key>_links</key><map><key>self</key><map><key>href</key><string>https://inventory.example.invalid/category/{}</string><key>name</key><string>link</string></map></map><key>agent_id</key><uuid>{}</uuid><key>category_id</key><uuid>{}</uuid><key>name</key><string>large</string><key>parent_id</key><uuid>00000000-0000-0000-0000-000000000000</uuid><key>type_default</key><integer>-1</integer><key>version</key><integer>{version}</integer><key>_embedded</key><map><key>categories</key><map/><key>links</key><map/><key>items</key><map>",
         folder.id().uuid(),
         folder.owner().id(), folder.id().uuid()
     )
@@ -380,13 +394,18 @@ fn apply_and_acknowledge(
     model: &watch::Sender<Option<::inventory::InventorySnapshot>>,
     fetch: FolderFetch,
     applied: oneshot::Sender<FolderApplyOutcome>,
-) -> Result<(), ::inventory::InventoryError> {
-    let result = inventory.apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children);
-    if result.is_ok() {
-        model.send_replace(Some(inventory.snapshot()));
-    }
-    applied.send(FolderApplyOutcome { rejected: result.is_err() }).expect("scheduler waits for folder apply outcome");
-    result.map(|_| ())
+) -> Result<FolderFetchApply, ::inventory::InventoryError> {
+    let result = apply_inventory_fetch(inventory, fetch);
+    let outcome = match &result {
+        Ok(FolderFetchApply::Applied(_)) => {
+            model.send_replace(Some(inventory.snapshot()));
+            FolderApplyOutcome::Applied
+        }
+        Ok(FolderFetchApply::Stale) => FolderApplyOutcome::Stale,
+        Err(_) => FolderApplyOutcome::Rejected,
+    };
+    applied.send(outcome).expect("scheduler waits for folder apply outcome");
+    result
 }
 
 #[tokio::test]
@@ -797,6 +816,197 @@ async fn missing_folder_keeps_walk_retryable() {
 }
 
 #[tokio::test]
+async fn stale_live_response_requeues_incomplete_folder() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let owner = InventoryOwner::new(Uuid::from_u128(1));
+    let root = key(owner, 44);
+    let mut root_category = category(root, None);
+    root_category.server_version = ServerVersion::from_raw(7);
+    root_category.server_descendent_count = Some(1);
+    let mut inventory = Inventory::new(root_category.clone(), None, InventoryLimits::default()).expect("valid inventory root");
+    for revision in 1..=7 {
+        let mut update = root_category.clone();
+        update.name = Arc::from(format!("folder-{revision}"));
+        inventory.upsert_category(update).expect("advance folder generation");
+    }
+    let start_generation = inventory.snapshot().folder_generation(root).expect("folder generation is tracked");
+    assert_eq!(start_generation.get(), 7);
+
+    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    peer.grant(&[("InventoryAPIv3", "/ais")]).await;
+    let initial_request = peer.next().await;
+    assert_eq!(initial_request.path, format!("/ais/category/{}/children?depth=16", root.id().uuid()));
+    initial_request.respond(404, "").await;
+    let InventoryFetchEvent::Failed { folder, error } = next_event(&mut events).await else {
+        panic!("expected initial background failure");
+    };
+    assert_eq!(folder, root);
+    std::assert_matches!(error, InventoryFetchError::RequestFailed);
+    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+
+    let (_status_sender, status) = watch::channel(InventoryLoadingStatus::default());
+    let handle =
+        InventoryFetchHandle { requests: requests.clone(), status, edits: crate::inventory::InventoryEditController::new().handle() };
+    let completion = handle.request_folder(root).expect("queue foreground retry");
+    let request = peer.next().await;
+    assert_eq!(request.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));
+
+    let mut live_root = inventory.snapshot().category(root).expect("root remains present").clone();
+    live_root.server_version = ServerVersion::from_raw(8);
+    live_root.server_descendent_count = Some(1);
+    inventory.upsert_category(live_root).expect("apply live folder update");
+    let live_snapshot = inventory.snapshot();
+    assert_eq!(live_snapshot.folder_generation(root).map(|generation| generation.get()), Some(8));
+    assert_eq!(live_snapshot.category(root).map(|category| category.server_version), Some(ServerVersion::from_raw(8)));
+    model.send_replace(Some(live_snapshot));
+
+    request.respond(200, folder_response(root, 1, 44_000, -1)).await;
+    let (fetch, applied) = take_folder_event(next_event(&mut events).await, root);
+    assert_eq!(fetch.provenance, FolderFetchProvenance::StartedAt(Some(start_generation)));
+    let FolderFetchApply::Stale = apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("discard stale response") else {
+        panic!("live update should make the response stale");
+    };
+    assert_eq!(completion.await.expect("foreground outcome delivered"), InventoryFetchOutcome::Failed);
+    assert!(inventory.snapshot().item(::inventory::ItemKey::new(owner, utils::ItemId::new(Uuid::from_u128(44_000)))).is_none());
+    assert_eq!(inventory.snapshot().category(root).map(|category| category.server_version), Some(ServerVersion::from_raw(8)));
+    assert!(!inventory.snapshot().is_complete(root));
+
+    let retry = peer.next().await;
+    assert_eq!(retry.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));
+    retry.respond(200, empty_folder_response(root, 9)).await;
+    let (fetch, applied) = take_folder_event(next_event(&mut events).await, root);
+    let FolderFetchApply::Applied(_) = apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply retry") else {
+        panic!("retry response should apply");
+    };
+    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+    assert!(inventory.snapshot().is_complete(root));
+
+    drop(handle);
+    drop(requests);
+    stop.send(()).expect("stop scheduler");
+    task.await.expect("scheduler stopped");
+}
+
+#[tokio::test]
+async fn unrelated_folder_change_keeps_fetch_fresh() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let owner = InventoryOwner::new(Uuid::from_u128(51));
+    let library_owner = InventoryOwner::new(Uuid::from_u128(52));
+    let root = key(owner, 53);
+    let library = key(library_owner, 54);
+    let mut personal_root = category(root, None);
+    personal_root.server_version = ServerVersion::from_raw(7);
+    personal_root.server_descendent_count = Some(1);
+    let mut library_root = category(library, None);
+    library_root.server_version = ServerVersion::from_raw(3);
+    library_root.server_descendent_count = Some(0);
+    let mut inventory = Inventory::new(personal_root, Some(library_root), InventoryLimits::default()).expect("valid inventory roots");
+    let target_generation = inventory.snapshot().folder_generation(root).expect("personal folder generation is tracked");
+    let library_generation = inventory.snapshot().folder_generation(library).expect("library folder generation is tracked");
+
+    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    peer.grant(&[("InventoryAPIv3", "/ais")]).await;
+    let request = peer.next().await;
+    assert_eq!(request.path, format!("/ais/category/{}/children?depth=16", root.id().uuid()));
+
+    inventory
+        .apply_delta(InventoryDelta { updated_category_versions: vec![(library, ServerVersion::from_raw(4))], ..InventoryDelta::default() })
+        .expect("update unrelated library folder");
+    let changed_snapshot = inventory.snapshot();
+    assert_eq!(changed_snapshot.folder_generation(root), Some(target_generation));
+    assert_ne!(changed_snapshot.folder_generation(library), Some(library_generation));
+    model.send_replace(Some(changed_snapshot));
+
+    request.respond(200, folder_response(root, 1, 53_000, 8)).await;
+    let (fetch, applied) = take_folder_event(next_event(&mut events).await, root);
+    assert_eq!(fetch.provenance, FolderFetchProvenance::StartedAt(Some(target_generation)));
+    let FolderFetchApply::Applied(_) =
+        apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply unchanged folder response")
+    else {
+        panic!("unrelated folder change should not stale this response");
+    };
+    assert!(inventory.snapshot().is_complete(root));
+    assert_eq!(inventory.snapshot().child_count(root), 1);
+    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+
+    drop(requests);
+    stop.send(()).expect("stop scheduler");
+    task.await.expect("scheduler stopped");
+}
+
+#[tokio::test]
+async fn recursive_child_refetches_after_parent_update() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let owner = InventoryOwner::new(Uuid::from_u128(61));
+    let root = key(owner, 62);
+    let child = key(owner, 63);
+    let item_id = Uuid::from_u128(64);
+    let mut child_category = category(child, Some(root));
+    child_category.server_version = ServerVersion::from_raw(10);
+    child_category.server_descendent_count = Some(0);
+    let inventory = Inventory::from_categories(category(root, None), None, vec![child_category], InventoryLimits::default())
+        .expect("valid inventory folders");
+    let child_generation = inventory.snapshot().folder_generation(child).expect("child generation is tracked");
+
+    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    peer.grant(&[("InventoryAPIv3", "/ais")]).await;
+    let request = peer.next().await;
+    assert_eq!(request.path, format!("/ais/category/{}/children?depth=16", root.id().uuid()));
+    let mut recursive_child =
+        ais_category(child.id().uuid(), owner.id(), Some(root.id().uuid()), format!("folder-{}", child.id().uuid().as_u128()), 11);
+    let Value::Map(fields) = &mut recursive_child else { unreachable!() };
+    fields.insert(
+        "_embedded".into(),
+        Value::Map(Map::from([
+            ("categories".into(), Value::Map(Map::new())),
+            ("items".into(), Value::Map(Map::from([(item_id.to_string(), ais_item(child, item_id))]))),
+            ("links".into(), Value::Map(Map::new())),
+        ])),
+    );
+    request.respond(200, ais_root_response(root, Map::from([(child.id().uuid().to_string(), recursive_child)]))).await;
+
+    let (root_fetch, root_applied) = take_folder_event(next_event(&mut events).await, root);
+    let mut inventory = inventory;
+    let FolderFetchApply::Applied(_) =
+        apply_and_acknowledge(&mut inventory, &model, root_fetch, root_applied).expect("apply root response")
+    else {
+        panic!("root response should apply");
+    };
+    let current_child_generation = inventory.snapshot().folder_generation(child).expect("child remains present");
+    assert_ne!(current_child_generation, child_generation);
+    assert!(!inventory.snapshot().is_complete(child));
+
+    let (child_fetch, child_applied) = take_folder_event(next_event(&mut events).await, child);
+    assert_eq!(child_fetch.provenance, FolderFetchProvenance::StartedAt(Some(child_generation)));
+    let FolderFetchApply::Stale =
+        apply_and_acknowledge(&mut inventory, &model, child_fetch, child_applied).expect("discard child response")
+    else {
+        panic!("parent update should stale the recursive child response");
+    };
+    assert!(inventory.snapshot().item(::inventory::ItemKey::new(owner, utils::ItemId::new(item_id))).is_none());
+
+    let retry = peer.next().await;
+    assert_eq!(retry.path, format!("/ais/category/{}/children?depth=0", child.id().uuid()));
+    retry.respond(200, folder_response(child, 1, item_id.as_u128(), 12)).await;
+    let (child_fetch, child_applied) = take_folder_event(next_event(&mut events).await, child);
+    let FolderFetchApply::Applied(_) =
+        apply_and_acknowledge(&mut inventory, &model, child_fetch, child_applied).expect("apply child refetch")
+    else {
+        panic!("child refetch should apply");
+    };
+    assert!(inventory.snapshot().is_complete(child));
+    assert!(inventory.snapshot().item(::inventory::ItemKey::new(owner, utils::ItemId::new(item_id))).is_some());
+    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+
+    drop(requests);
+    stop.send(()).expect("stop scheduler");
+    task.await.expect("scheduler stopped");
+}
+
+#[tokio::test]
 async fn rejected_folder_can_be_requested_again() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
@@ -906,7 +1116,19 @@ async fn parent_response_requeues_a_completed_child_when_its_new_count_is_unknow
 
     root_request.respond(200, root_response_with_child_version(root, child, 11)).await;
     let (fetch, applied) = take_folder_event(next_event(&mut events).await, root);
-    apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply parent response");
+    let FolderFetchApply::Stale = apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("discard stale parent response")
+    else {
+        panic!("child update should stale the parent response");
+    };
+    assert!(inventory.snapshot().is_complete(child));
+
+    let parent_retry = peer.next().await;
+    assert_eq!(parent_retry.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));
+    parent_retry.respond(200, root_response_with_child_version(root, child, 11)).await;
+    let (fetch, applied) = take_folder_event(next_event(&mut events).await, root);
+    let FolderFetchApply::Applied(_) = apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply parent retry") else {
+        panic!("parent retry should apply");
+    };
     assert!(!inventory.snapshot().is_complete(child));
 
     let child_retry = peer.next().await;
@@ -988,6 +1210,12 @@ async fn one_hundred_thousand_items_load_with_bounded_responses_and_concurrency(
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let (mut inventory, root, first, second) = inventory_with_children();
+    for folder in [first, second] {
+        let mut child = inventory.snapshot().category(folder).expect("child folder exists").clone();
+        child.server_version = ServerVersion::from_raw(0);
+        child.server_descendent_count = Some(0);
+        inventory.upsert_category(child).expect("mark child folder complete");
+    }
     let started = Instant::now();
     let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
     peer.grant(&[("InventoryAPIv3", "/ais")]).await;
@@ -1006,8 +1234,8 @@ async fn one_hundred_thousand_items_load_with_bounded_responses_and_concurrency(
     let peak_in_flight = 2;
     assert_eq!(peak_in_flight, BACKGROUND_CONCURRENCY);
 
-    let first_body = full_folder_response(first, ITEMS_PER_FOLDER, 10_000);
-    let second_body = full_folder_response(second, ITEMS_PER_FOLDER, 100_000);
+    let first_body = folder_response(first, ITEMS_PER_FOLDER, 10_000, 1);
+    let second_body = folder_response(second, ITEMS_PER_FOLDER, 100_000, 1);
     let largest_response = first_body.len().max(second_body.len());
     assert!(largest_response <= MAX_FETCH_RESPONSE_BYTES);
     first_request.respond(200, first_body).await;
@@ -1021,7 +1249,11 @@ async fn one_hundred_thousand_items_load_with_bounded_responses_and_concurrency(
         };
         assert!(fetch.folder == first || fetch.folder == second);
         let folder = fetch.folder;
-        apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply large folder response");
+        let FolderFetchApply::Applied(_) =
+            apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply large folder response")
+        else {
+            panic!("large folder response should apply: {folder:?}");
+        };
         applied_folders.insert(folder);
     }
     std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
