@@ -29,12 +29,15 @@ type OpaqueOutput = HashMap<(DrawKey, Vec<u8>), usize>;
 type BlendedOutput = Vec<(DrawKey, Vec<u8>)>;
 
 #[test]
-fn canceled_layout_retires_in_bounded_chunks() {
-    let (_region_world, view, camera, mut items, mut list, index) = active_layout();
+fn canceled_layout_releases_groups_in_bounded_chunks() {
+    let (_region_world, _view, camera, mut items, mut list, index) = active_layout();
+    let group = items.items.get(index).expect("active item").faces[0].group;
+    let active_refs = group_refs(&list, group);
     let active_commands = list.draws().len();
     let active_items = list.visible_items();
     let active_bytes = list.instance_bytes.len();
-    let staged = staged_layout(index, camera, view.membership_sequence(), &items.items);
+    let staged = staged_layout(&mut list, index, camera, &items.items, STAGED_REFS);
+    assert_eq!(group_refs(&list, group), active_refs + STAGED_REFS);
     list.pending = Some(staged);
     let initial_entries = list.pending.as_ref().map(staged_entry_count).expect("pending staged build");
     let initial_allocation = list.pending.as_ref().map(staged_allocation_bytes).expect("pending staged build");
@@ -44,7 +47,7 @@ fn canceled_layout_retires_in_bounded_chunks() {
     assert!(list.pending.is_none());
     assert_eq!(staged_entry_count(list.retired.as_ref().expect("full staged build is retained")), initial_entries);
     for _ in 0..8 {
-        assert!(!list.request_layout(&[index], camera, view.membership_sequence(), false, &items.items));
+        assert!(!list.request_layout(&[index], camera, false, &items.items));
         list.cancel_layout();
         assert!(list.pending.is_none());
         assert!(list.retired.is_some(), "repeated requests cannot add retired builds");
@@ -53,56 +56,64 @@ fn canceled_layout_retires_in_bounded_chunks() {
 
     let mut steps = 0;
     while list.layout_pending() {
-        let before_entries = list.retired.as_ref().map(staged_entry_count).unwrap_or_default();
-        let before_bytes = list.retired.as_ref().map(staged_payload_bytes).unwrap_or_default();
-        let _ = list.advance_layout(&view, &mut items.items, &HashMap::new(), false);
-        let after_entries = list.retired.as_ref().map(staged_entry_count).unwrap_or_default();
-        let after_bytes = list.retired.as_ref().map(staged_payload_bytes).unwrap_or_default();
-        let after_allocation = list.retired.as_ref().map(staged_allocation_bytes).unwrap_or_default();
-        assert!(before_entries.saturating_sub(after_entries) <= super::RETIRED_LAYOUT_ENTRIES_PER_FRAME);
-        assert!(before_bytes.saturating_sub(after_bytes) <= super::RETIRED_LAYOUT_BYTES_PER_FRAME);
-        assert!(after_allocation <= initial_allocation, "retirement cannot retain more than the single staged allocation");
+        let before = list.retired_entries_remaining();
+        let _ = list.advance_layout(&mut items.items, &HashMap::new(), false);
+        assert!(before.saturating_sub(list.retired_entries_remaining()) <= super::RETIRED_LAYOUT_ENTRIES_PER_FRAME);
         assert_eq!(list.draws().len(), active_commands, "retirement leaves active draw commands intact");
         assert_eq!(list.visible_items(), active_items, "retirement leaves active visibility intact");
         assert_eq!(list.instance_bytes.len(), active_bytes, "retirement leaves active instance data intact");
         steps += 1;
-        assert!(steps < 100, "staged allocation is reclaimed in bounded turns");
+        assert!(steps < 100, "staged group references are released in bounded turns");
     }
-    assert!(steps > 1, "large staged data requires multiple retirement turns");
+    assert!(steps > 1, "many staged group references require multiple retirement turns");
     assert!(list.retired.is_none(), "completed retirement releases the whole staged allocation");
-    assert!(list.request_layout(&[index], camera, view.membership_sequence(), false, &items.items));
+    assert_eq!(group_refs(&list, group), active_refs, "retirement releases every staged group reference");
+    assert!(list.request_layout(&[index], camera, false, &items.items));
 }
 
 #[test]
 fn stale_layout_retires_the_whole_build() {
-    let (_region_world, view, camera, mut items, mut list, index) = active_layout();
+    let (_region_world, _view, camera, mut items, mut list, index) = active_layout();
+    let group = items.items.get(index).expect("active item").faces[0].group;
+    let active_refs = group_refs(&list, group);
     let active_commands = list.draws().len();
     let active_items = list.visible_items();
-    list.pending = Some(staged_layout(index, camera, view.membership_sequence().wrapping_add(1), &items.items));
+    let staged = staged_layout(&mut list, index, camera, &items.items, STAGED_REFS);
+    list.pending = Some(staged);
+    list.mark_layout_stale();
 
-    let progress = list.advance_layout(&view, &mut items.items, &HashMap::new(), false).expect("stale build is observed");
+    let progress = list.advance_layout(&mut items.items, &HashMap::new(), false).expect("stale build is observed");
     assert!(progress.stale);
     assert!(list.pending.is_none());
     assert!(list.retired.is_some(), "stale staged inputs remain owned by incremental retirement");
     assert_eq!(list.draws().len(), active_commands, "stale build cannot replace active commands");
     assert_eq!(list.visible_items(), active_items, "stale build cannot replace active visibility");
-    let before = staged_entry_count(list.retired.as_ref().expect("retired staged build"));
-    assert!(before > 0, "stale input vectors remain owned until retirement");
+    assert!(list.retired_entries_remaining() > 0, "stale group references remain owned until retirement");
     let mut steps = 0;
     while list.layout_pending() {
-        let before_entries = list.retired.as_ref().map(staged_entry_count).unwrap_or_default();
-        let before_bytes = list.retired.as_ref().map(staged_payload_bytes).unwrap_or_default();
-        let _ = list.advance_layout(&view, &mut items.items, &HashMap::new(), false);
-        let after_entries = list.retired.as_ref().map(staged_entry_count).unwrap_or_default();
-        let after_bytes = list.retired.as_ref().map(staged_payload_bytes).unwrap_or_default();
-        assert!(before_entries.saturating_sub(after_entries) <= super::RETIRED_LAYOUT_ENTRIES_PER_FRAME);
-        assert!(before_bytes.saturating_sub(after_bytes) <= super::RETIRED_LAYOUT_BYTES_PER_FRAME);
+        let before = list.retired_entries_remaining();
+        let _ = list.advance_layout(&mut items.items, &HashMap::new(), false);
+        assert!(before.saturating_sub(list.retired_entries_remaining()) <= super::RETIRED_LAYOUT_ENTRIES_PER_FRAME);
         assert_eq!(list.draws().len(), active_commands, "retirement leaves active draw commands intact");
         assert_eq!(list.visible_items(), active_items, "retirement leaves active visibility intact");
         steps += 1;
-        assert!(steps < 100, "stale staged data is reclaimed in bounded turns");
+        assert!(steps < 100, "stale group references are released in bounded turns");
     }
     assert!(list.retired.is_none(), "stale allocations are eventually reclaimed");
+    assert_eq!(group_refs(&list, group), active_refs, "retirement releases every staged group reference");
+}
+
+#[test]
+fn plain_staged_data_retires_in_one_turn() {
+    let (_region_world, _view, camera, mut items, mut list, index) = active_layout();
+    let staged = staged_layout(&mut list, index, camera, &items.items, 0);
+    assert!(staged_entry_count(&staged) > 4 * super::RETIRED_LAYOUT_ENTRIES_PER_FRAME);
+    list.pending = Some(staged);
+    list.cancel_layout();
+
+    let _ = list.advance_layout(&mut items.items, &HashMap::new(), false);
+    assert!(!list.layout_pending(), "staged data without resources does not hold the next layout back");
+    assert!(list.request_layout(&[index], camera, false, &items.items));
 }
 
 #[test]
@@ -360,9 +371,9 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
         if layout {
             list.layout(&previous_visible, &next_visible, &mut items.items, camera);
         } else if camera_changed && list.has_blended() {
-            list.sort_blended(&mut items.items, camera);
+            list.sort_blended(&items.items, camera);
         } else if blended_patch {
-            list.reorder_blended(&mut items.items);
+            list.reorder_blended(&items.items);
         }
         visible = next_visible;
         assert_matches_fresh(&list, &items.items, &visible, camera);
@@ -385,12 +396,23 @@ fn active_layout() -> (world::World, crate::scene::SceneView, Camera, FrameCache
     (_region_world, view, camera, items, list, index)
 }
 
-fn staged_layout(index: ItemIndex, camera: Camera, membership_sequence: u64, items: &ItemSlab) -> super::LayoutBuild {
+const STAGED_REFS: usize = 2_047;
+
+fn staged_layout(list: &mut DrawList, index: ItemIndex, camera: Camera, items: &ItemSlab, refs: usize) -> super::LayoutBuild {
     let input = vec![index; 2_047];
-    let mut build = super::LayoutBuild::new(&input, &input, camera, membership_sequence, true, items);
-    build.state.instance_bytes.resize(3 * super::RETIRED_LAYOUT_BYTES_PER_FRAME, 0);
-    build.state.indirect_bytes.resize(2 * super::RETIRED_LAYOUT_BYTES_PER_FRAME, 0);
+    let mut build = super::LayoutBuild::new(&input, &input, camera, true, items);
+    let group = items.get(index).expect("staged item").faces[0].group;
+    for _ in 0..refs {
+        assert!(list.groups.retain(group));
+        build.state.draw_group_refs.push(group);
+    }
+    build.state.instance_bytes.resize(3 * 1024 * 1024, 0);
+    build.state.indirect_bytes.resize(2 * 1024 * 1024, 0);
     build
+}
+
+fn group_refs(list: &DrawList, group: u32) -> usize {
+    list.groups.group(group).expect("interned group").refs
 }
 
 fn staged_entry_count(build: &super::LayoutBuild) -> usize {
@@ -423,10 +445,6 @@ fn staged_entry_count(build: &super::LayoutBuild) -> usize {
         + state.batch_order.len()
         + state.draw_batches.len()
         + state.first_instances.len()
-}
-
-fn staged_payload_bytes(build: &super::LayoutBuild) -> usize {
-    build.state.instance_bytes.len() + build.state.indirect_bytes.len()
 }
 
 fn staged_allocation_bytes(build: &super::LayoutBuild) -> usize {

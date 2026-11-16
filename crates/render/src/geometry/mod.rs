@@ -20,7 +20,7 @@ use std::{
 };
 
 use assets::{TextureHandle, TextureId};
-use math::{Vec4, motion::RegionBounds};
+use math::{DVec3, Vec4, motion::RegionBounds};
 use uuid::Uuid;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
@@ -32,6 +32,7 @@ use world::{Entity, WorldTransform};
 use self::cache::FrameCache;
 use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
 use self::first_appearance::FirstAppearances;
+use self::items::ItemIndex;
 use self::mesh::GpuMesh;
 use self::storage::Storage;
 use crate::scene::{AgentPose, Camera, MAX_REGIONS, MeshId, ViewVersion};
@@ -102,6 +103,7 @@ pub struct Stats {
     pub item_order_items: usize,
     pub candidate_items_visited: usize,
     pub mesh_demand_items_visited: usize,
+    pub mesh_admission_items_visited: usize,
     pub mesh_demand_order_updates: usize,
     pub mesh_upload_attempts: usize,
     pub mesh_upload_attempt_bytes: usize,
@@ -120,6 +122,10 @@ pub struct Stats {
     pub gpu_mesh_retirements: usize,
     pub gpu_mesh_retired_bytes: usize,
     pub rebuild_pending: bool,
+    #[cfg(test)]
+    pub(crate) layout_stale_reason: Option<&'static str>,
+    #[cfg(test)]
+    pub(crate) layout_invalidation_reason: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -282,7 +288,11 @@ pub(crate) struct GeometryRenderer {
     storage: Storage,
     retired: Vec<GpuMesh>,
     cache: FrameCache,
+    active_origin: DVec3,
     draw_list: DrawList,
+    layout_pose_items: HashSet<(ItemIndex, Entity)>,
+    layout_parameter_items: HashSet<(ItemIndex, Entity)>,
+    recovery_publication_pending: bool,
     first_appearances: FirstAppearances,
     mesh_admission: frame::MeshAdmission,
     pending_meshes: HashSet<MeshId>,
@@ -297,6 +307,7 @@ pub(crate) struct GeometryRenderer {
     regions: Vec<RegionBounds>,
     motion_redraw: bool,
     layout_required: bool,
+    replacement_retry_pending: bool,
     epoch: u64,
     prepared: Option<FramePreparation>,
     applied_agent: Option<Uuid>,
@@ -351,7 +362,11 @@ impl GeometryRenderer {
             storage: Storage::default(),
             retired: Vec::new(),
             cache: FrameCache::default(),
+            active_origin: DVec3::ZERO,
             draw_list: DrawList::default(),
+            layout_pose_items: HashSet::new(),
+            layout_parameter_items: HashSet::new(),
+            recovery_publication_pending: false,
             first_appearances: FirstAppearances::default(),
             mesh_admission: frame::MeshAdmission::default(),
             pending_meshes: HashSet::new(),
@@ -366,6 +381,7 @@ impl GeometryRenderer {
             regions: Vec::new(),
             motion_redraw: false,
             layout_required: false,
+            replacement_retry_pending: false,
             epoch: 0,
             prepared: None,
             applied_agent: None,
@@ -410,6 +426,7 @@ impl GeometryRenderer {
         self.placements.clear();
         self.future_placements.clear();
         self.layout_required = false;
+        self.replacement_retry_pending = false;
         if let Some(agent_id) = self.applied_agent.take() {
             self.restore_agent_pose(agent_id);
         }
@@ -424,7 +441,6 @@ impl GeometryRenderer {
         self.cache.visible.clear();
         self.cache.next_visible.clear();
         self.cache.clear_mesh_demands();
-        self.cache.mesh_ready.clear();
         self.pending_meshes.clear();
         for (_, item) in self.cache.items.iter_mut() {
             for face in &mut item.faces {

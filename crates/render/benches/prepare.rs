@@ -9,7 +9,7 @@ use futures::executor::block_on;
 use math::{DVec3, Vec3};
 use render::{
     GeometryPrepare,
-    scene::{Camera, Reconciler, SceneView},
+    scene::{Camera, DrawnMeshKey, Reconciler, SceneView},
 };
 use wgpu::{DeviceDescriptor, PowerPreference, RequestAdapterOptions, TextureFormat};
 use world::World;
@@ -293,6 +293,17 @@ pub(crate) fn bench(c: &mut Criterion) {
     }))
     .expect("benchmark GPU device");
     let mut group = c.benchmark_group("render/geometry_prepare");
+    if std::env::args().any(|argument| argument.ends_with("live_walk_reprepare_pose4_texture_arrivals")) {
+        bench_live_mix(&mut group, &device, &queue);
+        group.finish();
+        return;
+    }
+    if std::env::args().any(|argument| argument.ends_with("region_load_progress_5000") || argument.ends_with("region_load_progress_65000"))
+    {
+        bench_region_load_progress(&mut group, &device, &queue);
+        group.finish();
+        return;
+    }
     if std::env::args().any(|argument| {
         [
             "history_loss_rebuild_1000",
@@ -613,6 +624,228 @@ fn bench_history_loss(
     }
 }
 
+fn bench_region_load_progress(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) {
+    let arguments = std::env::args().collect::<Vec<_>>();
+    let selected_size = [5_000, 65_000]
+        .into_iter()
+        .find(|size| arguments.iter().any(|argument| argument.ends_with(&format!("region_load_progress_{size}"))));
+    for objects in [5_000, 65_000] {
+        if selected_size.is_some_and(|selected| selected != objects) {
+            continue;
+        }
+        let name = format!("region_load_progress_{objects}");
+        let (mut world, rows) = support::live_prepare_world_with_regions(objects, 128, 8, 2);
+        let mut order = 20_000_000;
+        let meshes = support::add_meshes(&mut world, &rows, 128, &mut order);
+        let textures = support::benchmark_textures(8);
+        let camera = camera_at(256.5, 0.0, 768.0);
+        let (mut reconciler, mut view, mut now) = support::settle_with_assets(&world, objects, camera, &textures.textures, &meshes);
+        assert_eq!(meshes.len(), 128);
+        assert_eq!(
+            view.objects().filter(|object| matches!(object.mesh().map(|(key, _)| key), Some(DrawnMeshKey::Asset { .. }))).count(),
+            128,
+            "all distinct mesh assets are ready in the scene"
+        );
+        let mut generation = 0u64;
+        let mut first_useful_latency = DurationDistribution::default();
+        let mut preparation_turns = DurationDistribution::default();
+        let mut owner_turns = DurationDistribution::default();
+        let mut scene_updates = DurationDistribution::default();
+        let mut thread_cycles = CycleDistribution::default();
+        let mut work = RebuildWork::default();
+        let mut turn_samples = Vec::new();
+        let mut peak_memory = None;
+        let mut current_memory = None;
+        let mut total_loads = 0usize;
+        let mut useful_loads = 0usize;
+        let mut converged_loads = 0usize;
+        let mut quiet_turns_total = 0usize;
+        let mut quiet_turn_samples = Vec::new();
+        let mut first_useful_turn_total = 0usize;
+        let mut visible_instances_total = 0usize;
+        let mut visible_instance_samples = 0usize;
+        let mut peak_instances = 0usize;
+        let mut final_stats = render::Stats::default();
+        let mut recovery_periods = 0usize;
+        let mut published_count_drops = 0usize;
+        group.bench_function(name.clone(), |b| {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
+                    let memory_before = process_memory();
+                    let mut prepare = GeometryPrepare::new(device, queue, TextureFormat::Rgba8UnormSrgb);
+                    let mut load_elapsed = Duration::ZERO;
+                    let mut first_useful = None;
+                    let mut latest = prepare.stats();
+                    let mut rebuild_was_pending = false;
+                    let mut previous_instances = 0usize;
+                    for turn in 0..60usize {
+                        let owner_started = Instant::now();
+                        for (index, row) in rows.iter().take(128).enumerate() {
+                            generation = generation.wrapping_add(1);
+                            support::update_mesh_one(&mut world, row, index, &mut order, generation);
+                        }
+                        support::first_publish(&mut reconciler, &mut view, &world, &mut now);
+                        let scene_update = owner_started.elapsed();
+                        scene_updates.record(scene_update);
+                        let fast_steps = (turn + 1).min(2);
+                        let slow_steps = (turn + 1).saturating_sub(2).min(28);
+                        let walk = fast_steps as f64 * 0.3 + slow_steps as f64 * (0.7 / 28.0);
+                        let camera = camera_at(256.5 - walk, turn as f64, 768.0);
+                        let sample = prepare_sample(&mut prepare, device, queue, &view, camera);
+                        let owner_turn = scene_update + sample.wall + sample.submit + sample.poll;
+                        elapsed += owner_turn;
+                        load_elapsed += owner_turn;
+                        preparation_turns.record(sample.wall);
+                        owner_turns.record(owner_turn);
+                        if let Some(cpu_cycles) = sample.cpu_cycles {
+                            thread_cycles.record(cpu_cycles);
+                        }
+                        latest = sample.stats;
+                        work.add(latest);
+                        turn_samples.push(latest);
+                        visible_instances_total = visible_instances_total.saturating_add(latest.instances);
+                        visible_instance_samples += 1;
+                        peak_instances = peak_instances.max(latest.instances);
+                        published_count_drops += usize::from(latest.instances < previous_instances);
+                        previous_instances = latest.instances;
+                        if latest.rebuild_pending && !rebuild_was_pending {
+                            recovery_periods += 1;
+                        }
+                        rebuild_was_pending = latest.rebuild_pending;
+                        if first_useful.is_none() && latest.instances > 0 && latest.draw_calls > 0 {
+                            first_useful = Some((turn + 1, load_elapsed));
+                        }
+                        complete_texture_work(&mut prepare, 8);
+                    }
+                    let quiet_camera = camera_at(255.5, 3.0, 768.0);
+                    let mut quiet_turns = 0usize;
+                    let mut quiet_trace = Vec::new();
+                    while prepare.needs_frame(Instant::now()) && quiet_turns < 1_500 {
+                        let sample = prepare_sample(&mut prepare, device, queue, &view, quiet_camera);
+                        elapsed += sample.wall + sample.submit + sample.poll;
+                        load_elapsed += sample.wall + sample.submit + sample.poll;
+                        preparation_turns.record(sample.wall);
+                        owner_turns.record(sample.wall + sample.submit + sample.poll);
+                        if let Some(cpu_cycles) = sample.cpu_cycles {
+                            thread_cycles.record(cpu_cycles);
+                        }
+                        latest = sample.stats;
+                        work.add(latest);
+                        turn_samples.push(latest);
+                        visible_instances_total = visible_instances_total.saturating_add(latest.instances);
+                        visible_instance_samples += 1;
+                        peak_instances = peak_instances.max(latest.instances);
+                        published_count_drops += usize::from(latest.instances < previous_instances);
+                        previous_instances = latest.instances;
+                        complete_texture_work(&mut prepare, 8);
+                        quiet_turns += 1;
+                        if quiet_turns == 1 || quiet_turns.is_multiple_of(15) {
+                            quiet_trace.push(format!(
+                                "turn={quiet_turns}:rebuild_pending={},objects={},surfaces={},sweep={},cleanup={},candidates={},updated={},layouts={},layout_items={},layout_faces={},instances={},pending_meshes={},pending_textures={}",
+                                latest.rebuild_pending,
+                                latest.rebuild_objects,
+                                latest.rebuild_surfaces,
+                                latest.rebuild_sweep_slots,
+                                latest.rebuild_cleanup_entries,
+                                latest.candidate_items_visited,
+                                latest.items_updated,
+                                latest.layouts,
+                                latest.layout_items_visited,
+                                latest.layout_faces_visited,
+                                latest.instances,
+                                latest.pending_meshes,
+                                latest.pending_textures,
+                            ));
+                        }
+                    }
+                    assert!(
+                        !prepare.needs_frame(Instant::now()),
+                        "{name} continuation did not settle within 1,500 quiet turns: rebuild_pending={}, pending_meshes={}, pending_textures={}, quiet_trace={quiet_trace:?}",
+                        latest.rebuild_pending,
+                        latest.pending_meshes,
+                        latest.pending_textures,
+                    );
+                    assert!(
+                        !latest.rebuild_pending && latest.pending_meshes == 0 && latest.pending_textures == 0,
+                        "{name} settled without converged content: rebuild_pending={}, pending_meshes={}, pending_textures={}",
+                        latest.rebuild_pending,
+                        latest.pending_meshes,
+                        latest.pending_textures,
+                    );
+                    if let Some((turn, latency)) = first_useful {
+                        first_useful_turn_total += turn;
+                        first_useful_latency.record(latency);
+                        useful_loads += 1;
+                    }
+                    if !latest.rebuild_pending && latest.pending_meshes == 0 && latest.pending_textures == 0 {
+                        converged_loads += 1;
+                    }
+                    quiet_turns_total += quiet_turns;
+                    quiet_turn_samples.push(quiet_turns);
+                    total_loads += 1;
+                    final_stats = latest;
+                    if let Some(memory) = memory_before {
+                        current_memory = Some(memory);
+                        peak_memory = Some(peak_memory.map_or(memory, |previous: ProcessMemory| previous.max(memory)));
+                    }
+                    record_process_memory(&mut current_memory, &mut peak_memory);
+                }
+                elapsed
+            });
+        });
+        eprintln!(
+            "{name}: loads={total_loads}, useful_loads={useful_loads}, converged={converged_loads}, first_useful_turn_mean={:.1}, first_useful_latency=[{}], quiet_turns=[{}], recovery_periods={}, published_count_drops={}, prep_turns=[{}], complete_owner_turns=[{}], scene_updates=[{}], visible_instances_mean={:.1}, peak_instances={}, final_instances={}, cpu_cycles=[{}], work_per_load=[rebuild_objects={:.1}, rebuild_surfaces={:.1}, mesh_info_bytes={:.1}, candidates={:.1}, mesh_demands={:.1}, mesh_upload_attempts={:.1}, uploaded_bytes={:.1}, layouts={:.1}, layout_instance_bytes={:.1}, layout_command_bytes={:.1}], gpu_mesh_retained_bytes={}, gpu_mesh_peak_bytes={}, process_private_bytes_sampled={}, process_private_bytes_peak={}, process_working_set_sampled={}, process_working_set_peak={}",
+            first_useful_turn_total as f64 / useful_loads.max(1) as f64,
+            first_useful_latency.report(),
+            work_distribution(quiet_turn_samples.iter().copied()),
+            recovery_periods,
+            published_count_drops,
+            preparation_turns.report(),
+            owner_turns.report(),
+            scene_updates.report(),
+            visible_instances_total as f64 / visible_instance_samples.max(1) as f64,
+            peak_instances,
+            final_stats.instances,
+            thread_cycles.report(),
+            work.objects as f64 / total_loads.max(1) as f64,
+            work.surfaces as f64 / total_loads.max(1) as f64,
+            work.mesh_info_bytes as f64 / total_loads.max(1) as f64,
+            work.candidate_items as f64 / total_loads.max(1) as f64,
+            work.mesh_demand_items as f64 / total_loads.max(1) as f64,
+            work.mesh_upload_attempts as f64 / total_loads.max(1) as f64,
+            work.mesh_upload_attempt_bytes as f64 / total_loads.max(1) as f64,
+            work.layouts as f64 / total_loads.max(1) as f64,
+            work.draw_instance_bytes as f64 / total_loads.max(1) as f64,
+            work.draw_command_bytes as f64 / total_loads.max(1) as f64,
+            final_stats.mesh_bytes,
+            final_stats.mesh_peak,
+            current_memory.map_or(0, |memory| memory.private_bytes),
+            peak_memory.map_or(0, |memory| memory.peak_commit_bytes),
+            current_memory.map_or(0, |memory| memory.working_set_bytes),
+            peak_memory.map_or(0, |memory| memory.peak_working_set_bytes),
+        );
+        eprintln!(
+            "{name}: turn_work=[rebuild_objects={}, cleanup_entries={}, item_order={}, candidates={}, mesh_demands={}, mesh_order_updates={}, mesh_upload_attempts={}, mesh_upload_attempt_bytes={}, layouts={}, layout_items={}, layout_faces={}]",
+            work_distribution(turn_samples.iter().map(|stats| stats.rebuild_objects)),
+            work_distribution(turn_samples.iter().map(|stats| stats.rebuild_cleanup_entries)),
+            work_distribution(turn_samples.iter().map(|stats| stats.item_order_items)),
+            work_distribution(turn_samples.iter().map(|stats| stats.candidate_items_visited)),
+            work_distribution(turn_samples.iter().map(|stats| stats.mesh_demand_items_visited)),
+            work_distribution(turn_samples.iter().map(|stats| stats.mesh_demand_order_updates)),
+            work_distribution(turn_samples.iter().map(|stats| stats.mesh_upload_attempts)),
+            work_distribution(turn_samples.iter().map(|stats| stats.mesh_upload_attempt_bytes)),
+            work_distribution(turn_samples.iter().map(|stats| stats.layouts)),
+            work_distribution(turn_samples.iter().map(|stats| stats.layout_items_visited)),
+            work_distribution(turn_samples.iter().map(|stats| stats.layout_faces_visited)),
+        );
+    }
+}
+
 fn bench_mesh_objects(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     device: &wgpu::Device,
@@ -868,23 +1101,36 @@ fn bench_reprepare(
 }
 
 fn bench_live_mix(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
-    let mut fixture = Fixture::settled(device, queue, 7, 50, 0, 896.0, 1024.0);
+    let mut fixture = Fixture::settled(device, queue, 7, 50, 0, 768.0, 1024.0);
     let mut generation = 0u64;
     let mut order = 20_000_000;
     let mut latest = fixture.prepare.stats();
+    let mut faces_patched = 0usize;
+    let rows_per_region = OBJECTS.div_ceil(7);
     group.bench_function("live_walk_reprepare_pose4_texture_arrivals", |b| {
         b.iter_custom(|iters| {
             let mut elapsed = Duration::ZERO;
             for _ in 0..iters {
                 generation += 1;
-                let texture = support::update_texture(&mut fixture.world, &fixture.rows[0], &mut order, generation);
-                support::update_many(&mut fixture.world, &fixture.rows[1..5], 4, &mut order, generation);
+                let step = (generation % 2048) as f64 * 0.25;
+                let camera_x = 768.0 + step;
+                let local_x = (camera_x % 256.0) as usize;
+                let (region, first_local_id) = if local_x >= 220 {
+                    (camera_x as usize / 256 + 1, 50)
+                } else if local_x >= 100 {
+                    (camera_x as usize / 256, 95)
+                } else {
+                    (camera_x as usize / 256, local_x.clamp(1, 95))
+                };
+                let first_row = region * rows_per_region + first_local_id - 1;
+                let rows = &fixture.rows[first_row..first_row + 5];
+                let texture = support::update_texture(&mut fixture.world, &rows[0], &mut order, generation);
                 support::publish_texture_update(
                     &mut fixture.reconciler,
                     &mut fixture.view,
                     &fixture.world,
                     &mut fixture.now,
-                    &fixture.rows[0],
+                    &rows[0],
                     texture,
                 );
                 if generation.is_multiple_of(20) {
@@ -892,14 +1138,18 @@ fn bench_live_mix(group: &mut criterion::BenchmarkGroup<'_, criterion::measureme
                     let refinement_size = 128 << ((generation as usize / 20).min(4));
                     support::complete_texture_refinements(&mut fixture.textures, texture_indexes, refinement_size, Instant::now());
                 }
-                let step = (generation % 2048) as f64 * 0.25;
+                for row in &rows[1..] {
+                    support::update_one(&mut fixture.world, row, &mut order, generation);
+                    support::first_publish(&mut fixture.reconciler, &mut fixture.view, &fixture.world, &mut fixture.now);
+                }
                 elapsed += fixture.sample(device, queue, camera_at(768.0 + step, step, 1024.0));
                 latest = fixture.prepare.stats();
-                assert!(latest.items_updated >= 5, "live mix must include one appearance update and four pose updates");
-                assert_eq!(latest.layouts, 1, "appearance change must rebuild the draw list");
+                assert!(latest.items_updated > 0, "live mix must include published scene updates");
+                faces_patched += latest.faces_patched;
                 assert_eq!(latest.omitted_faces, 0);
                 complete_texture_work(&mut fixture.prepare, 5);
             }
+            assert!(faces_patched > 0, "live mix must patch visible pose data");
             elapsed
         });
     });
