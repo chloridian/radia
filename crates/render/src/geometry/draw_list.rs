@@ -669,11 +669,6 @@ impl DrawList {
     }
 
     #[cfg(test)]
-    pub(super) fn staged_draw_count(&self) -> usize {
-        self.pending.as_ref().map_or(0, |build| build.state.draws.len())
-    }
-
-    #[cfg(test)]
     pub(super) fn staged_progress(&self) -> Option<(&'static str, usize, usize, usize, usize, usize, usize)> {
         let build = self.pending.as_ref()?;
         let phase = match build.phase {

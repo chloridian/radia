@@ -145,6 +145,11 @@ fn canceled_build_keeps_committed_patches() {
 
     let transform = rotate(&mut items, &mut list, 0.3);
     assert_eq!(list.instance_transform(committed), Some(&transform[..]), "a pending build keeps committed poses patched");
+    let rebased = origin + DVec3::new(256.0, 0.0, 0.0);
+    list.patch(&items.items, &[(target, 0)], &[target], rebased, origin);
+    let item = items.items.get(target).expect("target item");
+    let transform = instance_base(item.position, item.rotation, item.scale, false, rebased);
+    assert_eq!(list.instance_transform(committed), Some(&transform[..]), "a pending rebase keeps committed poses in the active origin");
     list.cancel_layout();
     let transform = rotate(&mut items, &mut list, 0.6);
     assert_eq!(list.instance_transform(committed), Some(&transform[..]), "a canceled build keeps committed poses patched");
@@ -163,6 +168,20 @@ fn canceled_build_keeps_committed_patches() {
     assert_ne!(next, committed, "the next generation moves the target face");
     let transform = rotate(&mut items, &mut list, 1.2);
     assert_eq!(list.instance_transform(next), Some(&transform[..]), "the next generation patches its own address");
+
+    visible.remove(0);
+    assert!(list.request_layout(&visible, camera, &items.items));
+    for _ in 0..10_000 {
+        let _ = list.advance_layout(&mut items.items, Duration::ZERO);
+        if list.staged_progress().is_some_and(|(phase, cursor, ..)| phase == "fill" && cursor > 500) {
+            break;
+        }
+    }
+    assert_matches!(list.staged_progress(), Some(("fill", cursor, ..)) if cursor > 500, "the build staged the target face");
+    list.hide_item(items.items.get_mut(target).expect("target item"));
+    assert!(instance_bytes(&list, next).iter().all(|byte| *byte == 0), "removing a staged item clears its committed instance");
+    let progress = list.advance_layout(&mut items.items, Duration::ZERO).expect("the stale build is observed");
+    assert!(progress.stale, "removing a staged item invalidates the build");
 }
 
 #[test]
