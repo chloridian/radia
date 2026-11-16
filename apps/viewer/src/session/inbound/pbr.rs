@@ -84,36 +84,35 @@ fn face_index(value: &Value) -> Result<u8, ()> {
 
 fn decode_material(fields: &Map) -> Result<PbrMaterialOverride, ()> {
     let mut material = PbrMaterialOverride::default();
-    if let Some(value) = fields.get("tex") {
+    if let Some(value) = defined(fields, "tex") {
         let Value::Array(textures) = value else { return Err(()) };
         let slots = texture_slots(&mut material);
         if textures.len() > slots.len() {
             return Err(());
         }
         for (slot, texture) in slots.into_iter().zip(textures) {
-            let Value::Uuid(texture) = texture else { return Err(()) };
-            slot.texture = if texture.is_nil() {
-                FieldUpdate::Keep
-            } else if *texture == Uuid::max() {
-                FieldUpdate::Clear
-            } else {
-                FieldUpdate::Set(AssetId::new(*texture))
+            slot.texture = match texture {
+                Value::Undefined => FieldUpdate::Keep,
+                Value::Uuid(texture) if texture.is_nil() => FieldUpdate::Keep,
+                Value::Uuid(texture) if *texture == Uuid::max() => FieldUpdate::Clear,
+                Value::Uuid(texture) => FieldUpdate::Set(AssetId::new(*texture)),
+                _ => return Err(()),
             };
         }
     }
-    if let Some(value) = fields.get("bc") {
+    if let Some(value) = defined(fields, "bc") {
         material.base_color_factor = Some(vector(value)?);
     }
-    if let Some(value) = fields.get("ec") {
+    if let Some(value) = defined(fields, "ec") {
         material.emissive_factor = Some(vector(value)?);
     }
-    if let Some(value) = fields.get("mf") {
+    if let Some(value) = defined(fields, "mf") {
         material.metallic = Some(number(value)?);
     }
-    if let Some(value) = fields.get("rf") {
+    if let Some(value) = defined(fields, "rf") {
         material.roughness = Some(number(value)?);
     }
-    if let Some(value) = fields.get("am") {
+    if let Some(value) = defined(fields, "am") {
         material.alpha_mode = Some(match value {
             Value::Integer(0) => PbrAlphaMode::Opaque,
             Value::Integer(1) => PbrAlphaMode::Blend,
@@ -121,37 +120,48 @@ fn decode_material(fields: &Map) -> Result<PbrMaterialOverride, ()> {
             _ => return Err(()),
         });
     }
-    if let Some(value) = fields.get("ac") {
+    if let Some(value) = defined(fields, "ac") {
         material.alpha_cutoff = Some(number(value)?);
     }
-    if let Some(value) = fields.get("ds") {
+    if let Some(value) = defined(fields, "ds") {
         material.double_sided = Some(match value {
             Value::Boolean(value) => *value,
             _ => return Err(()),
         });
     }
-    if let Some(value) = fields.get("ti") {
+    if let Some(value) = defined(fields, "ti") {
         let Value::Array(transforms) = value else { return Err(()) };
         let slots = texture_slots(&mut material);
         if transforms.len() > slots.len() {
             return Err(());
         }
         for (slot, transform) in slots.into_iter().zip(transforms) {
-            let Value::Map(transform) = transform else { return Err(()) };
-            let mut decoded = PbrTextureTransformOverride::default();
-            if let Some(value) = transform.get("o") {
-                decoded.offset = Some(vector(value)?);
-            }
-            if let Some(value) = transform.get("s") {
-                decoded.scale = Some(vector(value)?);
-            }
-            if let Some(value) = transform.get("r") {
-                decoded.rotation = Some(number(value)?);
-            }
-            slot.transform = decoded;
+            slot.transform = match transform {
+                Value::Undefined => PbrTextureTransformOverride::default(),
+                Value::Map(transform) => decode_transform(transform)?,
+                _ => return Err(()),
+            };
         }
     }
     Ok(material)
+}
+
+fn decode_transform(fields: &Map) -> Result<PbrTextureTransformOverride, ()> {
+    let mut transform = PbrTextureTransformOverride::default();
+    if let Some(value) = defined(fields, "o") {
+        transform.offset = Some(vector(value)?);
+    }
+    if let Some(value) = defined(fields, "s") {
+        transform.scale = Some(vector(value)?);
+    }
+    if let Some(value) = defined(fields, "r") {
+        transform.rotation = Some(number(value)?);
+    }
+    Ok(transform)
+}
+
+fn defined<'a>(fields: &'a Map, key: &str) -> Option<&'a Value> {
+    fields.get(key).filter(|value| !matches!(value, Value::Undefined))
 }
 
 fn encode_material(material: &PbrMaterialOverride) -> Value {
@@ -367,6 +377,16 @@ mod tests {
             let too_many = material([(key, Value::Array(vec![element; 5]))]);
             assert!(decode_payload(&payload(7, vec![Value::Integer(4)], vec![too_many])).is_err(), "too many {key} entries");
         }
+
+        for (key, value) in [
+            ("tex", Value::Array(vec![Value::Integer(1)])),
+            ("ti", Value::Array(vec![Value::Integer(1)])),
+            ("ti", Value::Array(vec![material([("s", Value::Integer(1))])])),
+            ("bc", Value::Integer(1)),
+        ] {
+            let wrong_type = material([(key, value)]);
+            assert!(decode_payload(&payload(7, vec![Value::Integer(4)], vec![wrong_type])).is_err(), "wrong {key} type");
+        }
     }
 
     #[test]
@@ -403,6 +423,26 @@ mod tests {
         let decoded = decode_payload(&payload(7, vec![Value::Integer(4)], vec![Value::Undefined])).expect("undefined material is valid");
 
         assert_eq!(decoded.overrides.face(4), Some(&PbrMaterialOverride::default()));
+    }
+
+    #[test]
+    fn undefined_entries_are_not_overridden() {
+        let decoded = decode_payload(
+            b"{'id':i7,'od':[{'tex':[!,!,!,uffffffff-ffff-ffff-ffff-ffffffffffff],'ti':[!,{'s':[r5.7,r3.8],'o':!}],'bc':!}],'te':[i4]}",
+        )
+        .expect("undefined entries are valid");
+
+        assert_eq!(
+            decoded.overrides.face(4),
+            Some(&PbrMaterialOverride {
+                normal: PbrTextureOverride {
+                    texture: FieldUpdate::Keep,
+                    transform: PbrTextureTransformOverride { scale: Some([5.7, 3.8]), ..Default::default() },
+                },
+                emissive: PbrTextureOverride { texture: FieldUpdate::Clear, ..Default::default() },
+                ..Default::default()
+            })
+        );
     }
 
     #[test]
