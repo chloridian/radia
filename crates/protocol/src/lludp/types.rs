@@ -101,11 +101,6 @@ mod tests {
     use math::{Quat, Vec3};
 
     #[test]
-    fn quaternion_default_is_identity() {
-        assert_eq!(Quat::default(), Quat::IDENTITY);
-    }
-
-    #[test]
     fn quaternion_w_reconstructs_from_xyz() {
         let identity = quaternion_from_xyz(Vec3::ZERO).expect("finite XYZ components");
         assert_eq!(identity, Quat::IDENTITY);

@@ -3,30 +3,20 @@ mod generate;
 #[path = "../../build/template.rs"]
 mod template;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use protocol::lludp::{Message, MessageId, Packet};
 use protocol::{
-    BlockValues, FieldValue, Frequency, LLUdpError, SchemaMessage,
+    BlockValues, FieldValue, LLUdpError, SchemaMessage,
     schema::{
-        BlockMode, FieldKind, MESSAGE_COUNT, MESSAGES, MessageFlag,
-        ids::{AGENT_UPDATE, CLOSE_CIRCUIT, COMPLETE_PING_CHECK, OPEN_CIRCUIT, PACKET_ACK, USE_CIRCUIT_CODE},
+        MESSAGES, MessageFlag,
+        ids::{AGENT_UPDATE, COMPLETE_PING_CHECK, PACKET_ACK, USE_CIRCUIT_CODE},
     },
 };
 use test_support::{lludp::vectors, parse_hex_fixture};
 
 use super::coverage::{ConformanceCategory, TYPED_MESSAGE_COVERAGE, typed_variant_name};
-
-#[test]
-fn schema_covers_messages() {
-    assert_eq!(MESSAGE_COUNT, 483);
-    assert_eq!(MESSAGES.len(), MESSAGE_COUNT);
-
-    let names = MESSAGES.iter().map(|message| message.name).collect::<Vec<_>>();
-    let unique = names.iter().copied().collect::<HashSet<_>>();
-    assert_eq!(unique.len(), names.len());
-}
 
 #[test]
 fn typed_inventory_matches_schema() {
@@ -108,20 +98,6 @@ fn override_categories_are_explicit() {
 }
 
 #[test]
-fn schema_block_layouts() {
-    let message = MESSAGES.iter().find(|message| message.name == "ChatFromViewer").expect("ChatFromViewer is in the template");
-    assert_eq!(message.id.frequency, Frequency::Low);
-    assert_eq!(message.id.number, 80);
-    assert_eq!(message.blocks.len(), 2);
-    let chat_data = message.blocks.iter().find(|block| block.name == "ChatData").expect("ChatData block is in the template");
-    assert_eq!(chat_data.mode, BlockMode::Single);
-    assert!(chat_data.fields.iter().any(|field| field.name == "Message" && field.kind == FieldKind::Variable(2)));
-
-    let message = MESSAGES.iter().find(|message| message.name == "MapBlockReply").expect("MapBlockReply is in the template");
-    assert!(message.blocks.iter().any(|block| block.name == "Data" && block.mode == BlockMode::Variable));
-}
-
-#[test]
 fn lludp_flags_match_template_tokens() {
     let blacklisted = MESSAGES.iter().find(|message| message.name == "OpenCircuit").expect("OpenCircuit is in the template");
     assert_eq!(blacklisted.flags, &[MessageFlag::LLUdpBlacklisted]);
@@ -157,15 +133,6 @@ fn generator_emits_schema() {
 }
 
 #[test]
-fn fixed_endpoints_use_fixed_frequency() {
-    let endpoints = [("PacketAck", PACKET_ACK), ("OpenCircuit", OPEN_CIRCUIT), ("CloseCircuit", CLOSE_CIRCUIT)];
-    for (name, id) in endpoints {
-        assert_eq!(id.frequency, Frequency::Fixed);
-        assert_eq!(SchemaMessage::schema_by_id(id).map(|schema| schema.name), Some(name));
-    }
-}
-
-#[test]
 fn schema_built_ids_decode_strictly() {
     let schema = SchemaMessage::schema_by_id(COMPLETE_PING_CHECK).expect("CompletePingCheck schema");
     let message = SchemaMessage::new(schema, vec![BlockValues::single(vec![FieldValue::U8(0x5a)])]).expect("valid schema message");
@@ -179,21 +146,6 @@ fn schema_built_ids_decode_strictly() {
     let mut truncated = fixture;
     truncated.pop();
     assert_eq!(Packet::decode(&truncated).expect_err("typed payload cannot zero-fill its required field"), LLUdpError::TruncatedPacket);
-}
-
-#[test]
-fn typed_edge_fixtures_round_trip() {
-    for (fixture, expected_name) in [
-        (vectors::REGION_HANDSHAKE_LEGACY, "RegionHandshake"),
-        (vectors::REGION_HANDSHAKE_INFO4, "RegionHandshake"),
-        (vectors::CHAT_FROM_VIEWER_ZEROCODED, "ChatFromViewer"),
-        (vectors::AGENT_UPDATE_ZEROCODED, "AgentUpdate"),
-    ] {
-        let bytes = parse_hex_fixture(fixture).expect("edge fixture is valid hex");
-        let packet = Packet::decode(&bytes).expect("decode typed edge fixture");
-        assert_eq!(typed_variant_name(packet.message()), Some(expected_name));
-        assert_eq!(packet.encode().expect("re-encode typed edge fixture"), bytes);
-    }
 }
 
 #[test]

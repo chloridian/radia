@@ -59,41 +59,46 @@ fn region_handshake_zerocode() {
 }
 
 #[test]
-fn region_handshake_strings() {
-    let bytes = fixture(vectors::REGION_HANDSHAKE_STRINGS);
-    let message = Message::RegionHandshake(RegionHandshake {
-        region_info1: RegionInfo1 { region_flags: 1, sim_access: 13, sim_name: "Test Región".into(), ..RegionInfo1::default() },
-        region_info2: Some(RegionInfo2::default()),
-        region_info3: Some(RegionInfo3 {
-            colo_name: "Láb".into(),
-            product_sku: "SKU-42".into(),
-            product_name: "Radía test".into(),
-            ..RegionInfo3::default()
-        }),
-        region_info4: Vec::new(),
-    });
-    let packet = Packet::decode(&bytes).expect("decode string fixture");
+fn region_handshake_fixtures() {
+    let cases = [
+        (
+            "non-ASCII strings",
+            vectors::REGION_HANDSHAKE_STRINGS,
+            Message::RegionHandshake(RegionHandshake {
+                region_info1: RegionInfo1 { region_flags: 1, sim_access: 13, sim_name: "Test Región".into(), ..RegionInfo1::default() },
+                region_info2: Some(RegionInfo2::default()),
+                region_info3: Some(RegionInfo3 {
+                    colo_name: "Láb".into(),
+                    product_sku: "SKU-42".into(),
+                    product_name: "Radía test".into(),
+                    ..RegionInfo3::default()
+                }),
+                region_info4: Vec::new(),
+            }),
+        ),
+        (
+            "RegionInfo4",
+            vectors::REGION_HANDSHAKE_INFO4,
+            Message::RegionHandshake(RegionHandshake {
+                region_info1: RegionInfo1 { region_flags: 1, sim_access: 13, sim_name: "Test Region".into(), ..RegionInfo1::default() },
+                region_info2: Some(RegionInfo2::default()),
+                region_info3: Some(RegionInfo3::default()),
+                region_info4: vec![
+                    RegionInfo4 { region_flags_extended: 0x0102_0304_0506_0708, region_protocols: 0x1112_1314_1516_1718 },
+                    RegionInfo4 { region_flags_extended: 0x2122_2324_2526_2728, region_protocols: 0x3132_3334_3536_3738 },
+                ],
+            }),
+        ),
+        ("legacy", vectors::REGION_HANDSHAKE_LEGACY, region_handshake(false)),
+    ];
+    for (case, hex, message) in cases {
+        let bytes = fixture(hex);
+        let packet = Packet::decode(&bytes).expect(case);
 
-    assert_eq!(packet.message(), &message);
-    assert_eq!(packet.encode().expect("encode string fixture"), bytes);
-}
-
-#[test]
-fn region_handshake_info4() {
-    let bytes = fixture(vectors::REGION_HANDSHAKE_INFO4);
-    let message = Message::RegionHandshake(RegionHandshake {
-        region_info1: RegionInfo1 { region_flags: 1, sim_access: 13, sim_name: "Test Region".into(), ..RegionInfo1::default() },
-        region_info2: Some(RegionInfo2::default()),
-        region_info3: Some(RegionInfo3::default()),
-        region_info4: vec![
-            RegionInfo4 { region_flags_extended: 0x0102_0304_0506_0708, region_protocols: 0x1112_1314_1516_1718 },
-            RegionInfo4 { region_flags_extended: 0x2122_2324_2526_2728, region_protocols: 0x3132_3334_3536_3738 },
-        ],
-    });
-    let packet = Packet::decode(&bytes).expect("decode RegionInfo4 fixture");
-
-    assert_eq!(packet.message(), &message);
-    assert_eq!(packet.encode().expect("encode RegionInfo4 fixture"), bytes);
+        assert_eq!(packet.message(), &message, "{case}");
+        assert!(packet.trailing_message_bytes().is_empty(), "{case}");
+        assert_eq!(packet.encode().expect(case), bytes, "{case}");
+    }
 }
 
 #[test]
@@ -101,16 +106,6 @@ fn region_handshake_invalid_utf8() {
     let bytes = fixture(vectors::REGION_HANDSHAKE_INVALID_UTF8);
 
     assert_eq!(Packet::decode(&bytes), Err(LLUdpError::InvalidUtf8));
-}
-
-#[test]
-fn legacy_region_handshake() {
-    let bytes = fixture(vectors::REGION_HANDSHAKE_LEGACY);
-    let decoded = Packet::decode(&bytes).expect("decode legacy fixture");
-
-    assert_eq!(decoded.message(), &region_handshake(false));
-    assert!(decoded.trailing_message_bytes().is_empty());
-    assert_eq!(decoded.encode().expect("re-encode legacy handshake fixture"), bytes);
 }
 
 #[test]
@@ -184,25 +179,20 @@ fn initial_agent_update() {
 }
 
 #[test]
-fn chat_defaults_to_plain() {
-    let expected = fixture(vectors::CHAT_FROM_VIEWER_NIL_IDS);
-    let message = chat_message();
-    let packet = Packet::new(0x0102_0304, message.clone()).with_reliable();
+fn chat_zerocoding() {
+    let cases = [("default", vectors::CHAT_FROM_VIEWER_NIL_IDS, false), ("requested", vectors::CHAT_FROM_VIEWER_ZEROCODED, true)];
+    for (case, hex, zero_coded) in cases {
+        let expected = fixture(hex);
+        let message = chat_message();
+        let mut packet = Packet::new(0x0102_0304, message.clone()).with_reliable();
+        if zero_coded {
+            packet = packet.with_zero_coding(true);
+        }
 
-    assert_eq!(packet.encode().expect("encode packet"), expected);
-    assert_eq!(expected[0] & 0x80, 0);
-    assert_eq!(Packet::decode(&expected).expect("decode fixture").message(), &message);
-}
-
-#[test]
-fn chat_allows_zerocoding() {
-    let expected = fixture(vectors::CHAT_FROM_VIEWER_ZEROCODED);
-    let message = chat_message();
-    let packet = Packet::new(0x0102_0304, message.clone()).with_reliable().with_zero_coding(true);
-
-    assert_eq!(packet.encode().expect("encode packet"), expected);
-    assert_eq!(expected[0] & 0x80, 0x80);
-    assert_eq!(Packet::decode(&expected).expect("decode fixture").message(), &message);
+        assert_eq!(packet.encode().expect(case), expected, "{case}");
+        assert_eq!(expected[0] & 0x80 != 0, zero_coded, "{case}");
+        assert_eq!(Packet::decode(&expected).expect(case).message(), &message, "{case}");
+    }
 }
 
 #[test]

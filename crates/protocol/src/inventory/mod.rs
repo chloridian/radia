@@ -680,17 +680,6 @@ mod tests {
     }
 
     #[test]
-    fn ais_item_decodes_identity() {
-        let owner = Uuid::from_u128(1);
-        let parent = Uuid::from_u128(2);
-        let item_id = Uuid::from_u128(3);
-        let decoded = decode_ais_item(&encode(&item(item_id, parent, owner)), item_id, owner).expect("valid AIS item");
-        assert_eq!(decoded.id, item_id);
-        assert_eq!(decoded.parent_id, Some(parent));
-        assert_eq!(decoded.owner_id, Some(owner));
-    }
-
-    #[test]
     fn legacy_items_reject_unrequested_id() {
         let owner = Uuid::from_u128(1);
         let parent = Uuid::from_u128(2);

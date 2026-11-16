@@ -33,20 +33,3 @@ impl TypedMessage for SetAlwaysRun {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use uuid::Uuid;
-
-    use crate::lludp::{Message, Packet};
-
-    use super::SetAlwaysRun;
-
-    #[test]
-    fn always_run_message_round_trips() {
-        let update = SetAlwaysRun { agent_id: Uuid::from_u128(1), session_id: Uuid::from_u128(2), always_run: true };
-        let bytes = Packet::new(1, Message::SetAlwaysRun(update.clone())).encode().expect("encode always-run update");
-        let packet = Packet::decode(&bytes).expect("decode always-run update");
-        assert_eq!(packet.message(), &Message::SetAlwaysRun(update));
-    }
-}

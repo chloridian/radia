@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn texture_entry_defaults_and_conversions() {
+    fn default_entry_converts_fields() {
         let bytes = default_wire_entry();
         let decoded = decode_texture_entry(&bytes).unwrap().unwrap();
         let face = decoded.face(44).unwrap();
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn material_exceptions_and_bad_masks() {
+    fn material_exceptions_follow_masks() {
         let mut bytes = default_wire_entry();
         bytes.extend_from_slice(&uuid_bytes(6));
         bytes.push(1);
