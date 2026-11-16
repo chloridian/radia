@@ -542,11 +542,51 @@ pub struct ChangeSet {
     pub revision: InventoryRevision,
     pub changes: Vec<InventoryChange>,
     pub refetch_categories: Vec<CategoryKey>,
+    cache_write_estimate: InventoryChangeEstimate,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct InventoryChangeEstimate {
+    rows: usize,
+    bytes: usize,
+}
+
+impl InventoryChangeEstimate {
+    pub const fn rows(self) -> usize {
+        self.rows
+    }
+
+    pub const fn bytes(self) -> usize {
+        self.bytes
+    }
 }
 
 impl ChangeSet {
+    pub fn new(revision: InventoryRevision, changes: Vec<InventoryChange>, refetch_categories: Vec<CategoryKey>) -> Self {
+        let mut rows = refetch_categories.len();
+        let mut bytes = rows.saturating_mul(64);
+        for change in &changes {
+            let row_bytes = match change {
+                InventoryChange::CategoryUpserted(category) => 128usize.saturating_add(category.name.len()),
+                InventoryChange::ItemUpserted(item) => 288usize.saturating_add(item.name.len()).saturating_add(item.description.len()),
+                InventoryChange::NodeMoved { .. }
+                | InventoryChange::CategoryRemoved(_)
+                | InventoryChange::ItemRemoved(_)
+                | InventoryChange::FolderFetchApplied { .. }
+                | InventoryChange::VersionSet { .. } => 64,
+            };
+            rows = rows.saturating_add(1);
+            bytes = bytes.saturating_add(row_bytes);
+        }
+        Self { revision, changes, refetch_categories, cache_write_estimate: InventoryChangeEstimate { rows, bytes } }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.changes.is_empty() && self.refetch_categories.is_empty()
+    }
+
+    pub const fn cache_write_estimate(&self) -> InventoryChangeEstimate {
+        self.cache_write_estimate
     }
 }
 
@@ -559,4 +599,32 @@ pub struct InventoryDelta {
     pub removed_categories: Vec<CategoryKey>,
     pub removed_items: Vec<ItemKey>,
     pub updated_category_versions: Vec<(CategoryKey, ServerVersion)>,
+}
+
+impl InventoryDelta {
+    pub fn estimated_heap_bytes(&self) -> usize {
+        let vector_bytes = self
+            .created_categories
+            .capacity()
+            .saturating_add(self.updated_categories.capacity())
+            .saturating_mul(std::mem::size_of::<Category>())
+            .saturating_add(
+                self.created_items.capacity().saturating_add(self.updated_items.capacity()).saturating_mul(std::mem::size_of::<Item>()),
+            )
+            .saturating_add(self.removed_categories.capacity().saturating_mul(std::mem::size_of::<CategoryKey>()))
+            .saturating_add(self.removed_items.capacity().saturating_mul(std::mem::size_of::<ItemKey>()))
+            .saturating_add(self.updated_category_versions.capacity().saturating_mul(std::mem::size_of::<(CategoryKey, ServerVersion)>()));
+        let text_bytes =
+            self.created_categories
+                .iter()
+                .chain(&self.updated_categories)
+                .map(|category| category.name.len().saturating_add(2 * std::mem::size_of::<usize>()))
+                .chain(
+                    self.created_items.iter().chain(&self.updated_items).map(|item| {
+                        item.name.len().saturating_add(item.description.len()).saturating_add(4 * std::mem::size_of::<usize>())
+                    }),
+                )
+                .fold(0usize, usize::saturating_add);
+        std::mem::size_of::<Self>().saturating_add(vector_bytes).saturating_add(text_bytes)
+    }
 }

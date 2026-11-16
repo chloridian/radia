@@ -1,12 +1,19 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    mem::size_of,
+};
 
 use ::inventory::{
-    CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryChild, InventoryDelta, InventoryError, InventoryNodeId, InventoryNodeKey,
-    InventorySnapshot, ServerVersion,
+    CategoryKey, ChangeSet, FolderFetchCommit, Inventory, InventoryChild, InventoryDelta, InventoryError, InventoryNodeId,
+    InventoryNodeKey, InventoryPreparationCancellation, InventorySnapshot, PreparedFolderFetch, ServerVersion,
 };
-use network::{AgentSession, capabilities::Client};
+use network::{AgentSession, CapabilityEvent, capabilities::Client};
 use protocol::lludp::Message;
+use tokio::sync::oneshot;
 use tracing::Instrument;
+
+#[cfg(test)]
+use ::inventory::InventoryChange;
 
 use crate::{
     inventory::{
@@ -23,39 +30,124 @@ use crate::{
     },
 };
 
-use super::SessionDriver;
+use super::{DeferredInventoryEvent, PendingFolderPreparation, SessionDriver};
+use crate::session::coordinator::inventory_cache::InventoryDisposalPermit;
 
 impl SessionDriver {
-    pub(super) fn handle_inventory_udp(&mut self, message: &Message) {
-        let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
+    pub(super) fn handle_inventory_udp(&mut self, message: &Message) -> bool {
+        let is_inventory =
+            self.active_session.as_ref().is_some_and(|session| inventory_intake::is_inventory_udp_message(message, session.agent_id));
+        if !is_inventory {
+            return false;
+        }
+        if self.inventory_observations_deferred() {
+            return !self.defer_network_inventory(protocol::lludp::MAX_PACKET_RETAINED_CAPACITY_BYTES, || {
+                DeferredInventoryEvent::Udp(message.clone())
+            }) && self.note_inventory_overload();
+        }
+        let Some(disposal) = self.inventory_cache.try_reserve_disposal() else {
+            return !self.defer_network_inventory(protocol::lludp::MAX_PACKET_RETAINED_CAPACITY_BYTES, || {
+                DeferredInventoryEvent::Udp(message.clone())
+            }) && self.note_inventory_overload();
+        };
+        self.handle_inventory_udp_now(message, disposal);
+        false
+    }
+
+    pub(super) fn handle_inventory_udp_now(&mut self, message: &Message, disposal: InventoryDisposalPermit) {
+        let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else {
+            drop(disposal);
+            return;
+        };
         let Some(before) = self.inventory.as_ref().map(Inventory::snapshot) else {
             if self.inventory_bootstrap.is_some() && inventory_intake::is_inventory_udp_message(message, agent_id) {
                 self.inventory_bootstrap_dirty = true;
             }
+            drop(disposal);
             return;
         };
-        let Some(inventory) = self.inventory.as_mut() else { return };
+        let Some(inventory) = self.inventory.as_mut() else {
+            drop(disposal);
+            return;
+        };
         let result = inventory_intake::apply_udp(inventory, agent_id, message);
-        self.apply_inventory_intake_result(result, before);
+        self.apply_inventory_intake_result(result, before, disposal);
     }
 
-    pub(super) fn handle_inventory_event_queue(&mut self, name: &str, body: &llsd::Value) {
-        let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
+    pub(super) fn handle_inventory_event_queue(&mut self, name: &str, body: &llsd::Value) -> bool {
+        let is_inventory =
+            self.active_session.as_ref().is_some_and(|session| inventory_intake::is_valid_inventory_event(name, body, session.agent_id));
+        if !is_inventory {
+            return false;
+        }
+        let retained_bytes = size_of::<(String, llsd::Value)>().saturating_add(name.len()).saturating_add(body.estimated_heap_bytes());
+        if self.inventory_observations_deferred() {
+            return !self.defer_network_inventory(retained_bytes, || DeferredInventoryEvent::EventQueue {
+                name: name.to_owned(),
+                body: body.clone(),
+            }) && self.note_inventory_overload();
+        }
+        let Some(disposal) = self.inventory_cache.try_reserve_disposal() else {
+            return !self.defer_network_inventory(retained_bytes, || DeferredInventoryEvent::EventQueue {
+                name: name.to_owned(),
+                body: body.clone(),
+            }) && self.note_inventory_overload();
+        };
+        self.handle_inventory_event_queue_now(name, body, disposal);
+        false
+    }
+
+    pub(super) fn handle_inventory_event_queue_now(&mut self, name: &str, body: &llsd::Value, disposal: InventoryDisposalPermit) {
+        let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else {
+            drop(disposal);
+            return;
+        };
         let Some(before) = self.inventory.as_ref().map(Inventory::snapshot) else {
             if self.inventory_bootstrap.is_some() && inventory_intake::is_valid_inventory_event(name, body, agent_id) {
                 self.inventory_bootstrap_dirty = true;
             }
+            drop(disposal);
             return;
         };
-        let Some(inventory) = self.inventory.as_mut() else { return };
+        let Some(inventory) = self.inventory.as_mut() else {
+            drop(disposal);
+            return;
+        };
         let result = inventory_intake::apply_event_queue(inventory, agent_id, name, body);
-        self.apply_inventory_intake_result(result, before);
+        self.apply_inventory_intake_result(result, before, disposal);
+    }
+
+    pub(super) fn handle_inventory_event_queue_batch(&mut self, events: &[CapabilityEvent]) -> bool {
+        let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return false };
+        for event in events.iter().filter(|event| inventory_intake::is_valid_inventory_event(&event.message, &event.body, agent_id)) {
+            let retained_bytes =
+                size_of::<(String, llsd::Value)>().saturating_add(event.message.len()).saturating_add(event.body.estimated_heap_bytes());
+            if self.inventory_observations_deferred() {
+                if !self.defer_network_inventory(retained_bytes, || DeferredInventoryEvent::EventQueue {
+                    name: event.message.clone(),
+                    body: event.body.clone(),
+                }) {
+                    return self.note_inventory_overload();
+                }
+                continue;
+            }
+            if let Some(disposal) = self.inventory_cache.try_reserve_disposal() {
+                self.handle_inventory_event_queue_now(&event.message, &event.body, disposal);
+            } else if !self.defer_network_inventory(retained_bytes, || DeferredInventoryEvent::EventQueue {
+                name: event.message.clone(),
+                body: event.body.clone(),
+            }) {
+                return self.note_inventory_overload();
+            }
+        }
+        false
     }
 
     fn apply_inventory_intake_result(
         &mut self,
         result: Result<Option<InventoryIntakeOutcome>, InventoryIntakeError>,
         before: InventorySnapshot,
+        disposal: InventoryDisposalPermit,
     ) {
         match result {
             Ok(Some(outcome)) => {
@@ -63,15 +155,26 @@ impl SessionDriver {
                 if !outcome.changes.is_empty()
                     && let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot)
                 {
-                    self.process_inventory_changes(&outcome.changes, &snapshot);
-                    self.inventory_changes.send_replace(Some(snapshot.clone()));
+                    self.process_inventory_changes(&before, &snapshot);
                     self.request_inventory_refetches(&outcome.changes, &snapshot);
                     self.publish_inventory_status();
-                    self.inventory_cache.record_change(&self.runtime, outcome.changes, before, snapshot);
+                    publish_inventory_change(
+                        &self.inventory_changes,
+                        &mut self.inventory_cache,
+                        outcome.changes,
+                        before,
+                        snapshot,
+                        disposal,
+                    );
+                } else {
+                    drop(disposal);
                 }
             }
-            Ok(None) => {}
-            Err(error) => self.note_rejected_inventory_blocks_with_error(error),
+            Ok(None) => drop(disposal),
+            Err(error) => {
+                drop(disposal);
+                self.note_rejected_inventory_blocks_with_error(error);
+            }
         }
     }
 
@@ -161,8 +264,6 @@ impl SessionDriver {
         let Some(inventory) = &self.inventory else { return };
         let snapshot = inventory.snapshot();
         self.inventory_changes.send_replace(Some(snapshot.clone()));
-        self.inventory_known = snapshot.categories().map(|category| category.key).collect();
-        self.inventory_complete = self.inventory_known.iter().copied().filter(|key| snapshot.is_complete(*key)).collect();
         self.inventory_failed.clear();
         self.inventory_background_done = false;
         self.inventory_last_failure = None;
@@ -180,17 +281,17 @@ impl SessionDriver {
         self.inventory_edits.start(&self.runtime, capabilities, self.session_handle.clone(), session, model, self.cancellation.clone());
     }
 
-    pub(super) fn handle_inventory_edit_event(&mut self, event: InventoryEditEvent) {
+    pub(super) fn handle_inventory_edit_event_now(&mut self, event: InventoryEditEvent, disposal: InventoryDisposalPermit) {
         match event {
             InventoryEditEvent::Apply { confirmation, applied } => {
-                let result = self.apply_inventory_confirmation(confirmation);
+                let result = self.apply_inventory_confirmation(confirmation, disposal);
                 if applied.send(result).is_err() {
                     tracing::trace!("inventory edit worker stopped before apply acknowledgement");
                 }
             }
             InventoryEditEvent::RefreshFolders { folders, refreshed } => {
                 let folder_count = folders.len();
-                let refreshed_inventory = self.mark_inventory_folders_incomplete(folders);
+                let refreshed_inventory = self.mark_inventory_folders_incomplete(folders, disposal);
                 if !refreshed_inventory {
                     tracing::debug!(folder_count, "inventory folder refresh could not be queued after an edit failure");
                 }
@@ -200,6 +301,7 @@ impl SessionDriver {
             }
             InventoryEditEvent::MoveStarted { expectation, confirmed, registered } => {
                 self.inventory_pending_moves.insert(expectation.node, (expectation, confirmed));
+                drop(disposal);
                 if registered.send(()).is_err() {
                     tracing::trace!("inventory edit worker stopped before move registration acknowledgement");
                 }
@@ -208,6 +310,7 @@ impl SessionDriver {
                 if self.inventory_pending_moves.get(&expectation.node).is_some_and(|(current, _)| *current == expectation) {
                     self.inventory_pending_moves.remove(&expectation.node);
                 }
+                drop(disposal);
                 if removed.send(()).is_err() {
                     tracing::trace!("inventory edit worker stopped before move abort acknowledgement");
                 }
@@ -216,7 +319,7 @@ impl SessionDriver {
                 if self.inventory_pending_moves.get(&expectation.node).is_some_and(|(current, _)| *current == expectation) {
                     self.inventory_pending_moves.remove(&expectation.node);
                 }
-                let applied = self.mark_inventory_folders_incomplete([expectation.from, expectation.to]);
+                let applied = self.mark_inventory_folders_incomplete([expectation.from, expectation.to], disposal);
                 if refreshed.send(applied).is_err() {
                     tracing::trace!("inventory edit worker stopped before move timeout acknowledgement");
                 }
@@ -224,118 +327,118 @@ impl SessionDriver {
         }
     }
 
-    fn apply_inventory_confirmation(&mut self, confirmation: AisDelta) -> bool {
-        let Some(current) = self.inventory.as_ref().map(Inventory::snapshot) else { return false };
-        self.apply_inventory_edit_delta(confirmation.into_delta(&current))
+    fn apply_inventory_confirmation(&mut self, confirmation: AisDelta, disposal: InventoryDisposalPermit) -> bool {
+        let Some(current) = self.inventory.as_ref().map(Inventory::snapshot) else {
+            disposal.reclaim(confirmation);
+            return false;
+        };
+        if !confirmation.is_current(&current) {
+            let folders = confirmation.refetch_folders().to_vec();
+            if let Some(refresh_disposal) = self.inventory_cache.try_reserve_disposal() {
+                disposal.reclaim(confirmation);
+                return self.mark_inventory_folders_incomplete(folders, refresh_disposal);
+            }
+            if !folders.is_empty() {
+                let bytes = folders.capacity().saturating_mul(std::mem::size_of::<CategoryKey>());
+                if self.can_defer_network_inventory(1, bytes) {
+                    disposal.reclaim(confirmation);
+                    self.defer_inventory(DeferredInventoryEvent::RefreshFolders(folders));
+                    return true;
+                }
+            }
+            disposal.reclaim((confirmation, folders));
+            self.inventory_overload_recovery_pending = true;
+            return true;
+        }
+        self.apply_inventory_edit_delta(confirmation.into_delta(&current), disposal)
     }
 
-    fn apply_inventory_edit_delta(&mut self, delta: InventoryDelta) -> bool {
-        let Some(before) = self.inventory.as_ref().map(Inventory::snapshot) else { return false };
-        let Some(inventory) = self.inventory.as_mut() else { return false };
+    fn apply_inventory_edit_delta(&mut self, delta: InventoryDelta, disposal: InventoryDisposalPermit) -> bool {
+        let Some(before) = self.inventory.as_ref().map(Inventory::snapshot) else {
+            disposal.reclaim(delta);
+            return false;
+        };
+        let Some(inventory) = self.inventory.as_mut() else {
+            disposal.reclaim((delta, before));
+            return false;
+        };
         let changes = match inventory.apply_delta(delta) {
             Ok(changes) => changes,
             Err(error) => {
+                disposal.reclaim(before);
                 tracing::warn!(%error, "inventory edit confirmation could not be applied");
                 return false;
             }
         };
         if changes.is_empty() {
+            disposal.reclaim((changes, before));
             return true;
         }
-        let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot) else { return false };
-        self.process_inventory_changes(&changes, &snapshot);
-        self.inventory_changes.send_replace(Some(snapshot.clone()));
+        let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot) else {
+            disposal.reclaim((changes, before));
+            return false;
+        };
+        self.process_inventory_changes(&before, &snapshot);
         self.request_inventory_refetches(&changes, &snapshot);
         self.publish_inventory_status();
-        self.inventory_cache.record_change(&self.runtime, changes, before, snapshot);
+        publish_inventory_change(&self.inventory_changes, &mut self.inventory_cache, changes, before, snapshot, disposal);
         true
     }
 
-    pub(super) fn process_inventory_changes(&mut self, changes: &ChangeSet, snapshot: &InventorySnapshot) {
-        resolve_pending_inventory_moves(&mut self.inventory_pending_moves, changes);
-        self.track_inventory_changes(changes, snapshot);
+    pub(super) fn process_inventory_changes(&mut self, before: &InventorySnapshot, after: &InventorySnapshot) {
+        resolve_pending_inventory_moves_between(&mut self.inventory_pending_moves, before, after);
+        self.inventory_failed.retain(|folder| after.category(*folder).is_some());
     }
 
-    fn mark_inventory_folders_incomplete(&mut self, folders: impl IntoIterator<Item = CategoryKey>) -> bool {
-        let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot) else { return false };
+    pub(super) fn mark_inventory_folders_incomplete(
+        &mut self,
+        folders: impl IntoIterator<Item = CategoryKey>,
+        disposal: InventoryDisposalPermit,
+    ) -> bool {
+        let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot) else {
+            drop(disposal);
+            return false;
+        };
         let folders = folders.into_iter().filter(|folder| snapshot.category(*folder).is_some()).collect::<HashSet<_>>();
         if folders.is_empty() {
+            disposal.reclaim(snapshot);
             return false;
         }
+        drop(snapshot);
         let delta = InventoryDelta {
             updated_category_versions: folders.into_iter().map(|folder| (folder, ServerVersion::UNKNOWN)).collect(),
             ..InventoryDelta::default()
         };
-        self.apply_inventory_edit_delta(delta)
+        self.apply_inventory_edit_delta(delta, disposal)
     }
 
-    pub(super) fn handle_inventory_fetch(&mut self, event: InventoryFetchEvent) {
+    pub(super) fn handle_inventory_fetch_now(&mut self, event: InventoryFetchEvent, disposal: InventoryDisposalPermit) {
         match event {
             InventoryFetchEvent::Folder { fetch, applied } => {
                 let folder = fetch.folder;
-                let before = self.inventory.as_ref().map(Inventory::snapshot);
-                let result = self.inventory.as_mut().map(|inventory| apply_inventory_fetch(inventory, fetch));
-                let snapshot = self.inventory.as_ref().map(Inventory::snapshot);
-                let outcome = match result {
-                    Some(Ok(FolderFetchApply::Applied(changes))) => {
-                        if let Some(snapshot) = snapshot.as_ref() {
-                            self.process_inventory_changes(&changes, snapshot);
-                            if snapshot.is_complete(folder) {
-                                self.inventory_complete.insert(folder);
-                            } else {
-                                self.inventory_complete.remove(&folder);
-                            }
-                            self.inventory_failed.remove(&folder);
-                            if self.inventory_last_failure.as_ref().is_some_and(|(failed, _)| *failed == folder) {
-                                self.inventory_last_failure = None;
-                            }
-                            self.inventory_changes.send_replace(Some(snapshot.clone()));
-                            if let Some(before) = before {
-                                self.inventory_cache.record_change(&self.runtime, changes, before, snapshot.clone());
-                            }
-                        }
-                        FolderApplyOutcome::Applied
+                let Some(inventory) = self.inventory.as_ref() else {
+                    if applied.send(FolderApplyOutcome::Rejected).is_err() {
+                        tracing::trace!(folder = %folder.id().uuid(), "inventory fetch worker stopped before apply acknowledgement");
                     }
-                    Some(Ok(FolderFetchApply::Stale)) => FolderApplyOutcome::Stale,
-                    Some(Err(error)) => {
-                        self.record_inventory_failure(folder, InventoryFetchError::Model(error));
-                        FolderApplyOutcome::Rejected
-                    }
-                    None => FolderApplyOutcome::Rejected,
+                    disposal.reclaim(fetch);
+                    return;
                 };
-                if applied.send(outcome).is_err() {
-                    tracing::debug!(folder = %folder.id().uuid(), "inventory fetch worker stopped before apply acknowledgement");
-                }
-                self.publish_inventory_status();
+                let before = inventory.snapshot();
+                let worker_snapshot = before.clone();
+                let cancellation = InventoryPreparationCancellation::default();
+                let worker_cancellation = cancellation.clone();
+                let task = self.runtime.spawn_blocking(move || prepare_inventory_fetch(&worker_snapshot, fetch, &worker_cancellation));
+                self.pending_folder_preparation = Some(PendingFolderPreparation { folder, before, applied, cancellation, disposal, task });
             }
             InventoryFetchEvent::Failed { folder, error } => {
+                drop(disposal);
                 self.record_inventory_failure(folder, error);
                 self.publish_inventory_status();
             }
             InventoryFetchEvent::BackgroundDone => {
+                drop(disposal);
                 self.inventory_background_done = true;
                 self.publish_inventory_status();
-            }
-        }
-    }
-
-    fn track_inventory_changes(&mut self, changes: &ChangeSet, snapshot: &InventorySnapshot) {
-        for change in &changes.changes {
-            match change {
-                InventoryChange::CategoryUpserted(category) => {
-                    self.inventory_known.insert(category.key);
-                    if snapshot.is_complete(category.key) {
-                        self.inventory_complete.insert(category.key);
-                    } else {
-                        self.inventory_complete.remove(&category.key);
-                    }
-                }
-                InventoryChange::CategoryRemoved(key) => {
-                    self.inventory_known.remove(key);
-                    self.inventory_complete.remove(key);
-                    self.inventory_failed.remove(key);
-                }
-                _ => {}
             }
         }
     }
@@ -347,7 +450,6 @@ impl SessionDriver {
             if snapshot.category(*folder).is_none() {
                 continue;
             }
-            self.inventory_complete.remove(folder);
             if handle.refetch_folder(*folder).is_err() {
                 self.inventory_failed.insert(*folder);
                 self.inventory_last_failure = Some((*folder, InventoryFetchError::RequestFailed));
@@ -365,10 +467,15 @@ impl SessionDriver {
         tracing::warn!(owner = %folder.owner().id(), folder = %folder.id().uuid(), %error, "inventory folder fetch failed");
     }
 
-    fn publish_inventory_status(&self) {
+    pub(super) fn publish_inventory_status(&self) {
+        let (folders_known, folders_complete) = self.inventory.as_ref().map_or((0, 0), |inventory| {
+            let snapshot = inventory.snapshot();
+            let known = snapshot.category_count();
+            (known, known.saturating_sub(snapshot.incomplete_category_count_all()))
+        });
         self.inventory_fetch.publish(InventoryLoadingStatus {
-            folders_known: self.inventory_known.len(),
-            folders_complete: self.inventory_complete.len(),
+            folders_known,
+            folders_complete,
             folders_failed: self.inventory_failed.len(),
             background_done: self.inventory_background_done,
             last_failure: self.inventory_last_failure.clone(),
@@ -406,6 +513,7 @@ pub(super) async fn stop_favorites_refresh(task: &mut Option<tokio::task::JoinHa
     }
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_pending_inventory_moves(
     pending: &mut HashMap<InventoryNodeKey, (MoveExpectation, tokio::sync::oneshot::Sender<()>)>,
     changes: &ChangeSet,
@@ -423,6 +531,7 @@ pub(crate) fn resolve_pending_inventory_moves(
     }
 }
 
+#[cfg(test)]
 pub(super) fn cache_restore_move_changes(
     pending: &HashMap<InventoryNodeKey, (MoveExpectation, tokio::sync::oneshot::Sender<()>)>,
     before: &InventorySnapshot,
@@ -435,7 +544,7 @@ pub(super) fn cache_restore_move_changes(
                 .then_some(InventoryChange::NodeMoved { node: *node, from: expectation.from, to: expectation.to })
         })
         .collect();
-    ChangeSet { revision: after.revision(), changes, refetch_categories: Vec::new() }
+    ChangeSet::new(after.revision(), changes, Vec::new())
 }
 
 fn inventory_node_parent(snapshot: &InventorySnapshot, node: InventoryNodeKey) -> Option<CategoryKey> {
@@ -445,30 +554,56 @@ fn inventory_node_parent(snapshot: &InventorySnapshot, node: InventoryNodeKey) -
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum FolderFetchApply {
-    Applied(ChangeSet),
+fn resolve_pending_inventory_moves_between(
+    pending: &mut HashMap<InventoryNodeKey, (MoveExpectation, oneshot::Sender<()>)>,
+    before: &InventorySnapshot,
+    after: &InventorySnapshot,
+) {
+    let resolved = pending
+        .iter()
+        .filter_map(|(node, (expectation, _))| {
+            (inventory_node_parent(before, *node) == Some(expectation.from) && inventory_node_parent(after, *node) == Some(expectation.to))
+                .then_some(*node)
+        })
+        .collect::<Vec<_>>();
+    for node in resolved {
+        if let Some((_, confirmed)) = pending.remove(&node)
+            && confirmed.send(()).is_err()
+        {
+            tracing::trace!("inventory edit worker stopped before receiving move confirmation");
+        }
+    }
+}
+
+pub(super) enum PreparedInventoryFetch {
+    Prepared(PreparedFolderFetch),
     Stale,
 }
 
-pub(crate) fn apply_inventory_fetch(inventory: &mut Inventory, mut fetch: FolderFetch) -> Result<FolderFetchApply, InventoryError> {
-    let current = inventory.snapshot();
+pub(super) fn prepare_inventory_fetch(
+    current: &InventorySnapshot,
+    mut fetch: FolderFetch,
+    cancellation: &InventoryPreparationCancellation,
+) -> Result<PreparedInventoryFetch, InventoryError> {
     if current.category(fetch.folder).is_none() {
-        return Ok(FolderFetchApply::Stale);
+        return Ok(PreparedInventoryFetch::Stale);
     }
-    if let FolderFetchProvenance::StartedAt(generation) = fetch.provenance
-        && current.folder_generation(fetch.folder) != generation
+    if let FolderFetchProvenance::StartedAt { folder, owner } = fetch.provenance
+        && (current.folder_generation(fetch.folder) != folder || current.owner_refresh_generation(fetch.folder.owner()) != owner)
     {
-        return Ok(FolderFetchApply::Stale);
+        return Ok(PreparedInventoryFetch::Stale);
     }
     let stale = current.is_complete(fetch.folder)
         && current.category(fetch.folder).is_some_and(|category| {
             category.server_version.is_known() && fetch.version.is_known() && category.server_version.raw() > fetch.version.raw()
         });
     if stale {
-        return Ok(FolderFetchApply::Stale);
+        return Ok(PreparedInventoryFetch::Stale);
     }
-    for child in &mut fetch.children {
+    for (index, child) in fetch.children.iter_mut().enumerate() {
+        if index.is_multiple_of(128) && cancellation.is_cancelled() {
+            return Err(InventoryError::Cancelled);
+        }
         let InventoryChild::Category(incoming) = child else { continue };
         let Some(existing) = current.category(incoming.key) else { continue };
         if current.is_complete(incoming.key)
@@ -480,5 +615,103 @@ pub(crate) fn apply_inventory_fetch(inventory: &mut Inventory, mut fetch: Folder
             incoming.server_descendent_count = existing.server_descendent_count;
         }
     }
-    inventory.apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children).map(FolderFetchApply::Applied)
+    current
+        .prepare_folder_fetch_cancellable(fetch.folder, fetch.version, fetch.descendent_count, fetch.children, cancellation)
+        .map(PreparedInventoryFetch::Prepared)
+}
+
+pub(super) fn finish_inventory_fetch_preparation(
+    driver: &mut SessionDriver,
+    result: Result<Result<PreparedInventoryFetch, InventoryError>, tokio::task::JoinError>,
+) {
+    let Some(preparation) = driver.pending_folder_preparation.take() else { return };
+    let PendingFolderPreparation { folder, before, applied, disposal, .. } = preparation;
+    let outcome = match result {
+        Ok(Ok(PreparedInventoryFetch::Prepared(prepared))) => {
+            let Some(inventory) = driver.inventory.as_mut() else {
+                disposal.reclaim((prepared, before));
+                if applied.send(FolderApplyOutcome::Rejected).is_err() {
+                    tracing::trace!(folder = %folder.id().uuid(), "inventory fetch worker stopped before apply acknowledgement");
+                }
+                return;
+            };
+            match inventory.commit_folder_fetch(prepared) {
+                Ok(FolderFetchCommit::Applied(changes)) => {
+                    let after = inventory.snapshot();
+                    driver.process_inventory_changes(&before, &after);
+                    driver.inventory_failed.remove(&folder);
+                    if driver.inventory_last_failure.as_ref().is_some_and(|(failed, _)| *failed == folder) {
+                        driver.inventory_last_failure = None;
+                    }
+                    publish_inventory_change(&driver.inventory_changes, &mut driver.inventory_cache, changes, before, after, disposal);
+                    FolderApplyOutcome::Applied
+                }
+                Ok(FolderFetchCommit::StaleBase(prepared)) => {
+                    disposal.reclaim((prepared, before));
+                    FolderApplyOutcome::Stale
+                }
+                Err(error) => {
+                    disposal.reclaim(before);
+                    driver.record_inventory_failure(folder, InventoryFetchError::Model(error));
+                    FolderApplyOutcome::Rejected
+                }
+            }
+        }
+        Ok(Ok(PreparedInventoryFetch::Stale)) => {
+            disposal.reclaim(before);
+            FolderApplyOutcome::Stale
+        }
+        Ok(Err(InventoryError::Cancelled)) => {
+            disposal.reclaim(before);
+            FolderApplyOutcome::Rejected
+        }
+        Ok(Err(error)) => {
+            disposal.reclaim(before);
+            driver.record_inventory_failure(folder, InventoryFetchError::Model(error));
+            FolderApplyOutcome::Rejected
+        }
+        Err(error) => {
+            disposal.reclaim(before);
+            tracing::warn!(folder = %folder.id().uuid(), %error, "inventory folder preparation worker failed");
+            driver.record_inventory_failure(folder, InventoryFetchError::RequestFailed);
+            FolderApplyOutcome::Rejected
+        }
+    };
+    if applied.send(outcome).is_err() {
+        tracing::debug!(folder = %folder.id().uuid(), "inventory fetch worker stopped before apply acknowledgement");
+    }
+    driver.publish_inventory_status();
+}
+
+pub(super) fn publish_inventory_change(
+    inventory_changes: &tokio::sync::watch::Sender<Option<InventorySnapshot>>,
+    inventory_cache: &mut crate::session::coordinator::inventory_cache::InventoryCacheSession,
+    changes: ChangeSet,
+    before: InventorySnapshot,
+    after: InventorySnapshot,
+    disposal: InventoryDisposalPermit,
+) {
+    inventory_changes.send_replace(Some(after.clone()));
+    inventory_cache.record_change(changes, before, after, disposal);
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) enum FolderFetchApply {
+    Applied(ChangeSet),
+    Stale,
+}
+
+#[cfg(test)]
+pub(crate) fn apply_inventory_fetch(inventory: &mut Inventory, fetch: FolderFetch) -> Result<FolderFetchApply, InventoryError> {
+    let current = inventory.snapshot();
+    let cancellation = InventoryPreparationCancellation::default();
+    let prepared = match prepare_inventory_fetch(&current, fetch, &cancellation)? {
+        PreparedInventoryFetch::Prepared(prepared) => prepared,
+        PreparedInventoryFetch::Stale => return Ok(FolderFetchApply::Stale),
+    };
+    match inventory.commit_folder_fetch(prepared)? {
+        ::inventory::FolderFetchCommit::Applied(changes) => Ok(FolderFetchApply::Applied(changes)),
+        ::inventory::FolderFetchCommit::StaleBase(_) => Ok(FolderFetchApply::Stale),
+    }
 }

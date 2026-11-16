@@ -15,6 +15,20 @@ fn owner() -> InventoryOwner {
     InventoryOwner::new(uuid(1))
 }
 
+fn apply_fetch(
+    inventory: &mut Inventory,
+    folder: CategoryKey,
+    version: ServerVersion,
+    descendent_count: Option<u32>,
+    children: Vec<InventoryChild>,
+) -> Result<inventory::ChangeSet, InventoryError> {
+    let prepared = inventory.snapshot().prepare_folder_fetch(folder, version, descendent_count, children)?;
+    let inventory::FolderFetchCommit::Applied(changes) = inventory.commit_folder_fetch(prepared)? else {
+        panic!("single-owner fetch preparation became stale before commit");
+    };
+    Ok(changes)
+}
+
 fn category(owner: InventoryOwner, id: u128, parent: Option<u128>, version: i32, count: Option<u32>) -> Category {
     Category {
         key: CategoryKey::new(owner, FolderId::new(uuid(id))),
@@ -61,8 +75,7 @@ fn inventory_with_folder_and_item() -> (Inventory, CategoryKey, ItemKey) {
     let item_key = initial_item.key;
     let mut inventory = Inventory::new(root, None, InventoryLimits::default()).expect("root is valid");
     inventory.upsert_category(folder).expect("folder is valid");
-    inventory
-        .apply_folder_fetch(folder_key, ServerVersion::from_raw(7), Some(1), vec![InventoryChild::Item(initial_item)])
+    apply_fetch(&mut inventory, folder_key, ServerVersion::from_raw(7), Some(1), vec![InventoryChild::Item(initial_item)])
         .expect("fetch is valid");
     (inventory, folder_key, item_key)
 }
@@ -306,8 +319,7 @@ fn mismatched_parent_count_preserves_version_and_requests_refetch() {
     let (mut inventory, folder, _) = inventory_with_folder_and_item();
     let snapshot = inventory.snapshot();
     let existing = snapshot.items_for(folder.owner()).next().expect("one item exists").clone();
-    inventory
-        .apply_folder_fetch(folder, ServerVersion::from_raw(7), Some(2), vec![InventoryChild::Item(existing)])
+    apply_fetch(&mut inventory, folder, ServerVersion::from_raw(7), Some(2), vec![InventoryChild::Item(existing)])
         .expect("mismatched server count can be retained as incomplete metadata");
 
     let change = inventory
@@ -336,8 +348,7 @@ fn stale_folder_fetch_does_not_overwrite_a_newer_live_update() {
         .expect("live item update is accepted");
 
     let old_child = inventory.snapshot().item(original_item).expect("original item exists").clone();
-    inventory
-        .apply_folder_fetch(folder, ServerVersion::from_raw(7), Some(1), vec![InventoryChild::Item(old_child)])
+    apply_fetch(&mut inventory, folder, ServerVersion::from_raw(7), Some(1), vec![InventoryChild::Item(old_child)])
         .expect("older fetch is ignored");
 
     let snapshot = inventory.snapshot();

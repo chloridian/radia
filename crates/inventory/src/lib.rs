@@ -11,13 +11,13 @@ pub use cache::{
     InventoryCache, InventoryCacheError, InventoryCacheLoad, InventoryCacheOpenStatus, InventoryCacheRestore,
     InventoryCacheRestoreProgress, InventoryCacheWrite,
 };
-pub use mutation::{InventoryChild, MAX_FOLDER_FETCH_CHILDREN};
+pub use mutation::{FolderFetchCommit, InventoryChild, InventoryPreparationCancellation, MAX_FOLDER_FETCH_CHILDREN, PreparedFolderFetch};
 pub use snapshot::InventorySnapshot;
 pub use state::{Inventory, InventoryLimits, InventoryRoots};
 pub use types::{
-    AssetType, Category, CategoryKey, ChangeSet, FolderType, InventoryChange, InventoryDelta, InventoryNodeId, InventoryNodeKey,
-    InventoryOwner, InventoryRevision, InventoryType, Item, ItemKey, LinkResolution, PermissionMask, Permissions, SaleInfo, SaleType,
-    ServerVersion,
+    AssetType, Category, CategoryKey, ChangeSet, FolderType, InventoryChange, InventoryChangeEstimate, InventoryDelta, InventoryNodeId,
+    InventoryNodeKey, InventoryOwner, InventoryRevision, InventoryType, Item, ItemKey, LinkResolution, PermissionMask, Permissions,
+    SaleInfo, SaleType, ServerVersion,
 };
 
 pub const MAX_INVENTORY_CATEGORIES: usize = 131_074;
@@ -49,6 +49,7 @@ pub enum InventoryError {
     DescriptionTooLong,
     InconsistentIndex,
     RevisionExhausted,
+    Cancelled,
 }
 
 impl fmt::Display for InventoryError {
@@ -76,6 +77,7 @@ impl fmt::Display for InventoryError {
             Self::DescriptionTooLong => "inventory description exceeds its byte limit",
             Self::InconsistentIndex => "inventory parent and child indexes disagree",
             Self::RevisionExhausted => "inventory revision space exhausted",
+            Self::Cancelled => "inventory preparation was cancelled",
         })
     }
 }

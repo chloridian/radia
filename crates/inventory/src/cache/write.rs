@@ -16,11 +16,10 @@ pub(super) fn bootstrap(snapshot: &InventorySnapshot, identity: &CacheIdentity) 
 
 pub(super) fn changeset(
     changes: &ChangeSet,
-    before: &InventorySnapshot,
     after: &InventorySnapshot,
     identity: &CacheIdentity,
+    affected: Vec<CategoryKey>,
 ) -> Result<Vec<SqliteBatch>, InventoryCacheError> {
-    let affected = affected_categories(changes, before, after);
     let mut changed_categories = BTreeSet::new();
     let mut changed_items = BTreeSet::new();
     let mut replaced = BTreeSet::new();

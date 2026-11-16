@@ -1,11 +1,12 @@
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BTreeSet, BinaryHeap},
+    collections::{BTreeMap, BTreeSet},
     fmt,
-    ops::Range,
+    ops::{Bound, Range},
+    sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -30,6 +31,10 @@ const DEMAND_DEADLINE: Duration = Duration::from_secs(60);
 const NEGATIVE_TTL: Duration = Duration::from_secs(30);
 const CACHE_PRESSURE_RETRY: Duration = Duration::from_secs(1);
 const MAX_ATTEMPTS: u8 = 3;
+const DIRTY_QUEUE_CAPACITY: usize = 4096;
+const MAX_DIRTY_PER_TURN: usize = 128;
+const MAX_FALLBACK_SCAN_PER_TURN: usize = 128;
+const MAX_DEADLINES_PER_TURN: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ScheduleKey {
@@ -39,6 +44,41 @@ struct ScheduleKey {
     used: Instant,
     key: LoadKey,
     route: Route,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum DeadlineKind {
+    Demand,
+    Retry,
+    CacheRetry,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DeadlineKey {
+    at: Instant,
+    key: LoadKey,
+    route: Option<Route>,
+    kind: DeadlineKind,
+}
+
+#[derive(Clone, Copy)]
+enum RouteEligibility {
+    Eligible { attempts: u8 },
+    RetryAt { attempts: u8, failure: Failure, retry_at: Instant, expires: Instant },
+    Failed { attempts: u8, failure: Failure, expires: Instant },
+}
+
+#[derive(Clone, Copy)]
+enum CacheEligibility {
+    Unchecked,
+    Checked,
+    RetryAt(Instant),
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MeshFetchMode {
+    Range,
+    FullFallback,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -248,12 +288,13 @@ pub enum AdmissionError {
 
 struct Counter {
     count: AtomicUsize,
-    wake: watch::Sender<()>,
 }
 
 struct Lease {
     counter: Arc<Counter>,
-    maintenance: Arc<AtomicBool>,
+    key: LoadKey,
+    dirty: Arc<DirtyFlag>,
+    signals: Arc<DirtySignals>,
     size: AtomicU16,
     priority: AtomicBool,
     importance: AtomicU16,
@@ -264,8 +305,85 @@ struct Lease {
 impl Drop for Lease {
     fn drop(&mut self) {
         self.counter.count.fetch_sub(1, Ordering::AcqRel);
-        self.counter.wake.send_replace(());
-        self.maintenance.store(true, Ordering::Release);
+        self.signals.mark(self.key, &self.dirty);
+    }
+}
+
+const SIGNAL_ACTIVE: u8 = 0;
+const SIGNAL_DIRTY: u8 = 1;
+const SIGNAL_RETIRED: u8 = 2;
+
+struct DirtyFlag(AtomicU8);
+
+impl DirtyFlag {
+    fn is_dirty(&self) -> bool {
+        self.0.load(Ordering::Acquire) == SIGNAL_DIRTY
+    }
+}
+
+struct DirtyNotification {
+    key: LoadKey,
+    dirty: Arc<DirtyFlag>,
+}
+
+struct DirtySignals {
+    sender: SyncSender<DirtyNotification>,
+    queued: AtomicUsize,
+    overflow: AtomicBool,
+    pending: AtomicUsize,
+    change_generation: AtomicU64,
+    wake: watch::Sender<()>,
+}
+
+impl DirtySignals {
+    fn mark(&self, key: LoadKey, dirty: &Arc<DirtyFlag>) {
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        if dirty.0.compare_exchange(SIGNAL_ACTIVE, SIGNAL_DIRTY, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            self.pending.fetch_sub(1, Ordering::AcqRel);
+            return;
+        }
+        self.change_generation.fetch_add(1, Ordering::Release);
+        self.queued.fetch_add(1, Ordering::AcqRel);
+        match self.sender.try_send(DirtyNotification { key, dirty: Arc::clone(dirty) }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                self.queued.fetch_sub(1, Ordering::AcqRel);
+                self.overflow.store(true, Ordering::Release);
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.queued.fetch_sub(1, Ordering::AcqRel);
+                self.retire(dirty);
+            }
+        }
+        self.wake.send_replace(());
+    }
+
+    fn take(&self, dirty: &DirtyFlag) -> bool {
+        if dirty.0.compare_exchange(SIGNAL_DIRTY, SIGNAL_ACTIVE, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return false;
+        }
+        self.pending.fetch_sub(1, Ordering::AcqRel);
+        true
+    }
+
+    fn retire(&self, dirty: &DirtyFlag) {
+        loop {
+            match dirty.0.load(Ordering::Acquire) {
+                SIGNAL_ACTIVE => {
+                    if dirty.0.compare_exchange(SIGNAL_ACTIVE, SIGNAL_RETIRED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                        return;
+                    }
+                }
+                SIGNAL_DIRTY => {
+                    if dirty.0.compare_exchange(SIGNAL_DIRTY, SIGNAL_RETIRED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                        self.pending.fetch_sub(1, Ordering::AcqRel);
+                        return;
+                    }
+                }
+                SIGNAL_RETIRED => return,
+                _ => unreachable!("dirty signal state is valid"),
+            }
+        }
     }
 }
 
@@ -300,37 +418,29 @@ impl Demand {
 
     pub fn update_importance(&self, importance: u16) {
         self._lease.importance.store(importance, Ordering::Release);
-        self._lease.maintenance.store(true, Ordering::Release);
-        self._lease.counter.wake.send_replace(());
+        self._lease.signals.mark(self._lease.key, &self._lease.dirty);
     }
 
     pub fn update_priority(&self, priority: Priority) {
         self._lease.priority.store(priority == Priority::Visible, Ordering::Release);
-        self._lease.maintenance.store(true, Ordering::Release);
-        self._lease.counter.wake.send_replace(());
+        self._lease.signals.mark(self._lease.key, &self._lease.dirty);
     }
 
     pub fn update_size(&self, size: TextureSize) {
         let size = size.edge() as u16;
         if self._lease.size.try_update(Ordering::AcqRel, Ordering::Acquire, |current| (current != 0).then_some(size)).is_ok() {
-            self._lease.maintenance.store(true, Ordering::Release);
-            self._lease.counter.wake.send_replace(());
+            self._lease.signals.mark(self._lease.key, &self._lease.dirty);
         }
     }
-}
-
-struct FailureRecord {
-    failure: Failure,
-    retry_at: Option<Instant>,
-    expires: Instant,
 }
 
 struct RouteState {
     counter: Arc<Counter>,
     status: watch::Sender<Status<StoredContent>>,
-    attempts: u8,
-    failed: Option<FailureRecord>,
+    eligibility: RouteEligibility,
     deadline: Instant,
+    demand_deadline_indexed: bool,
+    retry_deadline_indexed: bool,
     leases: Vec<Weak<Lease>>,
 }
 
@@ -339,19 +449,63 @@ impl RouteState {
         self.counter.count.load(Ordering::Acquire)
     }
 
-    fn restart(&mut self, now: Instant) {
-        self.failed = None;
-        self.attempts = 0;
+    fn restart(&mut self, deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, route: Route, now: Instant) {
+        remove_demand_deadline(deadlines, key, route, self);
+        remove_retry_deadline(deadlines, key, route, self);
+        self.eligibility = RouteEligibility::Eligible { attempts: 0 };
         self.deadline = now + DEMAND_DEADLINE;
     }
 
     fn queued_status(&self) -> Status {
-        self.failed.as_ref().map_or(Status::Queued, |failed| Status::Failed { failure: failed.failure, retry_at: failed.retry_at })
+        match self.eligibility {
+            RouteEligibility::Eligible { .. } => Status::Queued,
+            RouteEligibility::RetryAt { failure, retry_at, .. } => Status::Failed { failure, retry_at: Some(retry_at) },
+            RouteEligibility::Failed { failure, .. } => Status::Failed { failure, retry_at: None },
+        }
     }
 
-    fn fail(&mut self, failure: Failure, retry_at: Option<Instant>, now: Instant, ready: Option<&Content>) {
-        self.failed = Some(FailureRecord { failure, retry_at, expires: now + NEGATIVE_TTL });
+    fn fail(
+        &mut self,
+        deadlines: &mut BTreeSet<DeadlineKey>,
+        key: LoadKey,
+        route: Route,
+        failure: Failure,
+        retry_at: Option<Instant>,
+        now: Instant,
+        ready: Option<&Content>,
+    ) {
+        let attempts = self.attempts();
+        remove_retry_deadline(deadlines, key, route, self);
+        self.eligibility = match retry_at {
+            Some(retry_at) => RouteEligibility::RetryAt { attempts, failure, retry_at, expires: now + NEGATIVE_TTL },
+            None => RouteEligibility::Failed { attempts, failure, expires: now + NEGATIVE_TTL },
+        };
         self.publish_status(Status::Failed { failure, retry_at }.retaining(ready));
+    }
+
+    fn attempts(&self) -> u8 {
+        match self.eligibility {
+            RouteEligibility::Eligible { attempts }
+            | RouteEligibility::RetryAt { attempts, .. }
+            | RouteEligibility::Failed { attempts, .. } => attempts,
+        }
+    }
+
+    fn retry_at(&self) -> Option<Instant> {
+        match self.eligibility {
+            RouteEligibility::RetryAt { retry_at, .. } => Some(retry_at),
+            RouteEligibility::Eligible { .. } | RouteEligibility::Failed { .. } => None,
+        }
+    }
+
+    fn begin_attempt(&mut self, deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, route: Route) {
+        let attempts = self.attempts().saturating_add(1);
+        remove_retry_deadline(deadlines, key, route, self);
+        self.eligibility = RouteEligibility::Eligible { attempts };
+    }
+
+    fn refund_attempt(&mut self) {
+        self.eligibility = RouteEligibility::Eligible { attempts: self.attempts().saturating_sub(1) };
     }
 
     fn publish_status(&self, status: Status) {
@@ -360,13 +514,15 @@ impl RouteState {
 }
 
 struct WorkLife {
-    maintenance: Arc<AtomicBool>,
+    key: LoadKey,
+    dirty: Arc<DirtyFlag>,
+    signals: Arc<DirtySignals>,
     transport_pending: AtomicBool,
 }
 
 impl Drop for WorkLife {
     fn drop(&mut self) {
-        self.maintenance.store(true, Ordering::Release);
+        self.signals.mark(self.key, &self.dirty);
     }
 }
 
@@ -388,15 +544,17 @@ struct AssetEntry {
     request: Request,
     views: BTreeMap<Route, RouteState>,
     phase: LoadPhase,
+    dirty: Arc<DirtyFlag>,
+    candidate: Option<ScheduleKey>,
     used: Instant,
     ready: Option<StoredContent>,
     texture: Option<WeakTexture>,
     target: Option<TextureSize>,
     priority: Priority,
     importance: u16,
-    cache_checked: bool,
-    cache_retry_at: Option<Instant>,
-    force_full_mesh: bool,
+    cache_eligibility: CacheEligibility,
+    indexed_cache_retry: Option<Instant>,
+    mesh_fetch_mode: MeshFetchMode,
 }
 
 impl AssetEntry {
@@ -447,7 +605,7 @@ struct Job {
     reservation: Reservation,
     cancelled: watch::Receiver<bool>,
     size: TextureSize,
-    force_full_mesh: bool,
+    mesh_fetch_mode: MeshFetchMode,
 }
 
 impl fmt::Debug for Job {
@@ -518,7 +676,7 @@ impl FetchJob {
         self.job.reservation.bytes()
     }
     pub fn force_full_mesh(&self) -> bool {
-        self.job.force_full_mesh
+        self.job.mesh_fetch_mode == MeshFetchMode::FullFallback
     }
     pub fn is_cancelled(&self) -> bool {
         self.job.is_cancelled()
@@ -533,7 +691,7 @@ impl FetchJob {
     pub fn complete_response(self, response: Result<FetchResponse, Failure>) -> Result<DecodeInput, FetchFailure> {
         let Self { mut job } = self;
         job._life.transport_pending.store(false, Ordering::Release);
-        job._life.maintenance.store(true, Ordering::Release);
+        job._life.signals.mark(job.key, &job._life.dirty);
         let response = match response {
             Ok(response) if !job.is_cancelled() => response,
             Ok(_) => return Err(FetchFailure::new(job, Failure::Cancelled)),
@@ -719,13 +877,20 @@ pub struct Store {
     routes: BTreeSet<Route>,
     entries: BTreeMap<LoadKey, AssetEntry>,
     candidates: Vec<ScheduleKey>,
-    mesh_candidate_heap: BinaryHeap<ScheduleKey>,
-    other_candidate_heap: BinaryHeap<ScheduleKey>,
+    candidate_generation: u64,
+    mesh_candidates: BTreeSet<ScheduleKey>,
+    other_candidates: BTreeSet<ScheduleKey>,
+    deadlines: BTreeSet<DeadlineKey>,
+    dirty_signals: Arc<DirtySignals>,
+    dirty_receiver: Receiver<DirtyNotification>,
+    fallback_scan_active: bool,
+    fallback_scan_cursor: Option<LoadKey>,
     candidates_dirty: bool,
     budget: Budget,
     closed: bool,
-    maintenance_dirty: Arc<AtomicBool>,
     maintained_at: Option<Instant>,
+    maintained_generation: u64,
+    maintenance_pending: bool,
     running_mesh_fetches: usize,
     running_other_fetches: usize,
     running_cache_reads: usize,
@@ -751,19 +916,35 @@ impl Store {
     pub fn new(budget: Budget) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1)).expect("asset session generation exhausted");
+        let (sender, dirty_receiver) = mpsc::sync_channel(DIRTY_QUEUE_CAPACITY);
+        let dirty_signals = Arc::new(DirtySignals {
+            sender,
+            queued: AtomicUsize::new(0),
+            overflow: AtomicBool::new(false),
+            pending: AtomicUsize::new(0),
+            change_generation: AtomicU64::new(0),
+            wake: budget.wake(),
+        });
         Self {
             id,
             sequence: 0,
             routes: BTreeSet::new(),
             entries: BTreeMap::new(),
             candidates: Vec::with_capacity(MAX_NON_MESH_FETCHES + MAX_MESH_FETCHES),
-            mesh_candidate_heap: BinaryHeap::with_capacity(MAX_MESH_FETCHES),
-            other_candidate_heap: BinaryHeap::with_capacity(MAX_NON_MESH_FETCHES),
+            candidate_generation: 0,
+            mesh_candidates: BTreeSet::new(),
+            other_candidates: BTreeSet::new(),
+            deadlines: BTreeSet::new(),
+            dirty_signals,
+            dirty_receiver,
+            fallback_scan_active: false,
+            fallback_scan_cursor: None,
             candidates_dirty: true,
             budget,
             closed: false,
-            maintenance_dirty: Arc::new(AtomicBool::new(true)),
             maintained_at: None,
+            maintained_generation: 0,
+            maintenance_pending: false,
             running_mesh_fetches: 0,
             running_other_fetches: 0,
             running_cache_reads: 0,
@@ -804,17 +985,24 @@ impl Store {
     }
 
     pub fn retire_route(&mut self, route: Route) {
-        self.maintenance_dirty.store(true, Ordering::Release);
         self.routes.remove(&route);
-        for entry in self.entries.values_mut() {
-            if let Some(view) = entry.views.remove(&route) {
+        let (entries, deadlines, dirty_signals) = (&mut self.entries, &mut self.deadlines, &self.dirty_signals);
+        for (key, entry) in entries {
+            let mut changed = false;
+            if let Some(mut view) = entry.views.remove(&route) {
+                Self::remove_route_deadlines(deadlines, *key, route, &mut view);
                 view.publish_status(Status::Failed { failure: Failure::RouteClosed, retry_at: None });
+                changed = true;
             }
             if let LoadPhase::Running { route: running, life, cancelled, .. } = &entry.phase
                 && (!entry.has_active_demand()
                     || *running == route && life.upgrade().is_some_and(|life| life.transport_pending.load(Ordering::Acquire)))
             {
                 cancelled.send_replace(true);
+                changed = true;
+            }
+            if changed {
+                dirty_signals.mark(*key, &entry.dirty);
             }
         }
     }
@@ -856,15 +1044,17 @@ impl Store {
             request,
             views: BTreeMap::new(),
             phase: LoadPhase::Queued,
+            dirty: Arc::new(DirtyFlag(AtomicU8::new(SIGNAL_ACTIVE))),
+            candidate: None,
             used: now,
             ready: None,
             texture: None,
             target: None,
             priority,
             importance,
-            cache_checked: false,
-            cache_retry_at: None,
-            force_full_mesh: false,
+            cache_eligibility: CacheEligibility::Unchecked,
+            indexed_cache_retry: None,
+            mesh_fetch_mode: MeshFetchMode::Range,
         });
         if !entry.request.is_compatible_with(request) {
             return Err(AdmissionError::ConflictingRequest);
@@ -886,21 +1076,25 @@ impl Store {
         } else {
             None
         };
-        let wake = self.budget.wake();
         let ready = entry.ready();
         let view = entry.views.entry(route).or_insert_with(|| {
             let (status, _) = watch::channel(Status::Queued);
             RouteState {
-                counter: Arc::new(Counter { count: AtomicUsize::new(0), wake }),
+                counter: Arc::new(Counter { count: AtomicUsize::new(0) }),
                 status,
-                attempts: 0,
-                failed: None,
+                eligibility: RouteEligibility::Eligible { attempts: 0 },
                 deadline: now + DEMAND_DEADLINE,
+                demand_deadline_indexed: false,
+                retry_deadline_indexed: false,
                 leases: Vec::new(),
             }
         });
-        if view.count() == 0 && view.failed.as_ref().is_none_or(|failed| failed.expires <= now) {
-            view.restart(now);
+        let expired = match view.eligibility {
+            RouteEligibility::Eligible { .. } => true,
+            RouteEligibility::RetryAt { expires, .. } | RouteEligibility::Failed { expires, .. } => expires <= now,
+        };
+        if view.count() == 0 && expired {
+            view.restart(&mut self.deadlines, key, route, now);
         }
         let status = match &entry.phase {
             LoadPhase::Idle => ready.as_ref().map_or(Status::Queued, |content| Status::Ready(content.clone())),
@@ -910,9 +1104,12 @@ impl Store {
         };
         view.publish_status(status.retaining(ready.as_ref()));
         view.counter.count.fetch_add(1, Ordering::AcqRel);
+        let dirty = Arc::clone(&entry.dirty);
         let lease = Arc::new(Lease {
             counter: Arc::clone(&view.counter),
-            maintenance: Arc::clone(&self.maintenance_dirty),
+            key,
+            dirty: Arc::clone(&dirty),
+            signals: Arc::clone(&self.dirty_signals),
             size: AtomicU16::new(request.size().map_or(0, |size| size.edge() as u16)),
             priority: AtomicBool::new(priority == Priority::Visible),
             importance: AtomicU16::new(importance),
@@ -921,107 +1118,244 @@ impl Store {
         });
         view.leases.retain(|lease| lease.strong_count() > 0);
         view.leases.push(Arc::downgrade(&lease));
-        self.maintenance_dirty.store(true, Ordering::Release);
-        Ok(Demand { _lease: lease, status: view.status.subscribe() })
+        let status = view.status.subscribe();
+        let signals = Arc::clone(&self.dirty_signals);
+        signals.mark(key, &dirty);
+        Ok(Demand { _lease: lease, status })
     }
 
-    pub fn maintain(&mut self, now: Instant) {
-        let dirty = self.maintenance_dirty.swap(false, Ordering::AcqRel);
-        if self.maintained_at == Some(now) && !dirty {
+    pub fn maintain(&mut self, now: Instant) -> bool {
+        if self.closed {
+            return false;
+        }
+        if self.maintained_at == Some(now)
+            && !self.maintenance_pending
+            && self.maintained_generation == self.dirty_signals.change_generation.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        self.maintained_at = Some(now);
+
+        for _ in 0..MAX_DEADLINES_PER_TURN {
+            let Some(deadline) = self.deadlines.first().copied().filter(|deadline| deadline.at <= now) else { break };
+            self.deadlines.remove(&deadline);
+            if self.deadline_is_current(deadline)
+                && let Some(entry) = self.entries.get_mut(&deadline.key)
+            {
+                match (deadline.kind, deadline.route) {
+                    (DeadlineKind::Demand, Some(route)) => {
+                        if let Some(view) = entry.views.get_mut(&route) {
+                            view.demand_deadline_indexed = false;
+                        }
+                    }
+                    (DeadlineKind::Retry, Some(route)) => {
+                        if let Some(view) = entry.views.get_mut(&route) {
+                            view.retry_deadline_indexed = false;
+                        }
+                    }
+                    _ => {}
+                }
+                self.dirty_signals.mark(deadline.key, &entry.dirty);
+            }
+        }
+
+        for _ in 0..MAX_DIRTY_PER_TURN {
+            match self.dirty_receiver.try_recv() {
+                Ok(signal) => {
+                    self.dirty_signals.queued.fetch_sub(1, Ordering::AcqRel);
+                    self.reconcile_dirty_notification(&signal, now);
+                }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+
+        if !self.fallback_scan_active && self.dirty_signals.overflow.swap(false, Ordering::AcqRel) {
+            self.fallback_scan_active = true;
+            self.fallback_scan_cursor = None;
+        }
+        for _ in 0..MAX_FALLBACK_SCAN_PER_TURN {
+            if !self.fallback_scan_active {
+                break;
+            }
+            let next = match self.fallback_scan_cursor {
+                Some(cursor) => self.entries.range((Bound::Excluded(cursor), Bound::Unbounded)).next(),
+                None => self.entries.iter().next(),
+            }
+            .map(|(key, _)| *key);
+            let Some(key) = next else {
+                self.fallback_scan_active = false;
+                self.fallback_scan_cursor = None;
+                break;
+            };
+            self.fallback_scan_cursor = Some(key);
+            self.reconcile_dirty_key(key, now);
+        }
+
+        let generation = self.dirty_signals.change_generation.load(Ordering::Acquire);
+        let pending = self.has_pending_maintenance(now);
+        self.maintenance_pending = pending;
+        self.maintained_generation = generation;
+        if pending {
+            self.dirty_signals.wake.send_replace(());
+        }
+        pending
+    }
+
+    fn has_pending_maintenance(&self, now: Instant) -> bool {
+        self.dirty_signals.pending.load(Ordering::Acquire) > 0
+            || self.dirty_signals.queued.load(Ordering::Acquire) > 0
+            || self.dirty_signals.overflow.load(Ordering::Acquire)
+            || self.fallback_scan_active
+            || self.deadlines.first().is_some_and(|deadline| deadline.at <= now)
+    }
+
+    fn deadline_is_current(&self, deadline: DeadlineKey) -> bool {
+        let Some(entry) = self.entries.get(&deadline.key) else { return false };
+        match (deadline.kind, deadline.route) {
+            (DeadlineKind::Demand, Some(route)) => {
+                entry.views.get(&route).is_some_and(|view| view.demand_deadline_indexed && view.deadline == deadline.at)
+            }
+            (DeadlineKind::Retry, Some(route)) => {
+                entry.views.get(&route).is_some_and(|view| view.retry_deadline_indexed && view.retry_at() == Some(deadline.at))
+            }
+            (DeadlineKind::CacheRetry, None) => entry.indexed_cache_retry == Some(deadline.at),
+            _ => false,
+        }
+    }
+
+    fn reconcile_dirty_notification(&mut self, signal: &DirtyNotification, now: Instant) {
+        if !self.dirty_signals.take(&signal.dirty) {
             return;
         }
-        for entry in self.entries.values_mut() {
-            let ready = entry.ready();
-            let mut desired = None;
-            let mut priority = Priority::Background;
-            let mut importance = 0;
-            for view in entry.views.values_mut() {
-                view.leases.retain(|weak| {
-                    let Some(lease) = weak.upgrade() else { return false };
-                    desired = desired.max(lease.size());
-                    priority = priority.max(lease.priority());
-                    importance = importance.max(lease.importance.load(Ordering::Acquire));
-                    true
-                });
+        if !self.entries.get(&signal.key).is_some_and(|entry| Arc::ptr_eq(&entry.dirty, &signal.dirty)) {
+            self.dirty_signals.retire(&signal.dirty);
+            return;
+        }
+        self.candidates_dirty = true;
+        self.reconcile_resource(signal.key, now);
+    }
+
+    fn reconcile_dirty_key(&mut self, key: LoadKey, now: Instant) {
+        let Some(dirty) = self.entries.get(&key).map(|entry| Arc::clone(&entry.dirty)) else { return };
+        self.reconcile_dirty_notification(&DirtyNotification { key, dirty }, now);
+    }
+
+    fn reconcile_resource(&mut self, key: LoadKey, now: Instant) {
+        let Store {
+            entries,
+            deadlines,
+            dirty_signals,
+            mesh_candidates,
+            other_candidates,
+            running_mesh_fetches,
+            running_other_fetches,
+            running_cache_reads,
+            running_non_mesh_cache_reads,
+            pending_non_mesh_cache_decodes,
+            running_texture_decodes,
+            running_other_decodes,
+            ..
+        } = self;
+        let Some(entry) = entries.get_mut(&key) else { return };
+        reconcile_entry(
+            entry,
+            key,
+            deadlines,
+            now,
+            running_mesh_fetches,
+            running_other_fetches,
+            running_cache_reads,
+            running_non_mesh_cache_reads,
+            pending_non_mesh_cache_decodes,
+            running_texture_decodes,
+            running_other_decodes,
+        );
+        if entry.dirty.is_dirty() {
+            Self::remove_candidate(mesh_candidates, other_candidates, entry);
+        } else {
+            Self::refresh_candidate_queues(mesh_candidates, other_candidates, key, entry, now);
+        }
+        Self::refresh_deadline_index(deadlines, key, entry, now);
+        if !entry.has_active_demand()
+            && entry.texture().is_none()
+            && !matches!(entry.phase, LoadPhase::Running { .. })
+            && let Some(entry) = entries.remove(&key)
+        {
+            dirty_signals.retire(&entry.dirty);
+        }
+    }
+
+    fn refresh_candidate_queues(
+        mesh_candidates: &mut BTreeSet<ScheduleKey>,
+        other_candidates: &mut BTreeSet<ScheduleKey>,
+        key: LoadKey,
+        entry: &mut AssetEntry,
+        now: Instant,
+    ) {
+        let candidate = if matches!(entry.phase, LoadPhase::Queued) && cache_retry_ready(entry.cache_eligibility, now) {
+            entry
+                .views
+                .iter()
+                .find(|(_, view)| {
+                    view.count() > 0
+                        && view.attempts() < MAX_ATTEMPTS
+                        && (entry.priority == Priority::Background || now < view.deadline)
+                        && route_eligible(view.eligibility, now)
+                })
+                .map(|(route, _)| ScheduleKey {
+                    priority: Reverse(entry.priority),
+                    importance: Reverse(entry.importance),
+                    ready: entry.ready().is_some(),
+                    used: entry.used,
+                    key,
+                    route: *route,
+                })
+        } else {
+            None
+        };
+        if entry.candidate == candidate {
+            return;
+        }
+        Self::remove_candidate(mesh_candidates, other_candidates, entry);
+        if let Some(candidate) = candidate {
+            if key.resource.kind == Kind::Mesh {
+                mesh_candidates.insert(candidate);
+            } else {
+                other_candidates.insert(candidate);
             }
-            if priority != entry.priority {
-                for view in entry.views.values_mut() {
-                    if now >= view.deadline && view.failed.as_ref().is_none_or(|failed| failed.failure == Failure::Deadline) {
-                        view.restart(now);
-                    }
-                }
-            }
-            entry.priority = priority;
-            entry.importance = importance;
-            if entry.target != desired {
-                entry.target = desired;
-                if let Some(size) = desired
-                    && let Request::Texture { id, .. } = entry.request
-                {
-                    entry.request = Request::Texture { id, size };
-                }
-                for view in entry.views.values_mut() {
-                    view.restart(now);
-                }
-                if !matches!(entry.phase, LoadPhase::Running { .. }) {
-                    entry.phase = LoadPhase::Queued;
-                }
-            }
-            if matches!(entry.phase, LoadPhase::Queued)
-                && let Some(content) = ready.as_ref()
-                && content_satisfies(content, desired)
-            {
-                entry.phase = LoadPhase::Idle;
-                entry.broadcast_status(Status::Ready((*content).clone()));
-            }
-            if let LoadPhase::Running { life, cancelled, route, stage, .. } = &entry.phase {
-                let transport_pending = life.upgrade().is_some_and(|life| life.transport_pending.load(Ordering::Acquire));
-                if !entry.has_live_demand(now) || transport_pending && entry.views.get(route).is_none_or(|view| now >= view.deadline) {
-                    cancelled.send_replace(true);
-                }
-                if life.upgrade().is_none() {
-                    if let Some(view) = entry.views.get_mut(route) {
-                        view.fail(Failure::Cancelled, None, now, ready.as_ref());
-                    }
-                    let stage = *stage;
-                    entry.phase = LoadPhase::Queued;
-                    match stage {
-                        Stage::ReadingCache => {
-                            finish_cache_read(&mut self.running_cache_reads);
-                            if entry.request.resource().kind != Kind::Mesh {
-                                finish_cache_read(&mut self.running_non_mesh_cache_reads);
-                            }
-                        }
-                        Stage::Cached if entry.request.resource().kind != Kind::Mesh => {
-                            finish_cache_read(&mut self.pending_non_mesh_cache_decodes);
-                        }
-                        Stage::Cached => {}
-                        Stage::Fetching => {
-                            finish_fetch(entry.request.resource().kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
-                        }
-                        Stage::Decoding => {
-                            finish_decode(entry.request.resource().kind, &mut self.running_texture_decodes, &mut self.running_other_decodes)
-                        }
-                    }
-                }
-            }
-            if !matches!(entry.phase, LoadPhase::Idle)
-                && (entry.priority == Priority::Visible || matches!(entry.phase, LoadPhase::Running { .. }))
-            {
-                for view in entry.views.values_mut().filter(|view| {
-                    view.count() > 0 && now >= view.deadline && view.failed.as_ref().is_none_or(|failed| failed.retry_at.is_some())
-                }) {
-                    view.fail(Failure::Deadline, None, now, ready.as_ref());
-                }
+            entry.candidate = Some(candidate);
+        }
+    }
+
+    fn remove_candidate(mesh_candidates: &mut BTreeSet<ScheduleKey>, other_candidates: &mut BTreeSet<ScheduleKey>, entry: &mut AssetEntry) {
+        if let Some(previous) = entry.candidate.take() {
+            if previous.key.resource.kind == Kind::Mesh {
+                mesh_candidates.remove(&previous);
+            } else {
+                other_candidates.remove(&previous);
             }
         }
-        self.entries
-            .retain(|_, entry| entry.has_active_demand() || entry.texture().is_some() || matches!(entry.phase, LoadPhase::Running { .. }));
-        self.candidates.clear();
-        self.mesh_candidate_heap.clear();
-        self.other_candidate_heap.clear();
-        self.candidates_dirty = true;
-        self.maintained_at = Some(now);
+    }
+
+    fn refresh_deadline_index(deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, entry: &mut AssetEntry, now: Instant) {
+        let running = matches!(entry.phase, LoadPhase::Running { .. });
+        for (route, view) in &mut entry.views {
+            let demand_deadline =
+                (view.count() > 0 && (entry.priority == Priority::Visible || running) && view.deadline > now).then_some(view.deadline);
+            update_route_deadline(deadlines, key, *route, DeadlineKind::Demand, view, demand_deadline);
+            let retry_at = view.retry_at().filter(|retry_at| view.count() > 0 && *retry_at > now);
+            update_route_deadline(deadlines, key, *route, DeadlineKind::Retry, view, retry_at);
+        }
+        let cache_retry = match entry.cache_eligibility {
+            CacheEligibility::RetryAt(retry_at) if entry.has_active_demand() && retry_at > now => Some(retry_at),
+            CacheEligibility::Unchecked | CacheEligibility::Checked | CacheEligibility::RetryAt(_) => None,
+        };
+        update_deadline(deadlines, key, None, DeadlineKind::CacheRetry, &mut entry.indexed_cache_retry, cache_retry);
+    }
+
+    fn remove_route_deadlines(deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, route: Route, view: &mut RouteState) {
+        remove_demand_deadline(deadlines, key, route, view);
+        remove_retry_deadline(deadlines, key, route, view);
     }
 
     pub fn next_job(&mut self, now: Instant) -> Option<LoadJob> {
@@ -1029,28 +1363,30 @@ impl Store {
             return None;
         }
         self.maintain(now);
-        self.build_candidates(now);
+        self.build_candidates();
         let mut selected = None;
         for index in (0..self.candidates.len()).rev() {
             let candidate = self.candidates[index];
             let key = candidate.key;
             let resource = key.resource;
+            if !self.entries.get(&key).is_some_and(|entry| !entry.dirty.is_dirty() && entry.candidate == Some(candidate)) {
+                self.quarantine_candidate(candidate);
+                continue;
+            }
             let Some(request) = self.entries.get(&key).map(|entry| entry.request) else { continue };
-            let cache_unchecked = self
-                .entries
-                .get(&key)
-                .is_some_and(|entry| !entry.cache_checked && entry.texture().and_then(|texture| texture.source()).is_none());
-            if cache_unchecked
+            let cache_lookup_unchecked = self.entries.get(&key).is_some_and(|entry| {
+                cache_unchecked(entry.cache_eligibility, now) && entry.texture().and_then(|texture| texture.source()).is_none()
+            });
+            if cache_lookup_unchecked
                 && self.cache.as_ref().is_some_and(|cache| !cache.may_contain(request))
                 && let Some(entry) = self.entries.get_mut(&key)
             {
-                entry.cache_checked = true;
+                entry.cache_eligibility = CacheEligibility::Checked;
             }
             let cache_read = self.cache.is_some()
-                && self
-                    .entries
-                    .get(&key)
-                    .is_some_and(|entry| !entry.cache_checked && entry.texture().and_then(|texture| texture.source()).is_none());
+                && self.entries.get(&key).is_some_and(|entry| {
+                    cache_unchecked(entry.cache_eligibility, now) && entry.texture().and_then(|texture| texture.source()).is_none()
+                });
             if cache_read {
                 if self.running_cache_reads >= storage::MAX_IN_FLIGHT_READS
                     || resource.kind != Kind::Mesh
@@ -1065,8 +1401,8 @@ impl Store {
                 continue;
             }
             let prefix_lod = (!cache_read).then(|| self.mesh_lod_prefix(request)).flatten();
-            let force_full_mesh = self.entries.get(&key).is_some_and(|entry| entry.force_full_mesh);
-            let fetch_bytes = if force_full_mesh && resource.kind == Kind::Mesh {
+            let mesh_fetch_mode = self.entries.get(&key).map_or(MeshFetchMode::Range, |entry| entry.mesh_fetch_mode);
+            let fetch_bytes = if mesh_fetch_mode == MeshFetchMode::FullFallback && resource.kind == Kind::Mesh {
                 Some(resource.kind.max_response_bytes())
             } else {
                 fetch_work_bytes(request)
@@ -1089,11 +1425,12 @@ impl Store {
         let key = candidate.key;
         let route = candidate.route;
         let resource = key.resource;
-        let life = Arc::new(WorkLife { maintenance: Arc::clone(&self.maintenance_dirty), transport_pending: AtomicBool::new(false) });
+        let dirty = Arc::clone(&self.entries.get(&key).expect("selected demanded entry").dirty);
+        let life = Arc::new(WorkLife { key, dirty, signals: Arc::clone(&self.dirty_signals), transport_pending: AtomicBool::new(false) });
         let (cancelled, receiver) = watch::channel(false);
         let entry = self.entries.get_mut(&key).expect("selected demanded entry");
-        if entry.cache_retry_at.is_some_and(|retry_at| retry_at <= now) {
-            entry.cache_retry_at = None;
+        if matches!(entry.cache_eligibility, CacheEligibility::RetryAt(retry_at) if retry_at <= now) {
+            entry.cache_eligibility = CacheEligibility::Unchecked;
         }
         let source = entry.texture().and_then(|texture| texture.source());
         let job = Job {
@@ -1106,34 +1443,56 @@ impl Store {
             _life: life,
             cancelled: receiver,
             size: entry.target.unwrap_or_default(),
-            force_full_mesh: entry.force_full_mesh,
+            mesh_fetch_mode: entry.mesh_fetch_mode,
         };
         if let Some(source) = source {
             if entry.priority == Priority::Background {
-                entry.views.get_mut(&route).expect("selected route").deadline = now + DEMAND_DEADLINE;
+                set_demand_deadline(
+                    &mut self.deadlines,
+                    key,
+                    route,
+                    entry.views.get_mut(&route).expect("selected route"),
+                    now + DEMAND_DEADLINE,
+                );
             }
-            entry.views.get_mut(&route).expect("selected route").attempts += 1;
+            entry.views.get_mut(&route).expect("selected route").begin_attempt(&mut self.deadlines, key, route);
             entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::Fetching };
             start_fetch(resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
             entry.broadcast_status(Status::Fetching);
+            Self::refresh_candidate_queues(&mut self.mesh_candidates, &mut self.other_candidates, key, entry, now);
+            Self::refresh_deadline_index(&mut self.deadlines, key, entry, now);
             return Some(LoadJob::Decode(DecodeInput { source: DecodeSource::Cached(source), job }));
         }
         if let Some((block, bytes)) = prefix_lod {
             if entry.priority == Priority::Background {
-                entry.views.get_mut(&route).expect("selected route").deadline = now + DEMAND_DEADLINE;
+                set_demand_deadline(
+                    &mut self.deadlines,
+                    key,
+                    route,
+                    entry.views.get_mut(&route).expect("selected route"),
+                    now + DEMAND_DEADLINE,
+                );
             }
-            entry.views.get_mut(&route).expect("selected route").attempts += 1;
+            entry.views.get_mut(&route).expect("selected route").begin_attempt(&mut self.deadlines, key, route);
             entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::Fetching };
             start_fetch(resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
             entry.broadcast_status(Status::Fetching);
+            Self::refresh_candidate_queues(&mut self.mesh_candidates, &mut self.other_candidates, key, entry, now);
+            Self::refresh_deadline_index(&mut self.deadlines, key, entry, now);
             let response = FetchResponse::Partial { bytes, range: block.range(), total_length: Some(block.asset_length()) };
             return Some(LoadJob::Decode(DecodeInput { source: DecodeSource::Response(response), job }));
         }
         if let Some(cache) = &self.cache
-            && !entry.cache_checked
+            && cache_unchecked(entry.cache_eligibility, now)
         {
             if entry.priority == Priority::Background {
-                entry.views.get_mut(&route).expect("selected route").deadline = now + DEMAND_DEADLINE;
+                set_demand_deadline(
+                    &mut self.deadlines,
+                    key,
+                    route,
+                    entry.views.get_mut(&route).expect("selected route"),
+                    now + DEMAND_DEADLINE,
+                );
             }
             entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::ReadingCache };
             self.running_cache_reads += 1;
@@ -1141,16 +1500,26 @@ impl Store {
                 self.running_non_mesh_cache_reads += 1;
             }
             entry.broadcast_status(Status::Fetching);
+            Self::refresh_candidate_queues(&mut self.mesh_candidates, &mut self.other_candidates, key, entry, now);
+            Self::refresh_deadline_index(&mut self.deadlines, key, entry, now);
             return Some(LoadJob::ReadCache(CacheReadJob { job, cache: Arc::clone(cache) }));
         }
         if entry.priority == Priority::Background {
-            entry.views.get_mut(&route).expect("selected route").deadline = now + DEMAND_DEADLINE;
+            set_demand_deadline(
+                &mut self.deadlines,
+                key,
+                route,
+                entry.views.get_mut(&route).expect("selected route"),
+                now + DEMAND_DEADLINE,
+            );
         }
-        entry.views.get_mut(&route).expect("selected route").attempts += 1;
+        entry.views.get_mut(&route).expect("selected route").begin_attempt(&mut self.deadlines, key, route);
         entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::Fetching };
         start_fetch(resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
         entry.broadcast_status(Status::Fetching);
         job._life.transport_pending.store(true, Ordering::Release);
+        Self::refresh_candidate_queues(&mut self.mesh_candidates, &mut self.other_candidates, key, entry, now);
+        Self::refresh_deadline_index(&mut self.deadlines, key, entry, now);
         Some(LoadJob::Fetch(FetchJob { job }))
     }
 
@@ -1201,7 +1570,6 @@ impl Store {
             }
         }
         start_decode(input.job.resource.kind, &mut self.running_texture_decodes, &mut self.running_other_decodes);
-        self.maintenance_dirty.store(true, Ordering::Release);
         entry.broadcast_status(Status::Decoding);
         Ok(DecodeJob(input))
     }
@@ -1215,7 +1583,7 @@ impl Store {
         if !matches!(entry.phase, LoadPhase::Running { generation, stage: Stage::ReadingCache, .. } if generation == job.generation) {
             return None;
         }
-        self.maintenance_dirty.store(true, Ordering::Release);
+        self.dirty_signals.mark(job.key, &entry.dirty);
         finish_cache_read(&mut self.running_cache_reads);
         if job.resource.kind != Kind::Mesh {
             finish_cache_read(&mut self.running_non_mesh_cache_reads);
@@ -1227,7 +1595,7 @@ impl Store {
         if !matches!(&result, Err(Failure::Cancelled))
             && !matches!(&result, Ok(AssetLookup::Unavailable(storage::UnavailableReason::ReadLimit)))
         {
-            entry.cache_checked = true;
+            entry.cache_eligibility = CacheEligibility::Checked;
         }
         match result {
             Ok(AssetLookup::Hit(asset)) => {
@@ -1252,15 +1620,15 @@ impl Store {
                     entry.broadcast_status(Status::Queued);
                     return None;
                 }
-                let fetch = Self::cache_read_fallback(entry, job, now)?;
+                let fetch = Self::cache_read_fallback(entry, job, now, &mut self.deadlines)?;
                 start_fetch(fetch.resource().kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
                 Some(LoadJob::Fetch(fetch))
             }
         }
     }
 
-    fn cache_read_fallback(entry: &mut AssetEntry, mut job: Job, now: Instant) -> Option<FetchJob> {
-        let bytes = if entry.force_full_mesh && job.resource.kind == Kind::Mesh {
+    fn cache_read_fallback(entry: &mut AssetEntry, mut job: Job, now: Instant, deadlines: &mut BTreeSet<DeadlineKey>) -> Option<FetchJob> {
+        let bytes = if entry.mesh_fetch_mode == MeshFetchMode::FullFallback && job.resource.kind == Kind::Mesh {
             job.resource.kind.max_response_bytes()
         } else {
             fetch_work_bytes(job.request)?
@@ -1269,10 +1637,10 @@ impl Store {
         if entry.priority == Priority::Background
             && let Some(view) = entry.views.get_mut(&job.route)
         {
-            view.deadline = now + DEMAND_DEADLINE;
+            set_demand_deadline(deadlines, job.key, job.route, view, now + DEMAND_DEADLINE);
         }
         if let Some(view) = entry.views.get_mut(&job.route) {
-            view.attempts = view.attempts.saturating_add(1);
+            view.begin_attempt(deadlines, job.key, job.route);
         }
         if let LoadPhase::Running { stage, .. } = &mut entry.phase {
             *stage = Stage::Fetching;
@@ -1315,24 +1683,22 @@ impl Store {
             Stage::Decoding => finish_decode(job.resource.kind, &mut self.running_texture_decodes, &mut self.running_other_decodes),
         }
         entry.phase = LoadPhase::Queued;
-        self.maintenance_dirty.store(true, Ordering::Release);
+        self.dirty_signals.mark(job.key, &entry.dirty);
         if job.is_cancelled() || !entry.has_live_demand(now) {
             return writes;
         }
         if origin == DecodeOrigin::Disk && result.as_ref().is_err_and(|failure| *failure == Failure::MemoryPressure) {
-            entry.cache_checked = false;
-            entry.cache_retry_at = Some(now + CACHE_PRESSURE_RETRY);
+            entry.cache_eligibility = CacheEligibility::RetryAt(now + CACHE_PRESSURE_RETRY);
             entry.broadcast_status(Status::Queued);
             return writes;
         }
         if result.as_ref().is_err_and(|failure| *failure == Failure::FullAssetRequired)
             && job.resource.kind == Kind::Mesh
-            && !entry.force_full_mesh
+            && entry.mesh_fetch_mode == MeshFetchMode::Range
         {
-            entry.force_full_mesh = true;
+            entry.mesh_fetch_mode = MeshFetchMode::FullFallback;
             if let Some(view) = entry.views.get_mut(&job.route) {
-                view.attempts = view.attempts.saturating_sub(1);
-                view.failed = None;
+                view.refund_attempt();
             }
             entry.broadcast_status(Status::Queued);
             return writes;
@@ -1383,8 +1749,8 @@ impl Store {
                 let ready = entry.ready();
                 let Some(view) = entry.views.get_mut(&job.route) else { return writes };
                 let retry_at = match failure {
-                    Failure::Transient { retry_after } if view.attempts < MAX_ATTEMPTS => {
-                        let delay = retry_after.max(Duration::from_secs(u64::from(view.attempts.max(1))));
+                    Failure::Transient { retry_after } if view.attempts() < MAX_ATTEMPTS => {
+                        let delay = retry_after.max(Duration::from_secs(u64::from(view.attempts().max(1))));
                         if delay > Duration::from_secs(30) {
                             None
                         } else {
@@ -1394,7 +1760,7 @@ impl Store {
                     }
                     _ => None,
                 };
-                view.fail(failure, retry_at, now, ready.as_ref());
+                view.fail(&mut self.deadlines, job.key, job.route, failure, retry_at, now, ready.as_ref());
                 for (route, view) in &entry.views {
                     if *route != job.route && view.count() > 0 {
                         view.publish_status(view.queued_status().retaining(ready.as_ref()));
@@ -1406,22 +1772,7 @@ impl Store {
     }
 
     pub fn next_deadline(&self, now: Instant) -> Option<Instant> {
-        self.entries
-            .values()
-            .filter(|entry| entry.has_active_demand() && !matches!(entry.phase, LoadPhase::Idle))
-            .flat_map(|entry| {
-                let demand_deadlines =
-                    (entry.priority == Priority::Visible || matches!(entry.phase, LoadPhase::Running { .. })).then(|| {
-                        entry
-                            .views
-                            .values()
-                            .filter(|view| view.count() > 0 && view.failed.as_ref().is_none_or(|failed| failed.retry_at.is_some()))
-                            .flat_map(|view| std::iter::once(view.deadline).chain(view.failed.as_ref().and_then(|failed| failed.retry_at)))
-                    });
-                entry.cache_retry_at.into_iter().chain(demand_deadlines.into_iter().flatten())
-            })
-            .filter(|deadline| *deadline > now)
-            .min()
+        self.deadlines.first().map(|deadline| deadline.at.max(now))
     }
 
     pub fn close(&mut self) {
@@ -1436,8 +1787,8 @@ impl Store {
         self.pending_non_mesh_cache_decodes = 0;
         self.running_texture_decodes = 0;
         self.running_other_decodes = 0;
-        self.maintenance_dirty.store(true, Ordering::Release);
         for entry in self.entries.values() {
+            self.dirty_signals.retire(&entry.dirty);
             if let LoadPhase::Running { cancelled, .. } = &entry.phase {
                 cancelled.send_replace(true);
             }
@@ -1445,54 +1796,293 @@ impl Store {
         }
         self.entries.clear();
         self.candidates.clear();
-        self.mesh_candidate_heap.clear();
-        self.other_candidate_heap.clear();
         self.candidates_dirty = true;
+        self.mesh_candidates.clear();
+        self.other_candidates.clear();
+        self.deadlines.clear();
         self.routes.clear();
     }
 
-    fn build_candidates(&mut self, now: Instant) {
-        if !self.candidates_dirty {
+    fn build_candidates(&mut self) {
+        let generation = self.dirty_signals.change_generation.load(Ordering::Acquire);
+        if !self.candidates_dirty && self.candidate_generation == generation {
             return;
         }
         self.candidates.clear();
-        self.mesh_candidate_heap.clear();
-        self.other_candidate_heap.clear();
-        let mesh_limit = MAX_MESH_FETCHES;
-        let other_limit = MAX_NON_MESH_FETCHES;
-        for (key, entry) in &self.entries {
-            if matches!(entry.phase, LoadPhase::Queued)
-                && let Some((route, _)) = entry.views.iter().find(|(_, view)| {
-                    view.count() > 0
-                        && view.attempts < MAX_ATTEMPTS
-                        && (entry.priority == Priority::Background || now < view.deadline)
-                        && entry.cache_retry_at.is_none_or(|retry_at| retry_at <= now)
-                        && view.failed.as_ref().is_none_or(|failed| failed.retry_at.is_some_and(|retry| retry <= now))
-                })
+        let (mesh_more, other_more) = {
+            let Store { entries, candidates, mesh_candidates, other_candidates, .. } = self;
+            (
+                collect_candidates(mesh_candidates, entries, candidates, MAX_MESH_FETCHES),
+                collect_candidates(other_candidates, entries, candidates, MAX_NON_MESH_FETCHES),
+            )
+        };
+        self.candidates.sort_unstable_by(|left, right| right.cmp(left));
+        self.candidate_generation = generation;
+        self.candidates_dirty = mesh_more || other_more || self.dirty_signals.change_generation.load(Ordering::Acquire) != generation;
+    }
+
+    fn quarantine_candidate(&mut self, candidate: ScheduleKey) {
+        let Store { entries, mesh_candidates, other_candidates, candidates_dirty, .. } = self;
+        if candidate.key.resource.kind == Kind::Mesh {
+            mesh_candidates.remove(&candidate);
+        } else {
+            other_candidates.remove(&candidate);
+        }
+        if let Some(entry) = entries.get_mut(&candidate.key)
+            && entry.candidate == Some(candidate)
+        {
+            entry.candidate = None;
+        }
+        *candidates_dirty = true;
+    }
+}
+
+fn collect_candidates(
+    queue: &mut BTreeSet<ScheduleKey>,
+    entries: &mut BTreeMap<LoadKey, AssetEntry>,
+    candidates: &mut Vec<ScheduleKey>,
+    limit: usize,
+) -> bool {
+    let scan_limit = MAX_DIRTY_PER_TURN.saturating_add(limit);
+    let mut cursor = None;
+    let mut scanned = 0;
+    let mut collected = 0;
+    while scanned < scan_limit && collected < limit {
+        let next = match cursor {
+            Some(cursor) => queue.range((Bound::Excluded(cursor), Bound::Unbounded)).next(),
+            None => queue.iter().next(),
+        }
+        .copied();
+        let Some(candidate) = next else { return false };
+        cursor = Some(candidate);
+        scanned += 1;
+        if entries.get(&candidate.key).is_some_and(|entry| !entry.dirty.is_dirty() && entry.candidate == Some(candidate)) {
+            candidates.push(candidate);
+            collected += 1;
+        } else {
+            queue.remove(&candidate);
+            if let Some(entry) = entries.get_mut(&candidate.key)
+                && entry.candidate == Some(candidate)
             {
-                let candidate = ScheduleKey {
-                    priority: Reverse(entry.priority),
-                    importance: Reverse(entry.importance),
-                    ready: entry.ready().is_some(),
-                    used: entry.used,
-                    key: *key,
-                    route: *route,
-                };
-                if key.resource.kind == Kind::Mesh {
-                    retain_candidate(&mut self.mesh_candidate_heap, mesh_limit, candidate);
-                } else {
-                    retain_candidate(&mut self.other_candidate_heap, other_limit, candidate);
-                }
+                entry.candidate = None;
             }
         }
-        while let Some(candidate) = self.mesh_candidate_heap.pop() {
-            self.candidates.push(candidate);
+    }
+    scanned == scan_limit && cursor.is_some_and(|cursor| queue.range((Bound::Excluded(cursor), Bound::Unbounded)).next().is_some())
+}
+
+fn cache_unchecked(eligibility: CacheEligibility, now: Instant) -> bool {
+    cache_eligible(eligibility, now)
+}
+
+fn cache_eligible(eligibility: CacheEligibility, now: Instant) -> bool {
+    match eligibility {
+        CacheEligibility::Unchecked => true,
+        CacheEligibility::RetryAt(retry_at) => retry_at <= now,
+        CacheEligibility::Checked => false,
+    }
+}
+
+fn cache_retry_ready(eligibility: CacheEligibility, now: Instant) -> bool {
+    !matches!(eligibility, CacheEligibility::RetryAt(retry_at) if retry_at > now)
+}
+
+fn route_eligible(eligibility: RouteEligibility, now: Instant) -> bool {
+    match eligibility {
+        RouteEligibility::Eligible { .. } => true,
+        RouteEligibility::RetryAt { retry_at, .. } => retry_at <= now,
+        RouteEligibility::Failed { .. } => false,
+    }
+}
+
+fn update_deadline(
+    deadlines: &mut BTreeSet<DeadlineKey>,
+    key: LoadKey,
+    route: Option<Route>,
+    kind: DeadlineKind,
+    indexed: &mut Option<Instant>,
+    next: Option<Instant>,
+) {
+    if *indexed == next {
+        return;
+    }
+    if let Some(at) = indexed.take() {
+        deadlines.remove(&DeadlineKey { at, key, route, kind });
+    }
+    if let Some(at) = next {
+        deadlines.insert(DeadlineKey { at, key, route, kind });
+        *indexed = Some(at);
+    }
+}
+
+fn update_route_deadline(
+    deadlines: &mut BTreeSet<DeadlineKey>,
+    key: LoadKey,
+    route: Route,
+    kind: DeadlineKind,
+    view: &mut RouteState,
+    next: Option<Instant>,
+) {
+    let (previous, indexed) = match kind {
+        DeadlineKind::Demand => (Some(view.deadline), &mut view.demand_deadline_indexed),
+        DeadlineKind::Retry => (view.retry_at(), &mut view.retry_deadline_indexed),
+        DeadlineKind::CacheRetry => return,
+    };
+    if *indexed && previous == next {
+        return;
+    }
+    if *indexed {
+        if let Some(at) = previous {
+            deadlines.remove(&DeadlineKey { at, key, route: Some(route), kind });
         }
-        while let Some(candidate) = self.other_candidate_heap.pop() {
-            self.candidates.push(candidate);
+        *indexed = false;
+    }
+    if let Some(at) = next {
+        deadlines.insert(DeadlineKey { at, key, route: Some(route), kind });
+        *indexed = true;
+    }
+}
+
+fn set_demand_deadline(deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, route: Route, view: &mut RouteState, next: Instant) {
+    remove_demand_deadline(deadlines, key, route, view);
+    view.deadline = next;
+}
+
+fn remove_demand_deadline(deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, route: Route, view: &mut RouteState) {
+    if view.demand_deadline_indexed {
+        deadlines.remove(&DeadlineKey { at: view.deadline, key, route: Some(route), kind: DeadlineKind::Demand });
+        view.demand_deadline_indexed = false;
+    }
+}
+
+fn remove_retry_deadline(deadlines: &mut BTreeSet<DeadlineKey>, key: LoadKey, route: Route, view: &mut RouteState) {
+    if view.retry_deadline_indexed {
+        if let Some(at) = view.retry_at() {
+            deadlines.remove(&DeadlineKey { at, key, route: Some(route), kind: DeadlineKind::Retry });
         }
-        self.candidates.sort_unstable_by(|left, right| right.cmp(left));
-        self.candidates_dirty = false;
+        view.retry_deadline_indexed = false;
+    }
+}
+
+fn reconcile_entry(
+    entry: &mut AssetEntry,
+    key: LoadKey,
+    deadlines: &mut BTreeSet<DeadlineKey>,
+    now: Instant,
+    running_mesh_fetches: &mut usize,
+    running_other_fetches: &mut usize,
+    running_cache_reads: &mut usize,
+    running_non_mesh_cache_reads: &mut usize,
+    pending_non_mesh_cache_decodes: &mut usize,
+    running_texture_decodes: &mut usize,
+    running_other_decodes: &mut usize,
+) {
+    let ready = entry.ready();
+    let mut desired = None;
+    let mut priority = Priority::Background;
+    let mut importance = 0;
+    for view in entry.views.values_mut() {
+        view.leases.retain(|weak| {
+            let Some(lease) = weak.upgrade() else { return false };
+            desired = desired.max(lease.size());
+            priority = priority.max(lease.priority());
+            importance = importance.max(lease.importance.load(Ordering::Acquire));
+            true
+        });
+    }
+    if priority != entry.priority {
+        for (route, view) in &mut entry.views {
+            let restart = match view.eligibility {
+                RouteEligibility::Eligible { .. } => true,
+                RouteEligibility::RetryAt { .. } => false,
+                RouteEligibility::Failed { failure, .. } => failure == Failure::Deadline,
+            };
+            if now >= view.deadline && restart {
+                view.restart(deadlines, key, *route, now);
+            }
+        }
+    }
+    entry.priority = priority;
+    entry.importance = importance;
+    if entry.target != desired {
+        entry.target = desired;
+        if let Some(size) = desired
+            && let Request::Texture { id, .. } = entry.request
+        {
+            entry.request = Request::Texture { id, size };
+        }
+        for (route, view) in &mut entry.views {
+            view.restart(deadlines, key, *route, now);
+        }
+        if !matches!(entry.phase, LoadPhase::Running { .. }) {
+            entry.phase = LoadPhase::Queued;
+        }
+    }
+    if matches!(entry.phase, LoadPhase::Queued)
+        && let Some(content) = ready.as_ref()
+        && content_satisfies(content, desired)
+    {
+        entry.phase = LoadPhase::Idle;
+        entry.broadcast_status(Status::Ready((*content).clone()));
+    }
+    if let LoadPhase::Running { life, cancelled, route, stage, .. } = &entry.phase {
+        let transport_pending = life.upgrade().is_some_and(|life| life.transport_pending.load(Ordering::Acquire));
+        if !entry.has_live_demand(now) || transport_pending && entry.views.get(route).is_none_or(|view| now >= view.deadline) {
+            cancelled.send_replace(true);
+        }
+        if life.upgrade().is_none() {
+            if let Some(view) = entry.views.get_mut(route) {
+                view.fail(deadlines, key, *route, Failure::Cancelled, None, now, ready.as_ref());
+            }
+            let stage = *stage;
+            entry.phase = LoadPhase::Queued;
+            release_stage(
+                stage,
+                entry.request.resource().kind,
+                running_mesh_fetches,
+                running_other_fetches,
+                running_cache_reads,
+                running_non_mesh_cache_reads,
+                pending_non_mesh_cache_decodes,
+                running_texture_decodes,
+                running_other_decodes,
+            );
+        }
+    }
+    if !matches!(entry.phase, LoadPhase::Idle) && (entry.priority == Priority::Visible || matches!(entry.phase, LoadPhase::Running { .. }))
+    {
+        for (route, view) in entry.views.iter_mut().filter(|(_, view)| {
+            view.count() > 0
+                && now >= view.deadline
+                && matches!(view.eligibility, RouteEligibility::Eligible { .. } | RouteEligibility::RetryAt { .. })
+        }) {
+            view.fail(deadlines, key, *route, Failure::Deadline, None, now, ready.as_ref());
+        }
+    }
+}
+
+fn release_stage(
+    stage: Stage,
+    kind: Kind,
+    running_mesh_fetches: &mut usize,
+    running_other_fetches: &mut usize,
+    running_cache_reads: &mut usize,
+    running_non_mesh_cache_reads: &mut usize,
+    pending_non_mesh_cache_decodes: &mut usize,
+    running_texture_decodes: &mut usize,
+    running_other_decodes: &mut usize,
+) {
+    match stage {
+        Stage::ReadingCache => {
+            finish_cache_read(running_cache_reads);
+            if kind != Kind::Mesh {
+                finish_cache_read(running_non_mesh_cache_reads);
+            }
+        }
+        Stage::Cached if kind != Kind::Mesh => finish_cache_read(pending_non_mesh_cache_decodes),
+        Stage::Cached => {}
+        Stage::Fetching => finish_fetch(kind, running_mesh_fetches, running_other_fetches),
+        Stage::Decoding => finish_decode(kind, running_texture_decodes, running_other_decodes),
     }
 }
 
@@ -1546,20 +2136,6 @@ fn fetch_work_bytes(request: Request) -> Option<usize> {
         Request::MeshHeader(_) => Some(crate::mesh::MAX_MESH_HEADER_BYTES),
         Request::MeshLod(block) => usize::try_from(block.range().end.checked_sub(block.range().start)?).ok(),
         _ => Some(request.resource().kind.max_response_bytes()),
-    }
-}
-
-fn retain_candidate(candidates: &mut BinaryHeap<ScheduleKey>, limit: usize, candidate: ScheduleKey) {
-    if limit == 0 {
-        return;
-    }
-    if candidates.len() < limit {
-        candidates.push(candidate);
-        return;
-    }
-    if candidates.peek().is_some_and(|largest| candidate < *largest) {
-        candidates.pop();
-        candidates.push(candidate);
     }
 }
 

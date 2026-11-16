@@ -108,6 +108,80 @@ fn mesh_scene(count: u32) -> (Budget, Mirror, BTreeMap<Uuid, Entity>) {
     (budget, mirror, identities)
 }
 
+fn shared_texture_scene(count: u32, texture: AssetId) -> (Budget, Region, Mirror, BTreeMap<Uuid, Entity>) {
+    let budget = Budget::default();
+    let object_count = usize::try_from(count).expect("fixture object count fits usize");
+    let tombstone_bytes = WorldLimits::tombstone_bytes_for_count(object_count);
+    let mut world = World::new(WorldLimits {
+        max_regions: 1,
+        max_entities: object_count,
+        max_entities_per_region: object_count,
+        max_tombstones_per_region: object_count,
+        max_tombstones: object_count,
+        max_tombstone_bytes_per_region: tombstone_bytes,
+        max_tombstone_bytes: tombstone_bytes,
+        max_journal_entries: 4096,
+        max_journal_changes: 8192,
+        max_region_name_bytes: 64,
+        max_recovery_targets: 1,
+    });
+    let region = world.register_region().expect("fixture region registers");
+    let _origin =
+        world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("fixture origin applies");
+
+    for local_id in 1..=count {
+        let mut observation = world::ObjectObservation::new(
+            world::UpdateSource::new(region, local_id, OrderEvidence::Ordered(u64::from(local_id)), 0),
+            Uuid::from_u128(u128::from(local_id)),
+            std::num::NonZeroU32::new(local_id).expect("fixture local ID is nonzero"),
+            world::Kind::Object,
+            world::ParentUpdate::Root,
+        );
+        observation.pose = Some(world::Pose { position: Some(Vec3::new(10.0, 0.0, 0.0)), rotation: Some(math::Quat::IDENTITY) });
+        observation.scale = Some(Vec3::ONE);
+        observation.shape = world::FieldUpdate::Set(world::Shape::Prim(world::PrimShape::default()));
+        observation.surface_appearance = Some(
+            world::SurfaceAppearance::new(FaceAppearance { texture: Some(texture), ..FaceAppearance::default() }, Vec::new())
+                .expect("fixture surface appearance is valid"),
+        );
+        let _applied = world.observe_object(observation).expect("fixture textured object applies");
+    }
+
+    let mut mirror = Mirror::default();
+    let mut identities = BTreeMap::new();
+    let mut cursor = None;
+    loop {
+        let page = world.object_list_page(cursor, 256).expect("fixture object page reads");
+        let next = page.next;
+        for item in page.objects {
+            let detail = world.object_detail(item.entity).expect("fixture object detail reads");
+            let lease = budget.reserve(detail.owned_bytes() + 32).expect("fixture object fits budget");
+            mirror.apply(crate::scene::model::Change::Object(crate::scene::Object::new(detail, lease)));
+            identities.insert(item.id, item.entity);
+        }
+        let Some(next) = next else { break };
+        cursor = Some(next);
+    }
+    (budget, region, mirror, identities)
+}
+
+fn process_all(demand: &mut AssetDemand, mirror: &Mirror, identities: &BTreeMap<Uuid, Entity>) {
+    for _ in 0..identities.len().div_ceil(128) + 2 {
+        if !demand.has_work() {
+            return;
+        }
+        let _ = demand.step(mirror, identities);
+    }
+    assert!(!demand.has_work(), "bounded fixture scan finishes");
+}
+
+fn assert_updates(demand: &mut AssetDemand, ticket: AssetTicket, size: TextureSize, priority: Priority, importance: u16) {
+    assert_matches!(demand.event(), Some(AssetChange::UpdateSize { ticket: updated, size: actual }) if updated == ticket && actual == size);
+    assert_matches!(demand.event(), Some(AssetChange::UpdatePriority { ticket: updated, priority: actual }) if updated == ticket && actual == priority);
+    assert_matches!(demand.event(), Some(AssetChange::UpdateImportance { ticket: updated, importance: actual }) if updated == ticket && actual == importance);
+    assert!(demand.event().is_none());
+}
+
 fn mesh_requests(demand: &mut AssetDemand) -> Vec<(AssetId, AssetTicket)> {
     std::iter::from_fn(|| demand.event())
         .filter_map(|change| match change {
@@ -407,11 +481,8 @@ fn priority_keeps_ticket_until_resize() {
     let ticket = initial.ticket;
 
     for (priority, importance) in [(Priority::Background, 0), (Priority::Visible, 600)] {
-        let user_demand =
-            demand.entries.get_mut(&key).expect("registered entry exists").users.get_mut(&user).expect("registered user exists");
-        user_demand.priority = priority;
-        user_demand.importance = importance;
-
+        demand.remove_user(user, key);
+        demand.register(user, region, Request::Texture { id, size }, size, priority, importance, &mut keys);
         demand.refresh(key);
 
         assert_matches!(
@@ -427,7 +498,8 @@ fn priority_keeps_ticket_until_resize() {
     }
 
     let resized = TextureSize::new(256);
-    demand.entries.get_mut(&key).expect("registered entry exists").users.get_mut(&user).expect("registered user exists").size = resized;
+    demand.remove_user(user, key);
+    demand.register(user, region, Request::Texture { id, size: resized }, resized, Priority::Visible, 600, &mut keys);
     demand.refresh(key);
 
     assert_matches!(demand.event(), Some(AssetChange::UpdateSize { ticket: updated, size }) if updated == ticket && size == resized);
@@ -438,6 +510,173 @@ fn priority_keeps_ticket_until_resize() {
     assert_eq!(entry.importance, 600);
     assert_eq!(demand.tickets.get(&ticket), Some(&key));
     assert!(demand.event().is_none());
+}
+
+#[test]
+fn shared_maxima_track_changes() {
+    let id = AssetId::new(Uuid::from_u128(700));
+    let (budget, region, _, identities) = shared_texture_scene(2, id);
+    let mut objects = identities.values();
+    let first = AssetUser::Object(*objects.next().expect("first fixture object"));
+    let second = AssetUser::Object(*objects.next().expect("second fixture object"));
+    let terrain = AssetUser::Terrain(region);
+    let low_size = TextureSize::new(64);
+    let high_size = TextureSize::new(512);
+    let mut demand = AssetDemand::new(budget);
+    let mut keys = HashSet::new();
+    let key = demand.register(terrain, region, Request::Texture { id, size: low_size }, low_size, Priority::Background, 100, &mut keys);
+    let Some(AssetChange::Request(request)) = demand.event() else { panic!("initial shared texture request is queued") };
+    let ticket = request.ticket;
+    assert_eq!(request.request, Request::Texture { id, size: low_size });
+
+    for user in [first, second] {
+        demand.register(user, region, Request::Texture { id, size: high_size }, high_size, Priority::Visible, 900, &mut keys);
+    }
+    let work = demand.entries.get(&key).expect("registered entry exists").extrema.work;
+    demand.register(second, region, Request::Texture { id, size: high_size }, high_size, Priority::Visible, 900, &mut keys);
+    assert_eq!(demand.entries.get(&key).expect("registered entry exists").extrema.work, work);
+    demand.refresh(key);
+    assert_updates(&mut demand, ticket, high_size, Priority::Visible, 900);
+
+    demand.release(first, key);
+    assert!(demand.event().is_none(), "one tied maximum keeps the shared demand unchanged");
+    assert_eq!(demand.tickets.get(&ticket), Some(&key));
+
+    demand.remove_user(second, key);
+    demand.register(second, region, Request::Texture { id, size: low_size }, low_size, Priority::Background, 100, &mut keys);
+    demand.refresh(key);
+    assert_updates(&mut demand, ticket, low_size, Priority::Background, 100);
+
+    demand.register(first, region, Request::Texture { id, size: high_size }, high_size, Priority::Visible, 900, &mut keys);
+    demand.refresh(key);
+    assert_updates(&mut demand, ticket, high_size, Priority::Visible, 900);
+    demand.release(first, key);
+    assert_updates(&mut demand, ticket, low_size, Priority::Background, 100);
+    assert_eq!(demand.tickets.get(&ticket), Some(&key));
+
+    demand.release(terrain, key);
+    assert!(demand.event().is_none());
+    demand.release(second, key);
+    assert_matches!(demand.event(), Some(AssetChange::Release(released)) if released == ticket);
+    assert!(demand.event().is_none());
+    assert!(!demand.tickets.contains_key(&ticket));
+}
+
+#[test]
+fn object_terrain_share_ticket() {
+    let texture = AssetId::new(Uuid::from_u128(701));
+    let textures = [texture.uuid(); 4];
+    let (budget, region, mut mirror, identities) = shared_texture_scene(1, texture);
+    mirror.regions.insert(region, region_data(&budget, region, DVec3::new(-128.0, -128.0, 0.0), textures));
+    let entity = *identities.values().next().expect("fixture object exists");
+    let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1280, 720]).expect("camera");
+    let mut demand = AssetDemand::new(budget);
+    demand.set_camera(camera);
+    process_all(&mut demand, &mirror, &identities);
+    let key = AssetKey { region, resource: Resource { id: texture, kind: Kind::Texture }, unit: AssetUnit::Whole };
+    let ticket = demand.entries.get(&key).expect("shared texture entry exists").ticket;
+    assert!(
+        std::iter::from_fn(|| demand.event()).any(|change| matches!(change, AssetChange::Request(request) if request.ticket == ticket))
+    );
+
+    demand.remove(entity);
+    assert!(std::iter::from_fn(|| demand.event()).all(|change| !matches!(change, AssetChange::Release(released) if released == ticket)));
+    assert_eq!(demand.tickets.get(&ticket), Some(&key));
+
+    demand.remove_region(region);
+    assert_matches!(demand.event(), Some(AssetChange::Release(released)) if released == ticket);
+    assert!(demand.event().is_none());
+    assert!(!demand.tickets.contains_key(&ticket));
+}
+
+#[test]
+fn camera_rescan_keeps_demand() {
+    let texture = AssetId::new(Uuid::from_u128(702));
+    let (budget, _, mirror, identities) = shared_texture_scene(32, texture);
+    let first_camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1280, 720]).expect("first camera");
+    let next_camera = Camera::new(DVec3::new(0.001, 0.0, 0.0), Vec3::X, 1.0, [1280, 720]).expect("next camera");
+    let mut demand = AssetDemand::new(budget);
+    demand.set_camera(first_camera);
+    process_all(&mut demand, &mirror, &identities);
+    let key = AssetKey {
+        region: identities
+            .values()
+            .next()
+            .and_then(|entity| mirror.objects.get(entity))
+            .expect("fixture object")
+            .detail()
+            .summary
+            .address
+            .region(),
+        resource: Resource { id: texture, kind: Kind::Texture },
+        unit: AssetUnit::Whole,
+    };
+    let ticket = demand.entries.get(&key).expect("shared texture entry exists").ticket;
+    assert!(
+        std::iter::from_fn(|| demand.event()).any(|change| matches!(change, AssetChange::Request(request) if request.ticket == ticket))
+    );
+
+    demand.set_camera(next_camera);
+    process_all(&mut demand, &mirror, &identities);
+    assert!(demand.event().is_none(), "rescan with unchanged texture demand emits no changes");
+    assert_eq!(demand.entries.get(&key).expect("shared texture entry remains").users.len(), identities.len());
+    assert_eq!(demand.tickets.get(&ticket), Some(&key));
+}
+
+fn shared_texture_work(count: u32) -> [usize; 3] {
+    let texture = AssetId::new(Uuid::from_u128(703));
+    let (budget, region, mirror, identities) = shared_texture_scene(count, texture);
+    let first_camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1280, 720]).expect("first camera");
+    let next_camera = Camera::new(DVec3::new(0.001, 0.0, 0.0), Vec3::X, 1.0, [1280, 720]).expect("next camera");
+    let key = AssetKey { region, resource: Resource { id: texture, kind: Kind::Texture }, unit: AssetUnit::Whole };
+    let mut demand = AssetDemand::new(budget);
+    demand.set_camera(first_camera);
+    process_all(&mut demand, &mirror, &identities);
+    let entry = demand.entries.get(&key).expect("shared texture entry exists");
+    assert_eq!(entry.users.len(), identities.len());
+    let ticket = entry.ticket;
+    let initial_work = entry.extrema.work;
+    assert!(initial_work <= 3 * identities.len(), "registration work stays bounded by user count");
+    let initial_events: Vec<_> = std::iter::from_fn(|| demand.event()).collect();
+    assert_eq!(initial_events.len(), 1, "all objects share one request");
+    assert!(matches!(&initial_events[0], AssetChange::Request(request) if request.ticket == ticket));
+
+    demand.set_camera(next_camera);
+    process_all(&mut demand, &mirror, &identities);
+    assert!(demand.event().is_none(), "unchanged shared demand emits no camera update");
+    let entry = demand.entries.get(&key).expect("shared texture entry remains");
+    assert_eq!(entry.users.len(), identities.len());
+    let rescan_work = entry.extrema.work.checked_sub(initial_work).expect("aggregate work grows during rescan");
+    assert!(rescan_work <= 6 * identities.len(), "rescan work stays bounded by user count");
+    assert_eq!(demand.tickets.get(&ticket), Some(&key));
+
+    let mut entities = identities.values().copied();
+    for entity in entities.by_ref().take(identities.len() - 1) {
+        demand.remove(entity);
+    }
+    let reverse_entry = demand.entries.get(&key).expect("one shared user remains");
+    let reverse_work =
+        reverse_entry.extrema.work.checked_sub(initial_work + rescan_work).expect("aggregate work grows during reverse transitions");
+    demand.remove(entities.next().expect("one fixture user remains"));
+    let releases: Vec<_> = std::iter::from_fn(|| demand.event()).collect();
+    assert_eq!(releases.len(), 1, "the final user releases the shared ticket once");
+    assert!(matches!(&releases[0], AssetChange::Release(released) if *released == ticket));
+    assert!(!demand.entries.contains_key(&key));
+    assert!(!demand.tickets.contains_key(&ticket));
+    [initial_work, rescan_work, reverse_work]
+}
+
+#[test]
+fn shared_texture_work_scales() {
+    const USERS: u32 = 256;
+    let one_scene = shared_texture_work(USERS);
+    let two_scenes = shared_texture_work(2 * USERS);
+
+    for (work, users) in [(one_scene, USERS as usize), (two_scenes, 2 * USERS as usize)] {
+        for (actual, bound) in work.into_iter().zip([3 * users, 6 * users, 3 * users]) {
+            assert!(actual <= bound, "aggregate work {actual} exceeds linear bound {bound} for {users} users");
+        }
+    }
 }
 
 #[test]

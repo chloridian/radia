@@ -18,6 +18,20 @@ fn uuid(value: u128) -> Uuid {
     Uuid::from_u128(value)
 }
 
+fn apply_fetch(
+    inventory: &mut Inventory,
+    folder: CategoryKey,
+    version: ServerVersion,
+    descendent_count: Option<u32>,
+    children: Vec<InventoryChild>,
+) -> Result<::inventory::ChangeSet, ::inventory::InventoryError> {
+    let prepared = inventory.snapshot().prepare_folder_fetch(folder, version, descendent_count, children)?;
+    let ::inventory::FolderFetchCommit::Applied(changes) = inventory.commit_folder_fetch(prepared)? else {
+        panic!("single-owner fetch preparation became stale before commit");
+    };
+    Ok(changes)
+}
+
 fn category(owner: InventoryOwner, id: u128, parent: Option<u128>, version: i32, count: Option<u32>) -> Category {
     Category {
         key: CategoryKey::new(owner, FolderId::new(uuid(id))),
@@ -345,8 +359,8 @@ proptest::proptest! {
                     let current_version = inventory.snapshot().category(folder).expect("folder exists").server_version;
                     let version = ServerVersion::from_raw(current_version.raw().saturating_add(1));
                     let count = u32::try_from(folder_child_items(&inventory, folder).len()).expect("bounded child count");
-                    inventory
-                        .apply_folder_fetch(folder, version, Some(count), folder_child_items(&inventory, folder))
+                    let children = folder_child_items(&inventory, folder);
+                    apply_fetch(&mut inventory, folder, version, Some(count), children)
                         .expect("current folder fetch applies");
                 }
                 1 => {
