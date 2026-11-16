@@ -18,7 +18,7 @@ use super::{
 use crate::{
     FrameInput,
     pipeline::projection,
-    scene::{Camera, Reconciler, SceneView},
+    scene::{Camera, MeshId, Reconciler, SceneView},
 };
 
 const OBJECTS: u32 = 3_000;
@@ -90,6 +90,8 @@ struct Report {
     pop_outs: u32,
     missed: u32,
     unencoded: u32,
+    mesh_switches: u32,
+    removals: u32,
     returned_during_build: u32,
     examples: Vec<String>,
 }
@@ -107,7 +109,7 @@ impl fmt::Display for Report {
         let per_hundred = f64::from(self.commits) * 100.0 / f64::from(self.frames.max(1));
         write!(
             f,
-            "frames={} commits={} commits_per_100={per_hundred:.1} stale={:?} invalidations={:?} build_frames=({}) building={} draining={} layout_required={} phases={:?} mesh_bytes_changes={} mesh_revision_changes={} retry_frames={} longest_retry={} restart_frames={} appearance_frames={} budget_blocked_frames={} mesh_wait=({}) mesh_unresolved=({}) parity=({}) parity_within_1={:.1}% parity_unresolved=({}) parity_abandoned={} pop_in_first=({}) pop_in_reentry=({}) unresolved=({}) abandoned={} returned_during_build={} pop_outs={} missed={} unencoded={} examples={:?}",
+            "frames={} commits={} commits_per_100={per_hundred:.1} stale={:?} invalidations={:?} build_frames=({}) building={} draining={} layout_required={} phases={:?} mesh_bytes_changes={} mesh_revision_changes={} retry_frames={} longest_retry={} restart_frames={} appearance_frames={} budget_blocked_frames={} mesh_wait=({}) mesh_unresolved=({}) parity=({}) parity_within_1={:.1}% parity_unresolved=({}) parity_abandoned={} pop_in_first=({}) pop_in_reentry=({}) unresolved=({}) abandoned={} returned_during_build={} pop_outs={} missed={} unencoded={} mesh_switches={} removals={} examples={:?}",
             self.frames,
             self.commits,
             self.stale,
@@ -138,6 +140,8 @@ impl fmt::Display for Report {
             self.pop_outs,
             self.missed,
             self.unencoded,
+            self.mesh_switches,
+            self.removals,
             self.examples,
         )
     }
@@ -153,6 +157,8 @@ struct Track {
     waiting_since: Option<u32>,
     slots: Vec<u32>,
     hidden_during: Option<u32>,
+    mesh: Option<MeshId>,
+    seen: Option<u32>,
 }
 
 struct Path {
@@ -318,6 +324,10 @@ impl Rig {
                 if committed_now {
                     track.slots = committed_slots(geometry, &item.faces);
                 }
+                let mesh = item.mesh.id();
+                report.mesh_switches += u32::from(track.mesh.is_some_and(|previous| previous != mesh));
+                track.mesh = Some(mesh);
+                track.seen = Some(frame_index);
                 let shown = drawn(geometry, &emitted, &track.slots);
                 if strict && !shown && track.slots.iter().any(|slot| written(geometry, *slot)) {
                     report.missed += 1;
@@ -365,6 +375,13 @@ impl Rig {
                     }
                 }
                 track.shown = shown;
+            }
+            for track in tracks.values_mut() {
+                if track.seen.is_some_and(|seen| seen != frame_index) {
+                    report.removals += 1;
+                    track.seen = None;
+                    track.mesh = None;
+                }
             }
         }
         let frames = report.frames;
@@ -422,7 +439,12 @@ fn run(path: &Path, regime: Regime) {
         rig.geometry.memory.reserve(MESH_BYTES.saturating_sub(used + headroom), Resource::Mesh).expect("pressure reservation fits")
     });
     let report = rig.walk(path);
-    println!("camera_path path={} regime={regime:?} mesh_bytes={} {report}", path.name, rig.geometry.memory.mesh_state().bytes);
+    let (prim_meshes, prim_bytes) = rig.scene.prim_mesh_usage();
+    println!(
+        "camera_path path={} regime={regime:?} mesh_bytes={} prim_meshes={prim_meshes} prim_bytes={prim_bytes} {report}",
+        path.name,
+        rig.geometry.memory.mesh_state().bytes
+    );
 }
 
 fn run_regimes(path: &Path) {

@@ -236,7 +236,7 @@ fn unique_meshes_follow_camera_priority() {
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.objects().filter(|object| object.mesh().is_some()).count(), 3000);
 
-    scene.set_camera(camera(499.0));
+    scene.set_camera(camera(499.0).with_quality(256.0, 1.0).unwrap());
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.objects().filter(|object| object.detail().summary.id.as_u128() > 1500 && object.mesh().is_some()).count(), 1500);
     assert_eq!(view.objects().filter(|object| object.detail().summary.id.as_u128() <= 1500 && object.mesh().is_some()).count(), 0);

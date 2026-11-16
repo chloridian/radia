@@ -158,21 +158,14 @@ impl Camera {
         if !center.is_finite() || !radius.is_finite() || radius <= 0.0 {
             return None;
         }
-        let offset = center - self.position;
-        if !offset.is_finite() || offset.length() - radius > self.draw_distance {
+        let distance = (center - self.position).length();
+        if !distance.is_finite() || distance - radius > self.draw_distance {
             return None;
         }
-        let depth = offset.dot(self.direction);
-        if !depth.is_finite() {
-            return None;
-        }
-        if depth + radius <= 0.0 {
-            return None;
-        }
-        if depth <= radius {
+        if distance <= radius {
             return Some(Detail::High);
         }
-        let diameter = (radius / (depth - radius)) * self.focal_pixels * 2.0 * self.lod_factor;
+        let diameter = (radius / (distance - radius)) * self.focal_pixels * 2.0 * self.lod_factor;
         const THRESHOLDS: [f64; 3] = [24.0, 96.0, 384.0];
         let Some(previous) = previous else {
             return Some(detail_from_index(THRESHOLDS.into_iter().take_while(|threshold| diameter >= *threshold).count()));
@@ -281,7 +274,12 @@ mod tests {
         assert_eq!(camera.detail(center, 1.8, Some(Detail::Low)), Some(Detail::Lowest));
         assert_eq!(camera.detail(center, 3.0, Some(Detail::Lowest)), Some(Detail::Low));
         assert_eq!(camera.detail(DVec3::X, 2.0, None), Some(Detail::High));
-        assert_eq!(camera.detail(-DVec3::X * 10.0, 2.0, None), None);
+        assert_eq!(camera.detail(-DVec3::X * 10.0, 2.0, None), camera.detail(DVec3::X * 10.0, 2.0, None));
+        let turned = Camera::new(DVec3::ZERO, -Vec3::X, PI / 2.0, [1000, 1000]).unwrap();
+        for radius in [1.0, 5.0, 20.0, 40.0] {
+            assert_eq!(turned.detail(center, radius, None), camera.detail(center, radius, None));
+        }
+        assert_eq!(turned.detail(center, 2.6, Some(Detail::Low)), Some(Detail::Low));
         let translated = Camera::new(DVec3::splat(1e12), Vec3::X, PI / 2.0, [1000, 1000]).unwrap();
         assert_eq!(translated.detail(DVec3::splat(1e12) + center, 20.0, None), Some(Detail::Medium));
     }

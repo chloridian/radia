@@ -89,6 +89,11 @@ impl MeshPlanner {
         planner
     }
 
+    #[cfg(test)]
+    pub(in crate::scene) fn mesh_usage(&self) -> (usize, usize) {
+        self.meshes.usage()
+    }
+
     pub(in crate::scene) fn set_camera(&mut self, camera: Camera) {
         if self.camera != Some(camera) {
             self.camera = Some(camera);
@@ -506,7 +511,7 @@ mod tests {
         let high = MeshKey { shape: PrimShape::default(), detail: Detail::High };
         let mut planner = MeshPlanner::new_with_cache_bytes(budget.clone(), cache_limit(high));
         let (mut mirror, identities) =
-            fixture(&[(1, Vec3::new(100.0, 600.0, 0.0), Vec3::splat(13.0)), (2, Vec3::new(100.0, 600.0, 0.0), Vec3::splat(13.0))], &budget);
+            fixture(&[(1, Vec3::new(0.0, 100.0, 0.0), Vec3::splat(13.0)), (2, Vec3::new(0.0, 100.0, 0.0), Vec3::splat(13.0))], &budget);
         let target = identities[&Uuid::from_u128(1)];
         planner.set_camera(camera(0.0, 1024.0));
         let changes = planner.step(&mirror, &identities);
@@ -516,7 +521,7 @@ mod tests {
         apply_changes(&mut mirror, &changes);
         assert_matches!(mesh_state(&mirror.objects[&target]), Some((key, MeshStatus::Ready)) if key == high);
 
-        planner.set_camera(camera(-300.0, 1024.0));
+        planner.set_camera(camera(300.0, 1024.0));
         let changes = planner.step(&mirror, &identities);
         apply_changes(&mut mirror, &changes);
 
@@ -529,7 +534,7 @@ mod tests {
     #[test]
     fn camera_change_restarts_partial_scan() {
         let budget = Budget::default();
-        let objects = (1..=260).map(|id| (id, Vec3::new(100.0, 600.0, 0.0), Vec3::splat(13.0))).collect::<Vec<_>>();
+        let objects = (1..=260).map(|id| (id, Vec3::new(0.0, 100.0, 0.0), Vec3::splat(13.0))).collect::<Vec<_>>();
         let (mirror, identities) = fixture(&objects, &budget);
         let target = identities[&Uuid::from_u128(1)];
         let mut planner = MeshPlanner::new(budget);
