@@ -12,7 +12,7 @@ mod texture;
 pub(crate) use budget::Blob;
 pub use budget::{ASSET_WORK_BYTES, Budget, MemoryStats};
 pub use content::{Content, Environment, Material, MeshAsset, MeshHeaderAsset};
-pub use envelope::legacy_request;
+pub use envelope::{legacy_request, split_legacy_response};
 pub use environment::{
     Atmosphere, CelestialBody, Clouds, DayCycle, DensityLayer, EnvironmentDescription, EnvironmentSettings, Haze, HazeProvenance, Keyframe,
     Sky, Water,

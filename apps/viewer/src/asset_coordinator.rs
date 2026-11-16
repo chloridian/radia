@@ -12,7 +12,7 @@ use assets::{
     AdmissionError, Budget, CacheReadCompletion, DecodeInput, Demand, Failure, FetchJob, FetchResponse, Kind, LoadCompletion, LoadJob,
     MemoryStats, Priority, Request, Route, Store,
     cache::{AssetCache, AssetCacheStats, CacheWrite},
-    legacy_request,
+    legacy_request, split_legacy_response,
 };
 use futures::{FutureExt, StreamExt, channel::oneshot, pin_mut, stream::FuturesUnordered};
 use network::{
@@ -77,12 +77,13 @@ impl CapabilityTransport {
             }
             Kind::LegacyMaterial => {
                 let grant = grants.get("RenderMaterials").ok_or(Failure::MissingCapability)?;
-                let request = legacy_request(resource.id)?;
-                self.client
+                let request = legacy_request(&[resource.id])?;
+                let response = self
+                    .client
                     .post_bytes_with_response_limit(grant, &request, limit)
                     .await
-                    .map_err(|error| classify_network_error(error, resource.kind))
-                    .map(FetchResponse::Full)
+                    .map_err(|error| classify_network_error(error, resource.kind))?;
+                split_legacy_response(response)?.remove(&resource.id).map(FetchResponse::Full).ok_or(Failure::NotFound)
             }
         }
     }
@@ -670,6 +671,25 @@ mod tests {
         .unwrap()
     }
 
+    fn legacy_response(id: AssetId, material: &Value) -> Vec<u8> {
+        let entry = Value::Map(
+            [("ID".into(), Value::Binary(llsd::Binary::new(id.uuid().as_bytes().to_vec()))), ("Material".into(), material.clone())].into(),
+        );
+        let record = binary::to_vec(&Value::Array(vec![entry])).unwrap();
+        let length = u16::try_from(record.len()).unwrap();
+        let mut zipped = vec![0x78, 0x01, 0x01];
+        zipped.extend(length.to_le_bytes());
+        zipped.extend((!length).to_le_bytes());
+        zipped.extend_from_slice(&record);
+        let (mut a, mut b) = (1u32, 0u32);
+        for byte in &record {
+            a = (a + u32::from(*byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        zipped.extend(((b << 16) | a).to_be_bytes());
+        xml::to_vec(&Value::Map([("Zipped".into(), Value::Binary(llsd::Binary::new(zipped)))].into())).unwrap()
+    }
+
     fn resource(kind: Kind) -> assets::Resource {
         assets::Resource { id: AssetId::new(Uuid::from_u128(1)), kind }
     }
@@ -774,7 +794,9 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_builds_kind_requests() {
-        let peer = Peer::new(4, |index, request, base| {
+        let legacy = Value::Map([("Name".into(), Value::String("legacy".into()))].into());
+        let expected_legacy = binary::to_vec(&legacy).unwrap();
+        let peer = Peer::new(4, move |index, request, base| {
             let header = String::from_utf8_lossy(request);
             match index {
                 0 => {
@@ -794,7 +816,7 @@ mod tests {
                     let body = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
                     let value: Value = xml::from_slice(&request[body..]).unwrap();
                     assert!(matches!(value.as_map().unwrap().get("Zipped"), Some(Value::Binary(_))));
-                    (200, b"legacy".to_vec())
+                    (200, legacy_response(resource(Kind::LegacyMaterial).id, &legacy))
                 }
                 _ => unreachable!(),
             }
@@ -802,9 +824,11 @@ mod tests {
         let transport = CapabilityTransport::new(Client::new(peer.url().join("seed").unwrap()).unwrap());
         let mut store = Store::new(Budget::default());
         let route = store.register_route().unwrap();
-        for (kind, expected) in
-            [(Kind::Texture, b"texture".as_slice()), (Kind::PbrMaterial, b"pbr".as_slice()), (Kind::LegacyMaterial, b"legacy".as_slice())]
-        {
+        for (kind, expected) in [
+            (Kind::Texture, b"texture".as_slice()),
+            (Kind::PbrMaterial, b"pbr".as_slice()),
+            (Kind::LegacyMaterial, expected_legacy.as_slice()),
+        ] {
             let demand = store.request(route, assets::Request::new(resource(kind)), Priority::Visible, Instant::now()).unwrap();
             let asset_job = store.next_job(Instant::now()).unwrap();
             let LoadJob::Fetch(fetch) = &asset_job else { panic!("new request must start with a fetch") };
