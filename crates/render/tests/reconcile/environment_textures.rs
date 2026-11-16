@@ -183,12 +183,23 @@ fn local_texture_tracks_region() {
     assert!(view.environment_texture(texture).is_none());
     scene.complete_asset(second_texture.ticket, prepared_asset(second_texture.request, test_support::texture::GRAY_4096_J2C.to_vec()));
     settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(view.environment_texture(texture).map(|handle| handle.asset()), Some(texture));
+    let ready_handle = view.environment_texture(texture).cloned().expect("local texture is ready");
+    assert_eq!(ready_handle.asset(), texture);
+
+    scene.complete_asset(second_texture.ticket, assets::Status::Failed { failure: assets::Failure::RouteClosed, retry_at: None });
+    let ReconcileStep::Idle = scene.poll(now) else { panic!("route closure should not publish a scene update") };
+    assert_eq!(view.environment_texture(texture), Some(&ready_handle));
+
+    scene.complete_asset(second_texture.ticket, assets::Status::Failed { failure: assets::Failure::Malformed, retry_at: None });
+    let stale = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(stale.requested.is_empty());
+    assert_eq!(view.environment_texture(texture), Some(&ready_handle));
 
     scene.set_local_environment(choice, first_region).unwrap();
     let ready_route = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(ready_route.requested.iter().all(|request| !matches!(request.request, Request::Texture { id, .. } if id == texture)));
-    assert_eq!(view.environment_texture(texture).map(|handle| handle.asset()), Some(texture));
+    assert!(!ready_route.released.contains(&second_texture.ticket));
+    assert_eq!(view.environment_texture(texture), Some(&ready_handle));
 }
 
 #[test]

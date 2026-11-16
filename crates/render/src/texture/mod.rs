@@ -889,26 +889,13 @@ impl Textures {
     }
 
     pub(crate) fn water_pair_binding(&self, device: &Device, first: Option<TextureKey>, second: Option<TextureKey>) -> BindGroup {
-        self.pair_binding_with_sampler(device, first, second, &self.water_sampler, true)
-    }
-
-    fn pair_binding_with_sampler(
-        &self,
-        device: &Device,
-        first: Option<TextureKey>,
-        second: Option<TextureKey>,
-        sampler: &wgpu::Sampler,
-        raw_channels: bool,
-    ) -> BindGroup {
-        let first_view = if raw_channels { self.raw_view(first) } else { self.view(first) };
-        let second_view = if raw_channels { self.raw_view(second) } else { self.view(second) };
         device.create_bind_group(&BindGroupDescriptor {
-            label: Some("Texture pair"),
+            label: Some("Water normals"),
             layout: &self.pair_layout,
             entries: &[
-                BindGroupEntry { binding: 0, resource: BindingResource::TextureView(first_view) },
-                BindGroupEntry { binding: 1, resource: BindingResource::TextureView(second_view) },
-                BindGroupEntry { binding: 2, resource: BindingResource::Sampler(sampler) },
+                BindGroupEntry { binding: 0, resource: BindingResource::TextureView(self.raw_view(first)) },
+                BindGroupEntry { binding: 1, resource: BindingResource::TextureView(self.raw_view(second)) },
+                BindGroupEntry { binding: 2, resource: BindingResource::Sampler(&self.water_sampler) },
             ],
         })
     }
