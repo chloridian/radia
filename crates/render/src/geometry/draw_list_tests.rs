@@ -114,7 +114,7 @@ fn canceled_build_keeps_committed_patches() {
     let origin = super::super::instance::scene_origin(camera.position());
     let mut items = FrameCache::default();
     let mut list = DrawList::default();
-    let mut visible = (1..=1_100)
+    let mut visible = (1..=2 * super::LAYOUT_ITEMS_PER_FRAME as u128)
         .map(|id| items.insert_item(new_item((2, id, 0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index"))
         .collect::<Vec<_>>();
     list.layout(&[], &visible, &mut items.items, camera);
@@ -132,7 +132,7 @@ fn canceled_build_keeps_committed_patches() {
     let entering = items.insert_item(new_item((2, 0, 0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("entering item");
     visible.insert(0, entering);
     assert!(list.request_layout(&visible, camera, true, &items.items));
-    for _ in 0..8 {
+    for _ in 0..10_000 {
         let _ = list.advance_layout(&mut items.items, &HashMap::new(), false);
         if list.staged_progress().is_some_and(|(phase, cursor, ..)| phase == "fill" && cursor > 501) {
             break;
