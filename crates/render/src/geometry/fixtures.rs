@@ -38,6 +38,45 @@ pub(super) fn scene_with_world(alpha: u8, scales: [Vec3; 2], mapping: world::Tex
     scene_with_world_with_agent(alpha, scales, mapping, None, false)
 }
 
+pub(super) fn object_scene(count: u32) -> (World, Reconciler, SceneView) {
+    let capacity = usize::try_from(count).unwrap().next_power_of_two();
+    let mut world = World::new(WorldLimits {
+        max_regions: 1,
+        max_entities: capacity,
+        max_entities_per_region: capacity,
+        max_tombstones_per_region: 1,
+        max_tombstones: 1,
+        max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(1),
+        max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(1),
+        max_journal_entries: 16,
+        max_journal_changes: 64,
+        max_region_name_bytes: 64,
+        max_recovery_targets: capacity,
+    });
+    let region = world.register_region().unwrap();
+    let _ = world.patch_region(region, world::RegionInfo { origin: Some(DVec3::ZERO), ..Default::default() }).unwrap();
+    for id in 1..=count {
+        let mut object = ObjectObservation::new(
+            UpdateSource::new(region, id, OrderEvidence::Ordered(u64::from(id)), 0),
+            Uuid::from_u128(u128::from(id)),
+            NonZeroU32::new(id).unwrap(),
+            Kind::Object,
+            ParentUpdate::Root,
+        );
+        object.pose = Some(Pose { position: Some(Vec3::new(10.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+        object.scale = Some(Vec3::ONE);
+        object.shape = FieldUpdate::Set(Shape::Prim(PrimShape::default()));
+        object.appearance = FieldUpdate::Set(Appearance::Surface);
+        object.surface_appearance = Some(SurfaceAppearance::new(FaceAppearance::default(), Vec::new()).unwrap());
+        assert_matches!(world.observe_object(object).unwrap().outcome, world::ApplyOutcome::Introduced(_));
+    }
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    scene.set_camera(Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap());
+    settle(&world, &mut scene, &mut view);
+    assert_eq!(view.object_count(), usize::try_from(count).unwrap());
+    (world, scene, view)
+}
+
 fn scene_with_world_with_agent(
     alpha: u8,
     scales: [Vec3; 2],
@@ -95,6 +134,13 @@ fn scene_with_world_with_agent(
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();
     scene.set_camera(camera);
+    settle(&world, &mut scene, &mut view);
+    assert_eq!(view.object_count(), 2);
+    assert!(view.objects().all(|object| object.mesh().is_some() && object.materials().is_some()));
+    (world, scene, view, camera)
+}
+
+fn settle(world: &World, scene: &mut Reconciler, view: &mut SceneView) {
     let mut now = Instant::now();
     loop {
         match scene.poll(now) {
@@ -116,11 +162,7 @@ fn scene_with_world_with_agent(
             }
             ReconcileStep::Continue => {}
             ReconcileStep::Wait(until) => now = until,
-            ReconcileStep::Idle => {
-                assert_eq!(view.object_count(), 2);
-                assert!(view.objects().all(|object| object.mesh().is_some() && object.materials().is_some()));
-                return (world, scene, view, camera);
-            }
+            ReconcileStep::Idle => return,
             _ => panic!("fixture stopped before publishing geometry"),
         }
     }

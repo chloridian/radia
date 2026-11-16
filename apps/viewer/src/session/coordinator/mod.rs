@@ -9,7 +9,7 @@ mod persistence;
 mod presentation;
 
 #[cfg(test)]
-pub(crate) use self::driver::inventory::resolve_pending_inventory_moves;
+pub(crate) use self::driver::inventory::confirm_pending_moves;
 #[cfg(test)]
 pub(crate) use self::driver::inventory::{FolderFetchApply, apply_inventory_fetch};
 pub(crate) use self::driver::{CredentialPersistence, drain_session};

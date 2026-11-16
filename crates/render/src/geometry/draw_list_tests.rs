@@ -1,4 +1,5 @@
 use std::{
+    assert_matches,
     collections::{HashMap, HashSet},
     sync::Arc,
     time::Instant,
@@ -104,6 +105,65 @@ fn stale_layout_retires_the_whole_build() {
 }
 
 #[test]
+fn canceled_build_keeps_committed_patches() {
+    let (_region_world, region) = crate::test_support::registered_region();
+    let (_scene, view, _) = super::super::fixtures::scene(255);
+    let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
+    let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
+    let camera = camera(0.0);
+    let origin = super::super::instance::scene_origin(camera.position());
+    let mut items = FrameCache::default();
+    let mut list = DrawList::default();
+    let mut visible = (1..=1_100)
+        .map(|id| items.insert_item(new_item((2, id, 0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index"))
+        .collect::<Vec<_>>();
+    list.layout(&[], &visible, &mut items.items, camera);
+    let target = visible[500];
+    let target_slot = |items: &FrameCache| items.items.get(target).expect("target item").faces[0].slot.expect("target face slot");
+    let committed = target_slot(&items);
+    let rotate = |items: &mut FrameCache, list: &mut DrawList, angle: f32| {
+        let item = items.items.get_mut(target).expect("target item");
+        item.rotation = Quat::from_rotation_z(angle);
+        item.transform = instance_base(item.position, item.rotation, item.scale, false, origin);
+        list.patch(&items.items, &[(target, 0)], &[target], camera, origin, origin);
+        items.items.get(target).expect("target item").transform
+    };
+
+    let entering = items.insert_item(new_item((2, 0, 0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("entering item");
+    visible.insert(0, entering);
+    assert!(list.request_layout(&visible, camera, true, &items.items));
+    for _ in 0..8 {
+        let _ = list.advance_layout(&mut items.items, &HashMap::new(), false);
+        if list.staged_progress().is_some_and(|(phase, cursor, ..)| phase == "fill" && cursor > 501) {
+            break;
+        }
+    }
+    assert_matches!(list.staged_progress(), Some(("fill", cursor, ..)) if cursor > 501, "the build staged the target face");
+    assert_ne!(target_slot(&items), committed, "the staged build moved the target face");
+
+    let transform = rotate(&mut items, &mut list, 0.3);
+    assert_eq!(list.instance_transform(committed), Some(&transform[..]), "a pending build keeps committed poses patched");
+    list.cancel_layout();
+    let transform = rotate(&mut items, &mut list, 0.6);
+    assert_eq!(list.instance_transform(committed), Some(&transform[..]), "a canceled build keeps committed poses patched");
+    for _ in 0..100 {
+        if !list.layout_pending() {
+            break;
+        }
+        let _ = list.advance_layout(&mut items.items, &HashMap::new(), false);
+    }
+    assert!(!list.layout_pending(), "the canceled build retires");
+    let transform = rotate(&mut items, &mut list, 0.9);
+    assert_eq!(list.instance_transform(committed), Some(&transform[..]), "retirement keeps committed poses patched");
+
+    list.layout(&[], &visible, &mut items.items, camera);
+    let next = target_slot(&items);
+    assert_ne!(next, committed, "the next generation moves the target face");
+    let transform = rotate(&mut items, &mut list, 1.2);
+    assert_eq!(list.instance_transform(next), Some(&transform[..]), "the next generation patches its own address");
+}
+
+#[test]
 fn plain_staged_data_retires_in_one_turn() {
     let (_region_world, _view, camera, mut items, mut list, index) = active_layout();
     let staged = staged_layout(&mut list, index, camera, &items.items, 0);
@@ -151,7 +211,7 @@ fn blended_parameter_patch_does_not_sort() {
     if let Some(face) = items.get_by_id_mut(id).and_then(|item| item.faces.first_mut()) {
         face.parameter_bytes[0] ^= 1;
     }
-    let stats = list.patch(&mut items.items, &[(index, 0)], &[], camera);
+    let stats = list.patch(&items.items, &[(index, 0)], &[], camera, origin, origin);
     assert_eq!(stats.faces_patched, 1);
     assert!(!stats.blended_sorted);
 }
@@ -338,7 +398,7 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
                 };
                 if changed {
                     let index = items.index(id).expect("updated test item");
-                    let stats = list.patch(&mut items.items, &[(index, 0)], &[index], current_camera);
+                    let stats = list.patch(&items.items, &[(index, 0)], &[index], current_camera, origin, origin);
                     blended_patch = stats.blended_sorted;
                 }
             }
@@ -400,7 +460,7 @@ const STAGED_REFS: usize = 2_047;
 
 fn staged_layout(list: &mut DrawList, index: ItemIndex, camera: Camera, items: &ItemSlab, refs: usize) -> super::LayoutBuild {
     let input = vec![index; 2_047];
-    let mut build = super::LayoutBuild::new(&input, &input, camera, true, items);
+    let mut build = super::LayoutBuild::new(Default::default(), &input, &input, camera, true, items);
     let group = items.get(index).expect("staged item").faces[0].group;
     for _ in 0..refs {
         assert!(list.groups.retain(group));
@@ -583,6 +643,8 @@ fn new_face(
         parameter_bytes: parameter_part(&params, scale),
         slot: None,
         blended_index: None,
+        layout: Default::default(),
+        retained: None,
     }
 }
 
