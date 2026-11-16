@@ -16,7 +16,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net, runtime,
     sync::Barrier,
-    task::{JoinSet, spawn},
+    task::{JoinSet, spawn, yield_now},
     time::timeout,
 };
 use url::Url;
@@ -668,7 +668,11 @@ async fn partial_grants() {
 
     assert_eq!(capabilities.len(), 1);
     assert!(capabilities.contains_key("GrantedCapability"));
-    let request = server.finish().remove(0);
+    let repeated = client.request_capabilities(&["GrantedCapability", "MissingCapability"]).await.expect("cached grants");
+    assert_eq!(repeated.keys().collect::<Vec<_>>(), ["GrantedCapability"], "a repeated lookup keeps the omitted name absent");
+    let mut requests = server.finish();
+    assert_eq!(requests.len(), 1, "granted and omitted names are answered from the cache");
+    let request = requests.remove(0);
     let request = str::from_utf8(&request).expect("request is UTF-8");
     let (headers, body) = request.split_once("\r\n\r\n").expect("request has a body");
 
@@ -687,6 +691,124 @@ async fn empty_grants() {
 
     assert!(capabilities.is_empty());
     assert_eq!(server.finish().len(), 1);
+}
+
+#[tokio::test]
+async fn lookup_requests_only_missing_names() {
+    let server = LocalServer::start(vec![
+        llsd_response("<llsd><map><key>FirstCapability</key><uri>http://caps.example/first</uri></map></llsd>"),
+        llsd_response("<llsd><map><key>SecondCapability</key><uri>http://caps.example/second</uri></map></llsd>"),
+    ]);
+    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+
+    client.request_capabilities(&["FirstCapability"]).await.expect("first lookup");
+    let capabilities = client.request_capabilities(&["FirstCapability", "SecondCapability"]).await.expect("extended lookup");
+
+    let mut granted = capabilities.keys().map(String::as_str).collect::<Vec<_>>();
+    granted.sort_unstable();
+    assert_eq!(granted, ["FirstCapability", "SecondCapability"]);
+    let requests = server.finish();
+    assert_eq!(requests.len(), 2);
+    let body = str::from_utf8(&requests[1]).expect("request is UTF-8").split_once("\r\n\r\n").expect("request has a body").1;
+    assert!(body.contains("SecondCapability"), "the second POST names the missing capability: {body}");
+    assert!(!body.contains("FirstCapability"), "the second POST omits the cached capability: {body}");
+}
+
+#[tokio::test]
+async fn failed_lookup_caches_nothing() {
+    let server = LocalServer::start(vec![
+        response(503, "Service Unavailable", "text/plain", None, "busy"),
+        llsd_response("<llsd><map><key>GrantedCapability</key><uri>http://caps.example/granted</uri></map></llsd>"),
+    ]);
+    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+
+    let error = client.request_capabilities(&["GrantedCapability"]).await.expect_err("seed failure is reported");
+    std::assert_matches!(error, CapabilityHttp(http::Error { status: Some(StatusCode::SERVICE_UNAVAILABLE), .. }));
+    let capabilities = client.request_capabilities(&["GrantedCapability"]).await.expect("retried lookup");
+
+    assert!(capabilities.contains_key("GrantedCapability"));
+    assert_eq!(server.finish().len(), 2, "a failed lookup must not be cached");
+}
+
+#[tokio::test]
+async fn concurrent_lookups_share_one_post() {
+    let mut server = ConcurrentCapabilityTestServer::start(1);
+    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let first = spawn({
+        let client = client.clone();
+        async move { client.request_capabilities(&["TestCapability"]).await }
+    });
+    let held = server.next_request().await;
+    let second = spawn({
+        let client = client.clone();
+        async move { client.request_capabilities(&["TestCapability"]).await }
+    });
+    for _ in 0..4 {
+        yield_now().await;
+    }
+    server.release_response(held);
+
+    for lookup in [first, second] {
+        let capabilities = timeout(TEST_TIMEOUT, lookup).await.expect("lookup finishes").expect("lookup task").expect("lookup succeeds");
+        assert!(capabilities.contains_key("TestCapability"));
+    }
+    server.finish();
+}
+
+#[tokio::test]
+async fn cached_lookup_skips_pending_discovery() {
+    let mut server = ConcurrentCapabilityTestServer::start(2);
+    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let warm = spawn({
+        let client = client.clone();
+        async move { client.request_capabilities(&["TestCapability"]).await }
+    });
+    let warm_request = server.next_request().await;
+    server.release_response(warm_request);
+    timeout(TEST_TIMEOUT, warm).await.expect("warm lookup finishes").expect("lookup task").expect("warm lookup succeeds");
+    let pending = spawn({
+        let client = client.clone();
+        async move { client.request_capabilities(&["OtherCapability"]).await }
+    });
+    let held = server.next_request().await;
+
+    let cached = timeout(TEST_TIMEOUT, client.request_capabilities(&["TestCapability"]))
+        .await
+        .expect("a cached lookup must not wait for another name's seed POST")
+        .expect("cached lookup succeeds");
+    assert!(cached.contains_key("TestCapability"));
+
+    server.release_response(held);
+    timeout(TEST_TIMEOUT, pending).await.expect("pending lookup finishes").expect("lookup task").expect("pending lookup succeeds");
+    client.close_session();
+    std::assert_matches!(client.request_capabilities(&["TestCapability"]).await, Err(crate::Error::CapabilitySessionClosed));
+    server.finish();
+}
+
+#[tokio::test]
+async fn close_releases_waiting_lookup() {
+    let mut server = ConcurrentCapabilityTestServer::start(1);
+    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let first = spawn({
+        let client = client.clone();
+        async move { client.request_capabilities(&["TestCapability"]).await }
+    });
+    let _held = server.next_request().await;
+    let second = spawn({
+        let client = client.clone();
+        async move { client.request_capabilities(&["TestCapability"]).await }
+    });
+    for _ in 0..4 {
+        yield_now().await;
+    }
+
+    client.close_session();
+
+    for lookup in [first, second] {
+        let result = timeout(TEST_TIMEOUT, lookup).await.expect("close releases the lookup").expect("lookup task");
+        std::assert_matches!(result, Err(crate::Error::CapabilitySessionClosed));
+    }
+    server.finish();
 }
 
 #[tokio::test]
@@ -894,11 +1016,13 @@ async fn requests_limit_concurrency() {
     let request_count = MAX_CONCURRENT_CAPABILITY_REQUESTS * 2;
     let mut server = ConcurrentCapabilityTestServer::start(request_count);
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let capability = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
     let mut requests = JoinSet::new();
 
     for _ in 0..request_count {
         let client = client.clone();
-        requests.spawn(async move { client.request_capabilities(&["TestCapability"]).await });
+        let capability = capability.clone();
+        requests.spawn(async move { client.post(&capability, "probe").await });
     }
 
     let mut in_flight = VecDeque::with_capacity(MAX_CONCURRENT_CAPABILITY_REQUESTS);
@@ -913,7 +1037,7 @@ async fn requests_limit_concurrency() {
 
     timeout(TEST_TIMEOUT, async {
         while let Some(request) = requests.join_next().await {
-            request.expect("capability request task should finish").expect("local seed request should succeed");
+            request.expect("capability request task should finish").expect("local capability request should succeed");
         }
     })
     .await
@@ -930,11 +1054,13 @@ async fn shared_budget_bounds_requests() {
     let budget = CapabilityBudget::new();
     let clients =
         (0..2).map(|_| Client::new_with_budget(server.url("/seed"), budget.clone()).expect("active Tokio runtime")).collect::<Vec<_>>();
+    let capability = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
     let mut requests = JoinSet::new();
 
     for index in 0..request_count {
         let client = clients[index % clients.len()].clone();
-        requests.spawn(async move { client.request_capabilities(&["TestCapability"]).await });
+        let capability = capability.clone();
+        requests.spawn(async move { client.post(&capability, "probe").await });
     }
 
     let mut in_flight = VecDeque::with_capacity(MAX_CONCURRENT_CAPABILITY_REQUESTS);
@@ -949,7 +1075,7 @@ async fn shared_budget_bounds_requests() {
 
     timeout(TEST_TIMEOUT, async {
         while let Some(request) = requests.join_next().await {
-            request.expect("capability request task should finish").expect("local seed request should succeed");
+            request.expect("capability request task should finish").expect("local capability request should succeed");
         }
     })
     .await
