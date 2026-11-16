@@ -10,9 +10,9 @@ use std::{
 
 use assets::{
     AdmissionError, Budget, CacheReadCompletion, DecodeInput, Demand, Failure, FetchJob, FetchResponse, Kind, LoadCompletion, LoadJob,
-    MemoryStats, Priority, Request, Route, Store,
+    MAX_RETRY_AFTER, MemoryStats, Priority, Request, Route, Store,
     cache::{AssetCache, AssetCacheStats, CacheWrite},
-    legacy_request,
+    legacy_request, split_legacy_response,
 };
 use futures::{FutureExt, StreamExt, channel::oneshot, pin_mut, stream::FuturesUnordered};
 use network::{
@@ -23,40 +23,58 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{OnceCell, mpsc, watch};
 use tokio::{
     runtime::Handle,
-    task::{JoinError, JoinHandle},
+    task::{AbortHandle, JoinError, JoinHandle},
+    time,
 };
 use tracing::Instrument;
+use utils::AssetId;
 use world::Region;
 
 const COMMANDS: usize = 64;
+const MAX_MATERIALS_PER_POST: usize = 50;
+const MATERIALS_POST_INTERVAL: Duration = Duration::from_secs(1);
 static UNEXPECTED_HTTP_STATUS_WARNED: AtomicU8 = AtomicU8::new(0);
+
+type Grants = Arc<OnceCell<HashMap<String, CapabilityUrl>>>;
+type MaterialReply = oneshot::Sender<Result<Vec<u8>, Failure>>;
 
 #[derive(Clone)]
 struct CapabilityTransport {
     client: Client,
-    grants: Arc<OnceCell<HashMap<String, CapabilityUrl>>>,
+    grants: Grants,
+    materials: MaterialBatcher,
 }
 
 impl CapabilityTransport {
     fn new(client: Client) -> Self {
-        Self { client, grants: Arc::new(OnceCell::new()) }
+        let grants = Grants::default();
+        let materials = {
+            let client = client.clone();
+            let grants = Arc::clone(&grants);
+            MaterialBatcher::spawn(move |ids| {
+                let client = client.clone();
+                let grants = Arc::clone(&grants);
+                async move {
+                    let grants = resolve_grants(&client, &grants, Kind::LegacyMaterial).await?;
+                    let grant = grants.get("RenderMaterials").ok_or(Failure::MissingCapability)?;
+                    let request = legacy_request(&ids)?;
+                    client
+                        .post_bytes_with_response_limit(grant, &request, Kind::LegacyMaterial.max_response_bytes())
+                        .await
+                        .map_err(|error| classify_network_error(error, Kind::LegacyMaterial))
+                }
+            })
+        };
+        Self { client, grants, materials }
     }
 
     async fn fetch(&self, job: &FetchJob) -> Result<FetchResponse, Failure> {
         let resource = job.resource();
         let request = job.request();
-        let grants = self
-            .grants
-            .get_or_try_init(|| async {
-                self.client
-                    .request_capabilities(&["ViewerAsset", "RenderMaterials"])
-                    .await
-                    .map_err(|error| classify_network_error(error, resource.kind))
-            })
-            .await?;
         let limit = if resource.kind == Kind::Mesh { job.response_limit() } else { resource.kind.max_response_bytes() };
         match resource.kind {
             Kind::Texture | Kind::PbrMaterial | Kind::Environment | Kind::Mesh => {
+                let grants = resolve_grants(&self.client, &self.grants, resource.kind).await?;
                 let grant = grants.get("ViewerAsset").ok_or(Failure::MissingCapability)?;
                 let field = match resource.kind {
                     Kind::Texture => "texture_id",
@@ -75,15 +93,7 @@ impl CapabilityTransport {
                     .map_err(|error| classify_network_error(error, resource.kind))
                     .map(FetchResponse::Full)
             }
-            Kind::LegacyMaterial => {
-                let grant = grants.get("RenderMaterials").ok_or(Failure::MissingCapability)?;
-                let request = legacy_request(resource.id)?;
-                self.client
-                    .post_bytes_with_response_limit(grant, &request, limit)
-                    .await
-                    .map_err(|error| classify_network_error(error, resource.kind))
-                    .map(FetchResponse::Full)
-            }
+            Kind::LegacyMaterial => self.materials.fetch(resource.id).await.map(FetchResponse::Full),
         }
     }
 
@@ -182,6 +192,108 @@ impl CapabilityTransport {
             }
         }
     }
+}
+
+struct AbortOnDrop(AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+struct MaterialRequest {
+    id: AssetId,
+    reply: MaterialReply,
+}
+
+#[derive(Clone)]
+struct MaterialBatcher {
+    requests: mpsc::Sender<MaterialRequest>,
+    _task: Arc<AbortOnDrop>,
+}
+
+impl MaterialBatcher {
+    fn spawn<P, F>(post: P) -> Self
+    where
+        P: Fn(Vec<AssetId>) -> F + Send + 'static,
+        F: Future<Output = Result<Vec<u8>, Failure>> + Send + 'static,
+    {
+        let (requests, receiver) = mpsc::channel(MAX_MATERIALS_PER_POST);
+        let task = tokio::spawn(batch_materials(receiver, post).in_current_span());
+        Self { requests, _task: Arc::new(AbortOnDrop(task.abort_handle())) }
+    }
+
+    async fn fetch(&self, id: AssetId) -> Result<Vec<u8>, Failure> {
+        let (reply, response) = oneshot::channel();
+        self.requests.send(MaterialRequest { id, reply }).await.map_err(|_| Failure::RouteClosed)?;
+        response.await.map_err(|_| Failure::RouteClosed)?
+    }
+}
+
+async fn batch_materials<P, F>(mut requests: mpsc::Receiver<MaterialRequest>, post: P)
+where
+    P: Fn(Vec<AssetId>) -> F,
+    F: Future<Output = Result<Vec<u8>, Failure>>,
+{
+    let mut ready_at = time::Instant::now();
+    let mut carried = None;
+    loop {
+        let first = match carried.take() {
+            Some(request) => request,
+            None => match requests.recv().await {
+                Some(request) => request,
+                None => return,
+            },
+        };
+        time::sleep_until(ready_at).await;
+        let mut ids = Vec::new();
+        let mut waiters = HashMap::<AssetId, Vec<MaterialReply>>::new();
+        let mut next = Some(first);
+        while let Some(MaterialRequest { id, reply }) = next {
+            if !reply.is_canceled() {
+                if let Some(replies) = waiters.get_mut(&id) {
+                    replies.push(reply);
+                } else if ids.len() < MAX_MATERIALS_PER_POST {
+                    ids.push(id);
+                    waiters.insert(id, vec![reply]);
+                } else {
+                    carried = Some(MaterialRequest { id, reply });
+                    break;
+                }
+            }
+            next = requests.try_recv().ok();
+        }
+        if ids.is_empty() {
+            continue;
+        }
+        let started = time::Instant::now();
+        let response = post(ids).await;
+        ready_at = match response {
+            Err(Failure::Transient { retry_after }) => time::Instant::now() + retry_after.clamp(MATERIALS_POST_INTERVAL, MAX_RETRY_AFTER),
+            _ => started + MATERIALS_POST_INTERVAL,
+        };
+        let mut materials = response.and_then(split_legacy_response);
+        let mut abandoned = 0;
+        for (id, replies) in waiters {
+            let material = match &mut materials {
+                Ok(materials) => materials.remove(&id).ok_or(Failure::NotFound),
+                Err(failure) => Err(*failure),
+            };
+            abandoned += replies.into_iter().map(|reply| reply.send(material.clone())).filter(Result::is_err).count();
+        }
+        if abandoned > 0 {
+            tracing::trace!(abandoned, "legacy material waiters left before their batch completed");
+        }
+    }
+}
+
+async fn resolve_grants<'a>(client: &Client, grants: &'a Grants, kind: Kind) -> Result<&'a HashMap<String, CapabilityUrl>, Failure> {
+    grants
+        .get_or_try_init(|| async {
+            client.request_capabilities(&["ViewerAsset", "RenderMaterials"]).await.map_err(|error| classify_network_error(error, kind))
+        })
+        .await
 }
 
 fn content_range_matches(content_range: ContentRange, requested: &std::ops::Range<u64>, total: u64, body_len: usize) -> bool {
@@ -643,7 +755,11 @@ fn spawn_cache_writes(writes: Vec<CacheWrite>, runtime: &Handle, jobs: &mut Futu
 
 #[cfg(test)]
 mod tests {
-    use std::{assert_matches, sync::Arc, time::Instant};
+    use std::{
+        assert_matches,
+        sync::{Arc, atomic::AtomicUsize},
+        time::Instant,
+    };
 
     use assets::{Budget, LoadJob, Priority, Store};
     use futures::future::join_all;
@@ -668,6 +784,74 @@ mod tests {
             .into(),
         ))
         .unwrap()
+    }
+
+    fn legacy_response(materials: &[(AssetId, Value)]) -> Vec<u8> {
+        let entries = materials
+            .iter()
+            .map(|(id, material)| {
+                Value::Map(
+                    [("ID".into(), Value::Binary(llsd::Binary::new(id.uuid().as_bytes().to_vec()))), ("Material".into(), material.clone())]
+                        .into(),
+                )
+            })
+            .collect();
+        let record = binary::to_vec(&Value::Array(entries)).unwrap();
+        let length = u16::try_from(record.len()).unwrap();
+        let mut zipped = vec![0x78, 0x01, 0x01];
+        zipped.extend(length.to_le_bytes());
+        zipped.extend((!length).to_le_bytes());
+        zipped.extend_from_slice(&record);
+        let (mut a, mut b) = (1u32, 0u32);
+        for byte in &record {
+            a = (a + u32::from(*byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        zipped.extend(((b << 16) | a).to_be_bytes());
+        xml::to_vec(&Value::Map([("Zipped".into(), Value::Binary(llsd::Binary::new(zipped)))].into())).unwrap()
+    }
+
+    struct Post {
+        started: time::Instant,
+        ids: Vec<AssetId>,
+        concurrent: usize,
+        respond: MaterialReply,
+    }
+
+    fn fake_batcher() -> (MaterialBatcher, mpsc::UnboundedReceiver<Post>) {
+        let (posts, received) = mpsc::unbounded_channel();
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let batcher = MaterialBatcher::spawn(move |ids| {
+            let posts = posts.clone();
+            let in_flight = Arc::clone(&in_flight);
+            async move {
+                let (respond, response) = oneshot::channel();
+                let concurrent = in_flight.fetch_add(1, Ordering::SeqCst);
+                posts.send(Post { started: time::Instant::now(), ids, concurrent, respond }).unwrap();
+                let response = response.await.unwrap();
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                response
+            }
+        });
+        (batcher, received)
+    }
+
+    async fn enqueue(batcher: &MaterialBatcher, id: AssetId) -> oneshot::Receiver<Result<Vec<u8>, Failure>> {
+        let (reply, response) = oneshot::channel();
+        batcher.requests.send(MaterialRequest { id, reply }).await.unwrap();
+        response
+    }
+
+    fn material_id(n: u128) -> AssetId {
+        AssetId::new(Uuid::from_u128(n))
+    }
+
+    fn material(id: AssetId) -> Value {
+        Value::Map([("Name".into(), Value::String(id.uuid().to_string()))].into())
+    }
+
+    fn materials(ids: &[AssetId]) -> Vec<u8> {
+        legacy_response(&ids.iter().map(|&id| (id, material(id))).collect::<Vec<_>>())
     }
 
     fn resource(kind: Kind) -> assets::Resource {
@@ -774,7 +958,9 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_builds_kind_requests() {
-        let peer = Peer::new(4, |index, request, base| {
+        let legacy = Value::Map([("Name".into(), Value::String("legacy".into()))].into());
+        let expected_legacy = binary::to_vec(&legacy).unwrap();
+        let peer = Peer::new(4, move |index, request, base| {
             let header = String::from_utf8_lossy(request);
             match index {
                 0 => {
@@ -793,8 +979,8 @@ mod tests {
                     assert!(header.starts_with("POST /materials HTTP/1.1"));
                     let body = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
                     let value: Value = xml::from_slice(&request[body..]).unwrap();
-                    assert!(matches!(value.as_map().unwrap().get("Zipped"), Some(Value::Binary(_))));
-                    (200, b"legacy".to_vec())
+                    assert_matches!(value.as_map().unwrap().get("Zipped"), Some(Value::Binary(_)));
+                    (200, legacy_response(&[(resource(Kind::LegacyMaterial).id, legacy.clone())]))
                 }
                 _ => unreachable!(),
             }
@@ -802,9 +988,11 @@ mod tests {
         let transport = CapabilityTransport::new(Client::new(peer.url().join("seed").unwrap()).unwrap());
         let mut store = Store::new(Budget::default());
         let route = store.register_route().unwrap();
-        for (kind, expected) in
-            [(Kind::Texture, b"texture".as_slice()), (Kind::PbrMaterial, b"pbr".as_slice()), (Kind::LegacyMaterial, b"legacy".as_slice())]
-        {
+        for (kind, expected) in [
+            (Kind::Texture, b"texture".as_slice()),
+            (Kind::PbrMaterial, b"pbr".as_slice()),
+            (Kind::LegacyMaterial, expected_legacy.as_slice()),
+        ] {
             let demand = store.request(route, assets::Request::new(resource(kind)), Priority::Visible, Instant::now()).unwrap();
             let asset_job = store.next_job(Instant::now()).unwrap();
             let LoadJob::Fetch(fetch) = &asset_job else { panic!("new request must start with a fetch") };
@@ -814,6 +1002,94 @@ mod tests {
             drop(demand);
         }
         assert_eq!(peer.finish().len(), 4, "capability discovery is shared across resource kinds");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn material_posts_are_bounded_serial_and_paced() {
+        let (batcher, mut posts) = fake_batcher();
+        let ids: Vec<AssetId> = (1..=120).map(material_id).collect();
+        let senders = {
+            let batcher = batcher.clone();
+            let ids = ids.clone();
+            tokio::spawn(async move {
+                let mut replies = Vec::new();
+                for id in ids {
+                    replies.push((id, enqueue(&batcher, id).await));
+                }
+                replies
+            })
+        };
+        let mut posted = Vec::new();
+        let mut starts = Vec::new();
+        while posted.len() < ids.len() {
+            let post = posts.recv().await.unwrap();
+            assert!(post.ids.len() <= MAX_MATERIALS_PER_POST, "{} IDs in one POST", post.ids.len());
+            assert_eq!(post.concurrent, 0, "a POST started while another was in flight");
+            starts.push(post.started);
+            post.respond.send(Ok(materials(&post.ids))).unwrap();
+            posted.extend(post.ids);
+        }
+        assert_eq!(posted, ids);
+        assert!(starts.len() >= ids.len().div_ceil(MAX_MATERIALS_PER_POST));
+        for pair in starts.windows(2) {
+            assert!(pair[1] - pair[0] >= MATERIALS_POST_INTERVAL, "POSTs started {:?} apart", pair[1] - pair[0]);
+        }
+        for (id, reply) in senders.await.unwrap() {
+            assert_eq!(reply.await.unwrap().unwrap(), binary::to_vec(&material(id)).unwrap());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn duplicates_share_post_entry() {
+        let (batcher, mut posts) = fake_batcher();
+        let (a, b) = (material_id(1), material_id(2));
+        let mut replies = Vec::new();
+        for id in [a, a, b, a] {
+            replies.push((id, enqueue(&batcher, id).await));
+        }
+        let post = posts.recv().await.unwrap();
+        assert_eq!(post.ids, [a, b]);
+        post.respond.send(Ok(materials(&post.ids))).unwrap();
+        for (id, reply) in replies {
+            assert_eq!(reply.await.unwrap().unwrap(), binary::to_vec(&material(id)).unwrap());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_failure_delays_next_post() {
+        let retry_after = Duration::from_secs(3);
+        let (batcher, mut posts) = fake_batcher();
+        let failed = enqueue(&batcher, material_id(1)).await;
+        let first = posts.recv().await.unwrap();
+        first.respond.send(Err(Failure::Transient { retry_after })).unwrap();
+        assert_eq!(failed.await.unwrap(), Err(Failure::Transient { retry_after }));
+        let _retry = enqueue(&batcher, material_id(2)).await;
+        let second = posts.recv().await.unwrap();
+        let gap = second.started - first.started;
+        assert!(gap >= retry_after && gap < retry_after + MATERIALS_POST_INTERVAL, "next POST started {gap:?} later");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn absent_id_fails_own_waiter() {
+        let (batcher, mut posts) = fake_batcher();
+        let (present, absent) = (material_id(1), material_id(2));
+        let found = enqueue(&batcher, present).await;
+        let missing = enqueue(&batcher, absent).await;
+        let post = posts.recv().await.unwrap();
+        assert_eq!(post.ids, [present, absent]);
+        post.respond.send(Ok(materials(&[present]))).unwrap();
+        assert_eq!(found.await.unwrap().unwrap(), binary::to_vec(&material(present)).unwrap());
+        assert_eq!(missing.await.unwrap(), Err(Failure::NotFound));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_waiter_not_posted() {
+        let (batcher, mut posts) = fake_batcher();
+        let (cancelled, live) = (material_id(1), material_id(2));
+        drop(enqueue(&batcher, cancelled).await);
+        let _live = enqueue(&batcher, live).await;
+        let post = posts.recv().await.unwrap();
+        assert_eq!(post.ids, [live]);
     }
 
     #[tokio::test]

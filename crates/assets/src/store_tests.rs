@@ -581,7 +581,7 @@ fn cancelled_read_allows_retry() {
     release.send(()).expect("resume disk read");
     let completion = worker.join().expect("disk read worker completes");
     assert!(store.complete_cache_read(completion, now).is_none());
-    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 0);
+    assert_eq!(store.running_fetches.iter().sum::<usize>(), 0);
     assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
     assert_eq!(budget.stats().charged_bytes, 0);
     assert!(store.next_job(now).is_none(), "cancelled demand must not enter decode admission");
@@ -592,7 +592,7 @@ fn cancelled_read_allows_retry() {
     let decode = store.start_decode(input).expect("admit retry decode");
     assert!(store.complete(decode.run(), now).is_empty());
     assert_matches!(retry.status(), Status::Ready(Content::Texture(_)));
-    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 0);
+    assert_eq!(store.running_fetches.iter().sum::<usize>(), 0);
     assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
     store.close();
     drop(store);
@@ -702,7 +702,7 @@ fn decoded_payloads_round_trip_disk() {
     let legacy = Resource { id: AssetId::new(Uuid::from_u128(102)), kind: Kind::LegacyMaterial };
     let environment = Resource { id: AssetId::new(Uuid::from_u128(103)), kind: Kind::Environment };
     round_trip(&cache, pbr, material_envelope(PBR_JSON));
-    round_trip(&cache, legacy, legacy_envelope(legacy.id));
+    round_trip(&cache, legacy, legacy_material());
     round_trip(&cache, environment, b"{'type':'sky'}".to_vec());
     assert_eq!(cache.stats().hits, 3);
     assert_eq!(cache.stats().misses, 0);
@@ -1286,21 +1286,8 @@ fn material_envelope(json: &str) -> Vec<u8> {
     bytes
 }
 
-fn legacy_envelope(id: AssetId) -> Vec<u8> {
-    use flate2::{Compression, write::ZlibEncoder};
-    use std::io::Write;
-    let record = binary::to_vec(&llsd::Value::Array(vec![llsd::Value::Map(
-        [
-            ("ID".into(), llsd::Value::Binary(llsd::Binary::new(id.uuid().as_bytes().to_vec()))),
-            ("Material".into(), llsd::Value::Map(legacy_fields(2, 128))),
-        ]
-        .into(),
-    )]))
-    .unwrap();
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&record).unwrap();
-    let zipped = encoder.finish().unwrap();
-    llsd::xml::to_vec(&llsd::Value::Map([("Zipped".into(), llsd::Value::Binary(llsd::Binary::new(zipped)))].into())).unwrap()
+fn legacy_material() -> Vec<u8> {
+    binary::to_vec(&llsd::Value::Map(legacy_fields(2, 128))).unwrap()
 }
 
 #[test]
@@ -1361,6 +1348,33 @@ fn importance_update_reorders_queue() {
     assert_eq!(next_fetch(&mut store, now).request(), Request::MeshHeader(mesh_resource(804).id));
     assert_eq!(next_fetch(&mut store, now).request(), Request::MeshHeader(mesh_resource(805).id));
     drop((running, lower, middle, running_fetch));
+}
+
+#[test]
+fn legacy_fetches_have_own_pool() {
+    let StoreHarness { now, mut store, route } = StoreHarness::new();
+    let mut demands = Vec::new();
+    let mut jobs = Vec::new();
+    for index in 0..MAX_NON_MESH_FETCHES {
+        let id = AssetId::new(Uuid::from_u128(1_000 + u128::try_from(index).unwrap()));
+        demands.push(store.request(route, Request::PbrMaterial(id), Priority::Visible, now).unwrap());
+        jobs.push(next_fetch(&mut store, now));
+    }
+    for index in 0..MAX_LEGACY_MATERIAL_FETCHES + 4 {
+        let id = AssetId::new(Uuid::from_u128(2_000 + u128::try_from(index).unwrap()));
+        demands.push(store.request(route, Request::LegacyMaterial(id), Priority::Visible, now).unwrap());
+    }
+    let id = AssetId::new(Uuid::from_u128(3_000));
+    demands.push(store.request(route, Request::PbrMaterial(id), Priority::Visible, now).unwrap());
+    while let Some(job) = store.next_job(now) {
+        let LoadJob::Fetch(fetch) = job else { panic!("network demands schedule fetches") };
+        assert_eq!(fetch.resource().kind, Kind::LegacyMaterial, "the shared slots stay full");
+        jobs.push(fetch);
+    }
+    assert_eq!(jobs.len(), MAX_NON_MESH_FETCHES + MAX_LEGACY_MATERIAL_FETCHES);
+    drop(jobs);
+    store.maintain(now);
+    assert_eq!(store.running_fetches, [0; 3], "dropped fetches release their pools");
 }
 
 #[test]
@@ -1796,8 +1810,9 @@ fn retry_limits_and_server_delays() {
         assert!(store.next_job(now).is_none(), "retry backoff is not shortened");
         now = retry_at.unwrap();
     }
-    assert!(store.next_job(now + Duration::from_secs(3600)).is_none());
-    assert_eq!(store.next_deadline(now + Duration::from_secs(3600)), None);
+    assert!(store.next_job(now).is_none(), "an exhausted burst waits for its negative result to expire");
+    assert_eq!(store.next_deadline(now), Some(now + NEGATIVE_TTL));
+    drop(demand);
     let demand = store.request(route, Request::new(resource(2)), Priority::Visible, now).unwrap();
     let completion = next_fetch(&mut store, now)
         .complete(Err(Failure::Transient { retry_after: Duration::from_secs(5) }))
@@ -1815,7 +1830,47 @@ fn retry_limits_and_server_delays() {
         .expect_err("transient fetch failure completes without decode input");
     store.complete(completion.into(), retry_at);
     assert_matches!(demand.status(), Status::Failed { retry_at: None, .. });
-    assert!(store.next_job(retry_at + Duration::from_secs(30)).is_none(), "an excessive server delay is not retried");
+    assert!(store.next_job(retry_at + Duration::from_secs(30)).is_none(), "an excessive server delay is not retried early");
+    let LoadJob::Fetch(restart) = store.next_job(retry_at + Duration::from_secs(120)).expect("the server delay elapses") else {
+        panic!("a restart fetches again")
+    };
+    let failed_at = retry_at + Duration::from_secs(120);
+    let completion = restart.complete(Err(Failure::Transient { retry_after: Duration::MAX })).unwrap_err();
+    store.complete(completion.into(), failed_at);
+    assert!(store.next_job(failed_at + MAX_RETRY_AFTER - Duration::from_secs(1)).is_none(), "a capped server delay is honoured");
+    assert_matches!(store.next_job(failed_at + MAX_RETRY_AFTER), Some(LoadJob::Fetch(_)), "an unbounded server delay is capped");
+    drop(demand);
+}
+
+#[test]
+fn only_transient_failures_recover() {
+    for (failure, recovers) in [(Failure::Transient { retry_after: Duration::ZERO }, true), (Failure::NotFound, false)] {
+        let StoreHarness { mut now, mut store, route } = StoreHarness::new();
+        let demand = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
+        loop {
+            let completion = next_fetch(&mut store, now).complete(Err(failure)).unwrap_err();
+            store.complete(completion.into(), now);
+            match demand.status() {
+                Status::Failed { retry_at: Some(retry), .. } => now = retry,
+                Status::Failed { retry_at: None, .. } => break,
+                status => panic!("{failure:?} leaves the demand failed, not {status:?}"),
+            }
+        }
+        let expiry = now + NEGATIVE_TTL;
+        assert!(store.next_job(expiry - Duration::from_millis(1)).is_none(), "{failure:?} stays failed before expiry");
+        if recovers {
+            assert_eq!(store.next_deadline(now), Some(expiry), "a transient failure wakes the worker at expiry");
+            let Some(LoadJob::Fetch(fetch)) = store.next_job(expiry) else { panic!("a demanded transient failure restarts at expiry") };
+            store.complete(fetch.complete(Err(failure)).unwrap_err().into(), expiry);
+            assert_matches!(demand.status(), Status::Failed { retry_at: Some(_), .. }, "a recovery starts a fresh retry burst");
+        } else {
+            let woken = store.next_deadline(now).unwrap_or(expiry);
+            for at in [expiry, woken, woken.max(expiry) + NEGATIVE_TTL] {
+                assert!(store.next_job(at).is_none(), "an exhausted {failure:?} does not fetch again");
+                assert_matches!(demand.status(), Status::Failed { failure: Failure::NotFound, retry_at: None });
+            }
+        }
+    }
 }
 
 #[test]
@@ -2116,7 +2171,7 @@ fn resize_preserves_pending_fetch() {
     assert!(fetch.is_cancelled(), "releasing the final lease cancels the fetch");
     drop(fetch);
     store.maintain(now);
-    assert_eq!(store.running_other_fetches, 0);
+    assert_eq!(store.running_fetches[fetch_pool(Kind::Texture)], 0);
 }
 
 #[test]
@@ -2238,17 +2293,17 @@ fn reacquisition_waits_for_cancelled_job() {
     let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(budget.clone());
     let first = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
     let job = next_fetch(&mut store, now);
-    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 1);
+    assert_eq!(store.running_fetches.iter().sum::<usize>(), 1);
     drop(first);
     store.maintain(now);
-    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 1);
+    assert_eq!(store.running_fetches.iter().sum::<usize>(), 1);
     assert!(job.is_cancelled());
     let replacement = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
     assert!(store.next_job(now).is_none(), "reacquisition must not duplicate a resource's in-flight work");
     let completion = job.complete(Err(Failure::NotFound)).expect_err("cancellation wins over a late fetch failure");
     assert_eq!(completion.failure(), Failure::Cancelled);
     store.complete(completion.into(), now);
-    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 0);
+    assert_eq!(store.running_fetches.iter().sum::<usize>(), 0);
     let job = store.next_job(now).expect("the replacement starts after cancelled work completes");
     let job = match job {
         LoadJob::Fetch(job) => job.complete(Ok(RGBA_J2C.to_vec())).expect("response attachment"),
@@ -2312,7 +2367,7 @@ proptest::proptest! {
             store.maintain(now);
             let fetching = store.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Fetching, .. })).count();
             let decoding = store.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Decoding, .. })).count();
-            proptest::prop_assert_eq!(store.running_mesh_fetches + store.running_other_fetches, fetching);
+            proptest::prop_assert_eq!(store.running_fetches.iter().sum::<usize>(), fetching);
             let decoding_textures = store.entries.values().filter(|entry| {
                 entry.request.resource().kind == Kind::Texture && matches!(entry.phase, LoadPhase::Running { stage: Stage::Decoding, .. })
             }).count();
@@ -2333,7 +2388,7 @@ proptest::proptest! {
         }
         drop(leases);
         store.close();
-        proptest::prop_assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 0);
+        proptest::prop_assert_eq!(store.running_fetches.iter().sum::<usize>(), 0);
         proptest::prop_assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
         drop(jobs);
         proptest::prop_assert_eq!(budget.stats().charged_bytes, 0);
@@ -2369,7 +2424,7 @@ fn retired_material_cannot_publish() {
     let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(budget.clone());
     let resource = Resource { id: AssetId::new(Uuid::from_u128(3)), kind: Kind::LegacyMaterial };
     let old = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
-    let input = fetch(&mut store, now, legacy_envelope(resource.id));
+    let input = fetch(&mut store, now, legacy_material());
     let job = store.start_decode(input).expect("decode admission");
     assert_eq!(store.running_texture_decodes + store.running_other_decodes, 1);
     let prepared = job.run();
@@ -2380,7 +2435,7 @@ fn retired_material_cannot_publish() {
     assert_eq!(budget.stats().charged_bytes, 0);
     let route = store.register_route().unwrap();
     let current = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
-    let input = fetch(&mut store, now, legacy_envelope(resource.id));
+    let input = fetch(&mut store, now, legacy_material());
     let job = store.start_decode(input).expect("decode admission");
     let result = job.run();
     store.complete(result, now);
