@@ -330,7 +330,11 @@ fn parse_landmark_asset(name: &str, bytes: &[u8]) -> Option<FavoriteLandmark> {
             if let Some(handle) = fields.get("region_handle").and_then(|parts| parts.first()).and_then(|value| parse_region_handle(value)) {
                 LandmarkDestination::RegionHandle { handle: RegionHandle::new(handle), position }
             } else {
-                let id = fields.get("region_id").and_then(|parts| parts.first()).and_then(|value| Uuid::parse_str(value).ok())?;
+                let id = fields
+                    .get("region_id")
+                    .and_then(|parts| parts.first())
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .filter(|id| !id.is_nil())?;
                 LandmarkDestination::Region { id: RegionId::new(id), position }
             }
         }
@@ -508,6 +512,13 @@ mod tests {
         );
         assert!(parse_landmark_asset("Unlocated", b"Landmark version 2\nlocal_pos <128, 64, 30>\n").is_none());
         assert!(parse_landmark_asset("Unpositioned", b"Landmark version 2\nregion_handle 0\n").is_none());
+        assert!(
+            parse_landmark_asset(
+                "Unlocated",
+                b"Landmark version 2\nregion_id 00000000-0000-0000-0000-000000000000\nlocal_pos <128, 64, 30>\n"
+            )
+            .is_none()
+        );
     }
 
     #[test]

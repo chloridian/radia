@@ -126,6 +126,118 @@ fn category_moves_validate_the_final_parent_plan() {
     assert_eq!(snapshot.child_count(root_key), 1);
     assert_eq!(snapshot.child_count(b_key), 1);
     assert_eq!(snapshot.child_count(a_key), 0);
+
+    let mut restored_a = snapshot.category(a_key).expect("A exists").clone();
+    restored_a.parent = Some(root_key);
+    let mut restored_b = snapshot.category(b_key).expect("B exists").clone();
+    restored_b.parent = Some(a_key);
+    inventory
+        .apply_delta(InventoryDelta { updated_categories: vec![restored_a, restored_b], ..InventoryDelta::default() })
+        .expect("reverse moves restore the original hierarchy");
+
+    let snapshot = inventory.snapshot();
+    assert_eq!(snapshot.category(a_key).and_then(|category| category.parent), Some(root_key));
+    assert_eq!(snapshot.category(b_key).and_then(|category| category.parent), Some(a_key));
+    assert_eq!(snapshot.child_count(root_key), 1);
+    assert_eq!(snapshot.child_count(a_key), 1);
+    assert_eq!(snapshot.child_count(b_key), 0);
+}
+
+#[test]
+fn deep_category_chain_applies() {
+    let owner = owner();
+    let root = category(owner, 10, None, 4, Some(0));
+    let root_key = root.key;
+    let mut inventory = Inventory::new(root, None, InventoryLimits::default()).expect("root is valid");
+    let categories = (0_u128..512)
+        .map(|index| {
+            let id = 1_000 + index;
+            let parent = if index == 0 { 10 } else { id - 1 };
+            category(owner, id, Some(parent), -1, None)
+        })
+        .collect::<Vec<_>>();
+    let deepest_key = categories.last().expect("chain is nonempty").key;
+
+    inventory
+        .apply_delta(InventoryDelta { created_categories: categories, ..InventoryDelta::default() })
+        .expect("deep valid chain applies");
+
+    let snapshot = inventory.snapshot();
+    assert!(snapshot.category(deepest_key).is_some());
+    assert_eq!(snapshot.child_count(root_key), 1);
+}
+
+#[test]
+fn metadata_update_preserves_parent() {
+    let owner = owner();
+    let root = category(owner, 10, None, 4, Some(1));
+    let root_key = root.key;
+    let folder = category(owner, 11, Some(10), 7, Some(0));
+    let folder_key = folder.key;
+    let mut inventory = Inventory::new(root, None, InventoryLimits::default()).expect("root is valid");
+    inventory.upsert_category(folder).expect("folder is valid");
+    let mut renamed = inventory.snapshot().category(folder_key).expect("folder exists").clone();
+    renamed.name = Arc::from("renamed");
+
+    inventory
+        .apply_delta(InventoryDelta { updated_categories: vec![renamed], ..InventoryDelta::default() })
+        .expect("metadata update applies");
+
+    let snapshot = inventory.snapshot();
+    assert_eq!(snapshot.category(folder_key).map(|category| category.name.as_ref()), Some("renamed"));
+    assert_eq!(snapshot.category(folder_key).and_then(|category| category.parent), Some(root_key));
+    assert_eq!(snapshot.child_count(root_key), 1);
+}
+
+#[test]
+fn cycle_delta_preserves_snapshot() {
+    let owner = owner();
+    let root = category(owner, 10, None, 4, Some(1));
+    let root_key = root.key;
+    let a = category(owner, 11, Some(10), -1, None);
+    let a_key = a.key;
+    let b = category(owner, 12, Some(11), -1, None);
+    let b_key = b.key;
+    let mut inventory = Inventory::new(root, None, InventoryLimits::default()).expect("root is valid");
+    inventory
+        .apply_delta(InventoryDelta { created_categories: vec![a, b], ..InventoryDelta::default() })
+        .expect("initial hierarchy applies");
+    let before_revision = inventory.revision();
+    let mut moved_a = inventory.snapshot().category(a_key).expect("A exists").clone();
+    moved_a.parent = Some(b_key);
+    let mut renamed_b = inventory.snapshot().category(b_key).expect("B exists").clone();
+    renamed_b.name = Arc::from("would change if published");
+
+    std::assert_matches!(
+        inventory.apply_delta(InventoryDelta { updated_categories: vec![moved_a, renamed_b], ..InventoryDelta::default() }),
+        Err(InventoryError::Cycle)
+    );
+
+    let snapshot = inventory.snapshot();
+    assert_eq!(inventory.revision(), before_revision);
+    assert_eq!(snapshot.category(a_key).and_then(|category| category.parent), Some(root_key));
+    assert_eq!(snapshot.category(b_key).and_then(|category| category.parent), Some(a_key));
+    assert_eq!(snapshot.category(b_key).map(|category| category.name.as_ref()), Some("folder-12"));
+}
+
+#[test]
+fn missing_parent_delta_is_atomic() {
+    let owner = owner();
+    let root = category(owner, 10, None, 4, Some(0));
+    let root_key = root.key;
+    let mut inventory = Inventory::new(root, None, InventoryLimits::default()).expect("root is valid");
+    let before_revision = inventory.revision();
+    let orphan = category(owner, 11, Some(99), -1, None);
+    let orphan_key = orphan.key;
+
+    std::assert_matches!(
+        inventory.apply_delta(InventoryDelta { created_categories: vec![orphan], ..InventoryDelta::default() }),
+        Err(InventoryError::MissingParent)
+    );
+
+    assert_eq!(inventory.revision(), before_revision);
+    assert!(inventory.snapshot().category(orphan_key).is_none());
+    assert_eq!(inventory.snapshot().child_count(root_key), 0);
 }
 
 #[test]

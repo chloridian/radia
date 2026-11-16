@@ -6,7 +6,7 @@ mod spawn;
 
 use std::{
     fmt::{self, Display, Formatter},
-    sync::{Arc, Mutex, PoisonError},
+    sync::Arc,
 };
 
 use ::inventory::{CategoryKey, FolderType, InventorySnapshot};
@@ -26,7 +26,7 @@ use self::{
 use crate::gui::views::chat::ChatScreen;
 use crate::inventory::{FavoriteLocation, InventoryFetchHandle, InventoryFetchRequestError, favorite_store};
 use crate::{
-    gui::window_geometry::observe,
+    gui::{SessionLifecycle, window_geometry::observe},
     remembered_login::{self, CredentialStoreError, RememberedLogin},
     session::{
         AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, Session, SessionEnd,
@@ -160,7 +160,7 @@ pub struct LoginScreen {
     session_generation: u64,
     credential_load_generation: u64,
     credential_write_lock: WriteLock,
-    shutdown_session: Arc<Mutex<Option<SessionHandle>>>,
+    session_lifecycle: Arc<SessionLifecycle>,
     _spawn_subscription: gpui::Subscription,
     _username_subscription: gpui::Subscription,
     _window_geometry_subscription: gpui::Subscription,
@@ -200,7 +200,7 @@ impl LoginScreen {
         handle.refetch_folder(folder)
     }
 
-    pub fn new(window: &mut Window, cx: &mut Context<Self>, shutdown_session: Arc<Mutex<Option<SessionHandle>>>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, session_lifecycle: Arc<SessionLifecycle>) -> Self {
         let grid = Grid::default();
         let favorite_locations = Vec::new();
         let username = cx.new(|cx| InputState::new(window, cx).placeholder("Username"));
@@ -242,7 +242,7 @@ impl LoginScreen {
             session_generation: 0,
             credential_load_generation: 0,
             credential_write_lock: write_lock(),
-            shutdown_session,
+            session_lifecycle,
             _spawn_subscription: spawn_subscription,
             _username_subscription: username_subscription,
             _window_geometry_subscription: window_geometry_subscription,
@@ -415,7 +415,7 @@ impl LoginScreen {
 
     fn prepare_session_attempt(&mut self, cx: &mut Context<Self>) {
         self.active_session = None;
-        *self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        self.session_lifecycle.set_active(None);
         self.session_generation = self.session_generation.wrapping_add(1);
         self.chat_screen.update(cx, |chat, cx| chat.clear_session(cx));
         self.login_phase = LoginPhase::Connecting;
@@ -449,7 +449,7 @@ impl LoginScreen {
             presentation_mailbox: mailbox.clone(),
             ready: None,
         };
-        *self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner) = Some(session_handle.clone());
+        self.session_lifecycle.set_active(Some(session_handle.clone()));
         self.active_session = Some(active);
         self.chat_screen.update(cx, |chat, cx| chat.set_session_handle(session_handle.clone(), cx));
 
@@ -477,7 +477,7 @@ impl LoginScreen {
         })
         .detach();
 
-        drop(background.spawn(drain_session(
+        self.session_lifecycle.track_drain(background.spawn(drain_session(
             network_session,
             session_handle,
             background.clone(),
@@ -617,7 +617,7 @@ impl LoginScreen {
         self.login_phase = LoginPhase::Idle;
         self.status.end_session(end);
         self.active_session = None;
-        self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner).take();
+        self.session_lifecycle.set_active(None);
         self.session_generation = self.session_generation.wrapping_add(1);
         self.chat_screen.update(cx, |chat, cx| chat.clear_session(cx));
         cx.notify();

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
     Category, CategoryKey, FolderType, InventoryError, InventoryNodeId, InventoryOwner, InventoryRevision, Item, ItemKey,
@@ -48,6 +48,7 @@ pub(crate) struct InventoryState {
     pub(crate) revision: InventoryRevision,
     pub(crate) roots: InventoryRoots,
     pub(crate) categories: HashMap<CategoryKey, Arc<Category>>,
+    pub(crate) folder_generations: HashMap<CategoryKey, InventoryRevision>,
     pub(crate) items: HashMap<ItemKey, Arc<Item>>,
     pub(crate) children: HashMap<CategoryKey, OrdSet<InventoryNodeId>>,
     pub(crate) incomplete_categories: HashMap<InventoryOwner, usize>,
@@ -87,6 +88,7 @@ impl Inventory {
             revision: InventoryRevision(0),
             roots,
             categories: HashMap::new(),
+            folder_generations: HashMap::new(),
             items: HashMap::new(),
             children: HashMap::new(),
             incomplete_categories: HashMap::new(),
@@ -147,6 +149,51 @@ impl Inventory {
         let revision = self.state.revision.0.checked_add(1).ok_or(InventoryError::RevisionExhausted)?;
         let revision = InventoryRevision(revision);
         next.revision = revision;
+        let mut touched = BTreeSet::new();
+        for change in &changes {
+            match change {
+                crate::InventoryChange::CategoryUpserted(category) => {
+                    touched.insert(category.key);
+                    if let Some(parent) = self.state.categories.get(&category.key).and_then(|old| old.parent) {
+                        touched.insert(parent);
+                    }
+                    if let Some(parent) = category.parent {
+                        touched.insert(parent);
+                    }
+                }
+                crate::InventoryChange::ItemUpserted(item) => {
+                    if let Some(old) = self.state.items.get(&item.key) {
+                        touched.insert(old.parent);
+                    }
+                    touched.insert(item.parent);
+                }
+                crate::InventoryChange::NodeMoved { from, to, .. } => {
+                    touched.insert(*from);
+                    touched.insert(*to);
+                }
+                crate::InventoryChange::CategoryRemoved(key) => {
+                    if let Some(parent) = self.state.categories.get(key).and_then(|category| category.parent) {
+                        touched.insert(parent);
+                    }
+                    next.folder_generations.remove(key);
+                }
+                crate::InventoryChange::ItemRemoved(key) => {
+                    if let Some(item) = self.state.items.get(key) {
+                        touched.insert(item.parent);
+                    }
+                }
+                crate::InventoryChange::FolderFetchApplied { folder, .. } | crate::InventoryChange::VersionSet { folder, .. } => {
+                    touched.insert(*folder);
+                }
+            }
+        }
+        for folder in touched {
+            if next.categories.contains_key(&folder) {
+                next.folder_generations.insert(folder, revision);
+            } else {
+                next.folder_generations.remove(&folder);
+            }
+        }
         self.state = Arc::new(next);
         Ok(crate::ChangeSet { revision, changes, refetch_categories })
     }
@@ -203,6 +250,9 @@ pub(crate) fn replace_category_record(state: &mut InventoryState, category: Cate
         insert_category_type(state, key, category.preferred_folder_type)?;
     }
     state.categories.insert(key, Arc::new(category));
+    if !state.folder_generations.contains_key(&key) {
+        state.folder_generations.insert(key, state.revision);
+    }
     Ok(())
 }
 

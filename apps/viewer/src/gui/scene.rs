@@ -306,7 +306,7 @@ impl Render for ChatWindow {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use super::{MainWindow, start_scene, viewport_event};
     use crate::gui::{
@@ -319,7 +319,7 @@ mod tests {
 
     #[gpui::test]
     fn handoff_preserves_window_lifetimes(cx: &mut gpui::TestAppContext) {
-        let session = Arc::new(Mutex::new(None));
+        let session = Arc::new(crate::gui::SessionLifecycle::default());
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_quit_mode(gpui::QuitMode::Explicit);

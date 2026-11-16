@@ -198,6 +198,32 @@ fn udp_and_event_queue_bulk_updates_reach_the_session_inventory() {
 }
 
 #[test]
+fn invalid_chain_keeps_valid_sibling() {
+    let agent = uuid(1);
+    let owner = InventoryOwner::new(agent);
+    let root = category(owner, 10, None, 4, Some(0));
+    let mut inventory = Inventory::new(root, None, InventoryLimits::default()).expect("valid root");
+    let folder = |id, parent| {
+        value_map([
+            ("FolderID".to_owned(), Value::Uuid(uuid(id))),
+            ("ParentID".to_owned(), Value::Uuid(uuid(parent))),
+            ("Type".to_owned(), Value::Integer(6)),
+            ("Name".to_owned(), Value::String(format!("folder-{id}"))),
+        ])
+    };
+    let body = bulk_event_body(agent, vec![folder(11, 12), folder(12, 11), folder(13, 10)], Vec::new());
+
+    let outcome = apply_event_queue(&mut inventory, agent, "BulkUpdateInventory", &body)
+        .expect("EventQueue update parses and applies")
+        .expect("message is handled");
+
+    assert_eq!(outcome.rejected_blocks, 2);
+    assert!(inventory.snapshot().category(CategoryKey::new(owner, FolderId::new(uuid(13)))).is_some());
+    assert!(inventory.snapshot().category(CategoryKey::new(owner, FolderId::new(uuid(11)))).is_none());
+    assert!(inventory.snapshot().category(CategoryKey::new(owner, FolderId::new(uuid(12)))).is_none());
+}
+
+#[test]
 fn save_asset_updates_loaded_items_for_udp_and_event_queue() {
     let agent = uuid(1);
     let owner = InventoryOwner::new(agent);

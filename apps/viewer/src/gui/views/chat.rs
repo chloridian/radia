@@ -1,12 +1,12 @@
 use std::collections::VecDeque;
 
-use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px};
+use gpui::{Context, IntoElement, Render, Role, Window, div, prelude::*, px};
 use gpui_component::{
     Theme,
     button::{Button, ButtonVariants as _},
     input::{Input, InputState},
 };
-use network::{AgentSession, Delivery, SessionHandle};
+use network::{AgentSession, Delivery, Error as NetworkError, SessionHandle};
 use protocol::{
     ChatType,
     messages::{
@@ -28,6 +28,7 @@ pub struct ChatScreen {
     message_bytes: usize,
     transcript_scroll: gpui::ScrollHandle,
     message_input: gpui::Entity<InputState>,
+    send_error: Option<&'static str>,
 }
 
 impl ChatScreen {
@@ -42,12 +43,14 @@ impl ChatScreen {
             message_bytes: 0,
             transcript_scroll: gpui::ScrollHandle::new(),
             message_input,
+            send_error: None,
         }
     }
 
     pub fn set_session(&mut self, session: AgentSession, cx: &mut Context<Self>) {
         self.session = Some(session);
         self.region_name = None;
+        self.send_error = None;
         cx.notify();
     }
 
@@ -55,6 +58,7 @@ impl ChatScreen {
         self.session = None;
         self.region_name = None;
         self.session_handle = None;
+        self.send_error = None;
         self.messages.clear();
         self.message_bytes = 0;
         self.transcript_scroll = gpui::ScrollHandle::new();
@@ -68,6 +72,7 @@ impl ChatScreen {
 
     pub fn set_session_handle(&mut self, session_handle: SessionHandle, cx: &mut Context<Self>) {
         self.session_handle = Some(session_handle);
+        self.send_error = None;
         cx.notify();
     }
 
@@ -96,12 +101,16 @@ impl ChatScreen {
                     },
                     Delivery::Reliable,
                 )
-                .map_err(|error| error.to_string()),
-            _ => Err("Connect to a simulator before sending nearby chat.".into()),
+                .map_err(|error| {
+                    tracing::warn!(%error, "nearby chat send failed");
+                    send_error_copy(&error)
+                }),
+            _ => Err("Connect to a simulator before sending nearby chat."),
         };
 
         match result {
             Ok(()) => {
+                self.send_error = None;
                 let from_name = self
                     .session
                     .as_ref()
@@ -112,7 +121,8 @@ impl ChatScreen {
                 cx.notify();
             }
             Err(error) => {
-                tracing::warn!(%error, "nearby chat send failed");
+                self.send_error = Some(error);
+                cx.notify();
             }
         }
     }
@@ -180,12 +190,25 @@ impl Render for ChatScreen {
                     .border_t_1()
                     .border_color(theme.border)
                     .debug_selector(|| "chat-composer".to_owned())
+                    .when_some(self.send_error, |composer, error| {
+                        composer.child(
+                            div()
+                                .id("nearby-chat-send-error")
+                                .role(Role::Alert)
+                                .w_full()
+                                .min_w_0()
+                                .text_sm()
+                                .text_color(theme.danger)
+                                .debug_selector(|| "chat-send-error".to_owned())
+                                .child(error),
+                        )
+                    })
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().flex_1().min_w_0().child(
+                            .child(div().flex_1().min_w_0().debug_selector(|| "chat-input".to_owned()).child(
                                 Input::new(&self.message_input).focus_bordered(false).aria_label("To nearby chat").h(px(38.)).w_full(),
                             ))
                             .child(
@@ -193,10 +216,20 @@ impl Render for ChatScreen {
                                     .label("Send")
                                     .primary()
                                     .h(px(32.))
+                                    .debug_selector(|| "chat-send-button".to_owned())
                                     .on_click(cx.listener(|this, _event, window, cx| this.send_message(window, cx))),
                             ),
                     ),
             )
+    }
+}
+
+fn send_error_copy(error: &NetworkError) -> &'static str {
+    match error {
+        NetworkError::CommandQueueFull => "Message wasn't sent. Try again in a moment.",
+        NetworkError::OutboundMessageTooLarge => "This message is too long to send. Shorten it and try again.",
+        NetworkError::SessionClosed | NetworkError::SimulatorConnectionClosed => "Message wasn't sent. Reconnect and try sending again.",
+        _ => "Couldn't send nearby chat. Check your connection and try again.",
     }
 }
 
@@ -222,9 +255,10 @@ fn retain_message(messages: &mut VecDeque<ChatMessage>, message_bytes: &mut usiz
 mod tests {
     use std::collections::VecDeque;
 
-    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, px, size};
+    use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, px, size};
 
-    use super::{ChatMessage, ChatScreen, MAX_CHAT_HISTORY_BYTES, MAX_CHAT_HISTORY_MESSAGES, retain_message};
+    use super::{ChatMessage, ChatScreen, MAX_CHAT_HISTORY_BYTES, MAX_CHAT_HISTORY_MESSAGES, retain_message, send_error_copy};
+    use network::Error as NetworkError;
 
     #[test]
     fn chat_history_keeps_recent_messages() {
@@ -267,6 +301,17 @@ mod tests {
         ));
         assert_eq!(messages.len(), 1);
         assert_eq!(messages.front().map(|message| message.from_name.as_str()), Some("Agent 1"));
+    }
+
+    #[test]
+    fn send_errors_preserve_safe_feedback() {
+        assert_eq!(send_error_copy(&NetworkError::CommandQueueFull), "Message wasn't sent. Try again in a moment.");
+        assert_eq!(send_error_copy(&NetworkError::OutboundMessageTooLarge), "This message is too long to send. Shorten it and try again.");
+        assert_eq!(send_error_copy(&NetworkError::SessionClosed), "Message wasn't sent. Reconnect and try sending again.");
+        assert_eq!(
+            send_error_copy(&NetworkError::SimulatorSend("session_id=private".into())),
+            "Couldn't send nearby chat. Check your connection and try again."
+        );
     }
 
     fn draw(cx: &mut VisualTestContext) {
@@ -375,5 +420,42 @@ mod tests {
         let screen = cx.debug_bounds("chat-screen").unwrap();
         let composer = cx.debug_bounds("chat-composer").unwrap();
         assert_eq!(composer.bottom(), screen.bottom());
+    }
+
+    #[gpui::test]
+    fn rejected_send_preserves_draft(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (chat, cx) = cx.add_window_view(ChatScreen::new);
+        draw(cx);
+
+        chat.update_in(cx, |chat, window, cx| chat.message_input.update(cx, |input, cx| input.set_value("hello nearby", window, cx)));
+        draw(cx);
+
+        let send_bounds = cx.debug_bounds("chat-send-button").unwrap();
+        cx.simulate_click(
+            point(send_bounds.left() + send_bounds.size.width / 2., send_bounds.top() + send_bounds.size.height / 2.),
+            Modifiers::default(),
+        );
+        draw(cx);
+
+        let (draft, message_count, send_error) = cx.update(|_, app| {
+            let chat = chat.read(app);
+            (chat.message_input.read(app).value().to_string(), chat.messages.len(), chat.send_error)
+        });
+        assert_eq!(draft, "hello nearby");
+        assert_eq!(message_count, 0);
+        assert_eq!(send_error, Some("Connect to a simulator before sending nearby chat."));
+        assert!(cx.debug_bounds("chat-send-error").is_some(), "the send error should be visible next to the composer");
+
+        cx.simulate_resize(size(px(360.), px(240.)));
+        draw(cx);
+        let error = cx.debug_bounds("chat-send-error").expect("visible error after resize");
+        let input = cx.debug_bounds("chat-input").expect("visible input after resize");
+        assert!(error.bottom() <= input.top(), "error feedback must not overlap the retained draft");
+        assert_eq!(cx.debug_bounds("chat-composer").unwrap().bottom(), cx.debug_bounds("chat-screen").unwrap().bottom());
+
+        cx.update(|_, app| chat.update(app, |chat, cx| chat.clear_session(cx)));
+        draw(cx);
+        assert!(cx.debug_bounds("chat-send-error").is_none(), "clearing the session should clear its stale send error");
     }
 }

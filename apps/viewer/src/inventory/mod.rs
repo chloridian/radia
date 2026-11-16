@@ -8,5 +8,5 @@ mod fetch;
 pub(crate) use edits::{AisDelta, InventoryEditController, InventoryEditEvent, MoveExpectation};
 pub use edits::{InventoryEditHandle, InventoryEditOutcome, InventoryEditRejection};
 pub use favorites::FavoriteLocation;
-pub(crate) use fetch::{FolderApplyOutcome, FolderFetch, InventoryFetchController, InventoryFetchEvent};
+pub(crate) use fetch::{FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryFetchController, InventoryFetchEvent};
 pub use fetch::{InventoryFetchError, InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequestError, InventoryLoadingStatus};

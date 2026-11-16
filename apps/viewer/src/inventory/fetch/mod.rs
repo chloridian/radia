@@ -6,7 +6,7 @@ mod state;
 
 use std::{fmt, time::Duration};
 
-use ::inventory::{CategoryKey, InventoryChild, InventoryError, ServerVersion};
+use ::inventory::{CategoryKey, InventoryChild, InventoryError, InventoryRevision, ServerVersion};
 use tokio::sync::oneshot;
 
 pub(crate) use decode::{to_category as category_from_wire, to_item as item_from_wire};
@@ -87,11 +87,20 @@ pub(crate) struct FolderFetch {
     pub(crate) version: ServerVersion,
     pub(crate) descendent_count: Option<u32>,
     pub(crate) children: Vec<InventoryChild>,
+    pub(crate) provenance: FolderFetchProvenance,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FolderFetchProvenance {
+    Untracked,
+    StartedAt(Option<InventoryRevision>),
 }
 
 #[derive(Debug)]
-pub(crate) struct FolderApplyOutcome {
-    pub(crate) rejected: bool,
+pub(crate) enum FolderApplyOutcome {
+    Applied,
+    Stale,
+    Rejected,
 }
 
 #[derive(Debug)]
