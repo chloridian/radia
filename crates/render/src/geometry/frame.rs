@@ -180,7 +180,6 @@ impl GeometryRenderer {
             }) {
                 let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, self.active_origin);
                 let pairs = environment_pairs(view, &self.textures, frame_input.environment);
-                self.update_region_water_bounds(camera.position());
                 self.update_environment_uniforms(device, camera, projection, size, frame_input, pairs);
                 if let Some(prepared) = self.prepared.as_mut() {
                     prepared.textures = self.textures.state();
@@ -585,9 +584,7 @@ impl GeometryRenderer {
             self.cache.size = size;
         }
         let pairs = environment_pairs(view, &self.textures, frame_input.environment);
-        if !rebuilding || camera_changed || update.immediate_visibility_change {
-            self.update_region_water_bounds(camera.position());
-        }
+        self.update_region_water_bounds(visible_changed);
         self.update_environment_uniforms(device, camera, projection, size, frame_input, pairs);
         self.cache.next_candidates.clear();
         let animation_deadline = (!rebuilding)
@@ -844,6 +841,7 @@ impl GeometryRenderer {
             frame_input.water_scroll,
             &self.region_water_bounds,
             self.region_water_count,
+            (camera.position() - self.active_origin).as_vec3(),
         );
         self.sky.update(
             device,
@@ -864,23 +862,23 @@ impl GeometryRenderer {
         );
     }
 
-    fn update_region_water_bounds(&mut self, camera: DVec3) {
+    fn update_region_water_bounds(&mut self, visible_changed: bool) {
+        if !visible_changed && !self.cache.region_water_changed && self.region_water_origin == Some(self.active_origin) {
+            return;
+        }
+        self.cache.region_water_changed = false;
+        self.region_water_origin = Some(self.active_origin);
         self.region_water_count = 0;
-        for index in self.cache.visible.iter().copied() {
-            let Some((region, position)) = self.cache.items.get(index).and_then(|item| {
-                (item.surface_kind == Some(crate::scene::SurfaceKind::RegionWater)).then_some((item.region, item.position))
-            }) else {
+        for index in self.cache.region_water.values().copied() {
+            if !self.cache.contains(&self.cache.visible, index) {
+                continue;
+            }
+            let Some(item) = self.cache.items.get(index) else { continue };
+            let relative = (item.position - self.active_origin).as_vec3();
+            let Some(bounds) = self.region_water_bounds.get_mut(self.region_water_count).filter(|_| relative.is_finite()) else {
                 continue;
             };
-            let relative = (position - camera).as_vec3();
-            if !relative.is_finite() || self.region_water_count >= self.region_water_bounds.len() {
-                continue;
-            }
-            if self.region_water_ids[..self.region_water_count].contains(&u128::from(region.get())) {
-                continue;
-            }
-            self.region_water_bounds[self.region_water_count] = math::Vec4::new(relative.x, relative.y, 256.0, 256.0);
-            self.region_water_ids[self.region_water_count] = u128::from(region.get());
+            *bounds = math::Vec4::new(relative.x, relative.y, 256.0, 256.0);
             self.region_water_count += 1;
         }
     }
