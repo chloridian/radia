@@ -11,9 +11,8 @@ use crate::geometry::{
     ShadingMode,
     instance::instance_base,
     items::{CachedItem, CachedReplacement, mesh_info},
-    visibility::RANGE_MARGIN,
 };
-use crate::scene::{Camera, SharedMesh};
+use crate::scene::{Camera, RANGE_MARGIN, SharedMesh};
 
 #[test]
 fn item_order_tracks_lifecycle() {

@@ -15,10 +15,10 @@ use super::items::{
     CachedFace, CachedFaceContext, CachedItem, CachedReplacement, ItemId, ItemIndex, ItemSlab, MeshInfo, cached_faces, draw_priority,
     mesh_info, object_draw_scale, same_surface_geometry,
 };
-use super::visibility::{RANGE_MARGIN, WorldSphere};
+use super::visibility::WorldSphere;
 use super::{GeometryRenderer, MeshState, ShadingMode};
 use crate::scene::{
-    Camera, DrawnMeshKey, MeshId, Object, Placement, PreparedMesh, SceneView, SharedMesh, Surface, SurfaceKind, ViewVersion,
+    Camera, DrawnMeshKey, MeshId, Object, Placement, PreparedMesh, RANGE_MARGIN, SceneView, SharedMesh, Surface, SurfaceKind, ViewVersion,
     VisibilityVersion, texture_animation,
 };
 
@@ -1863,7 +1863,7 @@ pub(super) fn range_moved(anchor: Camera, camera: Camera) -> bool {
 
 fn in_range(item: &CachedItem, camera: Camera) -> bool {
     WorldSphere::new(item.position, item.rotation, item.scale, item.info.bounds, camera)
-        .is_some_and(|sphere| sphere.in_range(item.shading, camera.draw_distance()))
+        .is_some_and(|sphere| sphere.in_range(item.shading, camera.range()))
 }
 
 fn contains_id(indices: &[ItemIndex], items: &ItemSlab, id: ItemId) -> bool {

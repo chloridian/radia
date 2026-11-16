@@ -3,8 +3,6 @@ use math::{Bounds, DVec3, Frustum, Quat, Sphere, Vec3};
 use super::ShadingMode;
 use crate::scene::Camera;
 
-pub(super) const RANGE_MARGIN: f64 = 16.0;
-
 #[derive(Clone, Copy)]
 pub(super) struct WorldSphere {
     center: DVec3,
@@ -28,8 +26,8 @@ impl WorldSphere {
         distance.is_finite().then_some(Self { center, radius: sphere.radius, distance })
     }
 
-    pub(super) fn in_range(self, shading: ShadingMode, draw_distance: f64) -> bool {
-        shading != ShadingMode::Surface || self.distance <= draw_distance + RANGE_MARGIN
+    pub(super) fn in_range(self, shading: ShadingMode, range: f64) -> bool {
+        shading != ShadingMode::Surface || self.distance <= range
     }
 
     pub(super) fn visible(self, shading: ShadingMode, camera: Camera, frustum: &Frustum) -> bool {

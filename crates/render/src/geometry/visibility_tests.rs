@@ -1,7 +1,11 @@
 use math::{Bounds, DVec3, Frustum, Quat, Vec3};
 
-use super::{RANGE_MARGIN, WorldSphere};
-use crate::{geometry::ShadingMode, pipeline::projection, scene::Camera};
+use super::WorldSphere;
+use crate::{
+    geometry::ShadingMode,
+    pipeline::projection,
+    scene::{Camera, RANGE_MARGIN},
+};
 
 const SIZE: [u32; 2] = [1000, 500];
 
@@ -12,9 +16,9 @@ fn range_extends_draw_distance_for_surfaces_only() {
     let point = Bounds { min: Vec3::ZERO, max: Vec3::ZERO };
     let behind = |distance: f64| sphere(DVec3::new(-distance, 0.0, 0.0), point, camera);
 
-    assert!(behind(32.0 + RANGE_MARGIN).in_range(ShadingMode::Surface, camera.draw_distance()));
-    assert!(!behind(32.0 + RANGE_MARGIN + 0.01).in_range(ShadingMode::Surface, camera.draw_distance()));
-    assert!(behind(10_000.0).in_range(ShadingMode::Terrain, camera.draw_distance()));
+    assert!(behind(32.0 + RANGE_MARGIN).in_range(ShadingMode::Surface, camera.range()));
+    assert!(!behind(32.0 + RANGE_MARGIN + 0.01).in_range(ShadingMode::Surface, camera.range()));
+    assert!(behind(10_000.0).in_range(ShadingMode::Terrain, camera.range()));
 }
 
 #[test]

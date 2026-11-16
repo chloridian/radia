@@ -21,6 +21,7 @@ use world::WorldPose;
 
 pub use asset_demand::{AssetChange, AssetRequest, AssetTicket};
 pub use budget::{Budget, MEMORY_BYTES};
+pub(crate) use camera::RANGE_MARGIN;
 pub use camera::{Camera, CameraError};
 pub use environment::{
     EnvironmentChoice, EnvironmentPreset, EnvironmentProperty, EnvironmentPush, EnvironmentPushError, ExperienceProperty,

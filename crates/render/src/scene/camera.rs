@@ -9,6 +9,8 @@ use math::{DVec3, Vec3};
 
 use super::mesh::Detail;
 
+pub(crate) const RANGE_MARGIN: f64 = 16.0;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CameraError {
     Position,
@@ -89,6 +91,10 @@ impl Camera {
         self.draw_distance
     }
 
+    pub(crate) fn range(self) -> f64 {
+        self.draw_distance + RANGE_MARGIN
+    }
+
     pub fn position(self) -> DVec3 {
         self.position
     }
@@ -114,8 +120,14 @@ impl Camera {
     }
 
     pub(in crate::scene) fn importance(self, center: DVec3, radius: f64) -> Option<u32> {
-        self.detail(center, radius, None)?;
+        if !center.is_finite() || !radius.is_finite() || radius <= 0.0 {
+            return None;
+        }
         let offset = center - self.position;
+        let distance = offset.length();
+        if !distance.is_finite() || distance - radius > self.draw_distance {
+            return None;
+        }
         let depth = offset.dot(self.direction);
         if self.view_planes.into_iter().any(|plane| offset.dot(plane) < -radius) {
             return None;
@@ -159,7 +171,7 @@ impl Camera {
             return None;
         }
         let distance = (center - self.position).length();
-        if !distance.is_finite() || distance - radius > self.draw_distance {
+        if !distance.is_finite() || distance - radius > self.range() {
             return None;
         }
         if distance <= radius {
@@ -351,6 +363,8 @@ mod tests {
             assert_eq!(camera.with_quality(distance, 1.0).unwrap().draw_distance(), distance);
         }
         assert_eq!(camera.detail(DVec3::X * 900.0, 1.0, None), None);
+        assert_eq!(camera.detail(DVec3::X * (513.0 + RANGE_MARGIN), 1.0, None), Some(Detail::Lowest));
+        assert_eq!(camera.detail(DVec3::X * (513.1 + RANGE_MARGIN), 1.0, None), None);
         assert_eq!(camera.with_quality(1024.0, 1.0).unwrap().detail(DVec3::X * 900.0, 1.0, None), Some(Detail::Lowest));
         for distance in [0.0, 31.0, 1024.01, f64::NAN, f64::INFINITY] {
             assert_eq!(camera.with_quality(distance, 1.0), Err(CameraError::Quality));
@@ -393,6 +407,8 @@ mod tests {
         assert_eq!(wide.importance(DVec3::new(10.0, 0.0, 12.0), 1.0), None);
         assert_eq!(wide.importance(-DVec3::X * 10.0, 1.0), None);
         assert_eq!(wide.importance(DVec3::X * 600.0, 1.0), None);
+        assert!(wide.importance(DVec3::X * 513.0, 1.0).is_some());
+        assert_eq!(wide.importance(DVec3::X * 513.1, 1.0), None);
         assert!(square.importance(DVec3::X * 10.0, 1.0) > square.importance(DVec3::X * 100.0, 1.0));
         let vertical = Camera::new(DVec3::ZERO, Vec3::Z, PI / 2.0, [1000, 1000]).unwrap();
         assert!(vertical.importance(DVec3::Z * 10.0, 1.0).is_some());
