@@ -2890,6 +2890,8 @@ fn gpu_lod_keeps_fallback() {
         if geometry.cache.rebuild.is_none()
             && geometry.cache.version.as_ref() == Some(&view.version())
             && geometry.draw_list.valid()
+            && !geometry.draw_list.layout_pending()
+            && !geometry.layout_required
             && geometry.meshes.len() == 3
             && geometry.stats.pending_meshes == 0
         {

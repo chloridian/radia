@@ -293,10 +293,10 @@ impl GeometryRenderer {
         times.visibility += visibility_started.elapsed().saturating_sub(times.cache);
 
         let previous_mesh_state = self.cache.mesh_state;
-        let mut batches_invalidated = previous_mesh_state != self.memory.mesh_state();
-        if batches_invalidated {
+        if previous_mesh_state != self.memory.mesh_state() {
             self.draw_list.invalidate_batches();
         }
+        let mut batches_invalidated = self.draw_list.flush_batch_invalidation();
         let meshes_started = Instant::now();
         let pending_priority_changed = camera_changed && (self.mesh_admission.active || !self.pending_meshes.is_empty());
         let mesh_demands_started = Instant::now();
@@ -335,7 +335,7 @@ impl GeometryRenderer {
         self.stats.items_updated = update.items_updated;
         if self.cache.mesh_state != previous_mesh_state {
             self.draw_list.invalidate_batches();
-            batches_invalidated = true;
+            batches_invalidated |= self.draw_list.flush_batch_invalidation();
         }
         let mut appearance_deadline = None;
         let mut gated_entities = HashSet::new();
@@ -452,15 +452,9 @@ impl GeometryRenderer {
                 }
             }
         }
-        if self.draw_list.layout_pending() && (update.layout_invalidated || origin_rebased || batches_invalidated) {
+        if self.draw_list.layout_pending() && (update.layout_invalidated || origin_rebased) {
             #[cfg(test)]
-            self.note_layout_stale(if update.layout_invalidated {
-                "layout_invalidated"
-            } else if origin_rebased {
-                "origin_rebased"
-            } else {
-                "batches_invalidated"
-            });
+            self.note_layout_stale(if update.layout_invalidated { "layout_invalidated" } else { "origin_rebased" });
             self.draw_list.mark_layout_stale();
         }
         if layout_requested {

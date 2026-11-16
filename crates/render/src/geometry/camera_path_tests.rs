@@ -27,6 +27,7 @@ const DRAW_DISTANCE: f64 = 96.0;
 const EYE_HEIGHT: f64 = 25.0;
 const FRAME: Duration = Duration::from_micros(16_667);
 const SETTLE_FRAMES: u32 = 4_000;
+const CHURN_FRAMES: u32 = 240;
 
 #[derive(Clone, Copy, Debug)]
 enum Regime {
@@ -378,4 +379,28 @@ fn gpu_camera_path_yaw_reversal() {
 #[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --release --run-ignored only -E 'test(camera_path)' --no-capture --test-threads=1"]
 fn gpu_camera_path_walk() {
     run_regimes(&walk());
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --release --run-ignored only -E 'test(mesh_memory_churn)' --test-threads=1"]
+fn gpu_layout_commits_through_mesh_memory_churn() {
+    let center = DVec3::new(128.0, 128.0, EYE_HEIGHT);
+    let first = camera(center, 0.0);
+    let turned = camera(center, 90.0);
+    let mut rig = Rig::new(first);
+    rig.settle_at(turned);
+    rig.settle_at(first);
+    let mut lease = None;
+    for _ in 0..CHURN_FRAMES {
+        lease = match lease.take() {
+            Some(_) => None,
+            None => Some(rig.geometry.memory.reserve(4096, Resource::Mesh).expect("churn lease fits")),
+        };
+        rig.frame(turned);
+        assert_ne!(rig.geometry.stats.layout_stale_reason, Some("batches_invalidated"), "mesh memory churn discarded the pending layout");
+        if rig.geometry.stats.layouts > 0 {
+            return;
+        }
+    }
+    panic!("no layout committed while mesh memory changed every frame");
 }
