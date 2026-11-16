@@ -127,7 +127,7 @@ fn full_update_fixture() {
 }
 
 #[test]
-fn full_update_typed_fields_round_trip() {
+fn full_update_round_trips() {
     let object = ObjectData {
         local_id: 0x0102_0304,
         state: 0x05,
@@ -258,7 +258,7 @@ fn full_update_typed_fields_round_trip() {
 }
 
 #[test]
-fn object_update_quaternions_use_canonical_xyz() {
+fn object_update_rotations_are_canonical() {
     let rotation = Quat::from_xyzw(0.2, -0.3, 0.4, -0.84);
 
     let (_, packet) = decode(vectors::OBJECT_UPDATE);
@@ -298,7 +298,7 @@ fn object_update_quaternions_use_canonical_xyz() {
 }
 
 #[test]
-fn full_update_extended_motion_is_accepted() {
+fn full_update_accepts_extended_motion() {
     let (_, packet) = decode(vectors::OBJECT_UPDATE);
     let Message::ObjectUpdate(update) = packet.message() else {
         panic!("expected full object update");
@@ -334,7 +334,7 @@ fn full_update_extended_motion_is_accepted() {
 }
 
 #[test]
-fn full_update_rejects_unsupported_motion_lengths() {
+fn full_update_rejects_motion_lengths() {
     let (_, packet) = decode(vectors::OBJECT_UPDATE);
     let Message::ObjectUpdate(update) = packet.message().clone() else {
         panic!("expected full object update");

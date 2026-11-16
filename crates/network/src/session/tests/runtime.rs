@@ -104,7 +104,7 @@ fn generation(value: u64) -> HandoffGeneration {
 }
 
 #[test]
-fn crossed_region_is_bound_to_session() {
+fn crossed_region_is_session_bound() {
     let agent_id = Uuid::from_u128(1);
     let session_id = Uuid::from_u128(2);
     let handoff = decode_crossed_region(&crossed_region(agent_id, session_id), agent_id, session_id).expect("valid crossing");
@@ -128,7 +128,7 @@ fn teleport_finish_has_checked_destination() {
 }
 
 #[test]
-fn event_queue_teleport_finish_decodes_real_llsd_shape() {
+fn event_queue_finish_decodes_llsd() {
     let agent_id = Uuid::from_u128(1);
     let session_id = Uuid::from_u128(2);
     let body = teleport_finish_event(agent_id, "https://example.test/seed");
@@ -286,7 +286,7 @@ fn handoff_duplicates_ignore_seed_changes() {
 }
 
 #[test]
-fn contradictory_handoffs_need_same_circuit_order() {
+fn contradictory_handoffs_need_circuit_order() {
     let current = PendingPromotion {
         source: test_simulator_id(1),
         target: test_simulator_id(2),
@@ -376,7 +376,7 @@ fn contradictory_handoffs_need_same_circuit_order() {
 }
 
 #[test]
-fn teleport_failure_needs_newer_local_order() {
+fn failure_needs_newer_order() {
     let pending = PendingPromotion {
         source: test_simulator_id(1),
         target: test_simulator_id(2),
@@ -411,7 +411,7 @@ fn teleport_failure_needs_newer_local_order() {
 }
 
 #[test]
-fn teleport_cancel_and_crossing_seed_are_redacted() {
+fn crossing_seed_is_redacted() {
     let message = Message::TeleportCancel(TeleportCancel { agent_id: Uuid::from_u128(1), session_id: Uuid::from_u128(2) });
     assert!(is_teleport_cancel(&message, Uuid::from_u128(1), Uuid::from_u128(2)));
     assert!(!is_teleport_cancel(&message, Uuid::from_u128(1), Uuid::from_u128(3)));
@@ -430,7 +430,7 @@ fn teleport_cancel_and_crossing_seed_are_redacted() {
 }
 
 #[tokio::test]
-async fn event_queue_panic_is_attributed_to_its_simulator_record() {
+async fn queue_panic_names_simulator() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let mut connection = connect_runtime(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default())
         .await
@@ -462,7 +462,7 @@ async fn event_queue_panic_is_attributed_to_its_simulator_record() {
 }
 
 #[tokio::test]
-async fn stale_event_queue_completion_leaves_replacement_running() {
+async fn stale_completion_keeps_replacement() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let mut connection = connect_runtime(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default())
         .await

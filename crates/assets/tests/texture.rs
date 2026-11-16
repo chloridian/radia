@@ -109,7 +109,7 @@ fn jp2_metadata_must_match() {
 
 proptest::proptest! {
     #[test]
-    fn mutations_never_publish_an_invalid_image(offset in 0usize..470, byte in proptest::prelude::any::<u8>()) {
+    fn mutations_never_publish_bad_images(offset in 0usize..470, byte in proptest::prelude::any::<u8>()) {
         let mut encoded = RGBA_J2C.to_vec();
         encoded[offset] = byte;
         if let Ok(image) = decode(&encoded) {

@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn sky_properties_set_only_known_fields() {
+    fn sky_ignores_unknown_properties() {
         let sky = Sky::from_properties([("gamma", b"r1.5".as_slice()), ("future", b"{'value':r2}".as_slice())]).unwrap();
         assert_eq!(sky.gamma, Some(1.5));
         assert_eq!(sky.sunlight, None);
@@ -554,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn sky_haze_prefers_legacy_values_per_field() {
+    fn legacy_haze_wins_per_field() {
         let sky = Sky::from_properties([
             ("legacy_haze", b"{'haze_density':r2}".as_slice()),
             ("haze_density", b"r1".as_slice()),

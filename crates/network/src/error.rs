@@ -85,7 +85,7 @@ mod redaction_tests {
     use crate::http;
 
     #[test]
-    fn error_debug_redacts_messages_but_display_preserves_them() {
+    fn debug_redacts_display_preserves() {
         let error = Error::Capability("capability-secret".into());
         assert!(!format!("{error:?}").contains("capability-secret"));
         assert!(format!("{error}").contains("capability-secret"));

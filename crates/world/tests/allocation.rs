@@ -109,7 +109,7 @@ fn world_memory_baseline() {
 }
 
 #[test]
-fn media_snapshot_copy_stays_within_its_budget() {
+fn media_copy_stays_in_budget() {
     let mut world = World::new(world_limits());
     let region = world.register_region().unwrap();
 

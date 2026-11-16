@@ -539,26 +539,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_blocks_with_source_location() {
+    fn rejects_duplicate_blocks() {
         let source =
             "version 2.0\n{\nExample Low 1 NotTrusted Unencoded\n{\nData Single\n{ One U8 }\n}\n{\nData Variable\n{ Two U8 }\n}\n}\n";
         assert_eq!(parse("bad.msg", source).expect_err("duplicate block names fail"), "bad.msg:9:1: duplicate block name Data in message");
     }
 
     #[test]
-    fn rejects_duplicate_fields_with_source_location() {
+    fn rejects_duplicate_fields() {
         let source = "version 2.0\n{\nExample Low 1 NotTrusted Unencoded\n{\nData Single\n{ Value U8 }\n{ Value U16 }\n}\n}\n";
         assert_eq!(parse("bad.msg", source).expect_err("duplicate field names fail"), "bad.msg:7:3: duplicate field name Value in block");
     }
 
     #[test]
-    fn duplicate_names_are_scoped_to_their_parent() {
+    fn duplicate_names_are_scoped() {
         let source = "version 2.0\n{ Example Low 1 NotTrusted Unencoded { First Single { Value U8 } } { Second Single { Value U16 } } }\n{ Other Low 2 NotTrusted Unencoded { First Single { Value U8 } } }";
         assert_eq!(parse("valid.msg", source).expect("names in separate scopes are valid").messages.len(), 2);
     }
 
     #[test]
-    fn invalid_identifiers_report_scope_and_location() {
+    fn rejects_invalid_identifiers() {
         let cases = [
             ("version 2.0\n{ Bad-Message Low 1 NotTrusted Unencoded }", "bad.msg:2:3: invalid identifier Bad-Message"),
             (

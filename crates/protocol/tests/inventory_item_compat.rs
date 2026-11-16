@@ -189,7 +189,7 @@ fn edit_item_preserves_flat_fields() {
 }
 
 #[test]
-fn legacy_entry_points_preserve_flat_fields() {
+fn legacy_decoders_keep_flat_fields() {
     let folder_id = id(3);
     let item_id = id(1);
     let owner_id = id(12);

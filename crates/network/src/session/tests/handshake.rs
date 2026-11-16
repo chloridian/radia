@@ -120,7 +120,7 @@ async fn handshake_chat_logout() {
 }
 
 #[tokio::test]
-async fn region_handshake_reply_is_explicit_and_preserves_application_flags() {
+async fn handshake_reply_preserves_flags() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
@@ -169,7 +169,7 @@ async fn region_handshake_reply_is_explicit_and_preserves_application_flags() {
 }
 
 #[test]
-fn region_handshake_reply_reports_a_full_command_queue_without_waiting() {
+fn handshake_reply_reports_full_queue() {
     let (commands, _receiver) = mpsc::channel(1);
     commands.try_send(Command::SubmitMfaCode("123456".into())).expect("fill command queue");
     let (disconnect_requested, _) = watch::channel(false);

@@ -65,7 +65,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_bindings_accept_nil_material_ids() {
+    fn empty_and_nil_bindings_decode() {
         assert_eq!(decode_render_material_bindings(&[0]).unwrap(), []);
 
         let mut bytes = vec![1];
@@ -90,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_u8_count_and_caps_faces() {
+    fn u8_count_caps_bindings() {
         let mut bytes = vec![u8::MAX];
         for index in 0..usize::from(u8::MAX) {
             let face_index = (index % MAX_TEXTURE_FACES) as u8;

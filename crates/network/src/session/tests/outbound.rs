@@ -37,7 +37,7 @@ async fn send_fixture(socket: &UdpSocket, peer: SocketAddr, name: &str, sequence
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn session_handle_send_reaches_the_simulator() {
+async fn handle_send_reaches_simulator() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let (login_url, http_server) = fake_login_server(simulator.local_addr().expect("simulator address").port());
     let credentials = LoginCredentials {

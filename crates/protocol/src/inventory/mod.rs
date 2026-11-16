@@ -207,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn ais_edit_response_decodes_all_change_metadata() {
+    fn ais_edit_decodes_metadata() {
         let ids = (1..=16).map(Uuid::from_u128).collect::<Vec<_>>();
         let metadata = Value::Map(Map::from([
             ("_created_categories".into(), Value::Array(vec![Value::Uuid(ids[0])])),
@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn ais_edit_response_rejects_mistyped_metadata() {
+    fn ais_edit_rejects_mistyped_metadata() {
         let cases = [
             ("_moved_items", Value::Map(Map::new())),
             ("_updated_category_versions", Value::Array(Vec::new())),
@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn ais_recursive_maps_decode_real_response() {
+    fn ais_recursive_maps_decode() {
         let owner = Uuid::from_u128(0x99);
         let root = Uuid::from_u128(1);
         let decoded = decode_ais_children(include_bytes!("../../tests/fixtures/ais_recursive_children.llsd.xml"), root, owner)
@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_map_keys_match_child_ids() {
+    fn embedded_keys_match_child_ids() {
         let owner = Uuid::from_u128(1);
         let root = Uuid::from_u128(2);
         let child_id = Uuid::from_u128(3);
@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_embedded_children_do_not_set_count() {
+    fn partial_children_omit_count() {
         let owner = Uuid::from_u128(1);
         let root = Uuid::from_u128(2);
         let mut root_fields = match category(root, None, 0) {
@@ -414,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_unknown_key_is_too_large() {
+    fn unknown_key_over_limit_rejected() {
         let owner = Uuid::from_u128(1);
         let folder = Uuid::from_u128(2);
         let mut fields = match category(folder, None, 0) {
@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn ais_created_at_requires_unix_integer_shape() {
+    fn created_at_requires_integer() {
         let owner = Uuid::from_u128(1);
         let root = Uuid::from_u128(2);
         let mut root_fields = match category(root, None, 1) {
@@ -506,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn official_type_names_decode_without_rejecting_folder() {
+    fn official_type_names_decode() {
         let owner = Uuid::from_u128(1);
         let folder = Uuid::from_u128(2);
         let asset_types = [
@@ -680,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn ais_item_endpoint_decodes_parent_and_identity() {
+    fn ais_item_decodes_identity() {
         let owner = Uuid::from_u128(1);
         let parent = Uuid::from_u128(2);
         let item_id = Uuid::from_u128(3);
@@ -691,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_items_response_rejects_unrequested_id() {
+    fn legacy_items_reject_unrequested_id() {
         let owner = Uuid::from_u128(1);
         let parent = Uuid::from_u128(2);
         let item_id = Uuid::from_u128(3);

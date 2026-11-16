@@ -81,7 +81,7 @@ fn inventory_with_folder_and_item() -> (Inventory, CategoryKey, ItemKey) {
 }
 
 #[test]
-fn applies_categories_before_items_and_uses_returned_versions() {
+fn categories_apply_before_items() {
     let owner = owner();
     let root = category(owner, 10, None, 4, Some(0));
     let root_key = root.key;
@@ -111,7 +111,7 @@ fn applies_categories_before_items_and_uses_returned_versions() {
 }
 
 #[test]
-fn category_moves_validate_the_final_parent_plan() {
+fn moves_validate_final_parents() {
     let owner = owner();
     let root = category(owner, 10, None, 4, Some(0));
     let root_key = root.key;
@@ -254,7 +254,7 @@ fn missing_parent_delta_is_atomic() {
 }
 
 #[test]
-fn returned_version_can_complete_a_new_folder_after_its_items_are_applied() {
+fn returned_version_completes_new_folder() {
     let owner = owner();
     let root = category(owner, 10, None, 4, Some(0));
     let root_key = root.key;
@@ -281,7 +281,7 @@ fn returned_version_can_complete_a_new_folder_after_its_items_are_applied() {
 }
 
 #[test]
-fn item_content_updates_do_not_change_parent_counts_or_versions() {
+fn item_updates_keep_parent_metadata() {
     let (mut inventory, folder, item_key) = inventory_with_folder_and_item();
     let mut changed = inventory.snapshot().item(item_key).expect("item exists").clone();
     changed.name = Arc::from("after");
@@ -298,7 +298,7 @@ fn item_content_updates_do_not_change_parent_counts_or_versions() {
 }
 
 #[test]
-fn removing_a_subtree_updates_its_surviving_parent() {
+fn subtree_removal_updates_parent() {
     let (mut inventory, folder, _) = inventory_with_folder_and_item();
     let root = inventory.roots().personal();
 
@@ -315,7 +315,7 @@ fn removing_a_subtree_updates_its_surviving_parent() {
 }
 
 #[test]
-fn mismatched_parent_count_preserves_version_and_requests_refetch() {
+fn count_mismatch_requests_refetch() {
     let (mut inventory, folder, _) = inventory_with_folder_and_item();
     let snapshot = inventory.snapshot();
     let existing = snapshot.items_for(folder.owner()).next().expect("one item exists").clone();
@@ -338,7 +338,7 @@ fn mismatched_parent_count_preserves_version_and_requests_refetch() {
 }
 
 #[test]
-fn stale_folder_fetch_does_not_overwrite_a_newer_live_update() {
+fn stale_fetch_keeps_live_update() {
     let (mut inventory, folder, original_item) = inventory_with_folder_and_item();
     inventory
         .apply_delta(InventoryDelta {
@@ -359,7 +359,7 @@ fn stale_folder_fetch_does_not_overwrite_a_newer_live_update() {
 }
 
 #[test]
-fn stale_version_delta_keeps_newer_contents_and_requests_refetch() {
+fn stale_delta_requests_refetch() {
     let (mut inventory, folder, item_key) = inventory_with_folder_and_item();
     let mut stale = inventory.snapshot().item(item_key).expect("item exists").clone();
     stale.name = Arc::from("stale");
@@ -382,7 +382,7 @@ fn stale_version_delta_keeps_newer_contents_and_requests_refetch() {
 }
 
 #[test]
-fn unknown_returned_version_keeps_known_version_but_marks_folder_incomplete() {
+fn unknown_version_marks_incomplete() {
     let (mut inventory, folder, _) = inventory_with_folder_and_item();
 
     let change = inventory
@@ -398,7 +398,7 @@ fn unknown_returned_version_keeps_known_version_but_marks_folder_incomplete() {
 }
 
 #[test]
-fn invalid_delta_does_not_publish_prior_operations() {
+fn invalid_delta_publishes_nothing() {
     let owner = owner();
     let root = category(owner, 10, None, 4, Some(0));
     let created = category(owner, 11, Some(10), -1, None);

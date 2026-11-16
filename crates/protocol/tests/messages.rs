@@ -104,7 +104,7 @@ fn movement_complete_fields() {
 }
 
 #[test]
-fn agent_update_quaternions_use_canonical_xyz() {
+fn agent_update_rotations_are_canonical() {
     fn message(rotation: Quat) -> Message {
         Message::AgentUpdate(AgentUpdate {
             agent_data: agent_update::AgentData {

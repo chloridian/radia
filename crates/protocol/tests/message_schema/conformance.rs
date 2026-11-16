@@ -51,7 +51,7 @@ fn fixtures_check_ids_and_bounds() {
 }
 
 #[test]
-fn schema_conforming_messages_match_wire_layout() {
+fn conforming_messages_match_layout() {
     for coverage in TYPED_MESSAGE_COVERAGE.iter().filter(|coverage| coverage.conformance == ConformanceCategory::SchemaConforming) {
         let Some(fixture) = coverage.fixture else { continue };
         let bytes = parse_hex_fixture(fixture).expect("inventory fixture is valid hex");
@@ -151,7 +151,7 @@ proptest! {
 
 proptest! {
     #[test]
-    fn chat_from_viewer_schema_wire_matches(
+    fn chat_schema_wire_matches(
         message in "[a-zA-Z0-9 ]{0,64}",
         chat_type in prop_oneof![
             Just(ChatType::Whisper),

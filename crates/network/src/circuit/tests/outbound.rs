@@ -34,7 +34,7 @@ fn control_sends_keep_reserved_capacity() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn full_reliable_window_keeps_reliable_work_queued_until_ack_packet() {
+async fn full_window_queues_reliable_work() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let socket = Arc::new(UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect transport"));
     let budget = OutboundBudget::new(8_000);
@@ -146,7 +146,7 @@ fn deferred_reliable_retry_expires() {
 }
 
 #[tokio::test]
-async fn control_traffic_cannot_restart_retry_deadline() {
+async fn control_keeps_retry_deadline() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let socket = Arc::new(UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect transport"));
     let budget = OutboundBudget::new(8_000);
@@ -181,7 +181,7 @@ async fn control_traffic_cannot_restart_retry_deadline() {
 }
 
 #[tokio::test]
-async fn shutdown_limits_sends_to_control_and_acks() {
+async fn shutdown_sends_only_control_acks() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let socket = Arc::new(UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect transport"));
     let budget = OutboundBudget::new(8_000);
@@ -284,7 +284,7 @@ async fn fair_sends_follow_retries() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn retry_loss_is_reported_once_per_reliable_generation() {
+async fn retry_loss_reports_once() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let socket = Arc::new(UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect transport"));
     let budget = OutboundBudget::new(20_000);
@@ -331,7 +331,7 @@ async fn retry_loss_is_reported_once_per_reliable_generation() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn primary_priority_sends_during_neighbor_retry_storm() {
+async fn primary_sends_during_retry_storm() {
     const NEIGHBOR_COUNT: usize = 4;
     const RETRIES_PER_NEIGHBOR: usize = 64;
 
@@ -462,7 +462,7 @@ fn urgent_send_preempts_fair() {
 }
 
 #[test]
-fn blocked_reliable_control_does_not_preempt_paced_fair_send() {
+fn blocked_control_defers_to_fair() {
     let mut circuit = Circuit::new();
     let reliable = queued_for_test(TrafficClass::Fair).message;
     for _ in 0..MAX_PENDING_PACKETS {
@@ -483,7 +483,7 @@ fn blocked_reliable_control_does_not_preempt_paced_fair_send() {
 }
 
 #[test]
-fn duplicate_reack_waits_for_ack_deadline_before_preempting_send() {
+fn duplicate_reack_waits_for_deadline() {
     let mut circuit = Circuit::new();
     let now = Instant::now();
     let received = circuit.prepare_receive(42, true, [], now).expect("reserve initial reliable packet");
@@ -513,7 +513,7 @@ fn duplicate_reack_waits_for_ack_deadline_before_preempting_send() {
 }
 
 #[tokio::test]
-async fn due_ack_preempts_deferred_payload_and_runs_before_retry() {
+async fn due_ack_precedes_payload_retry() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let socket = Arc::new(UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect transport"));
     let budget = OutboundBudget::new(8_000);

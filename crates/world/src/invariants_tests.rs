@@ -176,7 +176,7 @@ proptest::proptest! {
 }
 
 #[test]
-fn cycle_checks_follow_parents_beyond_the_pose_limit() {
+fn cycle_check_exceeds_pose_limit() {
     for use_observation in [false, true] {
         let mut world_limits = limits();
         world_limits.max_entities = 34;
