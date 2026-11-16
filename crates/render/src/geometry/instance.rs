@@ -90,4 +90,12 @@ mod tests {
         let world_tangent = rotation * (scale * local_tangent);
         assert!(world_normal.dot(world_tangent).abs() < 1e-5);
     }
+
+    #[test]
+    fn singular_scale_uploads_finite_normals() {
+        let bytes = instance_base(DVec3::ZERO, Quat::IDENTITY, Vec3::ZERO, false, DVec3::ZERO);
+        let normals: Vec<_> = bytes[64..112].as_chunks::<4>().0.iter().map(|component| f32::from_le_bytes(*component)).collect();
+
+        assert!(normals.iter().all(|component| component.is_finite()));
+    }
 }
