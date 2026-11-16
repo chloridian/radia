@@ -56,11 +56,10 @@ fn invalidate_completed(demand: &mut AssetDemand, mirror: &Mirror, ticket: Asset
 
 fn mesh_scene(count: u32) -> (Budget, Mirror, BTreeMap<Uuid, Entity>) {
     let budget = Budget::default();
-    let region = Region::new(1);
     let object_count = usize::try_from(count).expect("fixture object count fits usize");
     let tombstone_bytes = WorldLimits::tombstone_bytes_for_count(object_count);
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 1,
+        max_regions: 1,
         max_entities: object_count,
         max_entities_per_region: object_count,
         max_tombstones_per_region: object_count,
@@ -72,7 +71,7 @@ fn mesh_scene(count: u32) -> (Budget, Mirror, BTreeMap<Uuid, Entity>) {
         max_region_name_bytes: 64,
         max_recovery_targets: 1,
     });
-    let _adopted = world.adopt_region(region).expect("fixture region registers");
+    let region = world.register_region().expect("fixture region registers");
     let _origin =
         world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("fixture origin applies");
 
@@ -127,7 +126,7 @@ fn mesh_requests(demand: &mut AssetDemand) -> Vec<(AssetId, AssetTicket)> {
 #[test]
 fn live_region_texture_changes_release_old_demands_and_request_replacements() {
     let budget = Budget::default();
-    let region = Region::new(1);
+    let (_region_world, region) = crate::test_support::registered_region();
     let original = ids(10);
     let replacement = ids(20);
     let mut mirror = Mirror::default();
@@ -174,7 +173,7 @@ fn live_region_texture_changes_release_old_demands_and_request_replacements() {
 #[test]
 fn missing_and_failed_details_keep_the_neutral_fallback_for_each_layer() {
     let budget = Budget::default();
-    let region = Region::new(1);
+    let (_region_world, region) = crate::test_support::registered_region();
     let textures = ids(30);
     let mut mirror = Mirror::default();
     mirror.regions.insert(region, region_data(&budget, region, DVec3::ZERO, textures));
@@ -204,8 +203,9 @@ fn missing_and_failed_details_keep_the_neutral_fallback_for_each_layer() {
 #[test]
 fn neighboring_regions_keep_separate_detail_texture_sets() {
     let budget = Budget::default();
-    let south = Region::new(1);
-    let east = Region::new(2);
+    let (_region_world, regions) = crate::test_support::registered_regions(2);
+    let [south, east] = regions.as_slice() else { unreachable!() };
+    let (south, east) = (*south, *east);
     let south_textures = ids(40);
     let east_textures = ids(50);
     let mut mirror = Mirror::default();
@@ -226,7 +226,7 @@ fn neighboring_regions_keep_separate_detail_texture_sets() {
 #[test]
 fn nearby_terrain_details_refine_beyond_initial_size() {
     let budget = Budget::default();
-    let region = Region::new(1);
+    let (_region_world, region) = crate::test_support::registered_region();
     let mut mirror = Mirror::default();
     mirror.regions.insert(region, region_data(&budget, region, DVec3::ZERO, ids(60)));
     let close = camera().with_quality(64.0, 1.0).unwrap();
@@ -245,7 +245,7 @@ fn nearby_terrain_details_refine_beyond_initial_size() {
 #[test]
 fn terrain_background_keeps_resolution() {
     let budget = Budget::default();
-    let region = Region::new(1);
+    let (_region_world, region) = crate::test_support::registered_region();
     let textures = ids(70);
     let mut mirror = Mirror::default();
     mirror.regions.insert(region, region_data(&budget, region, DVec3::ZERO, textures));
@@ -332,9 +332,8 @@ fn terrain_background_keeps_resolution() {
 #[test]
 fn mesh_importance_keeps_its_ticket() {
     let budget = Budget::default();
-    let region = Region::new(1);
     let mut world = world::World::new(world::WorldLimits {
-        max_region_registrations: 1,
+        max_regions: 1,
         max_entities: 1,
         max_entities_per_region: 1,
         max_tombstones_per_region: 1,
@@ -346,7 +345,7 @@ fn mesh_importance_keeps_its_ticket() {
         max_region_name_bytes: 64,
         max_recovery_targets: 1,
     });
-    let _adopted = world.adopt_region(region).expect("fixture region registers");
+    let region = world.register_region().expect("fixture region registers");
     let _origin =
         world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("fixture origin applies");
     let asset = AssetId::new(Uuid::from_u128(90));
@@ -397,7 +396,7 @@ fn mesh_importance_keeps_its_ticket() {
 
 #[test]
 fn priority_keeps_ticket_until_resize() {
-    let region = Region::new(1);
+    let (_region_world, region) = crate::test_support::registered_region();
     let id = AssetId::new(Uuid::from_u128(100));
     let size = TextureSize::new(128);
     let user = AssetUser::Terrain(region);
@@ -526,11 +525,10 @@ fn camera_scan_reaches_target() {
     const MAX_TURNS: usize = 80;
 
     let budget = Budget::default();
-    let region = Region::new(1);
     let mesh_asset = AssetId::new(Uuid::from_u128(10_000));
     let tombstone_bytes = WorldLimits::tombstone_bytes_for_count(OBJECTS);
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 1,
+        max_regions: 1,
         max_entities: OBJECTS,
         max_entities_per_region: OBJECTS,
         max_tombstones_per_region: OBJECTS,
@@ -542,7 +540,7 @@ fn camera_scan_reaches_target() {
         max_region_name_bytes: 64,
         max_recovery_targets: 1,
     });
-    let _adopted = world.adopt_region(region).expect("fixture region registers");
+    let region = world.register_region().expect("fixture region registers");
     let _origin =
         world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("fixture origin applies");
 

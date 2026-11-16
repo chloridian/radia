@@ -2,7 +2,9 @@ use math::Vec3;
 use uuid::Uuid;
 
 use crate::update::{FieldStamp, Stamp};
-use crate::{AttachmentPoint, Kind, LinearMotion, LocalAddress, Parent, Region, Transform, UpdateAuthority, UpdateSource, WorldPose};
+use crate::{
+    AttachmentPoint, Kind, LinearMotion, LocalAddress, Parent, Region, Transform, UpdateAuthority, UpdateSource, WorldPose, WorldRevision,
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct Binding {
@@ -97,6 +99,7 @@ pub(crate) struct ObjectState {
     pub(crate) transform: Transform,
     pub(crate) binding: Binding,
     pub(crate) parent: Parent,
+    pub(crate) pending_since: WorldRevision,
     pub(crate) linear_motion: LinearMotion,
     pub(crate) angular_velocity: Option<Vec3>,
     pub(crate) is_physical: bool,
@@ -115,6 +118,7 @@ impl ObjectState {
             transform: Transform::default(),
             binding,
             parent: Parent::Unknown,
+            pending_since: WorldRevision(0),
             linear_motion: LinearMotion::default(),
             angular_velocity: None,
             is_physical: false,

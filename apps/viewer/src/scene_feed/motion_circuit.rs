@@ -188,7 +188,7 @@ mod tests {
         let silence = Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
         let taper = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
         let maximum_interpolation = silence + taper;
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let mut liveness = MotionCircuitLiveness::default();
         let status = |last_packet_received_at| CircuitMotionStatus { last_packet_received_at, measured_ping_delay: None, connected: true };
 
@@ -208,7 +208,7 @@ mod tests {
 
     #[tokio::test]
     async fn circuit_watcher_wakes_on_state_changes_but_not_active_packets() {
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let status = CircuitMotionStatus { last_packet_received_at: Instant::now(), measured_ping_delay: None, connected: false };
         let (status_sender, status_receiver) = watch::channel(status);
         let (_circuits_sender, circuits_receiver) = watch::channel(vec![(region, status_receiver)]);
@@ -237,7 +237,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn silence_wakes_once() {
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let last_packet_received_at = tokio::time::Instant::now().into_std();
         let status = CircuitMotionStatus { last_packet_received_at, measured_ping_delay: None, connected: true };
         let (status_sender, status_receiver) = watch::channel(status);

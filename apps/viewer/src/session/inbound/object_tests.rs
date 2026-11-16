@@ -21,8 +21,6 @@ use world::{
 
 use super::{ObjectOperation, attachment_point, decode_object_message, object_media_requests};
 
-const REGION: Region = Region::new(11);
-
 fn full_prim_shape() -> PrimShape {
     PrimShape {
         path_curve: 16,
@@ -178,28 +176,29 @@ fn xyz_packet(fixture: &str, z: f32) -> Packet {
     Packet::decode(&bytes).expect("decode raw XYZ rotation")
 }
 
-fn terse_patch(rotation: Quat, order: u64) -> ObjectPatch {
+fn terse_patch(region: Region, rotation: Quat, order: u64) -> ObjectPatch {
     let fixture_packet = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let mut message = fixture_packet.message().clone();
     let ImprovedTerseObjectUpdate(update) = &mut message else { panic!("expected terse fixture") };
     update.objects[0].as_decoded_mut().expect("fixture block is structurally valid").motion.rotation = rotation;
     let encoded = Packet::new(fixture_packet.sequence(), message).with_zero_coding(false).encode().expect("encode terse rotation");
     let packet = Packet::decode(&encoded).expect("decode terse rotation");
-    let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(order), packet.message())
+    let batch = decode_object_message(region, packet.sequence(), OrderEvidence::Ordered(order), packet.message())
         .expect("terse fixture has an object message");
     let Some(ObjectOperation::Patch(patch)) = batch.blocks.first().and_then(Option::as_ref) else { panic!("expected terse object patch") };
     patch.clone()
 }
 
 fn assert_xyz_rotation(fixture: &str, z: f32, accepted: bool) {
+    let mut world = world();
+    let region = region(&world);
     let packet = xyz_packet(fixture, z);
-    let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(1), packet.message())
+    let batch = decode_object_message(region, packet.sequence(), OrderEvidence::Ordered(1), packet.message())
         .expect("XYZ fixture has an object message");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks.first().and_then(Option::as_ref) else {
         panic!("expected full object observation")
     };
     let id = observation.id;
-    let mut world = world();
     let applied = world.observe_object(observation.clone()).expect("decoded object is accepted");
     let rejected = applied.rejections.iter().any(|rejection| rejection.reason == InvalidRotation);
     assert_eq!(rejected, !accepted);
@@ -218,9 +217,9 @@ fn world() -> World {
     world_with_regions(1)
 }
 
-fn world_with_regions(max_region_registrations: usize) -> World {
+fn world_with_regions(max_regions: usize) -> World {
     let limits = WorldLimits {
-        max_region_registrations,
+        max_regions,
         max_entities: 8,
         max_entities_per_region: 8,
         max_tombstones_per_region: 8,
@@ -233,19 +232,30 @@ fn world_with_regions(max_region_registrations: usize) -> World {
         max_recovery_targets: 8,
     };
     let mut world = World::new(limits);
-    assert!(matches!(world.adopt_region(REGION).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    for _ in 0..max_regions {
+        world.register_region().expect("fixture region registers");
+    }
     world
 }
 
+fn region(world: &World) -> Region {
+    world.region_page(None, 64).expect("fixture regions fit one page").regions[0].region
+}
+
+fn region_at(world: &World, index: usize) -> Region {
+    world.region_page(None, 64).expect("fixture regions fit one page").regions[index].region
+}
+
 fn assert_observed_rotation_is_valid(fixture: &str) {
+    let mut world = world();
+    let region = region(&world);
     let packet = packet(fixture);
-    let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(1), packet.message())
+    let batch = decode_object_message(region, packet.sequence(), OrderEvidence::Ordered(1), packet.message())
         .expect("fixture has an object message");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks.first().and_then(Option::as_ref) else {
         panic!("expected full object observation")
     };
     let id = observation.id;
-    let mut world = world();
     let applied = world.observe_object(observation.clone()).expect("decoded rotation is valid");
     assert!(!applied.rejections.iter().any(|rejection| rejection.reason == InvalidRotation), "rejections: {:?}", applied.rejections);
     let Introduced(entity) = applied.outcome else { panic!("expected object introduction") };

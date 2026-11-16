@@ -1,14 +1,14 @@
 use super::support::{
     AssetChange, AssetId, Budget, Duration, EnvironmentAssignment, EnvironmentProperty, EnvironmentPush, EnvironmentScope,
-    EnvironmentSource, ExperienceId, Instant, ParcelLocalId, ReadFailure, ReconcileStep, Reconciler, Region, Uuid, WorldReadError,
-    prepared_asset, settle, settle_materials, source, world,
+    EnvironmentSource, ExperienceId, Instant, ParcelLocalId, ReadFailure, ReconcileStep, Reconciler, Uuid, WorldReadError, prepared_asset,
+    settle, settle_materials, source, world, world_region, world_with_region_count,
 };
 use render::environment::Schedule;
 
 #[test]
 fn unrepresentable_transition_leaves_no_pending_work() {
     let world = world();
-    let region = Region::new(1);
+    let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
@@ -43,7 +43,7 @@ fn unrepresentable_transition_leaves_no_pending_work() {
 #[test]
 fn parcel_environment_precedes_region_and_inherit_falls_through() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
@@ -55,12 +55,12 @@ fn parcel_environment_precedes_region_and_inherit_falls_through() {
         Some(3000),
         Some([1000.0, 2000.0, 3000.0]),
     );
-    let _ = world.observe_environment(target, source(1, 1), region_assignment).unwrap();
+    let _ = world.observe_environment(target, source(&world, 0, 1), region_assignment).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.environment(region).map(|value| value.description().name.as_str()), Some("region"));
     let parcel = ParcelLocalId::new(7).unwrap();
-    let _ = world.observe_agent_parcel(source(1, 2), Some(parcel)).unwrap();
+    let _ = world.observe_agent_parcel(source(&world, 0, 2), Some(parcel)).unwrap();
     let parcel_target = world.environment_target(region, EnvironmentScope::Parcel(parcel)).unwrap();
     let parcel_assignment = assignment(
         EnvironmentSource::Inline(b"{'type':'sky','name':'parcel'}".as_slice().into()),
@@ -69,14 +69,14 @@ fn parcel_environment_precedes_region_and_inherit_falls_through() {
         None,
         Some([90.0, 80.0, 70.0]),
     );
-    let _ = world.observe_environment(parcel_target, source(1, 3), parcel_assignment).unwrap();
+    let _ = world.observe_environment(parcel_target, source(&world, 0, 3), parcel_assignment).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     let environment = view.environment(region).unwrap();
     assert_eq!(environment.description().name, "parcel");
     assert_eq!(environment.schedule(), Schedule { day_length: 7200.0, day_offset: 3000.0, altitudes: [1000.0, 2000.0, 3000.0] });
     let inherit = assignment(EnvironmentSource::Inherit, 2, None, None, None);
-    let _ = world.observe_environment(parcel_target, source(1, 4), inherit).unwrap();
+    let _ = world.observe_environment(parcel_target, source(&world, 0, 4), inherit).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     let environment = view.environment(region).unwrap();
@@ -87,13 +87,14 @@ fn parcel_environment_precedes_region_and_inherit_falls_through() {
 #[test]
 fn asset_and_inline_assignments_publish_decoded_settings() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let asset = AssetId::new(Uuid::from_u128(111));
     let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
-    let _ = world.observe_environment(target, source(1, 1), assignment(EnvironmentSource::Asset(asset), 1, None, None, None)).unwrap();
+    let _ =
+        world.observe_environment(target, source(&world, 0, 1), assignment(EnvironmentSource::Asset(asset), 1, None, None, None)).unwrap();
     scene.notify_world_change();
     let request = settle_materials(&mut scene, &mut view, &world, &mut now).requested.into_iter().next().expect("asset request");
     let ready = prepared_asset(request.request, b"{'type':'water','name':'asset'}".to_vec());
@@ -103,7 +104,7 @@ fn asset_and_inline_assignments_publish_decoded_settings() {
     assert_eq!(environment.description().name, "asset");
     std::assert_matches!(&environment.description().settings, assets::EnvironmentSettings::Water(_));
     let inline = assignment(EnvironmentSource::Inline(b"{'type':'sky','name':'inline'}".as_slice().into()), 2, None, None, None);
-    let _ = world.observe_environment(target, source(1, 2), inline).unwrap();
+    let _ = world.observe_environment(target, source(&world, 0, 2), inline).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     let environment = view.environment(region).unwrap();
@@ -114,7 +115,7 @@ fn asset_and_inline_assignments_publish_decoded_settings() {
 #[test]
 fn environment_identity_tracks_only_settings_and_schedule() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
@@ -123,7 +124,7 @@ fn environment_identity_tracks_only_settings_and_schedule() {
     let _ = world
         .observe_environment(
             target,
-            source(1, 1),
+            source(&world, 0, 1),
             assignment(EnvironmentSource::Inline(settings.as_slice().into()), 1, Some(3600), Some(600), None),
         )
         .unwrap();
@@ -133,7 +134,7 @@ fn environment_identity_tracks_only_settings_and_schedule() {
     let _ = world
         .observe_environment(
             target,
-            source(1, 2),
+            source(&world, 0, 2),
             assignment(EnvironmentSource::Inline(settings.as_slice().into()), 2, Some(3600), Some(600), None),
         )
         .unwrap();
@@ -143,7 +144,7 @@ fn environment_identity_tracks_only_settings_and_schedule() {
     let _ = world
         .observe_environment(
             target,
-            source(1, 3),
+            source(&world, 0, 3),
             assignment(EnvironmentSource::Inline(settings.as_slice().into()), 3, Some(7200), Some(600), None),
         )
         .unwrap();
@@ -154,7 +155,7 @@ fn environment_identity_tracks_only_settings_and_schedule() {
     let _ = world
         .observe_environment(
             target,
-            source(1, 4),
+            source(&world, 0, 4),
             assignment(EnvironmentSource::Inline(b"{'type':'sky','name':'changed'}".as_slice().into()), 4, Some(7200), Some(600), None),
         )
         .unwrap();
@@ -166,23 +167,27 @@ fn environment_identity_tracks_only_settings_and_schedule() {
 #[test]
 fn stale_asset_completion_is_ignored_and_previous_value_stays_until_replacement() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
     let old = assignment(EnvironmentSource::Inline(b"{'type':'sky','name':'old'}".as_slice().into()), 1, None, None, None);
-    let _ = world.observe_environment(target, source(1, 1), old).unwrap();
+    let _ = world.observe_environment(target, source(&world, 0, 1), old).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     let asset_a = AssetId::new(Uuid::from_u128(112));
-    let _ = world.observe_environment(target, source(1, 2), assignment(EnvironmentSource::Asset(asset_a), 2, None, None, None)).unwrap();
+    let _ = world
+        .observe_environment(target, source(&world, 0, 2), assignment(EnvironmentSource::Asset(asset_a), 2, None, None, None))
+        .unwrap();
     scene.notify_world_change();
     let request_a =
         settle_materials(&mut scene, &mut view, &world, &mut now).requested.into_iter().next().expect("first replacement request");
     assert_eq!(view.environment(region).unwrap().description().name, "old");
     let asset_b = AssetId::new(Uuid::from_u128(113));
-    let _ = world.observe_environment(target, source(1, 3), assignment(EnvironmentSource::Asset(asset_b), 3, None, None, None)).unwrap();
+    let _ = world
+        .observe_environment(target, source(&world, 0, 3), assignment(EnvironmentSource::Asset(asset_b), 3, None, None, None))
+        .unwrap();
     scene.notify_world_change();
     let replacement = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(replacement.released.contains(&request_a.ticket));
@@ -198,20 +203,21 @@ fn stale_asset_completion_is_ignored_and_previous_value_stays_until_replacement(
 #[test]
 fn parcel_failure_falls_back_to_region_then_none() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
     let region_asset = AssetId::new(Uuid::from_u128(114));
-    let _ =
-        world.observe_environment(target, source(1, 1), assignment(EnvironmentSource::Asset(region_asset), 1, None, None, None)).unwrap();
+    let _ = world
+        .observe_environment(target, source(&world, 0, 1), assignment(EnvironmentSource::Asset(region_asset), 1, None, None, None))
+        .unwrap();
     let parcel = ParcelLocalId::new(7).unwrap();
-    let _ = world.observe_agent_parcel(source(1, 2), Some(parcel)).unwrap();
+    let _ = world.observe_agent_parcel(source(&world, 0, 2), Some(parcel)).unwrap();
     let parcel_target = world.environment_target(region, EnvironmentScope::Parcel(parcel)).unwrap();
     let parcel_asset = AssetId::new(Uuid::from_u128(115));
     let _ = world
-        .observe_environment(parcel_target, source(1, 3), assignment(EnvironmentSource::Asset(parcel_asset), 1, None, None, None))
+        .observe_environment(parcel_target, source(&world, 0, 3), assignment(EnvironmentSource::Asset(parcel_asset), 1, None, None, None))
         .unwrap();
     scene.notify_world_change();
     let parcel_request = settle_materials(&mut scene, &mut view, &world, &mut now).requested.into_iter().next().expect("parcel request");
@@ -227,20 +233,21 @@ fn parcel_failure_falls_back_to_region_then_none() {
 #[test]
 fn retryable_failure_keeps_waiting_for_the_store() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
     let region_asset = AssetId::new(Uuid::from_u128(114));
-    let _ =
-        world.observe_environment(target, source(1, 1), assignment(EnvironmentSource::Asset(region_asset), 1, None, None, None)).unwrap();
+    let _ = world
+        .observe_environment(target, source(&world, 0, 1), assignment(EnvironmentSource::Asset(region_asset), 1, None, None, None))
+        .unwrap();
     let parcel = ParcelLocalId::new(7).unwrap();
-    let _ = world.observe_agent_parcel(source(1, 2), Some(parcel)).unwrap();
+    let _ = world.observe_agent_parcel(source(&world, 0, 2), Some(parcel)).unwrap();
     let parcel_target = world.environment_target(region, EnvironmentScope::Parcel(parcel)).unwrap();
     let parcel_asset = AssetId::new(Uuid::from_u128(115));
     let _ = world
-        .observe_environment(parcel_target, source(1, 3), assignment(EnvironmentSource::Asset(parcel_asset), 1, None, None, None))
+        .observe_environment(parcel_target, source(&world, 0, 3), assignment(EnvironmentSource::Asset(parcel_asset), 1, None, None, None))
         .unwrap();
     scene.notify_world_change();
     let request = settle_materials(&mut scene, &mut view, &world, &mut now).requested.into_iter().next().expect("parcel request");
@@ -259,7 +266,7 @@ fn retryable_failure_keeps_waiting_for_the_store() {
 #[test]
 fn stale_session_releases_ticket_without_falling_back() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
@@ -267,16 +274,17 @@ fn stale_session_releases_ticket_without_falling_back() {
     let _ = world
         .observe_environment(
             target,
-            source(1, 1),
+            source(&world, 0, 1),
             assignment(EnvironmentSource::Inline(b"{'type':'sky','name':'region'}".as_slice().into()), 1, None, None, None),
         )
         .unwrap();
     let parcel = ParcelLocalId::new(7).unwrap();
-    let _ = world.observe_agent_parcel(source(1, 2), Some(parcel)).unwrap();
+    let _ = world.observe_agent_parcel(source(&world, 0, 2), Some(parcel)).unwrap();
     let parcel_target = world.environment_target(region, EnvironmentScope::Parcel(parcel)).unwrap();
     let asset = AssetId::new(Uuid::from_u128(119));
-    let _ =
-        world.observe_environment(parcel_target, source(1, 3), assignment(EnvironmentSource::Asset(asset), 1, None, None, None)).unwrap();
+    let _ = world
+        .observe_environment(parcel_target, source(&world, 0, 3), assignment(EnvironmentSource::Asset(asset), 1, None, None, None))
+        .unwrap();
     scene.notify_world_change();
     let request = settle_materials(&mut scene, &mut view, &world, &mut now).requested.into_iter().next().expect("parcel request");
     scene.complete_asset(request.ticket, assets::Status::StaleSession);
@@ -288,10 +296,9 @@ fn stale_session_releases_ticket_without_falling_back() {
 
 #[test]
 fn retirement_releases_environment_ticket_and_source_charge() {
-    let mut world = world();
-    let region = Region::new(1);
-    let other_region = Region::new(2);
-    let _ = world.adopt_region(other_region).unwrap();
+    let (mut world, regions) = world_with_region_count(2);
+    let region = regions[0];
+    let other_region = regions[1];
     let _ = world.patch_region(other_region, ::world::RegionInfo::default()).unwrap();
     let budget = Budget::default();
     let (mut scene, mut view) = Reconciler::new(budget.clone());
@@ -299,7 +306,8 @@ fn retirement_releases_environment_ticket_and_source_charge() {
     settle(&mut scene, &mut view, &world, &mut now);
     let asset = AssetId::new(Uuid::from_u128(116));
     let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
-    let _ = world.observe_environment(target, source(1, 1), assignment(EnvironmentSource::Asset(asset), 1, None, None, None)).unwrap();
+    let _ =
+        world.observe_environment(target, source(&world, 0, 1), assignment(EnvironmentSource::Asset(asset), 1, None, None, None)).unwrap();
     scene.notify_world_change();
     let request = settle_materials(&mut scene, &mut view, &world, &mut now).requested.into_iter().next().expect("asset request");
     let charged = budget.charged_bytes();
@@ -321,13 +329,14 @@ fn retirement_releases_environment_ticket_and_source_charge() {
 #[test]
 fn reset_and_close_release_pending_environment_assets() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = world_region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
     let asset = AssetId::new(Uuid::from_u128(117));
-    let _ = world.observe_environment(target, source(1, 1), assignment(EnvironmentSource::Asset(asset), 1, None, None, None)).unwrap();
+    let _ =
+        world.observe_environment(target, source(&world, 0, 1), assignment(EnvironmentSource::Asset(asset), 1, None, None, None)).unwrap();
     scene.notify_world_change();
     let request = settle_materials(&mut scene, &mut view, &world, &mut now).requested.into_iter().next().expect("asset request");
     scene.notify_world_change();
@@ -338,13 +347,15 @@ fn reset_and_close_release_pending_environment_assets() {
     scene.complete_asset(request.ticket, prepared_asset(request.request, b"{'type':'sky','name':'stale'}".to_vec()));
     assert!(view.environment(region).is_none());
 
-    let mut close_world = super::support::world();
+    let (mut close_world, close_regions) = world_with_region_count(1);
+    let close_region = close_regions[0];
     let asset = AssetId::new(Uuid::from_u128(118));
     let (mut closed_scene, mut closed_view) = Reconciler::new(Budget::default());
     settle(&mut closed_scene, &mut closed_view, &close_world, &mut now);
-    let target = close_world.environment_target(region, EnvironmentScope::Region).unwrap();
-    let _ =
-        close_world.observe_environment(target, source(1, 2), assignment(EnvironmentSource::Asset(asset), 2, None, None, None)).unwrap();
+    let target = close_world.environment_target(close_region, EnvironmentScope::Region).unwrap();
+    let _ = close_world
+        .observe_environment(target, source(&close_world, 0, 2), assignment(EnvironmentSource::Asset(asset), 2, None, None, None))
+        .unwrap();
     closed_scene.notify_world_change();
     let request =
         settle_materials(&mut closed_scene, &mut closed_view, &close_world, &mut now).requested.into_iter().next().expect("asset request");
@@ -352,7 +363,7 @@ fn reset_and_close_release_pending_environment_assets() {
     let ReconcileStep::Asset(AssetChange::Release(ticket)) = closed_scene.poll(now) else { panic!("expected environment release") };
     assert_eq!(ticket, request.ticket);
     closed_scene.complete_asset(request.ticket, prepared_asset(request.request, b"{'type':'sky','name':'stale'}".to_vec()));
-    assert!(closed_view.environment(region).is_none());
+    assert!(closed_view.environment(close_region).is_none());
     if let ReconcileStep::Closed = closed_scene.poll(now) {
     } else {
         panic!("expected closed scene")

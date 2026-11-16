@@ -479,7 +479,7 @@ mod tests {
     use uuid::Uuid;
     use world::{LocalAddress, Region};
 
-    use crate::test_helpers::simulator_id;
+    use crate::test_helpers::{registered_regions, simulator_id};
 
     use super::{
         MAX_RECOVERY_OBJECTS_PER_REQUEST, MAX_RECOVERY_REQUEST_BYTES, RECOVERY_ENTRY_BYTES, RECOVERY_IDLE_WAIT, RECOVERY_MAX_AGE,
@@ -487,8 +487,8 @@ mod tests {
         recovery_request,
     };
 
-    fn address(region: u64, local_id: u32) -> LocalAddress {
-        LocalAddress::new(Region::new(region), NonZeroU32::new(local_id).expect("nonzero local ID"))
+    fn address(region: Region, local_id: u32) -> LocalAddress {
+        LocalAddress::new(region, NonZeroU32::new(local_id).expect("nonzero local ID"))
     }
 
     fn agent_data() -> RequestAgentData {
@@ -497,8 +497,9 @@ mod tests {
 
     #[test]
     fn retries_coalesce_and_stop_after_the_send_limit() {
+        let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
-        let target = address(simulator.get(), 8);
+        let target = address(regions[0], 8);
         let mut now = Instant::now();
         let mut scheduler = RecoveryScheduler::with_limits(1, RECOVERY_ENTRY_BYTES);
         assert!(scheduler.schedule(simulator, agent_data(), target, now).is_some());
@@ -528,9 +529,10 @@ mod tests {
 
     #[test]
     fn stale_completions_cannot_change_replaced_or_degraded_work() {
+        let (_region_world, regions) = registered_regions(1);
         let source = simulator_id();
         let destination = simulator_id();
-        let target = address(source.get(), 10);
+        let target = address(regions[0], 10);
         let now = Instant::now();
 
         for replacement in [Some(source), Some(destination), None] {
@@ -565,10 +567,11 @@ mod tests {
 
     #[test]
     fn simulator_retirement_clears_only_its_current_routes() {
+        let (_region_world, regions) = registered_regions(1);
         let source = simulator_id();
         let destination = simulator_id();
-        let target = address(source.get(), 9);
-        let failed = address(source.get(), 10);
+        let target = address(regions[0], 9);
+        let failed = address(regions[0], 10);
         let now = Instant::now();
         let mut scheduler = RecoveryScheduler::with_limits(2, 2 * RECOVERY_ENTRY_BYTES);
         assert!(scheduler.schedule(source, agent_data(), target, now).is_some());
@@ -590,8 +593,9 @@ mod tests {
 
     #[test]
     fn losing_route_or_session_context_stops_an_existing_recovery() {
+        let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
-        let target = address(simulator.get(), 9);
+        let target = address(regions[0], 9);
 
         for route in [Some(simulator), None] {
             let mut intake = RecoveryIntake::new();
@@ -607,17 +611,20 @@ mod tests {
     #[test]
     fn dispatch_batches_are_bounded_disjoint_and_simulator_local() {
         let simulators = [simulator_id(), simulator_id()];
+        let (_region_world, regions) = registered_regions(simulators.len());
         let now = Instant::now();
         let mut scheduler = RecoveryScheduler::new();
         let mut expected = HashSet::new();
-        for simulator in simulators {
-            for local_id in 1..=MAX_RECOVERY_OBJECTS_PER_REQUEST + 1 {
-                let target = address(simulator.get(), local_id as u32);
+        let targets_per_simulator = crate::session::world::MAX_WORLD_ENTITIES / simulators.len();
+        for (simulator, region) in simulators.into_iter().zip(regions.iter().copied()) {
+            for local_id in 1..=targets_per_simulator {
+                let target = address(region, local_id as u32);
                 assert!(scheduler.schedule(simulator, agent_data(), target, now).is_some());
                 expected.insert(target);
             }
         }
 
+        assert!(scheduler.schedule(simulators[0], agent_data(), address(regions[0], targets_per_simulator as u32 + 1), now).is_none());
         while !expected.is_empty() {
             let batch = scheduler.take_due(now);
             assert!(!batch.is_empty());
@@ -633,8 +640,9 @@ mod tests {
 
     #[test]
     fn transient_failures_back_off_without_spending_the_send_limit() {
+        let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
-        let target = address(simulator.get(), 8);
+        let target = address(regions[0], 8);
         let mut now = Instant::now();
         let mut scheduler = RecoveryScheduler::with_limits(1, RECOVERY_ENTRY_BYTES);
         assert!(scheduler.schedule(simulator, agent_data(), target, now).is_some());
@@ -652,9 +660,10 @@ mod tests {
 
     #[test]
     fn age_limit_suppresses_repeated_misses_until_an_object_update() {
+        let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
-        let target = address(simulator.get(), 8);
-        let other = address(simulator.get(), 9);
+        let target = address(regions[0], 8);
+        let other = address(regions[0], 9);
         let now = Instant::now();
         let mut scheduler = RecoveryScheduler::with_limits(1, RECOVERY_ENTRY_BYTES);
         assert!(scheduler.schedule(simulator, agent_data(), target, now).is_some());
@@ -671,11 +680,12 @@ mod tests {
 
     #[test]
     fn dispatch_never_sends_expired_work_left_by_bounded_cleanup() {
+        let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
         let now = Instant::now();
         let mut scheduler = RecoveryScheduler::new();
         for local_id in 1..=MAX_RECOVERY_OBJECTS_PER_REQUEST + 1 {
-            let target = address(simulator.get(), local_id as u32);
+            let target = address(regions[0], local_id as u32);
             assert!(scheduler.schedule(simulator, agent_data(), target, now).is_some());
         }
         let now = now + RECOVERY_MAX_AGE;
@@ -687,13 +697,14 @@ mod tests {
 
     #[test]
     fn admission_bounds_active_and_degraded_targets_together() {
+        let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
         let now = Instant::now();
         for (max_targets, max_bytes) in [(2, 3 * RECOVERY_ENTRY_BYTES), (3, 2 * RECOVERY_ENTRY_BYTES)] {
             let mut scheduler = RecoveryScheduler::with_limits(max_targets, max_bytes);
-            let first = address(simulator.get(), 1);
-            let second = address(simulator.get(), 2);
-            let excess = address(simulator.get(), 3);
+            let first = address(regions[0], 1);
+            let second = address(regions[0], 2);
+            let excess = address(regions[0], 3);
             assert!(scheduler.schedule(simulator, agent_data(), first, now).is_some());
             scheduler.mark_degraded(second, Some(simulator));
             assert!(scheduler.schedule(simulator, agent_data(), excess, now).is_none());
@@ -710,12 +721,13 @@ mod tests {
 
     #[test]
     fn requests_fetch_full_data_and_fit_the_wire_budget() {
-        let targets = [address(7, 10), address(7, 11)];
+        let (_region_world, regions) = registered_regions(1);
+        let targets = [address(regions[0], 10), address(regions[0], 11)];
         let request = recovery_request(agent_data(), &targets);
         assert_eq!(request.objects.iter().map(|object| object.local_id).collect::<Vec<_>>(), [10, 11]);
         assert!(request.objects.iter().all(|object| object.cache_miss_type == Full));
 
-        let targets = vec![address(7, 0xff00_ff00); MAX_RECOVERY_OBJECTS_PER_REQUEST];
+        let targets = vec![address(regions[0], 0xff00_ff00); MAX_RECOVERY_OBJECTS_PER_REQUEST];
         let agent_data = RequestAgentData {
             agent_id: Uuid::from_bytes([0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255]),
             ..agent_data()
@@ -729,9 +741,10 @@ mod tests {
     async fn pacing_delays_next_simulator_batch() {
         let first = simulator_id();
         let second = simulator_id();
+        let (_region_world, regions) = registered_regions(2);
         let mut intake = RecoveryIntake::new();
         intake.schedule(
-            vec![(Some(first), address(first.get(), 8), Full), (Some(second), address(second.get(), 9), Full)],
+            vec![(Some(first), address(regions[0], 8), Full), (Some(second), address(regions[1], 9), Full)],
             vec![],
             Some(agent_data()),
         );

@@ -116,8 +116,8 @@ mod tests {
     use super::*;
     use crate::session::world::{SessionWorld, viewer_world_limits};
 
-    fn source(order: u32) -> UpdateSource {
-        UpdateSource::new(Region::new(1), order, OrderEvidence::Ordered(u64::from(order)), 0)
+    fn source(region: Region, order: u32) -> UpdateSource {
+        UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0)
     }
 
     fn flat() -> Vec<u8> {
@@ -130,6 +130,7 @@ mod tests {
 
     #[tokio::test]
     async fn ordered_jobs_cancel_safely() {
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let mut work = TerrainDecodeQueue::default();
         let mut release = Vec::new();
         for order in 1..=MAX_TERRAIN_JOBS as u32 {
@@ -138,7 +139,7 @@ mod tests {
             work.jobs.push_back(
                 async move {
                     receive.await.unwrap();
-                    DecodedTerrain { source: source(order), patches: Vec::new(), rejected: 0 }
+                    DecodedTerrain { source: source(region, order), patches: Vec::new(), rejected: 0 }
                 }
                 .boxed(),
             );
@@ -157,7 +158,7 @@ mod tests {
         }
         let cancelled = Arc::clone(&work.cancelled);
         drop(work);
-        let decoded = decode_terrain_patches(source(1), &flat(), &cancelled);
+        let decoded = decode_terrain_patches(source(region, 1), &flat(), &cancelled);
         assert!(decoded.patches.is_empty());
     }
 

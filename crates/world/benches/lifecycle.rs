@@ -1,4 +1,4 @@
-use std::{hint::black_box, num::NonZeroU32};
+use std::hint::black_box;
 
 use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, measurement::WallTime};
 use math::{Quat, Vec3};
@@ -11,7 +11,8 @@ use world::{
 };
 
 use super::support::{
-    INITIAL_ORDER, PER_REGION, Row, SCENE_SIZES, Scene, empty_scene, limits, observation, populated_scene, rows, size_name, source,
+    INITIAL_ORDER, PER_REGION, Row, SCENE_SIZES, Scene, empty_scene, limits, observation, populated_scene, rows_for_regions, size_name,
+    source,
 };
 
 pub(super) fn bench(c: &mut Criterion) {
@@ -28,19 +29,17 @@ pub(super) fn bench(c: &mut Criterion) {
 fn bench_spawn(group: &mut BenchmarkGroup<'_, WallTime>) {
     for &count in SCENE_SIZES {
         group.throughput(Throughput::Elements(count as u64));
-        let (verification_rows, _) = rows(count, 0);
         let mut verification = empty_scene(count, false);
-        for row in &verification_rows {
+        for row in &verification.rows {
             assert!(matches!(verification.world.observe_object(observation(*row)).expect("object introduction").outcome, Introduced(_)));
         }
         assert_eq!(verification.world.object_count(), count);
 
         group.bench_with_input(BenchmarkId::new("spawn", size_name(count)), &count, |b, &count| {
-            let rows = rows(count, 0).0;
             b.iter_batched(
                 || empty_scene(count, false),
                 |mut scene| {
-                    for row in &rows {
+                    for row in &scene.rows {
                         let _ = black_box(scene.world.observe_object(observation(*row)).expect("object introduction"));
                     }
                     black_box(scene.world.object_count());
@@ -176,16 +175,13 @@ fn bench_agent_handoff(group: &mut BenchmarkGroup<'_, WallTime>) {
 }
 
 fn linked_scene(count: usize, linkset_size: usize) -> Scene {
-    let (mut rows, mut regions) = rows(count, 0);
-    regions.truncate(1);
     let mut world_limits = limits();
     world_limits.max_entities_per_region = count;
     let mut world = World::new(world_limits);
-    let _ = world.adopt_region(regions[0]).expect("adopt linked region");
-    for (index, row) in rows.iter_mut().enumerate() {
-        row.region = regions[0];
-        row.local_id = NonZeroU32::new(index as u32 + 1).unwrap();
-        row.order = INITIAL_ORDER + u64::from(row.local_id.get());
+    let region = world.register_region().expect("register linked region");
+    let regions = vec![region];
+    let rows = rows_for_regions(count, 0, &regions, count);
+    for row in &rows {
         let applied = world.observe_object(observation(*row)).expect("introduce linked object");
         assert!(matches!(applied.outcome, Introduced(_)));
     }

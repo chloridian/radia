@@ -1,14 +1,13 @@
 use super::support::{
     Ambiguous, AmbiguousOrder, AngularVelocity, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, FieldRejectionReason, IgnoredStale,
-    Introduced, InvalidRotation, KindMismatch, LinearMotion, MotionUpdateKind, Object, ObjectObservation, ObjectPatch, Pose, Quat, Region,
-    Removed, Root, Scale, Unchanged, Unknown, UnknownObject, UntrustedSource, UpdateSource, Updated, Vec3, address, local_id, object,
-    ordered, source, untracked, uuid, with_region,
+    Introduced, InvalidRotation, KindMismatch, LinearMotion, MotionUpdateKind, Object, ObjectObservation, ObjectPatch, Pose, Quat, Removed,
+    Root, Scale, Unchanged, Unknown, UnknownObject, UntrustedSource, UpdateSource, Updated, Vec3, address, local_id, object, ordered,
+    source, untracked, uuid, with_region,
 };
 
 #[test]
 fn all_invalid_patch_is_a_noop() {
-    let region = Region::new(44);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let id = uuid(440);
     let mut initial = object(source(region, 1), 440, 1, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) });
@@ -56,8 +55,7 @@ fn all_invalid_patch_is_a_noop() {
 
 #[test]
 fn unknown_pcode_is_preserved() {
-    let region = Region::new(24);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let result = world.observe_object(object(source(region, 1), 206, 1, Unknown(231), Root)).unwrap();
     let Introduced(entity) = result.outcome else { panic!("expected object introduction") };
 
@@ -66,8 +64,7 @@ fn unknown_pcode_is_preserved() {
 
 #[test]
 fn stale_kind_mismatch_is_rejected() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let added = world.observe_object(object(source(region, 10), 250, 1, Object, Root)).unwrap();
     let Introduced(entity) = added.outcome else { panic!("expected object introduction") };
     let revision = world.revision();
@@ -83,8 +80,7 @@ fn stale_kind_mismatch_is_rejected() {
 
 #[test]
 fn partial_patch_merge_and_ordering() {
-    let region = Region::new(1);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut initial = object(source(region, 10), 1, 10, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::new(1.0, 2.0, 3.0)), rotation: None });
     initial.scale = Some(Vec3::splat(2.0));
@@ -137,8 +133,7 @@ fn partial_patch_merge_and_ordering() {
 
 #[test]
 fn motion_metadata_is_stored_and_authoritative_updates_advance_the_sample() {
-    let region = Region::new(72);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let first_source = source(region, 1);
     let mut initial = object(first_source, 720, 1, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
@@ -171,8 +166,7 @@ fn motion_metadata_is_stored_and_authoritative_updates_advance_the_sample() {
 
 #[test]
 fn motion_bounds_depend_on_update_kind() {
-    let region = Region::new(73);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut initial = object(source(region, 1), 730, 1, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
     initial.linear_motion = Some(LinearMotion { velocity: Some(Vec3::ZERO), acceleration: Some(Vec3::ZERO) });
@@ -228,8 +222,7 @@ fn motion_bounds_depend_on_update_kind() {
 
 #[test]
 fn invalid_rotation_does_not_advance_pose() {
-    let region = Region::new(27);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut initial = object(source(region, 100), 270, 1, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) });
     initial.scale = Some(Vec3::ONE);
@@ -257,8 +250,7 @@ fn invalid_rotation_does_not_advance_pose() {
 
 #[test]
 fn quaternion_sign_and_freshness() {
-    let region = Region::new(28);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let rotation = Quat::from_rotation_y(0.25);
     let negative = Quat::from_xyzw(-rotation.x, -rotation.y, -rotation.z, -rotation.w);
     let mut initial = object(source(region, 1), 280, 1, Object, Root);
@@ -307,8 +299,7 @@ fn quaternion_sign_and_freshness() {
 
 #[test]
 fn partial_sign_flip_changes_rotation() {
-    let region = Region::new(31);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let rotation = Quat::from_rotation_y(0.25);
     let mut initial = object(source(region, 1), 310, 1, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::X), rotation: Some(rotation) });
@@ -329,8 +320,7 @@ fn partial_sign_flip_changes_rotation() {
 
 #[test]
 fn rounded_quaternion_sign_preserves_pose() {
-    let region = Region::new(29);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut initial = object(source(region, 1), 290, 1, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) });
     let introduced = world.observe_object(initial).unwrap();
@@ -374,8 +364,7 @@ fn rounded_quaternion_sign_preserves_pose() {
 
 #[test]
 fn equal_packet_blocks_keep_order() {
-    let region = Region::new(35);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut initial = object(source(region, 1), 350, 1, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
     let introduced = world.observe_object(initial).unwrap();
@@ -396,8 +385,7 @@ fn equal_packet_blocks_keep_order() {
 
 #[test]
 fn untracked_updates_respect_field_authority() {
-    let region = Region::new(32);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut initial = object(source(region, 1), 320, 1, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
     initial.scale = Some(Vec3::ONE);
@@ -459,8 +447,7 @@ fn untracked_updates_respect_field_authority() {
 
 #[test]
 fn untracked_motion_cannot_replace_tracked() {
-    let region = Region::new(31);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut initial = object(source(region, 1), 310, 1, Object, Root);
     initial.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X), acceleration: None });
     let introduced = world.observe_object(initial).unwrap();
@@ -494,8 +481,7 @@ fn untracked_motion_cannot_replace_tracked() {
 
 #[test]
 fn untracked_updates_fill_unfenced_groups() {
-    let region = Region::new(36);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let introduced = world.observe_object(object(source(region, 1), 360, 1, Object, Root)).unwrap();
     let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
 
@@ -534,8 +520,7 @@ fn untracked_updates_fill_unfenced_groups() {
 
 #[test]
 fn stale_observation_fills_only_unset_groups() {
-    let region = Region::new(7);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
 
     let mut initial = object(source(region, 100), 70, 10, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
@@ -575,8 +560,7 @@ fn stale_observation_fills_only_unset_groups() {
 
 #[test]
 fn observation_patch_advances_revision() {
-    let region = Region::new(16);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let created = world.observe_object(object(source(region, 1), 160, 1, Object, Root)).unwrap();
     let Introduced(entity) = created.outcome else { panic!("expected object introduction") };
     let revision = world.revision().get();
@@ -593,8 +577,7 @@ fn observation_patch_advances_revision() {
 
 #[test]
 fn patch_respects_field_fences_not_binding() {
-    let region = Region::new(12);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let mut initial = object(source(region, 100), 120, 10, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
     initial.scale = Some(Vec3::ONE);
@@ -614,8 +597,7 @@ fn patch_respects_field_fences_not_binding() {
 
 #[test]
 fn ambiguous_updates_defer_with_recovery() {
-    let region = Region::new(2);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let expected_address = address(region, 7);
     let observation = object(source(region, 1), 2, 7, Object, Root);
 
@@ -636,8 +618,7 @@ fn ambiguous_updates_defer_with_recovery() {
 
 #[test]
 fn empty_pose_patch_preserves_fence() {
-    let region = Region::new(18);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let created = world.observe_object(object(source(region, 1), 180, 1, Object, Root)).unwrap();
     let Introduced(entity) = created.outcome else { panic!("expected object introduction") };
     let revision = world.revision();

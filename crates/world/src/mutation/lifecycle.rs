@@ -88,7 +88,7 @@ impl World {
             let reason = cause.reason();
             let (id, state, media_bytes) = self.store.removal_data(entity.0);
             let address = state.binding.address;
-            let children = if expanded { None } else { self.children.remove(&entity) };
+            let children = if expanded { None } else { Some(self.take_dependents(entity)) };
             if expanded || children.as_ref().is_none_or(|children| children.is_empty()) {
                 self.object_media_bytes = self.object_media_bytes.saturating_sub(media_bytes);
                 self.detach_parent(entity);

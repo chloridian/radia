@@ -1,14 +1,13 @@
 use super::support::{
     AgentHandedOff, Ambiguous, AmbiguousOrder, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, HashSet, IgnoredStale, Introduced,
-    InvalidValue, KindMismatch, LinearMotion, Local, Object, ObjectPatch, Ordered, Parent, ParentCycle, Pending, Pose, Quat, Region,
-    RegionInfo, Removed, Resolved, Root, TombstoneRecorded, Unchanged, UpdateSource, Updated, Vec3, World, WorldLimits, address, limits,
-    local_id, object, source, uuid, with_region,
+    InvalidValue, KindMismatch, LinearMotion, Local, Object, ObjectPatch, Ordered, Parent, ParentCycle, Pending, Pose, Quat, RegionInfo,
+    Removed, Resolved, Root, TombstoneRecorded, Unchanged, UpdateSource, Updated, Vec3, World, WorldLimits, address, limits, local_id,
+    object, source, uuid, with_region,
 };
 
 #[test]
 fn object_count_tracks_live_objects() {
-    let region = Region::new(1);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     assert_eq!(world.object_count(), 0);
 
     assert!(matches!(world.observe_object(object(source(region, 1), 1, 1, Object, Root)).unwrap().outcome, Introduced(_)));
@@ -24,14 +23,13 @@ fn object_count_tracks_live_objects() {
 
 #[test]
 fn live_binding_precedes_region_floor() {
-    let region = Region::new(43);
     let mut world_limits = limits();
     world_limits.max_tombstones_per_region = 1;
     world_limits.max_tombstones = 1;
     world_limits.max_tombstone_bytes_per_region = WorldLimits::tombstone_bytes_for_count(1);
     world_limits.max_tombstone_bytes = WorldLimits::tombstone_bytes_for_count(1);
     let mut world = World::new(world_limits);
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
     let addr = address(region, 1);
     let created = world.observe_object(object(source(region, 10), 430, 1, Object, Root)).unwrap();
     let Introduced(entity) = created.outcome else { panic!("expected object introduction") };
@@ -50,11 +48,9 @@ fn live_binding_precedes_region_floor() {
 
 #[test]
 fn local_ids_are_region_scoped() {
-    let first_region = Region::new(22);
-    let second_region = Region::new(23);
     let mut world = World::new(limits());
-    assert!(matches!(world.adopt_region(first_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(second_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let first_region = world.register_region().unwrap();
+    let second_region = world.register_region().unwrap();
 
     let first = world.observe_object(object(source(first_region, 1), 204, 1, Object, Root)).unwrap();
     let Introduced(first_entity) = first.outcome else { panic!("expected first object introduction") };
@@ -70,11 +66,9 @@ fn local_ids_are_region_scoped() {
 
 #[test]
 fn world_queries_follow_lifecycle() {
-    let first_region = Region::new(20);
-    let second_region = Region::new(21);
     let mut world = World::new(limits());
-    assert!(matches!(world.adopt_region(first_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(second_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let first_region = world.register_region().unwrap();
+    let second_region = world.register_region().unwrap();
     assert!(matches!(
         world.patch_region(first_region, RegionInfo { name: Some("First".to_owned()), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
@@ -98,7 +92,9 @@ fn world_queries_follow_lifecycle() {
     assert_eq!(world.objects().iter().count(), 4);
     assert_eq!(world.objects_in_region(first_region).map(|object| object.id()).collect::<HashSet<_>>(), [uuid(200), uuid(201)].into());
     assert_eq!(world.objects_in_region(second_region).map(|object| object.id()).collect::<HashSet<_>>(), [uuid(202), uuid(203)].into());
-    assert_eq!(world.objects_in_region(Region::new(99)).count(), 0);
+    let mut foreign_world = World::new(limits());
+    let foreign_region = foreign_world.register_region().unwrap();
+    assert_eq!(world.objects_in_region(foreign_region).count(), 0);
     assert_eq!(world.children(parent_entity).map(|object| object.id()).collect::<HashSet<_>>(), [uuid(201)].into());
     assert_eq!(world.children(child_entity).count(), 0);
     assert_eq!(world.avatars().map(|object| object.id()).collect::<HashSet<_>>(), [uuid(202)].into());
@@ -129,10 +125,8 @@ fn world_queries_follow_lifecycle() {
 
 #[test]
 fn avatar_queries_follow_rebinding_replacement_and_retirement() {
-    let first = Region::new(1);
-    let second = Region::new(2);
-    let mut world = with_region(first);
-    let _ = world.adopt_region(second).unwrap();
+    let (mut world, first) = with_region();
+    let second = world.register_region().unwrap();
     let Introduced(avatar) = world.observe_object(object(source(first, 1), 10, 1, Avatar, Root)).unwrap().outcome else {
         panic!("expected avatar introduction")
     };
@@ -161,8 +155,7 @@ fn avatar_queries_follow_rebinding_replacement_and_retirement() {
 
 #[test]
 fn replacement_pends_cascaded_parent() {
-    let region = Region::new(1);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     world.set_self_agent(uuid(1)).unwrap();
     let avatar = world.observe_object(object(source(region, 0), 1, 1, Avatar, Root)).unwrap();
     let Introduced(avatar) = avatar.outcome else { panic!("expected avatar introduction") };
@@ -181,8 +174,7 @@ fn replacement_pends_cascaded_parent() {
 
 #[test]
 fn replacement_keeps_newer_target() {
-    let region = Region::new(1);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let root = world.observe_object(object(source(region, 0), 1, 1, Object, Root)).unwrap();
     let Introduced(root) = root.outcome else { panic!("expected root introduction") };
     let child = world.observe_object(object(source(region, 10), 2, 272, Object, Local(local_id(1)))).unwrap();
@@ -200,8 +192,7 @@ fn replacement_keeps_newer_target() {
 
 #[test]
 fn replacement_stops_at_avatar() {
-    let region = Region::new(1);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let root = world.observe_object(object(source(region, 0), 1, 1, Object, Root)).unwrap();
     let Introduced(root) = root.outcome else { panic!("expected root introduction") };
     let avatar = world.observe_object(object(source(region, 0), 2, 272, Avatar, Local(local_id(1)))).unwrap();
@@ -221,10 +212,8 @@ fn replacement_stops_at_avatar() {
 
 #[test]
 fn transfer_ignores_old_region_barrier() {
-    let first_region = Region::new(70);
-    let second_region = Region::new(71);
-    let mut world = with_region(first_region);
-    assert!(matches!(world.adopt_region(second_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let (mut world, first_region) = with_region();
+    let second_region = world.register_region().unwrap();
 
     let first_id = 700;
     let parent_id = 701;
@@ -253,8 +242,7 @@ fn transfer_ignores_old_region_barrier() {
 
 #[test]
 fn rebind_fences_old_local_id_at_rebind_stamp() {
-    let region = Region::new(13);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let created = world.observe_object(object(source(region, 100), 130, 1, Object, Root)).unwrap();
     let Introduced(original) = created.outcome else { panic!("expected introduction") };
 
@@ -270,8 +258,7 @@ fn rebind_fences_old_local_id_at_rebind_stamp() {
 
 #[test]
 fn unordered_removal_requests_recovery() {
-    let region = Region::new(51);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let entity = match world.observe_object(object(source(region, 1), 510, 7, Object, Root)).unwrap().outcome {
         Introduced(entity) => entity,
         other => panic!("expected object introduction, got {other:?}"),
@@ -289,11 +276,10 @@ fn unordered_removal_requests_recovery() {
 
 #[test]
 fn recovery_targets_respect_world_limit() {
-    let region = Region::new(41);
     let mut world_limits = limits();
     world_limits.max_recovery_targets = 2;
     let mut world = World::new(world_limits);
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
 
     let root = world.observe_object(object(source(region, 100), 410, 1, Object, Root)).unwrap();
     let Introduced(_) = root.outcome else { panic!("expected root introduction") };
@@ -318,11 +304,9 @@ fn recovery_targets_respect_world_limit() {
 
 #[test]
 fn agent_region_change_requires_handoff() {
-    let source_region = Region::new(4);
-    let destination_region = Region::new(5);
     let mut world = World::new(limits());
-    std::assert_matches!(world.adopt_region(source_region).unwrap().outcome, world::RegionOutcome::Adopted { .. });
-    std::assert_matches!(world.adopt_region(destination_region).unwrap().outcome, world::RegionOutcome::Adopted { .. });
+    let source_region = world.register_region().unwrap();
+    let destination_region = world.register_region().unwrap();
     let agent_id = uuid(40);
     world.set_self_agent(agent_id).unwrap();
 

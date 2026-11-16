@@ -381,8 +381,9 @@ mod tests {
 
     #[test]
     fn active_cycle_textures_are_requested_before_background_descriptions() {
+        let (_region_world, region) = crate::test_support::registered_region();
         let mut manager = EnvironmentTextures::new();
-        let active = BTreeMap::from([(asset(1), Region::new(1)), (asset(2), Region::new(1))]);
+        let active = BTreeMap::from([(asset(1), region), (asset(2), region)]);
 
         manager.update(&BTreeMap::new(), None, &active);
 
@@ -391,9 +392,10 @@ mod tests {
 
     #[test]
     fn pending_demand_stays_bounded() {
+        let (_region_world, region) = crate::test_support::registered_region();
         let mut manager = EnvironmentTextures::new();
         for value in 1..4096 {
-            manager.update(&BTreeMap::new(), None, &BTreeMap::from([(asset(value), Region::new(1))]));
+            manager.update(&BTreeMap::new(), None, &BTreeMap::from([(asset(value), region)]));
             assert!(manager.events.len() <= 2 * MAX_TEXTURES, "pending events: {}", manager.events.len());
         }
         let requests = requested(&mut manager);
@@ -403,6 +405,7 @@ mod tests {
 
     #[test]
     fn slow_delivery_preserves_leases() {
+        let (_region_world, region) = crate::test_support::registered_region();
         let mut manager = EnvironmentTextures::new();
         let mut issued = std::collections::HashSet::new();
         let apply = |event, issued: &mut std::collections::HashSet<_>| match event {
@@ -418,7 +421,7 @@ mod tests {
             AssetChange::UpdateImportance { .. } | AssetChange::UpdateSize { .. } => unreachable!(),
         };
         for value in 1..4096 {
-            manager.update(&BTreeMap::new(), None, &BTreeMap::from([(asset(value), Region::new(1))]));
+            manager.update(&BTreeMap::new(), None, &BTreeMap::from([(asset(value), region)]));
             if value % 4 == 0
                 && let Some(event) = manager.event()
             {
@@ -448,8 +451,8 @@ mod tests {
 
     #[test]
     fn stale_textures_stay_resident_until_capacity_is_needed() {
+        let (_region_world, region) = crate::test_support::registered_region();
         let mut manager = EnvironmentTextures::new();
-        let region = Region::new(1);
         let first = BTreeMap::from([(asset(1), region)]);
         manager.update(&BTreeMap::new(), None, &first);
         let old_ticket = manager.entries[&asset(1)].ticket.expect("active request ticket");
@@ -468,9 +471,9 @@ mod tests {
 
     #[test]
     fn priority_change_keeps_texture_ticket() {
+        let (_region_world, region) = crate::test_support::registered_region();
         let mut manager = EnvironmentTextures::new();
         let id = asset(3);
-        let region = Region::new(1);
         manager.request(id, Desired { region, priority: Priority::Background });
         let Some(AssetChange::Request(request)) = manager.event() else { panic!("background texture request") };
         manager.update_existing(id, Desired { region, priority: Priority::Visible });
@@ -486,9 +489,9 @@ mod tests {
 
     #[test]
     fn stale_active_demand_downgrades() {
+        let (_region_world, region) = crate::test_support::registered_region();
         let mut manager = EnvironmentTextures::new();
         let id = asset(6);
-        let region = Region::new(1);
         manager.request(id, Desired { region, priority: Priority::Visible });
         let Some(AssetChange::Request(request)) = manager.event() else { panic!("active texture request") };
         manager.update(&BTreeMap::new(), None, &BTreeMap::new());
@@ -499,10 +502,11 @@ mod tests {
 
     #[test]
     fn route_change_replaces_incomplete_demand() {
+        let (_region_world, regions) = crate::test_support::registered_regions(2);
         let mut manager = EnvironmentTextures::new();
         let id = asset(4);
-        let first_region = Region::new(1);
-        let second_region = Region::new(2);
+        let first_region = regions[0];
+        let second_region = regions[1];
         manager.request(id, Desired { region: first_region, priority: Priority::Background });
         let Some(AssetChange::Request(first)) = manager.event() else { panic!("first texture request") };
         manager.update_existing(id, Desired { region: second_region, priority: Priority::Background });
@@ -515,10 +519,11 @@ mod tests {
 
     #[test]
     fn route_change_keeps_ready_handle() {
+        let (_region_world, regions) = crate::test_support::registered_regions(2);
         let mut manager = EnvironmentTextures::new();
         let id = asset(5);
-        let first_region = Region::new(1);
-        let second_region = Region::new(2);
+        let first_region = regions[0];
+        let second_region = regions[1];
         manager.request(id, Desired { region: first_region, priority: Priority::Background });
         let Some(AssetChange::Request(request)) = manager.event() else { panic!("texture request") };
         let handle = loaded_texture(id);

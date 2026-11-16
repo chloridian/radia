@@ -6,6 +6,8 @@ pub mod material;
 mod pipeline;
 mod renderer;
 pub mod scene;
+#[cfg(test)]
+mod test_support;
 mod texture;
 
 #[doc(hidden)]

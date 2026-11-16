@@ -5,6 +5,7 @@ use protocol::messages::{
     CacheMissType::{CrcMismatch, Full},
     ObjectUpdateCached,
 };
+use uuid::Uuid;
 use world::{LocalAddress, OrderEvidence, Region, UpdateSource};
 
 use crate::session::inbound::{
@@ -27,10 +28,16 @@ impl ObjectCacheSession {
         region: Region,
         sequence: u32,
         order: OrderEvidence,
-        is_live: impl Fn(LocalAddress) -> bool,
+        live_id: impl Fn(LocalAddress) -> Option<Uuid>,
         update: &ObjectUpdateCached,
         mut batch: ObjectBatch,
     ) -> (ObjectBatch, Vec<ObjectMediaRequest>, Vec<CachedOverride>) {
+        enum Resolution {
+            Hit(ObjectOperation),
+            SameLiveObject,
+            DifferentLiveObject(Uuid),
+        }
+
         let scope = self.identities.get(&simulator_id).cloned();
         let mut stale = HashSet::new();
         let mut stale_overrides = Vec::new();
@@ -44,10 +51,6 @@ impl ObjectCacheSession {
             let Some(ObjectOperation::Cached { source, local_id, .. }) = operation else { continue };
             let source = *source;
             let local_id = *local_id;
-            if is_live(LocalAddress::new(region, local_id)) {
-                *operation = None;
-                continue;
-            }
             let reference = update.objects.get(index).copied();
             let loaded = self.loaded_regions.get(&simulator_id).filter(|region| scope.as_ref() == Some(&region.scope));
             let entry = loaded.and_then(|region| region.entries.get(&local_id.get()));
@@ -69,26 +72,36 @@ impl ObjectCacheSession {
                 };
                 set_region_data(&mut payload, update.region_data);
                 let ordinal = u32::try_from(index).ok()?;
-                let mut operation = decode_cached_object(region, sequence, order, ordinal, reference, &payload, &mut invalid_fields);
-                if operation.is_some() {
-                    if let Some(operation) = &mut operation {
-                        if let Some(received_at) = source.motion_received_at() {
-                            operation.set_source(operation.source().with_motion_timing(received_at, source.motion_ping_delay()));
-                        }
-                        operation.set_is_physical(reference.update_flags & FLAGS_USE_PHYSICS != 0);
-                    }
-                    for mut request in object_media_requests(region, sequence, order, &payload) {
-                        request.source = UpdateSource::new(region, sequence, order, ordinal);
-                        media_requests.push(request);
-                    }
-                } else {
+                let Some(mut operation) = decode_cached_object(region, sequence, order, ordinal, reference, &payload, &mut invalid_fields)
+                else {
                     stale.insert(local_id.get());
+                    return None;
+                };
+                let ObjectOperation::Observe(observation) = &operation else {
+                    stale.insert(local_id.get());
+                    return None;
+                };
+                match live_id(LocalAddress::new(region, local_id)) {
+                    Some(current_id) if current_id == observation.id => return Some(Resolution::SameLiveObject),
+                    Some(_) => return Some(Resolution::DifferentLiveObject(observation.id)),
+                    None => {}
                 }
-                operation
+                if let Some(received_at) = source.motion_received_at() {
+                    operation.set_source(operation.source().with_motion_timing(received_at, source.motion_ping_delay()));
+                }
+                operation.set_is_physical(reference.update_flags & FLAGS_USE_PHYSICS != 0);
+                for mut request in object_media_requests(region, sequence, order, &payload) {
+                    request.source = UpdateSource::new(region, sequence, order, ordinal);
+                    media_requests.push(request);
+                }
+                Some(Resolution::Hit(operation))
             });
-            if let Some(stored) = stored_override {
+            if let Some(stored) = stored_override
+                && !matches!(recovered, Some(Resolution::SameLiveObject))
+            {
                 let observed_id = match &recovered {
-                    Some(ObjectOperation::Observe(observation)) => Some(observation.id),
+                    Some(Resolution::Hit(ObjectOperation::Observe(observation))) => Some(observation.id),
+                    Some(Resolution::DifferentLiveObject(id)) => Some(*id),
                     _ => None,
                 };
                 match decode_pbr_overrides(&stored.payload) {
@@ -104,7 +117,9 @@ impl ObjectCacheSession {
                 }
             }
             *operation = match recovered {
-                Some(operation) => Some(operation),
+                Some(Resolution::Hit(operation)) => Some(operation),
+                Some(Resolution::SameLiveObject) => None,
+                Some(Resolution::DifferentLiveObject(_)) => Some(ObjectOperation::Cached { source, local_id, cache_miss_type: Full }),
                 None => Some(ObjectOperation::Cached { source, local_id, cache_miss_type }),
             };
         }
@@ -361,6 +376,7 @@ mod tests {
         let mut cache = open_cache(directory.path().join("objects.sqlite"));
         assert_eq!(load_region(&mut cache).await, 7);
         let object_id = Uuid::from_u128(0xabcde);
+        let (_region_world, region) = crate::test_helpers::registered_region();
 
         for (index, fixture) in [vectors::OBJECT_UPDATE, vectors::OBJECT_UPDATE_COMPRESSED_TYPED].into_iter().enumerate() {
             let mut full = fixture_message(fixture);
@@ -388,9 +404,9 @@ mod tests {
 
             let cached = cached_message(region_data, references);
             let sequence = 90 + u32::try_from(index).expect("two fixture indexes fit u32");
-            let batch = decoded_cached_batch(&cached, sequence);
+            let batch = decoded_cached_batch(region, &cached, sequence);
             let (resolved, requests, _) = cache
-                .resolve_cached(SIMULATOR, REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), |_| false, &cached, batch)
+                .resolve_cached(SIMULATOR, region, sequence, OrderEvidence::Ordered(u64::from(sequence)), |_| None, &cached, batch)
                 .await;
 
             assert_eq!(resolved.blocks.len(), 1);
@@ -419,9 +435,10 @@ mod tests {
         flush(&mut cache).await;
 
         let cached = cached_message(region_data, references);
-        let batch = decoded_cached_batch(&cached, 80);
-        let (batch, _, _) = cache.resolve_cached(SIMULATOR, REGION, 80, OrderEvidence::Ordered(80), |_| false, &cached, batch).await;
         let mut world = region_world();
+        let region = world.region_for(SIMULATOR).expect("cached simulator has a registered region");
+        let batch = decoded_cached_batch(region, &cached, 80);
+        let (batch, _, _) = cache.resolve_cached(SIMULATOR, region, 80, OrderEvidence::Ordered(80), |_| None, &cached, batch).await;
         let summary = world.apply_object_batch(SIMULATOR, batch).expect("registered simulator applies the cached hit");
         assert!(summary.blocks.iter().all(|block| block.applied().is_some()));
         let entity = world.world().entity(object_id).expect("cached object was restored");
@@ -623,6 +640,7 @@ mod tests {
         let warm_handshake_us = handshake_started.elapsed().as_micros();
 
         let mut warm_world = region_world();
+        let warm_region = warm_world.region_for(SIMULATOR).expect("warm simulator has a registered region");
         let mut decode_us = 0_u128;
         let mut resolve_us = 0_u128;
         let mut world_apply_us = 0_u128;
@@ -633,16 +651,16 @@ mod tests {
             let update = cached_message(region_data, chunk.to_vec());
             let message = Message::ObjectUpdateCached(update.clone());
             let started = Instant::now();
-            let batch = decode_object_message(REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), &message)
+            let batch = decode_object_message(warm_region, sequence, OrderEvidence::Ordered(u64::from(sequence)), &message)
                 .expect("cached update decodes into World operations");
             decode_us += started.elapsed().as_micros();
             let started = Instant::now();
             let (batch, _, _) = warm_cache.resolve_cached(
                 SIMULATOR,
-                REGION,
+                warm_region,
                 sequence,
                 OrderEvidence::Ordered(u64::from(sequence)),
-                |_| false,
+                |_| None,
                 &update,
                 batch,
             ).await;
@@ -658,11 +676,12 @@ mod tests {
         assert_eq!(warm_world.world().object_count(), 5_000);
 
         let mut full_world = region_world();
+        let full_region = full_world.region_for(SIMULATOR).expect("full simulator has a registered region");
         let mut full_world_apply_us = 0_u128;
         let mut full_recovery_targets = 0_usize;
         for (index, message) in updates.iter().enumerate() {
             let sequence = u32::try_from(index + 1).expect("synthetic packet sequence fits u32");
-            let batch = decode_object_message(REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), message)
+            let batch = decode_object_message(full_region, sequence, OrderEvidence::Ordered(u64::from(sequence)), message)
                 .expect("full update decodes into World operations");
             let started = Instant::now();
             let summary = full_world

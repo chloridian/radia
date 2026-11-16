@@ -347,7 +347,10 @@ impl WorldHandoff {
                         region,
                         sequence,
                         order_evidence(packet_order),
-                        |address| world.world().entity_at(address).is_some(),
+                        |address| {
+                            let world = world.world();
+                            world.entity_at(address).and_then(|entity| world.object(entity).map(|object| object.id()))
+                        },
                         cached,
                         batch,
                     )

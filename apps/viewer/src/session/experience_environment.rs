@@ -267,6 +267,7 @@ mod tests {
 
     #[test]
     fn unrepresentable_transition_is_not_published() {
+        let (_region_world, region) = crate::test_helpers::registered_region();
         let agent = Uuid::from_u128(1);
         let experience = Uuid::from_u128(2);
         let seconds = 18_446_744_073_709_549_568.0f64;
@@ -278,7 +279,7 @@ mod tests {
         assert!(decode(&message, agent).is_err());
 
         let (sender, inbox) = EnvironmentInbox::channel();
-        sender.publish(&message, agent, Region::new(1), network::SimulatorId::new(1), received_at).unwrap();
+        sender.publish(&message, agent, region, network::SimulatorId::new(1), received_at).unwrap();
         let mut receiver = inbox.take().unwrap();
         assert!(matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
     }

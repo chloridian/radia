@@ -1,8 +1,8 @@
 use uuid::Uuid;
 
-use super::Effects;
-use super::fields::{Draft, Fields, Origin, Settlement, validate_uuid};
+use super::fields::{Draft, Fields, Settlement, validate_uuid};
 use super::lifecycle::RemovalCause;
+use super::{Effects, Origin};
 use crate::ParentUpdate::Local;
 use crate::UpdateAuthority::Untracked;
 use crate::history::WorldChange::{EntityAdded, EntityRebound, EntityTransferred, EntityUpdated};
@@ -93,6 +93,9 @@ impl World {
             Some(displaced) => self.pend_cascaded_parent(displaced, parent, parent_update, address.region, origin),
             None => parent,
         };
+        if !self.relationship_capacity_available(address, id) {
+            return Ok(self.defer(DeferredReason::RelationshipCapacity, address));
+        }
         self.ensure_revision_available()?;
 
         let state = ObjectState::new(Binding::new(address, 0, origin.stamp, address_was_reused.then_some(origin.stamp)));
@@ -202,8 +205,11 @@ impl World {
         draft.update(fields, kind, origin, settlement, self.object_media_bytes, &mut rejections);
         let parent_changed = parent_applied && draft.state.parent != parent;
         let change_classes = draft.change_classes(&before, if parent_applied { parent } else { draft.state.parent });
-        let waiting_children_change =
-            (parent_applied || binding_changed) && self.waiting_children_will_change(address, entity, id, draft.state.binding);
+        let waiting_children_change = (parent_applied || binding_changed)
+            && self.waiting_children_will_change(address, entity, id, draft.state.binding, draft.state.parent);
+        if (parent_applied || binding_changed) && !self.relationship_capacity_available(address, id) {
+            return Ok(self.defer(DeferredReason::RelationshipCapacity, address));
+        }
         if binding_changed || displaced.is_some() || !change_classes.is_empty() || waiting_children_change {
             self.ensure_revision_available()?;
         }
@@ -284,16 +290,16 @@ mod tests {
 
     use crate::{
         ApplyError, ApplyError::RevisionExhausted, ApplyOutcome, Kind, LinearMotion, LocalAddress, MotionUpdateKind, ObjectObservation,
-        ObjectPatch, OrderEvidence::Ordered, ParentUpdate::Root, Pose, Region, UpdateSource, WorldRevision,
+        ObjectPatch, OrderEvidence::Ordered, ParentUpdate::Root, Pose, UpdateSource, WorldRevision,
     };
 
     use crate::mutation::tests::{observation, test_world};
 
     #[test]
     fn handoff_revision_exhaustion_is_atomic() {
-        let source_region = Region::new(25);
-        let destination = Region::new(26);
-        let mut world = test_world(&[source_region, destination]);
+        let (mut world, regions) = test_world(2);
+        let source_region = regions[0];
+        let destination = regions[1];
         let agent_id = Uuid::from_u128(25);
         world.set_self_agent(agent_id).unwrap();
         let observation = ObjectObservation {
@@ -344,8 +350,8 @@ mod tests {
 
     #[test]
     fn full_and_terse_motion_bounds() {
-        let region = Region::new(28);
-        let mut world = test_world(&[region]);
+        let (mut world, regions) = test_world(1);
+        let region = regions[0];
         let mut full = observation(region, 28, 1, 1);
         full.linear_motion = Some(LinearMotion { velocity: Some(Vec3::splat(1024.0)), acceleration: Some(Vec3::splat(-1024.0)) });
         full.angular_velocity = Some(Vec3::splat(1024.0));
@@ -380,8 +386,8 @@ mod tests {
 
     #[test]
     fn compressed_source_tracks_missing_omega() {
-        let region = Region::new(29);
-        let mut world = test_world(&[region]);
+        let (mut world, regions) = test_world(1);
+        let region = regions[0];
         let mut initial = observation(region, 29, 1, 1);
         initial.angular_velocity = Some(Vec3::ZERO);
         initial.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X), acceleration: None });
@@ -401,8 +407,8 @@ mod tests {
 
     #[test]
     fn stale_omega_marker_stays_clear() {
-        let region = Region::new(32);
-        let mut world = test_world(&[region]);
+        let (mut world, regions) = test_world(1);
+        let region = regions[0];
         let mut initial = observation(region, 32, 1, 2);
         initial.angular_velocity = Some(Vec3::ZERO);
         let introduced = world.observe_object(initial).unwrap();
@@ -423,8 +429,8 @@ mod tests {
 
     #[test]
     fn generation_overflow_preserves_bindings() {
-        let region = Region::new(27);
-        let mut world = test_world(&[region]);
+        let (mut world, regions) = test_world(1);
+        let region = regions[0];
         let ApplyOutcome::Introduced(first) = world.observe_object(observation(region, 27, 1, 1)).unwrap().outcome else {
             panic!("expected first object introduction")
         };

@@ -11,8 +11,8 @@ use render::scene::{EnvironmentProperty, EnvironmentPush, Status};
 use utils::{AssetId, ExperienceId};
 use uuid::Uuid;
 use world::{
-    Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate, Pose, Region,
-    RegionInfo, Shape, SurfaceAppearance, TerrainPatch, UpdateSource, World, WorldLimits,
+    Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate, Pose, RegionInfo,
+    Shape, SurfaceAppearance, TerrainPatch, UpdateSource, World, WorldLimits,
 };
 
 use crate::asset_coordinator::AssetCoordinator;
@@ -41,7 +41,7 @@ async fn select_read<T>(service: &mut WorldReadHost, intake: impl Future<Output 
 
 fn world() -> World {
     World::new(WorldLimits {
-        max_region_registrations: 2,
+        max_regions: 2,
         max_entities: 16,
         max_entities_per_region: 16,
         max_tombstones_per_region: 16,
@@ -55,26 +55,30 @@ fn world() -> World {
     })
 }
 
-fn motion_sample(received_at: Instant) -> AgentMotionSample {
-    AgentMotionSample {
-        region: Region::new(1),
-        position: DVec3::new(10.0, 20.0, 30.0),
-        scale: Vec3::ONE,
-        velocity: Vec3::ZERO,
-        acceleration: Vec3::ZERO,
-        time_dilation: 1.0,
-        ping_delay: None,
-        parented: false,
-        simulator_rotation: Quat::IDENTITY,
-        received_at,
-        seed: 1,
-    }
+fn motion_sample(received_at: Instant) -> (World, AgentMotionSample) {
+    let (world, region) = crate::test_helpers::registered_region();
+    (
+        world,
+        AgentMotionSample {
+            region,
+            position: DVec3::new(10.0, 20.0, 30.0),
+            scale: Vec3::ONE,
+            velocity: Vec3::ZERO,
+            acceleration: Vec3::ZERO,
+            time_dilation: 1.0,
+            ping_delay: None,
+            parented: false,
+            simulator_rotation: Quat::IDENTITY,
+            received_at,
+            seed: 1,
+        },
+    )
 }
 
 #[test]
 fn dead_reckoning_uses_constant_velocity() {
     let received_at = Instant::now();
-    let mut sample = motion_sample(received_at);
+    let (_region_world, mut sample) = motion_sample(received_at);
     sample.velocity = Vec3::new(2.0, -1.0, 0.5);
     let mut dead_reckoning = DeadReckoning::default();
     dead_reckoning.replace(Some(sample));
@@ -88,7 +92,7 @@ fn dead_reckoning_uses_constant_velocity() {
 #[test]
 fn dead_reckoning_uses_timestep_acceleration() {
     let received_at = Instant::now();
-    let mut sample = motion_sample(received_at);
+    let (_region_world, mut sample) = motion_sample(received_at);
     sample.acceleration = Vec3::new(0.0, 9.0, 0.0);
     let mut dead_reckoning = DeadReckoning::default();
     dead_reckoning.replace(Some(sample));
@@ -100,7 +104,7 @@ fn dead_reckoning_uses_timestep_acceleration() {
 #[test]
 fn dead_reckoning_applies_half_ping_lead_with_time_dilation() {
     let received_at = Instant::now();
-    let mut sample = motion_sample(received_at);
+    let (_region_world, mut sample) = motion_sample(received_at);
     sample.velocity = Vec3::X * 2.0;
     sample.time_dilation = 0.5;
     sample.ping_delay = Some(Duration::from_millis(100));
@@ -115,12 +119,12 @@ fn dead_reckoning_applies_half_ping_lead_with_time_dilation() {
 #[test]
 fn dead_reckoning_stops_at_an_unloaded_region_edge() {
     let received_at = Instant::now();
-    let mut sample = motion_sample(received_at);
+    let (_region_world, mut sample) = motion_sample(received_at);
     sample.position = DVec3::new(255.0, 20.0, 10.0);
     sample.velocity = Vec3::X * 100.0;
     let mut dead_reckoning = DeadReckoning::default();
     dead_reckoning.replace(Some(sample));
-    let regions = [kinematics::RegionBounds { region_id: Region::new(1).get(), origin: DVec3::ZERO }];
+    let regions = [kinematics::RegionBounds { region_id: sample.region.get(), origin: DVec3::ZERO }];
 
     let pose = dead_reckoning.pose(received_at + Duration::from_secs(2), &regions).unwrap();
 
@@ -130,9 +134,11 @@ fn dead_reckoning_stops_at_an_unloaded_region_edge() {
 #[test]
 fn new_sample_replaces_state_immediately() {
     let received_at = Instant::now();
+    let (_region_world, sample) = motion_sample(received_at);
+    let (_next_region_world, next_sample) = motion_sample(received_at);
     let mut dead_reckoning = DeadReckoning::default();
-    dead_reckoning.replace(Some(motion_sample(received_at)));
-    let next = AgentMotionSample { position: DVec3::new(400.0, 500.0, 40.0), seed: 2, ..motion_sample(received_at) };
+    dead_reckoning.replace(Some(sample));
+    let next = AgentMotionSample { position: DVec3::new(400.0, 500.0, 40.0), seed: 2, ..next_sample };
     dead_reckoning.replace(Some(next));
 
     assert_eq!(dead_reckoning.pose(received_at, &[]).unwrap().position, next.position);
@@ -144,7 +150,7 @@ fn dead_reckoning_tapers_after_silence() {
     let phase_out_at = received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
     let phase_out_duration = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
     let phase_out_end = phase_out_at + phase_out_duration;
-    let mut sample = motion_sample(received_at);
+    let (_region_world, mut sample) = motion_sample(received_at);
     sample.velocity = Vec3::X;
     let mut dead_reckoning = DeadReckoning::default();
     dead_reckoning.replace(Some(sample));
@@ -162,7 +168,7 @@ fn disconnect_tapers_agent_early() {
     let disconnect_at = received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME / 4.0);
     let phase_out_duration = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
     let phase_out_end = disconnect_at + phase_out_duration;
-    let mut sample = motion_sample(received_at);
+    let (_region_world, mut sample) = motion_sample(received_at);
     sample.velocity = Vec3::X;
     let mut dead_reckoning = DeadReckoning::default();
     dead_reckoning.replace(Some(sample));
@@ -184,7 +190,7 @@ fn dead_reckoning_recovers_from_displayed_position() {
     let phase_out_at = received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
     let phase_out_duration = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
     let recovered_at = phase_out_at + phase_out_duration / 2;
-    let mut sample = motion_sample(received_at);
+    let (_region_world, mut sample) = motion_sample(received_at);
     sample.velocity = Vec3::X;
     let mut dead_reckoning = DeadReckoning::default();
     dead_reckoning.replace(Some(sample));
@@ -200,7 +206,7 @@ fn dead_reckoning_recovers_from_displayed_position() {
 #[test]
 fn negligible_motion_is_idle() {
     let received_at = Instant::now();
-    let mut sample = motion_sample(received_at);
+    let (_region_world, mut sample) = motion_sample(received_at);
     sample.velocity = Vec3::splat(1e-4);
     sample.acceleration = Vec3::splat(1e-4);
     let mut dead_reckoning = DeadReckoning::default();
@@ -214,7 +220,7 @@ fn negligible_motion_is_idle() {
 #[test]
 fn non_finite_sample_does_not_replace_valid_state() {
     let received_at = Instant::now();
-    let valid = motion_sample(received_at);
+    let (_region_world, valid) = motion_sample(received_at);
     let mut dead_reckoning = DeadReckoning::default();
     dead_reckoning.replace(Some(valid));
     let invalid = AgentMotionSample { velocity: Vec3::splat(f32::INFINITY), ..valid };
@@ -228,8 +234,9 @@ fn non_finite_sample_does_not_replace_valid_state() {
 async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
     let agent_id = Uuid::from_u128(1);
     let now = Instant::now();
+    let (_region_world, region) = crate::test_helpers::registered_region();
     let sample = AgentMotionSample {
-        region: Region::new(1),
+        region,
         position: DVec3::new(270.0, 520.0, 24.0),
         scale: Vec3::ONE,
         velocity: Vec3::X,
@@ -293,30 +300,28 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
 async fn terrain_clamp_respects_parenting() {
     let mut world = world();
     let agent = Uuid::from_u128(1);
-    for region in [Region::new(1), Region::new(2)] {
-        let _ = world.adopt_region(region).unwrap();
+    let first_region = world.register_region().unwrap();
+    let second_region = world.register_region().unwrap();
+    for (index, region) in [first_region, second_region].into_iter().enumerate() {
         let _ = world
-            .patch_region(
-                region,
-                RegionInfo { origin: Some(DVec3::new((region.get() - 1) as f64 * 256.0, 0.0, 7.0)), ..RegionInfo::default() },
-            )
+            .patch_region(region, RegionInfo { origin: Some(DVec3::new(index as f64 * 256.0, 0.0, 7.0)), ..RegionInfo::default() })
             .unwrap();
     }
-    for region in [Region::new(1), Region::new(2)] {
+    for region in [first_region, second_region] {
         let terrain_source = UpdateSource::new(region, 1, Ordered(1), 0);
         let terrain = TerrainPatch::new(0, 0, Box::new([5.0; world::TERRAIN_PATCH_SAMPLES])).unwrap();
         let _ = world.observe_terrain_patch(terrain_source, terrain).unwrap();
     }
     let _ = world
         .observe_object(ObjectObservation::new(
-            UpdateSource::new(Region::new(1), 1, Ordered(1), 0),
+            UpdateSource::new(first_region, 1, Ordered(1), 0),
             agent,
             NonZeroU32::new(1).unwrap(),
             Kind::Avatar,
             ParentUpdate::Root,
         ))
         .unwrap();
-    let _ = world.observe_water_height(UpdateSource::new(Region::new(2), 1, Ordered(1), 0), 31.0).unwrap();
+    let _ = world.observe_water_height(UpdateSource::new(second_region, 1, Ordered(1), 0), 31.0).unwrap();
     let budget = Budget::default();
     let (mut scene, view) = Reconciler::new(budget.clone());
     let (sender, incoming) = mpsc::channel(1);
@@ -389,13 +394,13 @@ async fn terrain_clamp_respects_parenting() {
     let (height, original) = hydrate(&world);
     assert_eq!(height, None, "another region's water must not supply the water height");
     let original = original.expect("the observed avatar is available before its water height");
-    let _ = world.observe_water_height(UpdateSource::new(Region::new(1), 2, Ordered(2), 0), 17.0).unwrap();
+    let _ = world.observe_water_height(UpdateSource::new(first_region, 2, Ordered(2), 0), 17.0).unwrap();
     assert_eq!(hydrate(&world), (Some(24.0), Some(original)));
-    let _ = world.retire_region(Region::new(1)).unwrap();
+    let _ = world.retire_region(first_region).unwrap();
     assert_eq!(hydrate(&world), (None, None), "retirement must remove both the avatar and previous water height");
     let _ = world
         .observe_object(ObjectObservation::new(
-            UpdateSource::new(Region::new(2), 3, Ordered(3), 0),
+            UpdateSource::new(second_region, 3, Ordered(3), 0),
             agent,
             NonZeroU32::new(1).unwrap(),
             Kind::Avatar,
@@ -407,16 +412,16 @@ async fn terrain_clamp_respects_parenting() {
     assert_ne!(replacement.expect("the replacement avatar is available"), original, "a retired entity must not remain cached");
     drop(hydrate);
     let received_at = Instant::now();
-    let mut falling_agent = motion_sample(received_at);
-    falling_agent.region = Region::new(2);
+    let (_motion_world, mut falling_agent) = motion_sample(received_at);
+    falling_agent.region = second_region;
     falling_agent.position = DVec3::new(266.0, 10.0, -10.0);
     falling_agent.velocity = Vec3::NEG_Z * 20.0;
     feed.dead_reckoning.replace(Some(falling_agent));
     let pose = feed.camera_pose_at(received_at + Duration::from_secs(1)).expect("self motion pose");
     assert_eq!(pose.position.z, 12.5);
 
-    let mut seated_agent = motion_sample(received_at);
-    seated_agent.region = Region::new(2);
+    let (_seated_world, mut seated_agent) = motion_sample(received_at);
+    seated_agent.region = second_region;
     seated_agent.position = DVec3::new(266.0, 10.0, -10.0);
     seated_agent.parented = true;
     feed.dead_reckoning.replace(Some(seated_agent));
@@ -426,7 +431,7 @@ async fn terrain_clamp_respects_parenting() {
 
 #[tokio::test]
 async fn pending_texture_size_wins_before_acquisition() {
-    let region = Region::new(1);
+    let (_region_world, region) = crate::test_helpers::registered_region();
     let id = AssetId::new(Uuid::from_u128(101));
     let (mut scene, _) = Reconciler::new(Budget::default());
     scene.set_active_environment_textures(Some(region), BTreeSet::from([id]));
@@ -465,8 +470,7 @@ async fn pending_texture_size_wins_before_acquisition() {
 #[tokio::test]
 async fn pending_asset_preserves_scene() {
     let mut world = world();
-    let region = Region::new(1);
-    let _ = world.adopt_region(region).unwrap();
+    let region = world.register_region().unwrap();
     let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap();
     let mut object = ObjectObservation::new(
         UpdateSource::new(region, 1, Ordered(1), 0),
@@ -540,8 +544,7 @@ async fn pending_asset_preserves_scene() {
 #[tokio::test]
 async fn stalled_publication_preserves_intake() {
     let mut world = world();
-    let region = Region::new(1);
-    let _ = world.adopt_region(region).unwrap();
+    let region = world.register_region().unwrap();
     let _ = world
         .observe_object(ObjectObservation::new(
             UpdateSource::new(region, 1, Ordered(1), 0),

@@ -3,33 +3,34 @@ use std::assert_matches;
 use super::support::{
     BTreeMap, BTreeSet, Budget, DVec3, Instant, Mesh, ParentUpdate, PreparedMesh, ReadFailure, ReadQuery, ReadReply, ReconcileStep,
     Reconciler, RecoveryReason, Region, RegionInfo, SceneView, Status, SurfaceKind, TerrainPatch, TerrainPatchId, Vec3, add, move_root,
-    next_terrain_job, positions, reply, settle, settle_work, source, world, world_at, world_with_journal,
+    next_terrain_job, positions, reply, settle, settle_work, source, world, world_at, world_region, world_with_journal,
 };
 
 #[test]
 fn terrain_and_water_lifetimes() {
     let mut world = world();
+    let region = world_region(&world, 0);
     let first = world::TerrainPatch::new(0, 0, Box::new([7.0; 256])).unwrap();
-    let _ = world.observe_terrain_patch(source(1, 1), first).unwrap();
-    let _ = world.observe_water_height(source(1, 2), 0.0).unwrap();
+    let _ = world.observe_terrain_patch(source(&world, 0, 1), first).unwrap();
+    let _ = world.observe_water_height(source(&world, 0, 2), 0.0).unwrap();
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.patch_count(), 1);
-    assert_eq!(view.water_height(Region::new(1)), Some(0.0));
+    assert_eq!(view.water_height(region), Some(0.0));
     assert_eq!(view.patches().next().unwrap().1.source().heights(), &[7.0; 256]);
     let updated = world::TerrainPatch::new(0, 0, Box::new([8.0; 256])).unwrap();
-    let _ = world.observe_terrain_patch(source(1, 3), updated).unwrap();
+    let _ = world.observe_terrain_patch(source(&world, 0, 3), updated).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.patch_count(), 1);
     assert_eq!(view.patches().next().unwrap().1.source().heights(), &[8.0; 256]);
-    let _ = world.retire_region(Region::new(1)).unwrap();
+    let _ = world.retire_region(region).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.region_count(), 0);
     assert_eq!(view.patch_count(), 0);
-    assert_eq!(view.water_height(Region::new(1)), None);
+    assert_eq!(view.water_height(region), None);
     assert_eq!(view.surfaces().count(), 0);
 }
 
@@ -40,10 +41,10 @@ fn terrain_loading_keeps_history() {
     for y in 0..16 {
         for x in 0..16 {
             let patch = TerrainPatch::new(x, y, Box::new([1.0; 256])).unwrap();
-            let _ = world.observe_terrain_patch(source(1, 2 + u64::from(y) * 16 + u64::from(x)), patch).unwrap();
+            let _ = world.observe_terrain_patch(source(&world, 0, 2 + u64::from(y) * 16 + u64::from(x)), patch).unwrap();
         }
     }
-    let _ = world.observe_water_height(source(1, 300), 20.0).unwrap();
+    let _ = world.observe_water_height(source(&world, 0, 300), 20.0).unwrap();
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     let mut terrain_reads = 0;
@@ -72,7 +73,7 @@ fn terrain_loading_keeps_history() {
     }
     assert_eq!(terrain_reads, 32);
     assert_eq!(view.patch_count(), 256);
-    assert_eq!(view.water_height(Region::new(1)), Some(20.0));
+    assert_eq!(view.water_height(world_region(&world, 0)), Some(20.0));
     assert_eq!(view.revision(), Some(world.revision()));
     assert_eq!(positions(&view), BTreeMap::from([(1, 32.0)]));
 }
@@ -80,16 +81,17 @@ fn terrain_loading_keeps_history() {
 #[test]
 fn terrain_prepares_during_publication() {
     let mut world = world();
+    let region = world_region(&world, 0);
     for x in 0..8 {
         let patch = TerrainPatch::new(x, 0, Box::new([1.0; 256])).unwrap();
-        let _ = world.observe_terrain_patch(source(1, u64::from(x) + 1), patch).unwrap();
+        let _ = world.observe_terrain_patch(source(&world, 0, u64::from(x) + 1), patch).unwrap();
     }
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     for x in 0..8 {
         let patch = TerrainPatch::new(x, 0, Box::new([2.0; 256])).unwrap();
-        let _ = world.observe_terrain_patch(source(1, u64::from(x) + 20), patch).unwrap();
+        let _ = world.observe_terrain_patch(source(&world, 0, u64::from(x) + 20), patch).unwrap();
     }
     scene.notify_world_change();
     let mut running = Vec::new();
@@ -126,21 +128,22 @@ fn terrain_prepares_during_publication() {
         }
     }
     assert!(built > 0, "a slow frame must not stop terrain preparation");
-    assert_eq!(terrain_mesh(&view, 1, 0, 0).bounds().min.z, 1.0, "undelivered work must not alter the published view");
+    assert_eq!(terrain_mesh(&view, region, 0, 0).bounds().min.z, 1.0, "undelivered work must not alter the published view");
     view.apply(held).unwrap();
     settle(&mut scene, &mut view, &world, &mut now);
     for x in 0..8 {
-        assert_eq!(terrain_mesh(&view, 1, x, 0).bounds().min.z, 2.0);
+        assert_eq!(terrain_mesh(&view, region, x, 0).bounds().min.z, 2.0);
     }
 }
 
 #[test]
 fn hydration_allows_ready_surfaces() {
     let mut world = world();
+    let region = world_region(&world, 0);
     let coordinates = [(0, 0), (14, 0), (15, 0), (14, 1), (15, 1), (0, 15), (1, 15), (2, 15), (3, 15), (4, 15)];
     for (index, (x, y)) in coordinates.into_iter().enumerate() {
         let patch = TerrainPatch::new(x, y, Box::new([3.0; 256])).unwrap();
-        let _ = world.observe_terrain_patch(source(1, index as u64 + 1), patch).unwrap();
+        let _ = world.observe_terrain_patch(source(&world, 0, index as u64 + 1), patch).unwrap();
     }
     let budget = Budget::default();
     let (mut scene, mut view) = Reconciler::new(budget.clone());
@@ -164,7 +167,7 @@ fn hydration_allows_ready_surfaces() {
         view.surfaces().any(|surface| surface.kind == SurfaceKind::Terrain(TerrainPatchId::new(15, 0).unwrap())),
         "ready terrain must publish before the next hydration reply"
     );
-    assert_eq!(terrain_mesh(&view, 1, 15, 0).bounds().min.z, 3.0);
+    assert_eq!(terrain_mesh(&view, region, 15, 0).bounds().min.z, 3.0);
     assert!(
         !view.surfaces().any(|surface| surface.kind == SurfaceKind::Terrain(TerrainPatchId::new(0, 0).unwrap())),
         "incomplete terrain must still wait for hydration"
@@ -173,7 +176,7 @@ fn hydration_allows_ready_surfaces() {
     scene.complete_read(pending, result, now);
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.surfaces().count(), coordinates.len(), "deferred patches must resume after hydration finishes");
-    assert_eq!(terrain_mesh(&view, 1, 0, 0).bounds().min.z, 3.0);
+    assert_eq!(terrain_mesh(&view, region, 0, 0).bounds().min.z, 3.0);
     assert_eq!(view.status(), Status::Ready);
     drop(scene);
     drop(view);
@@ -188,9 +191,9 @@ fn terrain_streams_during_bootstrap() {
     }
     for x in 0..8 {
         let patch = TerrainPatch::new(x, 0, Box::new([1.0; 256])).unwrap();
-        let _ = world.observe_terrain_patch(source(1, u64::from(x) + 400), patch).unwrap();
+        let _ = world.observe_terrain_patch(source(&world, 0, u64::from(x) + 400), patch).unwrap();
     }
-    let _ = world.observe_water_height(source(1, 500), 20.0).unwrap();
+    let _ = world.observe_water_height(source(&world, 0, 500), 20.0).unwrap();
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     let mut observed = false;
@@ -264,17 +267,18 @@ fn bootstrap_ignores_frame_latency() {
 #[test]
 fn startup_failure_retains_terrain() {
     let mut world = world();
+    let region = world_region(&world, 0);
     for id in 1..=300 {
         add(&mut world, id, id as u32, ParentUpdate::Root, 0.0, id as u64);
     }
     let patch = TerrainPatch::new(0, 0, Box::new([1.0; 256])).unwrap();
-    let _ = world.observe_terrain_patch(source(1, 400), patch).unwrap();
+    let _ = world.observe_terrain_patch(source(&world, 0, 400), patch).unwrap();
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     loop {
         match scene.poll(now) {
             ReconcileStep::Read(job) if matches!(job.query(), ReadQuery::Objects(_)) => {
-                assert_eq!(terrain_mesh(&view, 1, 0, 0).bounds().min.z, 1.0);
+                assert_eq!(terrain_mesh(&view, region, 0, 0).bounds().min.z, 1.0);
                 scene.complete_read(job, Err(ReadFailure::Busy), now);
                 break;
             }
@@ -289,7 +293,7 @@ fn startup_failure_retains_terrain() {
         }
     }
     let patch = TerrainPatch::new(0, 0, Box::new([9.0; 256])).unwrap();
-    let _ = world.observe_terrain_patch(source(1, 500), patch).unwrap();
+    let _ = world.observe_terrain_patch(source(&world, 0, 500), patch).unwrap();
     let mut checked = false;
     for _ in 0..1000 {
         match scene.poll(now) {
@@ -317,7 +321,7 @@ fn startup_failure_retains_terrain() {
     }
     assert!(checked);
     assert_eq!(view.object_count(), 300);
-    assert_eq!(terrain_mesh(&view, 1, 0, 0).bounds().min.z, 9.0);
+    assert_eq!(terrain_mesh(&view, region, 0, 0).bounds().min.z, 9.0);
     assert_eq!(view.revision(), Some(world.revision()));
     assert_eq!(view.status(), Status::Ready);
 }
@@ -327,12 +331,12 @@ fn water_precedes_terrain_builds() {
     let mut world = world();
     for x in 0..8 {
         let patch = TerrainPatch::new(x, 0, Box::new([1.0; 256])).unwrap();
-        let _ = world.observe_terrain_patch(source(1, u64::from(x) + 1), patch).unwrap();
+        let _ = world.observe_terrain_patch(source(&world, 0, u64::from(x) + 1), patch).unwrap();
     }
-    let _ = world.observe_water_height(source(1, 10), 20.0).unwrap();
-    let _ = world.adopt_region(Region::new(2)).unwrap();
-    let _ = world.patch_region(Region::new(2), RegionInfo { origin: Some(DVec3::X * 256.0), ..RegionInfo::default() }).unwrap();
-    let _ = world.observe_water_height(source(2, 1), 25.0).unwrap();
+    let _ = world.observe_water_height(source(&world, 0, 10), 20.0).unwrap();
+    let second_region = world.register_region().unwrap();
+    let _ = world.patch_region(second_region, RegionInfo { origin: Some(DVec3::X * 256.0), ..RegionInfo::default() }).unwrap();
+    let _ = world.observe_water_height(source(&world, 1, 1), 25.0).unwrap();
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     let mut appeared = BTreeSet::new();
@@ -352,7 +356,7 @@ fn water_precedes_terrain_builds() {
                     }
                 }
                 if appeared.len() == 2 {
-                    assert_eq!(view.water_height(Region::new(2)), Some(25.0));
+                    assert_eq!(view.water_height(second_region), Some(25.0));
                     return;
                 }
             }
@@ -365,9 +369,9 @@ fn water_precedes_terrain_builds() {
     panic!("water did not become visible");
 }
 
-fn terrain_mesh(view: &SceneView, region: u64, x: u8, y: u8) -> &Mesh {
+fn terrain_mesh(view: &SceneView, region: Region, x: u8, y: u8) -> &Mesh {
     let kind = SurfaceKind::Terrain(TerrainPatchId::new(x, y).unwrap());
-    let surface = view.surfaces().find(|surface| surface.region == Region::new(region) && surface.kind == kind).unwrap();
+    let surface = view.surfaces().find(|surface| surface.region == region && surface.kind == kind).unwrap();
     let PreparedMesh::Ready(mesh) = &surface.mesh else { panic!("expected ready terrain") };
     mesh.mesh()
 }
@@ -375,6 +379,7 @@ fn terrain_mesh(view: &SceneView, region: u64, x: u8, y: u8) -> &Mesh {
 #[test]
 fn terrain_samples_and_gaps() {
     let mut world = world();
+    let region = world_region(&world, 0);
     let plane = |x: u8, y: u8| {
         TerrainPatch::new(
             x,
@@ -385,22 +390,22 @@ fn terrain_samples_and_gaps() {
         )
         .unwrap()
     };
-    let _ = world.observe_terrain_patch(source(1, 1), plane(0, 0)).unwrap();
+    let _ = world.observe_terrain_patch(source(&world, 0, 1), plane(0, 0)).unwrap();
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
-    let mesh = terrain_mesh(&view, 1, 0, 0);
+    let mesh = terrain_mesh(&view, region, 0, 0);
     assert_eq!(mesh.vertices().len(), 256);
     assert_eq!(mesh.indices().len(), 15 * 15 * 6, "unknown neighbors must leave uncovered cells");
     assert_eq!(mesh.vertices()[0].position, Vec3::new(0.0, 0.0, 7.0));
     assert_eq!(mesh.vertices()[255].position, Vec3::new(15.0, 15.0, 82.0));
     assert!(!view.surfaces().any(|surface| surface.kind == SurfaceKind::RegionWater));
     for (order, (x, y)) in [(1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
-        let _ = world.observe_terrain_patch(source(1, order as u64 + 2), plane(x, y)).unwrap();
+        let _ = world.observe_terrain_patch(source(&world, 0, order as u64 + 2), plane(x, y)).unwrap();
     }
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
-    let mesh = terrain_mesh(&view, 1, 0, 0);
+    let mesh = terrain_mesh(&view, region, 0, 0);
     assert_eq!(mesh.vertices().len(), 289);
     assert_eq!(mesh.indices().len(), 1536);
     assert_eq!(mesh.vertices()[288].position, Vec3::new(16.0, 16.0, 87.0));
@@ -413,17 +418,17 @@ fn terrain_samples_and_gaps() {
     }
     let extreme =
         TerrainPatch::new(4, 4, Box::new(std::array::from_fn(|index| if index % 2 == 0 { f32::MAX } else { -f32::MAX }))).unwrap();
-    let _ = world.observe_terrain_patch(source(1, 10), extreme).unwrap();
+    let _ = world.observe_terrain_patch(source(&world, 0, 10), extreme).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
-    assert!(terrain_mesh(&view, 1, 4, 4).vertices().iter().all(|vertex| vertex.position.is_finite() && vertex.normal.is_finite()));
+    assert!(terrain_mesh(&view, region, 4, 4).vertices().iter().all(|vertex| vertex.position.is_finite() && vertex.normal.is_finite()));
 }
 
 #[test]
 fn terrain_extent_validation() {
     for dimensions in [[0, 0], [512, 256]] {
         let mut world = world();
-        let _ = world.observe_terrain_patch(source(1, 1), TerrainPatch::new(0, 0, Box::new([0.0; 256])).unwrap()).unwrap();
+        let _ = world.observe_terrain_patch(source(&world, 0, 1), TerrainPatch::new(0, 0, Box::new([0.0; 256])).unwrap()).unwrap();
         let (mut scene, mut view) = Reconciler::new(Budget::default());
         let now = Instant::now();
         loop {
@@ -451,39 +456,40 @@ fn terrain_extent_validation() {
 fn terrain_region_edges() {
     let origin = DVec3::new(1_000_000_000.0, 1_000_000_000.0, 0.0);
     let mut world = world_at(origin);
-    let _ = world.adopt_region(Region::new(2)).unwrap();
-    let _ = world.patch_region(Region::new(2), RegionInfo { origin: Some(origin + DVec3::X * 256.0), ..RegionInfo::default() }).unwrap();
-    let _ = world.observe_terrain_patch(source(1, 1), TerrainPatch::new(15, 0, Box::new([10.0; 256])).unwrap()).unwrap();
+    let second_region = world.register_region().unwrap();
+    let _ = world.patch_region(second_region, RegionInfo { origin: Some(origin + DVec3::X * 256.0), ..RegionInfo::default() }).unwrap();
+    let _ = world.observe_terrain_patch(source(&world, 0, 1), TerrainPatch::new(15, 0, Box::new([10.0; 256])).unwrap()).unwrap();
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(terrain_mesh(&view, 1, 15, 0).bounds().max.x, 15.0, "active neighbor without samples must not be clamped");
-    let _ = world.observe_terrain_patch(source(2, 2), TerrainPatch::new(0, 0, Box::new([20.0; 256])).unwrap()).unwrap();
-    let _ = world.observe_water_height(source(1, 3), 17.0).unwrap();
+    let west_region = world_region(&world, 0);
+    assert_eq!(terrain_mesh(&view, west_region, 15, 0).bounds().max.x, 15.0, "active neighbor without samples must not be clamped");
+    let _ = world.observe_terrain_patch(source(&world, 1, 2), TerrainPatch::new(0, 0, Box::new([20.0; 256])).unwrap()).unwrap();
+    let _ = world.observe_water_height(source(&world, 0, 3), 17.0).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
-    let west = terrain_mesh(&view, 1, 15, 0);
-    let east = terrain_mesh(&view, 2, 0, 0);
+    let west = terrain_mesh(&view, west_region, 15, 0);
+    let east = terrain_mesh(&view, second_region, 0, 0);
     assert_eq!(west.bounds().max.x, 16.0);
     let west_edge = west.vertices().iter().find(|v| v.position.x == 16.0 && v.position.y == 8.0).unwrap();
     let east_edge = east.vertices().iter().find(|v| v.position.x == 0.0 && v.position.y == 8.0).unwrap();
     assert_eq!(west_edge.position.z, 20.0);
     assert_eq!(west_edge.normal, east_edge.normal);
     let positions: BTreeMap<_, _> = view.surfaces().map(|s| ((s.region, s.kind), s.position)).collect();
-    let west_position = positions[&(Region::new(1), SurfaceKind::Terrain(TerrainPatchId::new(15, 0).unwrap()))];
-    let east_position = positions[&(Region::new(2), SurfaceKind::Terrain(TerrainPatchId::new(0, 0).unwrap()))];
+    let west_position = positions[&(west_region, SurfaceKind::Terrain(TerrainPatchId::new(15, 0).unwrap()))];
+    let east_position = positions[&(second_region, SurfaceKind::Terrain(TerrainPatchId::new(0, 0).unwrap()))];
     assert_eq!(west_position + west_edge.position.as_dvec3(), east_position + east_edge.position.as_dvec3());
     assert_eq!(west_position, origin + DVec3::X * 240.0);
     let water = view.surfaces().find(|s| s.kind == SurfaceKind::RegionWater).unwrap();
-    assert_eq!(water.region, Region::new(1));
+    assert_eq!(water.region, west_region);
     assert_eq!(water.position, origin);
     let PreparedMesh::Ready(mesh) = &water.mesh else { panic!("expected water") };
     assert_eq!(mesh.mesh().bounds().min, Vec3::new(0.0, 0.0, 17.0));
     assert_eq!(mesh.mesh().bounds().max, Vec3::new(256.0, 256.0, 17.0));
-    let _ = world.retire_region(Region::new(1)).unwrap();
+    let _ = world.retire_region(west_region).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
-    assert!(view.surfaces().all(|s| s.region == Region::new(2) && s.position == east_position));
+    assert!(view.surfaces().all(|s| s.region == second_region && s.position == east_position));
 }
 
 #[test]
@@ -493,7 +499,7 @@ fn terrain_rebuild_bounds() {
         for x in 0..16 {
             let _ = world
                 .observe_terrain_patch(
-                    source(1, u64::from(y) * 16 + u64::from(x) + 1),
+                    source(&world, 0, u64::from(y) * 16 + u64::from(x) + 1),
                     TerrainPatch::new(x, y, Box::new([0.0; 256])).unwrap(),
                 )
                 .unwrap();
@@ -513,7 +519,8 @@ fn terrain_rebuild_bounds() {
     };
     let baseline = ids(&view);
     for order in 300..332 {
-        let _ = world.observe_terrain_patch(source(1, order), TerrainPatch::new(8, 8, Box::new([order as f32; 256])).unwrap()).unwrap();
+        let _ =
+            world.observe_terrain_patch(source(&world, 0, order), TerrainPatch::new(8, 8, Box::new([order as f32; 256])).unwrap()).unwrap();
         scene.notify_world_change();
         assert_eq!(
             settle_work(&mut scene, &mut view, &world, &mut now).1,
@@ -529,7 +536,7 @@ fn terrain_rebuild_bounds() {
         }
     }
     let before_water = ids(&view);
-    let _ = world.observe_water_height(source(1, 400), 24.0).unwrap();
+    let _ = world.observe_water_height(source(&world, 0, 400), 24.0).unwrap();
     scene.notify_world_change();
     assert_eq!(settle_work(&mut scene, &mut view, &world, &mut now).1, 1);
     for (kind, id) in before_water {
@@ -546,7 +553,7 @@ fn terrain_rebuild_bounds() {
 #[test]
 fn retired_terrain_jobs() {
     let mut world = world();
-    let _ = world.observe_terrain_patch(source(1, 1), TerrainPatch::new(0, 0, Box::new([f32::MAX; 256])).unwrap()).unwrap();
+    let _ = world.observe_terrain_patch(source(&world, 0, 1), TerrainPatch::new(0, 0, Box::new([f32::MAX; 256])).unwrap()).unwrap();
     let budget = Budget::default();
     let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
@@ -562,16 +569,22 @@ fn retired_terrain_jobs() {
             _ => panic!("expected terrain work"),
         }
     };
-    let _ = world.retire_region(Region::new(1)).unwrap();
-    let _ = world.adopt_region(Region::new(2)).unwrap();
-    let _ = world.patch_region(Region::new(2), RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap();
-    let _ = world.observe_terrain_patch(source(2, 2), TerrainPatch::new(0, 0, Box::new([9.0; 256])).unwrap()).unwrap();
+    let retired_region = world_region(&world, 0);
+    let _ = world.retire_region(retired_region).unwrap();
+    let replacement_region = world.register_region().unwrap();
+    let _ = world.patch_region(replacement_region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap();
+    let _ = world
+        .observe_terrain_patch(
+            world::UpdateSource::new(replacement_region, 2, world::OrderEvidence::Ordered(2), 0),
+            TerrainPatch::new(0, 0, Box::new([9.0; 256])).unwrap(),
+        )
+        .unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     scene.complete_mesh(job.run());
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.surfaces().count(), 1);
-    assert_eq!(terrain_mesh(&view, 2, 0, 0).bounds().min.z, 9.0);
+    assert_eq!(terrain_mesh(&view, replacement_region, 0, 0).bounds().min.z, 9.0);
     scene.close();
     drop(scene);
     drop(view);
@@ -581,7 +594,8 @@ fn retired_terrain_jobs() {
 #[test]
 fn abandoned_terrain_work_retries() {
     let mut world = world();
-    let _ = world.observe_terrain_patch(source(1, 1), TerrainPatch::new(0, 0, Box::new([1.0; 256])).unwrap()).unwrap();
+    let region = world_region(&world, 0);
+    let _ = world.observe_terrain_patch(source(&world, 0, 1), TerrainPatch::new(0, 0, Box::new([1.0; 256])).unwrap()).unwrap();
     let budget = Budget::default();
     let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
@@ -594,7 +608,7 @@ fn abandoned_terrain_work_retries() {
     let job = next_terrain_job(&mut scene, &mut view, &world, &mut now);
     scene.complete_mesh(job.run());
     settle(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(terrain_mesh(&view, 1, 0, 0).bounds().min.z, 1.0);
+    assert_eq!(terrain_mesh(&view, region, 0, 0).bounds().min.z, 1.0);
     scene.close();
     drop(scene);
     drop(view);

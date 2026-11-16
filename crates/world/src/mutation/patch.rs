@@ -2,9 +2,9 @@ use std::num::NonZeroU32;
 
 use uuid::Uuid;
 
-use super::Effects;
 use super::facet::{FacetChanges, FacetSet};
-use super::fields::{Draft, Fields, Origin, Settlement, normalized_rotation, validate_uuid, validate_vec3};
+use super::fields::{Draft, Fields, Settlement, normalized_rotation, validate_uuid, validate_vec3};
+use super::{Effects, Origin};
 use crate::FieldRejectionReason::UntrustedSource;
 use crate::UpdateAuthority::{Tracked, Untracked};
 use crate::history::WorldChange::EntityUpdated;
@@ -206,7 +206,7 @@ mod tests {
     use crate::{
         Appearance, ApplyOutcome, ApplyOutcome::Introduced, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, Kind,
         LinearMotion, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate::Root, Pose,
-        Region, UpdateSource,
+        UpdateSource,
     };
 
     use crate::MAX_OBJECT_MEDIA_BYTES;
@@ -214,8 +214,8 @@ mod tests {
 
     #[test]
     fn invalid_patch_keeps_valid_groups() {
-        let region = Region::new(23);
-        let mut world = test_world(&[region]);
+        let (mut world, regions) = test_world(1);
+        let region = regions[0];
         let source = UpdateSource::new(region, 1, Ordered(1), 0);
         let observation = ObjectObservation {
             pose: Some(Pose { position: Some(Vec3::X), rotation: None }),
@@ -248,8 +248,8 @@ mod tests {
 
     #[test]
     fn object_media_respects_retained_budget() {
-        let region = Region::new(24);
-        let mut world = test_world(&[region]);
+        let (mut world, regions) = test_world(1);
+        let region = regions[0];
         let local_id = NonZeroU32::new(1).unwrap();
         let object = ObjectObservation {
             appearance: FieldUpdate::Set(Appearance::Surface),

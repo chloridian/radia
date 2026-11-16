@@ -68,7 +68,7 @@ pub enum WorldChange {
     EntityRemoved { id: Uuid, entity: Entity, address: LocalAddress, reason: WorldEntityRemovalReason },
     EntityRebound { id: Uuid, entity: Entity, from: LocalAddress, to: LocalAddress },
     EntityTransferred { id: Uuid, entity: Entity, from: LocalAddress, to: LocalAddress },
-    RegionAdopted(Region),
+    RegionRegistered(Region),
     RegionUpdated(Region),
     EnvironmentUpdated(Region),
     ParcelUpdated(Region),
@@ -166,7 +166,7 @@ mod tests {
     use std::num::NonZeroU32;
 
     use super::WorldChange::{
-        EntityAdded, EntityRebound, EntityRemoved, EntityTransferred, EntityUpdated, RegionAdopted, RegionRetired, RegionUpdated,
+        EntityAdded, EntityRebound, EntityRemoved, EntityTransferred, EntityUpdated, RegionRegistered, RegionRetired, RegionUpdated,
         SubtreeInvalidated,
     };
     use OrderEvidence::Ordered;
@@ -183,7 +183,7 @@ mod tests {
 
     fn limits(max_journal_entries: usize) -> WorldLimits {
         WorldLimits {
-            max_region_registrations: 4,
+            max_regions: 4,
             max_entities: 8,
             max_entities_per_region: 8,
             max_tombstones_per_region: 8,
@@ -217,7 +217,7 @@ mod tests {
 
     fn assert_region_revision(outcome: RegionOutcome) {
         match outcome {
-            RegionOutcome::Adopted { revision } | RegionOutcome::Patched { revision } | RegionOutcome::Retired { revision, .. } => {
+            RegionOutcome::Patched { revision } | RegionOutcome::Retired { revision, .. } => {
                 assert!(revision.get() > 0);
             }
             RegionOutcome::Unchanged => panic!("changed region operation has a revision"),
@@ -226,9 +226,8 @@ mod tests {
 
     #[test]
     fn revision_exhaustion_rejects_update_atomically() {
-        let region = Region::new(21);
         let mut world = World::new(limits(4));
-        assert!(matches!(world.adopt_region(region).unwrap().outcome, crate::RegionOutcome::Adopted { .. }));
+        let region = world.register_region().unwrap();
         world.journal.revision = WorldRevision(u64::MAX);
 
         let result = world
@@ -253,9 +252,8 @@ mod tests {
 
     #[test]
     fn revision_exhaustion_preserves_patch_values_and_fences() {
-        let region = Region::new(27);
         let mut world = World::new(limits(4));
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         let created = world.observe_object(observation(region, 1, 270, 1)).unwrap();
         let ApplyOutcome::Introduced(entity) = created.outcome else { panic!("expected introduction") };
         let revision = world.revision();
@@ -277,9 +275,8 @@ mod tests {
 
     #[test]
     fn repeated_motion_samples_reset_prediction_but_non_motion_noops_need_no_revision() {
-        let region = Region::new(27);
         let mut world = World::new(limits(4));
-        assert_region_revision(world.adopt_region(region).unwrap().outcome);
+        let region = world.register_region().unwrap();
         let mut initial = observation(region, 1, 270, 1);
         initial.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
         let introduced = world.observe_object(initial).unwrap();
@@ -306,9 +303,8 @@ mod tests {
 
     #[test]
     fn surface_changes_emit_appearance() {
-        let region = Region::new(28);
         let mut world = World::new(limits(4));
-        assert_region_revision(world.adopt_region(region).unwrap().outcome);
+        let region = world.register_region().unwrap();
         let added = world.observe_object(observation(region, 1, 280, 1)).unwrap();
         let ApplyOutcome::Introduced(entity) = added.outcome else { panic!("expected object introduction") };
         let appearance = SurfaceAppearance::new(
@@ -336,9 +332,8 @@ mod tests {
 
     #[test]
     fn pbr_material_changes_emit_appearance() {
-        let region = Region::new(28);
         let mut world = World::new(limits(4));
-        assert_region_revision(world.adopt_region(region).unwrap().outcome);
+        let region = world.register_region().unwrap();
         let added = world.observe_object(observation(region, 1, 282, 1)).unwrap();
         let ApplyOutcome::Introduced(entity) = added.outcome else { panic!("expected object introduction") };
         let materials = PbrMaterialAssignments::new(vec![(3, AssetId::new(Uuid::from_u128(283)))]).unwrap();
@@ -362,9 +357,8 @@ mod tests {
 
     #[test]
     fn bounded_journal_marks_the_last_lost_revision() {
-        let region = Region::new(22);
         let mut world = World::new(limits(1));
-        assert!(matches!(world.adopt_region(region).unwrap().outcome, crate::RegionOutcome::Adopted { .. }));
+        let region = world.register_region().unwrap();
         let first_revision = world.revision();
 
         assert_eq!(
@@ -379,12 +373,11 @@ mod tests {
 
     #[test]
     fn journal_change_budget_evicts_oldest_entries() {
-        let region = Region::new(28);
         let mut limits = limits(4);
         limits.max_journal_changes = 1;
         let mut world = World::new(limits);
+        let region = world.register_region().unwrap();
 
-        assert_region_revision(world.adopt_region(region).unwrap().outcome);
         let first_revision = world.revision();
         assert_region_revision(
             world.patch_region(region, RegionInfo { name: Some("region".to_owned()), ..RegionInfo::default() }).unwrap().outcome,
@@ -398,11 +391,10 @@ mod tests {
 
     #[test]
     fn oversized_journal_entry_still_applies_mutation() {
-        let region = Region::new(29);
         let mut limits = limits(8);
         limits.max_journal_changes = 2;
         let mut world = World::new(limits);
-        assert_region_revision(world.adopt_region(region).unwrap().outcome);
+        let region = world.register_region().unwrap();
         assert_revision(world.observe_object(observation(region, 1, 290, 1)).unwrap());
         assert_revision(world.observe_object(observation(region, 2, 291, 2)).unwrap());
         let before_retirement = world.revision();
@@ -427,39 +419,35 @@ mod tests {
 
         let after_retirement_cursor = world.read_barrier().changes;
         assert!(world.change_page(after_retirement_cursor, 8).unwrap().records.is_empty());
-        assert_region_revision(world.adopt_region(Region::new(30)).unwrap().outcome);
+        let registered_region = world.register_region().unwrap();
         let changes = world.change_page(after_retirement_cursor, 8).unwrap();
         assert!(matches!(changes.records.as_slice(), [record] if record.revision == world.revision()
-            && matches!(record.change, RegionAdopted(adopted) if adopted == Region::new(30))));
+            && matches!(record.change, RegionRegistered(region) if region == registered_region)));
         assert!(!changes.has_more);
         assert_eq!(world.check_invariants(), Ok(()));
     }
 
     #[test]
     fn zero_entry_journal_discards_unread_history() {
-        let region = Region::new(31);
         let mut limits = limits(0);
         limits.max_journal_changes = 4;
         let mut world = World::new(limits);
-        let before_adoption = world.read_barrier().changes;
-
-        assert_region_revision(world.adopt_region(region).unwrap().outcome);
+        let before_registration = world.read_barrier().changes;
+        let _region = world.register_region().unwrap();
 
         assert!(world.journal.entries.is_empty());
         assert_eq!(world.journal.retained_changes, 0);
         assert_eq!(world.journal.lost_through, Some(world.revision()));
-        assert_eq!(world.change_page(before_adoption, 8), Err(crate::WorldReadError::ResyncRequired));
+        assert_eq!(world.change_page(before_registration, 8), Err(crate::WorldReadError::ResyncRequired));
         assert_eq!(world.check_invariants(), Ok(()));
     }
 
     #[test]
     fn journal_records_add_rebind_transfer() {
-        let first_region = Region::new(23);
-        let second_region = Region::new(24);
         let mut world = World::new(limits(8));
-        assert_region_revision(world.adopt_region(first_region).unwrap().outcome);
-        assert_region_revision(world.adopt_region(second_region).unwrap().outcome);
-        assert!(matches!(last_changes(&world), [RegionAdopted(region)] if *region == second_region));
+        let first_region = world.register_region().unwrap();
+        let second_region = world.register_region().unwrap();
+        assert!(matches!(last_changes(&world), [RegionRegistered(region)] if *region == second_region));
         assert_region_revision(
             world.patch_region(first_region, RegionInfo { name: Some("first".to_owned()), ..RegionInfo::default() }).unwrap().outcome,
         );
@@ -486,9 +474,8 @@ mod tests {
 
     #[test]
     fn journal_records_kill_and_cascade_reasons() {
-        let region = Region::new(25);
         let mut world = World::new(limits(8));
-        assert_region_revision(world.adopt_region(region).unwrap().outcome);
+        let region = world.register_region().unwrap();
         assert_revision(world.observe_object(observation(region, 1, 250, 1)).unwrap());
         let mut child = observation(region, 2, 251, 2);
         child.parent = Local(NonZeroU32::new(1).unwrap());
@@ -522,9 +509,8 @@ mod tests {
 
     #[test]
     fn relationships_invalidate_transform_motion() {
-        let region = Region::new(32);
         let mut world = World::new(limits(8));
-        assert_region_revision(world.adopt_region(region).unwrap().outcome);
+        let region = world.register_region().unwrap();
         assert_revision(world.observe_object(observation(region, 1, 320, 1)).unwrap());
         assert_revision(world.observe_object(observation(region, 2, 321, 2)).unwrap());
 
@@ -541,9 +527,8 @@ mod tests {
 
     #[test]
     fn shape_and_appearance_journal_separately() {
-        let region = Region::new(34);
         let mut world = World::new(limits(8));
-        assert_region_revision(world.adopt_region(region).unwrap().outcome);
+        let region = world.register_region().unwrap();
         let mut object = observation(region, 1, 340, 1);
         object.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
         object.appearance = FieldUpdate::Set(Appearance::Surface);
@@ -589,9 +574,8 @@ mod tests {
 
     #[test]
     fn parent_pose_change_invalidates_descendant_subtree() {
-        let region = Region::new(31);
         let mut world = World::new(limits(8));
-        assert_region_revision(world.adopt_region(region).unwrap().outcome);
+        let region = world.register_region().unwrap();
         assert_revision(world.observe_object(observation(region, 1, 310, 1)).unwrap());
 
         let mut child = observation(region, 2, 311, 2);
@@ -617,9 +601,8 @@ mod tests {
 
     #[test]
     fn journal_records_replacement_and_retirement() {
-        let region = Region::new(26);
         let mut world = World::new(limits(8));
-        assert_region_revision(world.adopt_region(region).unwrap().outcome);
+        let region = world.register_region().unwrap();
         assert_revision(world.observe_object(observation(region, 1, 260, 1)).unwrap());
         assert_revision(world.observe_object(observation(region, 2, 261, 1)).unwrap());
         assert!(last_changes(&world).iter().any(|change| {

@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn terrain_height_interpolates_across_patch_seam() {
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_support::registered_region();
         let view = terrain_view(&[(region, DVec3::ZERO)], &[(region, 0, 0, 0.0), (region, 1, 0, 16.0)]);
 
         assert_eq!(view.terrain_height_at(DVec3::new(15.5, 4.0, 0.0)), Some(8.0));
@@ -341,8 +341,9 @@ mod tests {
 
     #[test]
     fn terrain_height_interpolates_across_region_seam() {
-        let west = Region::new(1);
-        let east = Region::new(2);
+        let (_region_world, regions) = crate::test_support::registered_regions(2);
+        let [west, east] = regions.as_slice() else { unreachable!() };
+        let (west, east) = (*west, *east);
         let view = terrain_view(&[(west, DVec3::ZERO), (east, DVec3::new(256.0, 0.0, 0.0))], &[(west, 15, 0, 4.0), (east, 0, 0, 20.0)]);
 
         assert_eq!(view.terrain_height_at(DVec3::new(255.5, 4.0, 0.0)), Some(12.0));
@@ -350,7 +351,7 @@ mod tests {
 
     #[test]
     fn unloaded_region_neighbor_clamps_to_mesh_edge() {
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_support::registered_region();
         let view = terrain_view(&[(region, DVec3::ZERO)], &[(region, 15, 0, 4.0)]);
 
         assert_eq!(view.terrain_height_at(DVec3::new(255.5, 4.0, 0.0)), Some(4.0));
@@ -358,7 +359,7 @@ mod tests {
 
     #[test]
     fn exact_row_ignores_unloaded_neighbor() {
-        let region = Region::new(1);
+        let (_region_world, region) = crate::test_support::registered_region();
         let view = terrain_view(&[(region, DVec3::ZERO)], &[(region, 1, 0, 7.0)]);
 
         assert_eq!(view.terrain_height_at(DVec3::new(20.0, 15.0, 0.0)), Some(7.0));
