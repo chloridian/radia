@@ -630,7 +630,7 @@ fn schema_recovery_reports_no_writes() {
                 PRIMARY KEY(namespace, name)
             ) WITHOUT ROWID;
             INSERT INTO namespaces VALUES (0, 'tests/storage', 'bin');
-            PRAGMA user_version = 5;",
+            PRAGMA user_version = 1;",
         )
         .expect("create same-version schema with a second-chunk constraint");
     drop(database);
