@@ -1783,8 +1783,9 @@ fn retry_limits_and_server_delays() {
         assert!(store.next_job(now).is_none(), "retry backoff is not shortened");
         now = retry_at.unwrap();
     }
-    assert!(store.next_job(now + Duration::from_secs(3600)).is_none());
-    assert_eq!(store.next_deadline(now + Duration::from_secs(3600)), None);
+    assert!(store.next_job(now).is_none(), "an exhausted burst waits for its negative result to expire");
+    assert_eq!(store.next_deadline(now), Some(now + NEGATIVE_TTL));
+    drop(demand);
     let demand = store.request(route, Request::new(resource(2)), Priority::Visible, now).unwrap();
     let completion = next_fetch(&mut store, now)
         .complete(Err(Failure::Transient { retry_after: Duration::from_secs(5) }))
@@ -1802,7 +1803,38 @@ fn retry_limits_and_server_delays() {
         .expect_err("transient fetch failure completes without decode input");
     store.complete(completion.into(), retry_at);
     assert_matches!(demand.status(), Status::Failed { retry_at: None, .. });
-    assert!(store.next_job(retry_at + Duration::from_secs(30)).is_none(), "an excessive server delay is not retried");
+    assert!(store.next_job(retry_at + Duration::from_secs(29)).is_none(), "an excessive server delay ends the burst");
+}
+
+#[test]
+fn only_transient_failures_recover() {
+    for (failure, recovers) in [(Failure::Transient { retry_after: Duration::ZERO }, true), (Failure::NotFound, false)] {
+        let StoreHarness { mut now, mut store, route } = StoreHarness::new();
+        let demand = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
+        loop {
+            let completion = next_fetch(&mut store, now).complete(Err(failure)).unwrap_err();
+            store.complete(completion.into(), now);
+            match demand.status() {
+                Status::Failed { retry_at: Some(retry), .. } => now = retry,
+                Status::Failed { retry_at: None, .. } => break,
+                status => panic!("{failure:?} leaves the demand failed, not {status:?}"),
+            }
+        }
+        let expiry = now + NEGATIVE_TTL;
+        assert!(store.next_job(expiry - Duration::from_millis(1)).is_none(), "{failure:?} stays failed before expiry");
+        if recovers {
+            assert_eq!(store.next_deadline(now), Some(expiry), "a transient failure wakes the worker at expiry");
+            let Some(LoadJob::Fetch(fetch)) = store.next_job(expiry) else { panic!("a demanded transient failure restarts at expiry") };
+            store.complete(fetch.complete(Err(failure)).unwrap_err().into(), expiry);
+            assert_matches!(demand.status(), Status::Failed { retry_at: Some(_), .. }, "a recovery starts a fresh retry burst");
+        } else {
+            let woken = store.next_deadline(now).unwrap_or(expiry);
+            for at in [expiry, woken, woken.max(expiry) + NEGATIVE_TTL] {
+                assert!(store.next_job(at).is_none(), "an exhausted {failure:?} does not fetch again");
+                assert_matches!(demand.status(), Status::Failed { failure: Failure::NotFound, retry_at: None });
+            }
+        }
+    }
 }
 
 #[test]
