@@ -478,46 +478,27 @@ mod tests {
 
     #[test]
     fn oversized_namespace_recreates_index() {
-        let directory = tempdir().expect("cache directory");
-        let path = directory.path().join("index.sqlite");
-        let namespaces = NamespaceTable::new(&[Namespace::new("items", "bin")]).expect("valid namespaces");
-        let (index, _) = Index::open(&path, &namespaces).expect("create index");
-        index.shutdown().expect("close index");
+        for (column, max_bytes, expected) in [("directory", MAX_NAMESPACE_BYTES, "items"), ("extension", MAX_EXTENSION_BYTES, "bin")] {
+            let directory = tempdir().expect("cache directory");
+            let path = directory.path().join("index.sqlite");
+            let namespaces = NamespaceTable::new(&[Namespace::new("items", "bin")]).expect("valid namespaces");
+            let (index, _) = Index::open(&path, &namespaces).expect("create index");
+            index.shutdown().expect("close index");
 
-        let connection = Connection::open(&path).expect("open index database");
-        let oversized = "x".repeat(MAX_NAMESPACE_BYTES + 1);
-        connection.execute("UPDATE namespaces SET directory=?1", [&oversized]).expect("write oversized namespace");
-        drop(connection);
+            let connection = Connection::open(&path).expect("open index database");
+            let oversized = "x".repeat(max_bytes + 1);
+            connection.execute(&format!("UPDATE namespaces SET {column}=?1"), [&oversized]).expect("write oversized namespace field");
+            drop(connection);
 
-        let (index, records) = Index::open(&path, &namespaces).expect("recreate invalid index");
-        assert!(records.is_empty());
-        index.shutdown().expect("close recovered index");
+            let (index, records) = Index::open(&path, &namespaces).expect("recreate invalid index");
+            assert!(records.is_empty(), "{column}");
+            index.shutdown().expect("close recovered index");
 
-        let connection = Connection::open(path).expect("open recovered database");
-        let value: String = connection.query_row("SELECT directory FROM namespaces", [], |row| row.get(0)).expect("read namespace");
-        assert_eq!(value, "items");
-    }
-
-    #[test]
-    fn oversized_extension_recreates_index() {
-        let directory = tempdir().expect("cache directory");
-        let path = directory.path().join("index.sqlite");
-        let namespaces = NamespaceTable::new(&[Namespace::new("items", "bin")]).expect("valid namespaces");
-        let (index, _) = Index::open(&path, &namespaces).expect("create index");
-        index.shutdown().expect("close index");
-
-        let connection = Connection::open(&path).expect("open index database");
-        let oversized = "x".repeat(MAX_EXTENSION_BYTES + 1);
-        connection.execute("UPDATE namespaces SET extension=?1", [&oversized]).expect("write oversized extension");
-        drop(connection);
-
-        let (index, records) = Index::open(&path, &namespaces).expect("recreate invalid index");
-        assert!(records.is_empty());
-        index.shutdown().expect("close recovered index");
-
-        let connection = Connection::open(path).expect("open recovered database");
-        let value: String = connection.query_row("SELECT extension FROM namespaces", [], |row| row.get(0)).expect("read extension");
-        assert_eq!(value, "bin");
+            let connection = Connection::open(path).expect("open recovered database");
+            let value: String =
+                connection.query_row(&format!("SELECT {column} FROM namespaces"), [], |row| row.get(0)).expect("read namespace field");
+            assert_eq!(value, expected, "{column}");
+        }
     }
 
     #[test]

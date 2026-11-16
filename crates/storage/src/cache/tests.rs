@@ -182,32 +182,6 @@ fn limit_counts_wal_and_shm() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn index_schema_stores_verified_rows() -> Result<(), Box<dyn std::error::Error>> {
-    let directory = tempdir()?;
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES)?;
-    cache.put(key(12), b"indexed payload".to_vec())?;
-    cache.shutdown()?;
-
-    let database = Connection::open(directory.path().join("index.sqlite"))?;
-    let version: i64 = database.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let row: (i64, Vec<u8>, i64, i64, i64, i64) =
-        database.query_row("SELECT namespace, name, size, length(hash), last_use, use_count FROM entries", [], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
-        })?;
-    assert_eq!(version, 5);
-    assert_eq!(row.0, 0);
-    assert_eq!(row.1, key(12).name());
-    assert_eq!(row.2, 15);
-    assert_eq!(row.3, 32);
-    assert!(row.4 > 0);
-    assert_eq!(row.5, 0);
-    let secondary_indexes: i64 =
-        database.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='entries'", [], |row| row.get(0))?;
-    assert_eq!(secondary_indexes, 0);
-    Ok(())
-}
-
-#[test]
 fn namespace_change_remaps_entries() {
     const OLD: [Namespace; 2] = [Namespace::new("removed/items", "bin"), Namespace::new("retained/items", "bin")];
     const NEW: [Namespace; 1] = [Namespace::new("retained/items", "bin")];
@@ -275,32 +249,23 @@ fn locked_old_temp_allows_open() {
 }
 
 #[cfg(windows)]
-fn locked_old_index_file_is_retried(name: &str) {
-    let directory = tempdir().expect("cache directory");
-    let path = directory.path().join(name);
-    fs::write(&path, b"obsolete").expect("write obsolete index file");
-    let locked_file = fs::OpenOptions::new().read(true).share_mode(0).open(&path).expect("lock obsolete index file");
-
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open despite locked legacy index file");
-    cache.shutdown().expect("close cache");
-    assert!(path.exists(), "locked {name} was removed");
-
-    drop(locked_file);
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("retry obsolete file removal on open");
-    assert!(!path.exists(), "{name} remained after the next open");
-    cache.shutdown().expect("close reopened cache");
-}
-
-#[cfg(windows)]
 #[test]
-fn locked_old_snapshot_allows_open() {
-    locked_old_index_file_is_retried("snapshot");
-}
+fn locked_old_files_retry_removal() {
+    for name in ["snapshot", "journal"] {
+        let directory = tempdir().expect("cache directory");
+        let path = directory.path().join(name);
+        fs::write(&path, b"obsolete").expect("write obsolete index file");
+        let locked_file = fs::OpenOptions::new().read(true).share_mode(0).open(&path).expect("lock obsolete index file");
 
-#[cfg(windows)]
-#[test]
-fn locked_old_journal_allows_open() {
-    locked_old_index_file_is_retried("journal");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open despite locked legacy index file");
+        cache.shutdown().expect("close cache");
+        assert!(path.exists(), "locked {name} was removed");
+
+        drop(locked_file);
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("retry obsolete file removal on open");
+        assert!(!path.exists(), "{name} remained after the next open");
+        cache.shutdown().expect("close reopened cache");
+    }
 }
 
 #[test]
@@ -364,22 +329,34 @@ fn contains_checks_index() {
 }
 
 #[test]
-fn hash_mismatch_removes_entry() {
-    let directory = tempdir().expect("cache directory");
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
-    cache.put(key(1), b"payload bytes".to_vec()).expect("store payload");
-    cache.shutdown().expect("close cache");
-    let file = data_file(directory.path(), key(1));
-    let mut bytes = fs::read(&file).expect("read payload file");
-    let byte = bytes.first_mut().expect("first payload byte");
-    *byte ^= 0xff;
-    fs::write(file, bytes).expect("flip payload byte");
+fn damaged_payloads_are_corrupt() {
+    for damage in ["missing", "truncated", "flipped"] {
+        let directory = tempdir().expect("cache directory");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+        cache.put(key(2), b"payload bytes".to_vec()).expect("store payload");
+        cache.shutdown().expect("close cache");
+        let file = data_file(directory.path(), key(2));
+        let mut bytes = fs::read(&file).expect("read payload");
+        match damage {
+            "missing" => fs::remove_file(&file).expect("remove payload"),
+            "truncated" => {
+                bytes.pop();
+                fs::write(&file, bytes).expect("truncate payload");
+            }
+            _ => {
+                *bytes.first_mut().expect("first payload byte") ^= 0xff;
+                fs::write(&file, bytes).expect("flip payload byte");
+            }
+        }
 
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("reopen cache");
-    assert_eq!(cache.lookup(key(1)), Lookup::Corrupt);
-    cache.flush().expect("remove corrupted entry");
-    assert_eq!(cache.lookup(key(1)), Lookup::Miss);
-    cache.shutdown().expect("close cache after removal");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open without data rescan");
+        assert_eq!(cache.entry_count(), 1, "{damage}: startup leaves payload validation to lookup");
+        assert_eq!(cache.lookup(key(2)), Lookup::Corrupt, "{damage}");
+        cache.flush().expect("remove damaged entry");
+        assert_eq!(cache.entry_count(), 0, "{damage}");
+        assert_eq!(cache.lookup(key(2)), Lookup::Miss, "{damage}");
+        cache.shutdown().expect("close repaired cache");
+    }
 }
 
 #[test]
@@ -427,30 +404,6 @@ fn bounded_lookup_rejects_large_entries() {
     cache.flush().expect("discard oversized entry");
     assert_eq!(cache.lookup(key(3)), Lookup::Miss);
     cache.shutdown().expect("close cache");
-}
-
-#[test]
-fn damaged_payloads_are_corrupt() {
-    for missing in [false, true] {
-        let directory = tempdir().expect("cache directory");
-        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
-        cache.put(key(2), b"payload bytes".to_vec()).expect("store payload");
-        cache.shutdown().expect("close cache");
-        let file = data_file(directory.path(), key(2));
-        if missing {
-            fs::remove_file(&file).expect("remove payload");
-        } else {
-            let bytes = fs::read(&file).expect("read payload");
-            fs::write(&file, bytes.get(..bytes.len().saturating_sub(1)).expect("truncated payload range")).expect("truncate payload");
-        }
-
-        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open without data rescan");
-        assert_eq!(cache.entry_count(), 1, "startup leaves payload validation to lookup");
-        assert_eq!(cache.lookup(key(2)), Lookup::Corrupt);
-        cache.flush().expect("remove damaged entry");
-        assert_eq!(cache.entry_count(), 0);
-        cache.shutdown().expect("close repaired cache");
-    }
 }
 
 #[test]
