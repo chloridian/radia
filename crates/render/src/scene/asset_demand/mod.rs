@@ -149,10 +149,31 @@ impl DemandExtrema {
 }
 
 struct ObjectDemand {
+    id: Uuid,
     keys: HashSet<AssetKey>,
     faces: usize,
     size: TextureSize,
     asset: Option<AssetId>,
+    priority: Priority,
+    distance: f64,
+}
+
+struct Displaceable {
+    order: Vec<(u64, Uuid, Entity, usize)>,
+    faces: usize,
+}
+
+impl Displaceable {
+    fn new(targets: &HashMap<Entity, ObjectDemand>) -> Self {
+        let mut order: Vec<_> = targets
+            .iter()
+            .filter(|(_, target)| target.priority == Priority::Background)
+            .map(|(entity, target)| (target.distance.to_bits(), target.id, *entity, target.faces))
+            .collect();
+        order.sort_unstable_by_key(|(distance, id, ..)| (*distance, *id));
+        let faces = order.iter().map(|(.., faces)| faces).sum();
+        Self { order, faces }
+    }
 }
 
 struct RejectedObject {
@@ -190,6 +211,8 @@ pub(in crate::scene) struct AssetDemand {
     rejected: VecDeque<RejectedObject>,
     rejected_entities: HashSet<Entity>,
     rejected_scan_remaining: usize,
+    displaceable: Option<Displaceable>,
+    displaced: Vec<Entity>,
     terrain_targets: HashMap<Region, TerrainDemand>,
     dirty_terrain: BTreeSet<Region>,
     terrain_changes: BTreeSet<Region>,
@@ -216,6 +239,8 @@ impl AssetDemand {
             rejected: VecDeque::new(),
             rejected_entities: HashSet::new(),
             rejected_scan_remaining: 0,
+            displaceable: None,
+            displaced: Vec::new(),
             terrain_targets: HashMap::new(),
             dirty_terrain: BTreeSet::new(),
             terrain_changes: BTreeSet::new(),
@@ -411,6 +436,32 @@ impl AssetDemand {
         self.rejected_scan_remaining = self.rejected.len();
     }
 
+    fn displace(&mut self, entity: Entity, faces: usize, target: bool) -> bool {
+        let mut pool = self.displaceable.take().unwrap_or_else(|| Displaceable::new(&self.targets));
+        let own = self.targets.get(&entity).filter(|own| own.priority == Priority::Background).map_or(0, |own| own.faces);
+        let room = pool.faces.saturating_sub(own) >= faces && (!target || !pool.order.is_empty());
+        let mut freed = 0;
+        let mut slot = !target;
+        while room && (freed < faces || !slot) {
+            let Some((_, id, candidate, listed)) = pool.order.pop() else { break };
+            pool.faces = pool.faces.saturating_sub(listed);
+            let Some(displaced) = self.targets.get(&candidate).filter(|displaced| displaced.priority == Priority::Background) else {
+                continue;
+            };
+            if candidate == entity || (displaced.faces == 0 && slot) {
+                continue;
+            }
+            let count = displaced.faces;
+            freed += count;
+            slot = true;
+            self.remove(candidate);
+            self.queue_rejected(id, candidate, count);
+            self.displaced.push(candidate);
+        }
+        self.displaceable = Some(pool);
+        freed >= faces && slot
+    }
+
     fn refresh(&mut self, key: AssetKey) {
         let Some(entry) = self.entries.get_mut(&key) else { return };
         let Some(maxima) = entry.extrema.maxima() else { return };
@@ -506,6 +557,8 @@ impl AssetDemand {
         self.rejected.clear();
         self.rejected_entities.clear();
         self.rejected_scan_remaining = 0;
+        self.displaceable = None;
+        self.displaced.clear();
         self.terrain_targets.clear();
         self.dirty_terrain.clear();
         self.terrain_changes.clear();
@@ -551,6 +604,7 @@ impl AssetDemand {
                 self.rejected.push_back(rejected);
             }
         }
+        self.displaceable = None;
         let mut changes = Vec::new();
         let mut prefer_scan = true;
         let mut entries = identities.range((self.cursor.map_or(Unbounded, Excluded), Unbounded));
@@ -583,6 +637,9 @@ impl AssetDemand {
                 continue;
             };
             processed += 1;
+            if self.displaced.contains(&entity) {
+                continue;
+            }
             if let Some(object) = mirror.objects.get(&entity) {
                 if !mirror.object_visible(entity) {
                     self.remove(entity);
@@ -592,6 +649,19 @@ impl AssetDemand {
                 } else if let Some(change) = self.resolve_object_materials(camera, object) {
                     changes.push(change);
                 }
+            }
+        }
+        for entity in self.displaced.drain(..) {
+            if let Some(object) = mirror.objects.get(&entity)
+                && (object.materials().is_some()
+                    || object.mesh().is_some()
+                    || changes.iter().any(|change| change.source.detail().summary.entity == entity))
+            {
+                let mesh = match object.geometry() {
+                    crate::scene::Geometry::Mesh(_) => MeshPublication::Clear,
+                    _ => MeshPublication::Keep,
+                };
+                changes.push(MaterialChange { source: object.clone(), materials: None, mesh });
             }
         }
         changes
@@ -659,9 +729,9 @@ impl AssetDemand {
         let publication = mesh::publication(object, mesh_asset, mesh_resolution);
         let slots = mesh::material_slots(object, mesh_asset.is_some(), publication.mesh.as_ref(), priority);
         let count = slots.len();
-        if self.faces.saturating_sub(previous_faces).saturating_add(count) > MAX_FACES
-            || (previous_faces == 0 && !self.targets.contains_key(&entity) && self.targets.len() == MAX_TARGETS)
-        {
+        let excess = self.faces.saturating_sub(previous_faces).saturating_add(count).saturating_sub(MAX_FACES);
+        let target = previous_faces == 0 && !self.targets.contains_key(&entity) && self.targets.len() == MAX_TARGETS;
+        if (excess > 0 || target) && (priority == Priority::Background || !self.displace(entity, excess, target)) {
             for key in keys.drain() {
                 self.release(AssetUser::Object(entity), key);
             }
@@ -695,7 +765,14 @@ impl AssetDemand {
         for key in &keys {
             self.refresh(*key);
         }
-        self.targets.insert(entity, ObjectDemand { keys, faces: count, size, asset: tracked_asset });
+        let distance = match object.placement() {
+            Placement::Ready(transform) => transform.pose.position.distance(camera.position()),
+            _ => f64::INFINITY,
+        };
+        self.targets.insert(
+            entity,
+            ObjectDemand { id: object.detail().summary.id, keys, faces: count, size, asset: tracked_asset, priority, distance },
+        );
         let mesh_changed = !matches!(&publication.publication, MeshPublication::Keep);
         let materials_unchanged = object.materials().is_some_and(|old| old == faces) || object.materials().is_none() && faces.is_empty();
         if !mesh_changed && materials_unchanged {
