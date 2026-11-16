@@ -60,7 +60,7 @@ mod tests {
     }
 
     #[test]
-    fn bindings_validate_and_keep_first() {
+    fn bindings_keep_first_valid() {
         assert_eq!(decode_render_material_bindings(&[]), Err(RenderMaterialError::Malformed));
         assert_eq!(decode_render_material_bindings(&[1]), Err(RenderMaterialError::Malformed));
 

@@ -238,7 +238,7 @@ fn explicit_zero_differs_from_fill() {
 }
 
 #[test]
-fn preflights_padding_and_truncated_variables() {
+fn bound_covers_padding_rejects_truncation() {
     static FIXED_FIELDS: &[FieldSchema] = &[FieldSchema { name: "Data", kind: FieldKind::Fixed(32) }];
     static FIXED_BLOCKS: &[BlockSchema] = &[BlockSchema { name: "Data", mode: BlockMode::Variable, fields: FIXED_FIELDS }];
     static FIXED_SCHEMA: MessageSchema = MessageSchema {

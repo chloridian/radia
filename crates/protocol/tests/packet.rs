@@ -360,7 +360,7 @@ fn failed_encode_keeps_output() {
 }
 
 #[test]
-fn packet_header_is_typed() {
+fn header_is_typed() {
     let source = Packet::new(0x0102_0304, complete_ping(7)).with_reliable().with_extra_header(vec![0xaa, 0xbb]).with_appended_acks(vec![3]);
     let bytes = source.encode().expect("encode header fixture");
     let decoded = Packet::decode(&bytes).expect("decode header fixture");
