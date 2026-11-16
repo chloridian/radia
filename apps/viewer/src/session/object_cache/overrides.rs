@@ -156,7 +156,7 @@ mod tests {
 
     use protocol::{
         lludp::Message,
-        messages::{GenericStreamingMessage, ObjectUpdateCached, object::kill_object},
+        messages::{GenericStreamingMessage, ObjectUpdateCached, generic_streaming_message::MAX_DATA_BYTES, object::kill_object},
     };
     use uuid::Uuid;
     use world::{OrderEvidence, PbrMaterialOverride, PbrMaterialOverrides, Region};
@@ -255,8 +255,14 @@ mod tests {
     }
 
     fn override_message(roughness: Option<f32>) -> Message {
-        let faces = roughness.map(|roughness| (0, PbrMaterialOverride { roughness: Some(roughness), ..Default::default() }));
-        let overrides = PbrMaterialOverrides::new(faces.into_iter().collect()).expect("valid overrides");
+        faces_message(roughness.as_slice())
+    }
+
+    fn faces_message(roughness: &[f32]) -> Message {
+        let faces = (0..)
+            .zip(roughness)
+            .map(|(index, roughness)| (index, PbrMaterialOverride { roughness: Some(*roughness), ..Default::default() }));
+        let overrides = PbrMaterialOverrides::new(faces.collect()).expect("valid overrides");
         let local_id = NonZeroU32::new(LOCAL_ID).expect("fixture local ID is nonzero");
         let data = encode_pbr_overrides(local_id, &overrides).expect("overrides fit a message");
         Message::GenericStreamingMessage(GenericStreamingMessage { method: 0x4175, data })
@@ -379,7 +385,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn clear_after_eviction_deletes_the_row() {
+    async fn evicted_region_clear_deletes_row() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let path = directory.path().join("objects.sqlite");
         let mut viewer = Viewer::open(&path).await;
@@ -398,7 +404,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn declined_override_is_not_rewritten() {
+    async fn declined_override_not_rewritten() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let mut viewer = Viewer::open(&directory.path().join("objects.sqlite")).await;
         let scope = viewer.cache.identities.get(&SIMULATOR).expect("simulator has a cache scope").clone();
@@ -423,6 +429,46 @@ mod tests {
         }
         assert_eq!(viewer.cache.pending.len(), 0);
         viewer.cache.db = db;
+        viewer.cache.close().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn over_cap_replacement_deletes_row() {
+        let directory = tempfile::tempdir().expect("create isolated cache directory");
+        let path = directory.path().join("objects.sqlite");
+        let mut viewer = Viewer::open(&path).await;
+        viewer.ingest(full_update(OBJECT_ID, 11)).await;
+        let stored = override_message(Some(0.25));
+        let Message::GenericStreamingMessage(GenericStreamingMessage { data, .. }) = &stored else {
+            panic!("override is a streaming message")
+        };
+        let mut remaining = MAX_REGION_OVERRIDE_BYTES - data.len();
+        viewer.ingest(stored).await;
+        let scope = viewer.cache.identities.get(&SIMULATOR).expect("simulator has a cache scope").clone();
+        let mut fillers = Vec::new();
+        for index in 1_u32.. {
+            if remaining == 0 {
+                break;
+            }
+            let bytes = remaining.min(MAX_DATA_BYTES);
+            remaining -= bytes;
+            let stored = StoredOverride { object_id: Uuid::from_u128(u128::from(index)), payload: vec![b'x'; bytes].into() };
+            fillers.push(OverrideWrite::Upsert(10_000 + index, stored));
+        }
+        let filler_count = fillers.len();
+        viewer.cache.write_overrides(SIMULATOR, scope, fillers);
+        flush(&mut viewer.cache).await;
+        assert_eq!(viewer.rows().await.len(), filler_count + 1);
+
+        viewer.ingest(faces_message(&[0.5, 0.75])).await;
+        let rows = viewer.rows().await;
+        assert_eq!(rows.len(), filler_count);
+        assert!(rows.iter().all(|(local_id, _)| *local_id != LOCAL_ID), "the replaced override row is deleted");
+        viewer.cache.close().await;
+
+        let mut viewer = Viewer::open(&path).await;
+        viewer.replay(&cached(&full_update(OBJECT_ID, 11))).await;
+        assert_eq!(viewer.roughness(OBJECT_ID), None);
         viewer.cache.close().await;
     }
 }
