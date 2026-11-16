@@ -1,4 +1,12 @@
-use std::{collections::HashMap, fmt, future::Future, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt,
+    future::Future,
+    net::SocketAddr,
+    ops::Range,
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
 
 use llsd::xml;
 use reqwest::Url;
@@ -100,6 +108,7 @@ pub struct Client {
     requests: RequestTracker,
     pub(super) budget: CapabilityBudget,
     request_timeout: Duration,
+    grants: Arc<GrantCache>,
 }
 
 impl fmt::Debug for Client {
@@ -126,15 +135,23 @@ impl Client {
             requests: RequestTracker::new(),
             budget,
             request_timeout: REQUEST_TIMEOUT,
+            grants: Arc::default(),
         })
     }
 
-    #[tracing::instrument(
-        name = "capabilities.discover", level = "debug", skip_all,
-        fields(capability_count = names.len())
-    )]
     pub async fn request_capabilities(&self, names: &[&str]) -> Result<HashMap<String, CapabilityUrl>, Error> {
         validate_capability_names(names)?;
+        if *self.session_closed.borrow() {
+            return Err(Error::CapabilitySessionClosed);
+        }
+        match self.grants.cached(names) {
+            Ok(granted) => Ok(granted),
+            Err(_) => self.discover_missing(names).await,
+        }
+    }
+
+    #[tracing::instrument(name = "capabilities.discover", level = "debug", skip_all, fields(capability_count = names.len()))]
+    async fn discover_missing(&self, names: &[&str]) -> Result<HashMap<String, CapabilityUrl>, Error> {
         let deadline = RequestDeadline::new(self.request_timeout);
         let names = names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
         if deadline.expired() {
@@ -142,35 +159,43 @@ impl Client {
         }
         let client = self.clone();
         self.on_runtime(async move {
-            let seed = client.seed.as_ref().clone();
-            let request_names = names.clone();
-            let (response, permit) = client
-                .run_with_permit(deadline, move |http, permit| async move {
-                    let response =
-                        request_capabilities_response(&http, &seed, &request_names, super::budget::MAX_SEED_CAPABILITY_RESPONSE_BYTES)
-                            .await?;
-                    Ok((response, permit))
-                })
-                .await?;
-            let decode_names = names.clone();
-            let decode_guard = client.requests.track();
-            let decode = spawn_blocking_with_permit(permit, move || {
-                let _decode_guard = decode_guard;
-                decode_seed_capabilities(response, &decode_names)
-            });
-            let (result, permit) = client
-                .race_request(deadline, async {
-                    time::timeout_at(deadline.at, decode)
-                        .await
-                        .map_err(|_| deadline.error())?
-                        .map_err(|error| Error::Capability(format!("Capability response decoder failed: {error}")))
-                })
-                .await?;
-            drop(permit);
-            let capabilities = result?;
-            Ok(capabilities.into_iter().map(|(name, url)| (name, CapabilityUrl::from_discovery(url))).collect())
+            let _discovery = client.race_request(deadline, async { Ok(client.grants.discovery.lock().await) }).await?;
+            let missing = match client.grants.cached(&names) {
+                Ok(granted) => return Ok(granted),
+                Err(missing) => missing,
+            };
+            let discovered = client.discover(deadline, missing.clone()).await?;
+            Ok(client.grants.record(&names, missing, &discovered))
         })
         .await
+    }
+
+    async fn discover(&self, deadline: RequestDeadline, names: Vec<String>) -> Result<HashMap<String, CapabilityUrl>, Error> {
+        let seed = self.seed.as_ref().clone();
+        let request_names = names.clone();
+        let (response, permit) = self
+            .run_with_permit(deadline, move |http, permit| async move {
+                let response =
+                    request_capabilities_response(&http, &seed, &request_names, super::budget::MAX_SEED_CAPABILITY_RESPONSE_BYTES).await?;
+                Ok((response, permit))
+            })
+            .await?;
+        let decode_guard = self.requests.track();
+        let decode = spawn_blocking_with_permit(permit, move || {
+            let _decode_guard = decode_guard;
+            decode_seed_capabilities(response, &names)
+        });
+        let (result, permit) = self
+            .race_request(deadline, async {
+                time::timeout_at(deadline.at, decode)
+                    .await
+                    .map_err(|_| deadline.error())?
+                    .map_err(|error| Error::Capability(format!("Capability response decoder failed: {error}")))
+            })
+            .await?;
+        drop(permit);
+        let capabilities = result?;
+        Ok(capabilities.into_iter().map(|(name, url)| (name, CapabilityUrl::from_discovery(url))).collect())
     }
 
     pub async fn post_with_response_limit<Request>(
@@ -574,6 +599,34 @@ impl Client {
     }
 }
 
+#[derive(Default)]
+struct GrantCache {
+    grants: Mutex<HashMap<String, Option<CapabilityUrl>>>,
+    discovery: tokio::sync::Mutex<()>,
+}
+
+impl GrantCache {
+    fn cached<N: AsRef<str>>(&self, names: &[N]) -> Result<HashMap<String, CapabilityUrl>, Vec<String>> {
+        let grants = self.grants.lock().unwrap_or_else(PoisonError::into_inner);
+        let missing = names.iter().map(AsRef::as_ref).filter(|name| !grants.contains_key(*name)).map(str::to_owned).collect::<Vec<_>>();
+        if missing.is_empty() { Ok(granted(&grants, names)) } else { Err(missing) }
+    }
+
+    fn record(
+        &self,
+        names: &[String],
+        missing: Vec<String>,
+        discovered: &HashMap<String, CapabilityUrl>,
+    ) -> HashMap<String, CapabilityUrl> {
+        let mut grants = self.grants.lock().unwrap_or_else(PoisonError::into_inner);
+        for name in missing {
+            let url = discovered.get(&name).cloned();
+            grants.insert(name, url);
+        }
+        granted(&grants, names)
+    }
+}
+
 struct RequestTracker {
     active: watch::Sender<usize>,
 }
@@ -617,6 +670,10 @@ impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+fn granted<N: AsRef<str>>(grants: &HashMap<String, Option<CapabilityUrl>>, names: &[N]) -> HashMap<String, CapabilityUrl> {
+    names.iter().map(AsRef::as_ref).filter_map(|name| grants.get(name).cloned().flatten().map(|url| (name.to_owned(), url))).collect()
 }
 
 fn validate_response_limit(max_response_bytes: usize) -> Result<(), Error> {
