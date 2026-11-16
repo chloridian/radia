@@ -428,9 +428,7 @@ mod tests {
         let (chat, cx) = cx.add_window_view(ChatScreen::new);
         draw(cx);
 
-        let input_bounds = cx.debug_bounds("chat-input").unwrap();
-        cx.simulate_click(input_bounds.center(), Modifiers::default());
-        cx.simulate_input("hello nearby");
+        chat.update_in(cx, |chat, window, cx| chat.message_input.update(cx, |input, cx| input.set_value("hello nearby", window, cx)));
         draw(cx);
 
         let send_bounds = cx.debug_bounds("chat-send-button").unwrap();
