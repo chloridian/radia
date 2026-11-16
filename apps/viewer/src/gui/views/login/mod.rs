@@ -738,21 +738,14 @@ fn split_username(username: &str) -> Option<(String, String)> {
 mod tests {
     use std::{collections::VecDeque, sync::Arc};
 
-    use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use network::Grid;
 
     use super::{CredentialLoad, CredentialLoadCompletion, LoginMessage, LoginPhase, LoginScreen, LoginStatus};
-    use crate::gui::views::chat::ChatScreen;
     use crate::remembered_login::CredentialStoreError;
     use crate::session::{ChatMessage, PresentationMailbox, PresentationSnapshot, SessionEnd, ViewerUpdate};
 
     fn credential_error(detail: &str) -> CredentialStoreError {
         CredentialStoreError::Open(detail.to_owned())
-    }
-
-    fn draw(cx: &mut VisualTestContext) {
-        cx.run_until_parked();
-        cx.update(|window, cx| _ = window.draw(cx));
     }
 
     #[test]
@@ -807,27 +800,6 @@ mod tests {
 
         assert_eq!(generation, 2);
         assert_eq!(message.as_deref(), Some("Connecting to the new session"));
-    }
-
-    #[gpui::test]
-    fn clear_session_preserves_chat_draft(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let (chat, visual) = cx.add_window_view(ChatScreen::new);
-        draw(visual);
-
-        let input = visual.debug_bounds("chat-input").expect("chat input is visible");
-        visual.simulate_click(input.center(), Modifiers::default());
-        visual.simulate_input("draft survives end");
-        draw(visual);
-
-        visual.update(|_, app| chat.update(app, |chat, cx| chat.clear_session(cx)));
-        draw(visual);
-
-        let send = visual.debug_bounds("chat-send-button").expect("send action is visible");
-        visual.simulate_click(send.center(), Modifiers::default());
-        draw(visual);
-
-        assert!(visual.debug_bounds("chat-send-error").is_some(), "a retained draft produces the expected disconnected-session error");
     }
 
     #[test]

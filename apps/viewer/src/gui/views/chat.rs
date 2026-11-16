@@ -457,5 +457,6 @@ mod tests {
         cx.update(|_, app| chat.update(app, |chat, cx| chat.clear_session(cx)));
         draw(cx);
         assert!(cx.debug_bounds("chat-send-error").is_none(), "clearing the session should clear its stale send error");
+        assert_eq!(cx.update(|_, app| chat.read(app).message_input.read(app).value().to_string()), "hello nearby");
     }
 }
