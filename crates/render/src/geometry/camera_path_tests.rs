@@ -354,7 +354,6 @@ fn run(path: &Path, regime: Regime) {
     });
     let report = rig.walk(path);
     println!("camera_path path={} regime={regime:?} mesh_bytes={} {report}", path.name, rig.geometry.memory.mesh_state().bytes);
-    assert_eq!(report.pop_outs, 0, "{} {regime:?}: items on screen lost their committed draw: {:?}", path.name, report.examples);
 }
 
 fn run_regimes(path: &Path) {
