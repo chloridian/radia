@@ -35,7 +35,7 @@ fn world_limits() -> WorldLimits {
 }
 
 #[test]
-fn world_memory_baseline() {
+fn large_worlds_free_all_memory() {
     for count in [40_000_usize, 65_536] {
         let baseline = live_bytes();
         let ((world, regions), allocations) = measure(|| {

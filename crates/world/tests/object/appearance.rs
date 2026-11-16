@@ -22,7 +22,7 @@ fn shape_and_appearance_are_independent() {
 }
 
 #[test]
-fn shape_appearance_order_and_clear() {
+fn shape_appearance_clear_independently() {
     let (mut world, region) = with_region();
     let mut observation = object(source(region, 1), 208, 1, Object, Root);
     observation.shape = FieldUpdate::Set(sculpt_shape(0x208));
@@ -246,7 +246,7 @@ fn untracked_texture_entry_cannot_replace() {
 }
 
 #[test]
-fn pbr_materials_freshness_and_clears() {
+fn pbr_materials_respect_freshness() {
     let (mut world, region) = with_region();
     let mut observation = object(source(region, 10), 213, 1, Object, Root);
     observation.appearance = FieldUpdate::Set(Appearance::Surface);

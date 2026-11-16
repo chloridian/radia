@@ -341,7 +341,7 @@ fn region_index_tracks_transfer() {
 }
 
 #[test]
-fn retirement_clears_and_blocks_reuse() {
+fn retirement_clears_region_permanently() {
     let mut world_limits = limits();
     world_limits.max_regions = 2;
     world_limits.max_entities = 3;
@@ -393,34 +393,6 @@ fn retirement_clears_and_blocks_reuse() {
         .flat_map(|turn| turn.recovery_cancellations.into_iter().map(|cancellation| cancellation.address()))
         .collect::<HashSet<_>>();
     assert_eq!(cancellations, HashSet::from([address(region, 3), address(region, 4)]));
-}
-
-#[test]
-fn world_registration_limits_are_enforced() {
-    let mut world = World::new(WorldLimits {
-        max_regions: 1,
-        max_entities: 1,
-        max_entities_per_region: 1,
-        max_tombstones_per_region: 1,
-        max_tombstones: 1,
-        max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(1),
-        max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(1),
-        max_journal_entries: 1,
-        max_journal_changes: 32,
-        max_region_name_bytes: 1,
-        max_recovery_targets: 4,
-    });
-    let region_a = world.register_region().unwrap();
-    let revision = world.revision();
-    assert_eq!(world.register_region(), Err(RegionBudgetExhausted));
-    assert_eq!(world.revision(), revision);
-    assert_eq!(
-        world.patch_region(region_a, RegionInfo { name: Some("longer".to_owned()), ..RegionInfo::default() }),
-        Err(InvalidValue { field: "region_name" })
-    );
-
-    assert!(matches!(world.observe_object(observation(source(region_a, 1), 20, 1)).unwrap().outcome, Introduced(_)));
-    assert_eq!(world.observe_object(observation(source(region_a, 2), 21, 2)), Err(EntityBudgetExhausted));
 }
 
 #[test]

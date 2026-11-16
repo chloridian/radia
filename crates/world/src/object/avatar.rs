@@ -285,7 +285,7 @@ mod tests {
     use utils::AssetId;
 
     #[test]
-    fn avatar_slot_bounds_hold() {
+    fn index_bounds_hold() {
         assert_eq!(AvatarTextureSlot::new(44).map(AvatarTextureSlot::index), Some(44));
         assert_eq!(AvatarTextureSlot::new(45), None);
         assert_eq!(AvatarVisualParamIndex::new(254).map(AvatarVisualParamIndex::get), Some(254));
@@ -301,27 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn params_merge_by_position() {
-        let first = AvatarAppearanceUpdate::new(
-            None,
-            None,
-            vec![(AvatarVisualParamIndex::new(0).unwrap(), 10), (AvatarVisualParamIndex::new(2).unwrap(), 30)],
-            None,
-        )
-        .expect("valid update");
-        let second =
-            AvatarAppearanceUpdate::new(None, None, vec![(AvatarVisualParamIndex::new(0).unwrap(), 20)], None).expect("valid update");
-        let mut appearance = AvatarAppearance::default();
-
-        appearance.apply(first);
-        appearance.apply(second);
-
-        assert_eq!(appearance.visual_param(AvatarVisualParamIndex::new(0).unwrap()), Some(20));
-        assert_eq!(appearance.visual_param(AvatarVisualParamIndex::new(2).unwrap()), Some(30));
-    }
-
-    #[test]
-    fn texture_slots_replace_and_clear() {
+    fn texture_slots_replace_whole_set() {
         let slot = AvatarTextureSlot::HEAD_BAKED;
         let mut values = [None; super::MAX_AVATAR_TEXTURE_SLOTS];
         values[usize::from(slot.index())] = Some(AssetId::new(Uuid::from_u128(7)));

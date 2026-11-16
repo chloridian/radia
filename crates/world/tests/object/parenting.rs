@@ -186,7 +186,7 @@ fn queued_parent_jobs_rotate_fairly() {
 }
 
 #[test]
-fn queued_resolution_advances_after_updates() {
+fn queued_resolution_progresses_under_churn() {
     let mut bounds = limits();
     bounds.max_entities = 220;
     bounds.max_entities_per_region = 220;
@@ -557,7 +557,7 @@ fn sit_target_respects_tracked_authority() {
 }
 
 #[test]
-fn sit_target_defers_when_unresolved() {
+fn sit_target_defers_until_resolved() {
     let (mut world, region) = with_region();
     let target = SitTarget { position: Vec3::X, rotation: Quat::IDENTITY };
 
@@ -683,7 +683,7 @@ fn transfer_retention_is_bounded() {
 }
 
 #[test]
-fn rebind_preserves_an_unrelated_parent() {
+fn rebind_preserves_unrelated_parent() {
     for parent_present in [false, true] {
         let (mut world, region) = with_region();
         let _ = world.observe_object(object(source(region, 1), 360, 1, Object, Root)).unwrap();
