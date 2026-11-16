@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     error::Error,
     fmt::{self, Display, Formatter},
     mem::size_of,
@@ -8,6 +8,7 @@ use std::{
 
 use assets::TextureHandle;
 use utils::AssetId;
+use uuid::Uuid;
 use world::{Entity, Region, WorldRevision};
 
 use super::{Batch, Change, MeshChange, Mirror, SceneLifetime, Status};
@@ -15,6 +16,7 @@ use crate::scene::{Object, Patch, RegionData, Surface, ViewerEnvironment, region
 
 const CHANGE_HISTORY: usize = 64;
 const CHANGE_HISTORY_BYTES: usize = 4 * 1024 * 1024;
+const FILTERED_OBJECT_PAGE_LIMIT: usize = 128;
 
 #[derive(Default)]
 pub(crate) struct SceneChanges {
@@ -100,6 +102,12 @@ impl PartialEq for ViewVersion {
 
 impl Eq for ViewVersion {}
 
+pub(crate) struct ObjectPage<'a> {
+    pub(crate) entries: Vec<(Uuid, Option<&'a Object>)>,
+    pub(crate) cursor: Option<Uuid>,
+    pub(crate) done: bool,
+}
+
 pub struct SceneView {
     session: SceneLifetime,
     sequence: u64,
@@ -107,6 +115,8 @@ pub struct SceneView {
     revision: Option<WorldRevision>,
     status: Status,
     mirror: Mirror,
+    object_order: BTreeMap<Uuid, Entity>,
+    membership_sequence: u64,
     change_history: VecDeque<(u64, SceneChanges)>,
     change_history_bytes: usize,
     reconcile_marker: SceneChanges,
@@ -127,6 +137,8 @@ impl SceneView {
             revision: None,
             status: Status::Loading,
             mirror: Mirror::default(),
+            object_order: BTreeMap::new(),
+            membership_sequence: 0,
             change_history: VecDeque::with_capacity(CHANGE_HISTORY),
             change_history_bytes: 0,
             reconcile_marker: SceneChanges { reconcile_all: true, ..SceneChanges::default() },
@@ -161,12 +173,57 @@ impl SceneView {
         }
         if batch.replace {
             self.mirror = Mirror::default();
+            self.object_order.clear();
         }
         let now = Instant::now();
+        let mut membership_changed = batch.replace;
         for change in batch.changes {
-            self.mirror.apply_at(change, now);
+            match change {
+                Change::Object(object) => {
+                    let entity = object.detail().summary.entity;
+                    let previous = self
+                        .mirror
+                        .objects
+                        .get(&entity)
+                        .map(|object| (object.detail().summary.id, object.detail().summary.address.region()));
+                    let was_visible = self.mirror.object_visible(entity);
+                    self.mirror.apply_at(Change::Object(object), now);
+                    let Some(current) = self.mirror.objects.get(&entity) else { continue };
+                    let current_id = current.detail().summary.id;
+                    let current_region = current.detail().summary.address.region();
+                    if previous.map(|(id, _)| id) != Some(current_id) {
+                        if let Some((previous_id, _)) = previous
+                            && self.object_order.get(&previous_id) == Some(&entity)
+                        {
+                            self.object_order.remove(&previous_id);
+                        }
+                        self.object_order.insert(current_id, entity);
+                        membership_changed = true;
+                    }
+                    membership_changed |= previous.is_some_and(|(_, region)| region != current_region);
+                    membership_changed |= was_visible != self.mirror.object_visible(entity);
+                }
+                Change::Remove(entity) => {
+                    if let Some(object) = self.mirror.objects.get(&entity) {
+                        let id = object.detail().summary.id;
+                        if self.object_order.get(&id) == Some(&entity) {
+                            self.object_order.remove(&id);
+                        }
+                        membership_changed = true;
+                    }
+                    self.mirror.apply_at(Change::Remove(entity), now);
+                }
+                change @ Change::InvalidateSubtree(..) | change @ Change::Retire(_) => {
+                    membership_changed = true;
+                    self.mirror.apply_at(change, now);
+                }
+                change => self.mirror.apply_at(change, now),
+            }
         }
         self.sequence = batch.sequence;
+        if membership_changed {
+            self.membership_sequence = self.membership_sequence.checked_add(1).expect("scene membership version space exhausted");
+        }
         if geometry_changed {
             self.geometry_sequence = self.geometry_sequence.checked_add(1).expect("scene geometry version space exhausted");
         }
@@ -241,11 +298,49 @@ impl SceneView {
             .values()
             .filter(move |object| active && (!needs_filter || mirror.visibility(object.detail().summary.entity, &mut visibility).visible))
     }
+
+    pub(crate) fn object_page(&self, after: Option<Uuid>, limit: usize) -> ObjectPage<'_> {
+        if !self.session.is_active() || limit == 0 {
+            return ObjectPage { entries: Vec::new(), cursor: after, done: true };
+        }
+        let needs_filter = !self.mirror.invalidations.is_empty() || !self.mirror.retired_regions.is_empty();
+        let limit = if needs_filter { limit.min(FILTERED_OBJECT_PAGE_LIMIT) } else { limit };
+        let entries = match after {
+            Some(after) => self.object_order.range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded)),
+            None => self.object_order.range(..),
+        }
+        .take(limit.saturating_add(1))
+        .map(|(id, entity)| (*id, *entity))
+        .collect::<Vec<_>>();
+        let done = entries.len() <= limit;
+        let next = entries.get(limit.saturating_sub(1)).map(|(id, _)| *id);
+        let mut visibility = HashMap::new();
+        let objects = entries
+            .into_iter()
+            .take(limit)
+            .map(|(id, entity)| {
+                let object = self.mirror.objects.get(&entity);
+                let visible = object.is_some_and(|object| {
+                    !self.mirror.is_retired(object.detail().summary.address.region())
+                        && (!needs_filter || self.mirror.visibility(entity, &mut visibility).visible)
+                });
+                (id, object.filter(|_| visible))
+            })
+            .collect();
+        ObjectPage { entries: objects, cursor: next, done }
+    }
+
     pub fn object(&self, entity: Entity) -> Option<&Object> {
         if !self.session.is_active() || !self.mirror.object_visible(entity) {
             return None;
         }
         self.mirror.objects.get(&entity)
+    }
+    pub(crate) fn object_is_live(&self, entity: Entity) -> bool {
+        self.object(entity).is_some()
+    }
+    pub(crate) fn membership_sequence(&self) -> u64 {
+        self.membership_sequence
     }
     pub fn regions(&self) -> impl Iterator<Item = &RegionData> {
         self.mirror.regions.values().filter(|_| self.session.is_active())
@@ -276,6 +371,27 @@ impl SceneView {
 
     pub fn surfaces(&self) -> impl Iterator<Item = &Surface> {
         self.mirror.surfaces.values().filter(|_| self.session.is_active())
+    }
+
+    pub(crate) fn surface_page(
+        &self,
+        after: Option<(Region, crate::scene::SurfaceKind)>,
+        limit: usize,
+    ) -> (Vec<&Surface>, Option<(Region, crate::scene::SurfaceKind)>, bool) {
+        if !self.session.is_active() || limit == 0 {
+            return (Vec::new(), after, true);
+        }
+        let entries = match after {
+            Some(after) => self.mirror.surfaces.range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded)),
+            None => self.mirror.surfaces.range(..),
+        }
+        .take(limit.saturating_add(1))
+        .map(|(key, surface)| (*key, surface))
+        .collect::<Vec<_>>();
+        let done = entries.len() <= limit;
+        let next = entries.get(limit.saturating_sub(1)).map(|(key, _)| *key);
+        let surfaces = entries.into_iter().take(limit).map(|(_, surface)| surface).collect();
+        (surfaces, next, done)
     }
 
     pub(crate) fn surface(&self, region: Region, kind: crate::scene::SurfaceKind) -> Option<&Surface> {
@@ -319,8 +435,15 @@ mod tests {
     use math::DVec3;
     use world::{RegionInfo, RegionSummary, TERRAIN_PATCH_SAMPLES, TerrainPatch};
 
+    use crate::scene::model::Receipt;
     use crate::scene::model::SceneLifetime;
     use crate::scene::{Budget, Reconciler};
+
+    struct PageState {
+        entries: Vec<(Uuid, Option<Entity>)>,
+        cursor: Option<Uuid>,
+        done: bool,
+    }
 
     fn terrain_view(regions: &[(Region, DVec3)], patches: &[(Region, u8, u8, f32)]) -> SceneView {
         let budget = Budget::default();
@@ -343,6 +466,52 @@ mod tests {
         view
     }
 
+    fn membership_entity(
+        world: &mut world::World,
+        region: Region,
+        id: Uuid,
+        local_id: u32,
+        order: u64,
+        parent: world::ParentUpdate,
+    ) -> Entity {
+        let local_id = std::num::NonZeroU32::new(local_id).expect("fixture local id");
+        let mut observation = world::ObjectObservation::new(
+            world::UpdateSource::new(region, u32::try_from(order).expect("fixture order"), world::OrderEvidence::Ordered(order), 0),
+            id,
+            local_id,
+            world::Kind::Object,
+            parent,
+        );
+        observation.pose = Some(world::Pose { position: Some(math::Vec3::new(10.0, 0.0, 0.0)), rotation: Some(math::Quat::IDENTITY) });
+        observation.scale = Some(math::Vec3::ONE);
+        let world::ApplyOutcome::Introduced(entity) = world.observe_object(observation).expect("fixture object applies").outcome else {
+            panic!("fixture object must be new");
+        };
+        entity
+    }
+
+    fn scene_object(world: &world::World, entity: Entity, budget: &Budget) -> Object {
+        let detail = world.object_detail(entity).expect("fixture object detail");
+        let lease = budget.reserve(detail.owned_bytes() + 32).expect("object lease");
+        Object::new(detail, lease)
+    }
+
+    fn apply_changes(view: &mut SceneView, replace: bool, changes: Vec<Change>) {
+        let (_, delivery) = Receipt::new();
+        let sequence = view.sequence.checked_add(1).expect("fixture sequence");
+        view.apply(Batch { session: view.session.clone(), sequence, revision: None, status: Status::Ready, replace, changes, delivery })
+            .expect("fixture publication applies");
+    }
+
+    fn object_page_state(view: &SceneView, after: Option<Uuid>, limit: usize) -> PageState {
+        let page = view.object_page(after, limit);
+        PageState {
+            entries: page.entries.into_iter().map(|(id, object)| (id, object.map(|object| object.detail().summary.entity))).collect(),
+            cursor: page.cursor,
+            done: page.done,
+        }
+    }
+
     #[test]
     fn status_change_requests_reconciliation_without_full_rebuild() {
         let (_scene, mut view) = Reconciler::new(crate::scene::Budget::default());
@@ -354,6 +523,124 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert!(changes[0].reconcile_all);
         assert!(!changes[0].full);
+    }
+
+    #[test]
+    fn object_pages_follow_visibility() {
+        let mut world = world::World::new(world::WorldLimits {
+            max_regions: 1,
+            max_entities: 4,
+            max_entities_per_region: 4,
+            max_tombstones_per_region: 4,
+            max_tombstones: 4,
+            max_tombstone_bytes_per_region: world::WorldLimits::tombstone_bytes_for_count(4),
+            max_tombstone_bytes: world::WorldLimits::tombstone_bytes_for_count(4),
+            max_journal_entries: 16,
+            max_journal_changes: 64,
+            max_region_name_bytes: 64,
+            max_recovery_targets: 4,
+        });
+        let region = world.register_region().expect("fixture region registers");
+        let _origin =
+            world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("fixture origin applies");
+        let first_id = Uuid::from_u128(1);
+        let second_id = Uuid::from_u128(2);
+        let third_id = Uuid::from_u128(3);
+        let first = membership_entity(&mut world, region, first_id, 1, 1, world::ParentUpdate::Root);
+        let second = membership_entity(
+            &mut world,
+            region,
+            second_id,
+            2,
+            2,
+            world::ParentUpdate::Local(std::num::NonZeroU32::new(1).expect("parent local id")),
+        );
+        let third = membership_entity(&mut world, region, third_id, 3, 3, world::ParentUpdate::Root);
+        let budget = Budget::default();
+        let mut view = SceneView::new(SceneLifetime::new());
+        apply_changes(
+            &mut view,
+            true,
+            vec![
+                Change::Object(scene_object(&world, first, &budget)),
+                Change::Object(scene_object(&world, second, &budget)),
+                Change::Object(scene_object(&world, third, &budget)),
+            ],
+        );
+
+        assert_eq!(view.object_count(), 3);
+        assert_eq!(view.tracked_object_count(), 3);
+        let page = object_page_state(&view, None, 1);
+        assert_eq!(page.entries, [(first_id, Some(first))]);
+        assert_eq!(page.cursor, Some(first_id));
+        assert!(!page.done);
+
+        let membership = view.membership_sequence();
+        apply_changes(&mut view, false, vec![Change::InvalidateSubtree(first, world::RemovalFence::new(region, 4, 0))]);
+        assert!(view.membership_sequence() > membership, "subtree invalidation advances membership");
+        assert_eq!(view.object_count(), 1);
+        assert_eq!(view.tracked_object_count(), 3);
+        assert!(view.object(first).is_none());
+        assert!(view.object(second).is_none());
+        assert_eq!(view.objects().map(|object| object.detail().summary.entity).collect::<Vec<_>>(), [third]);
+        let page = object_page_state(&view, None, 1);
+        assert_eq!(page.entries, [(first_id, None)]);
+        assert_eq!(page.cursor, Some(first_id));
+        assert!(!page.done);
+        let page = object_page_state(&view, page.cursor, 1);
+        assert_eq!(page.entries, [(second_id, None)]);
+        assert_eq!(page.cursor, Some(second_id));
+        assert!(!page.done);
+        let page = object_page_state(&view, page.cursor, 1);
+        assert_eq!(page.entries, [(third_id, Some(third))]);
+        assert_eq!(page.cursor, Some(third_id));
+        assert!(page.done);
+
+        let membership = view.membership_sequence();
+        apply_changes(&mut view, false, vec![Change::Remove(third)]);
+        assert!(view.membership_sequence() > membership);
+        assert_eq!(view.object_count(), 0);
+        assert_eq!(view.tracked_object_count(), 2);
+        let page = object_page_state(&view, None, 1);
+        assert_eq!(page.entries, [(first_id, None)]);
+        assert_eq!(page.cursor, Some(first_id));
+        assert!(!page.done);
+
+        let _removal = world
+            .remove_object(
+                world::UpdateSource::new(region, 4, world::OrderEvidence::Ordered(4), 0),
+                std::num::NonZeroU32::new(3).expect("removed local id"),
+            )
+            .expect("fixture removal applies");
+        let reused = membership_entity(&mut world, region, third_id, 4, 5, world::ParentUpdate::Root);
+        assert_ne!(reused, third);
+        apply_changes(&mut view, false, vec![Change::Object(scene_object(&world, reused, &budget))]);
+        assert_eq!(view.object_count(), 1);
+        assert_eq!(view.tracked_object_count(), 3);
+        assert_eq!(view.object(reused).map(|object| object.detail().summary.id), Some(third_id));
+        let page = object_page_state(&view, Some(second_id), 1);
+        assert_eq!(page.entries, [(third_id, Some(reused))]);
+        assert_eq!(page.cursor, Some(third_id));
+        assert!(page.done);
+
+        let membership = view.membership_sequence();
+        apply_changes(&mut view, false, vec![Change::Retire(region)]);
+        assert!(view.membership_sequence() > membership);
+        assert_eq!(view.object_count(), 0);
+        assert_eq!(view.tracked_object_count(), 3);
+        assert!(view.objects().next().is_none());
+        let page = object_page_state(&view, None, 1);
+        assert_eq!(page.entries, [(first_id, None)]);
+        assert_eq!(page.cursor, Some(first_id));
+        assert!(!page.done);
+        let page = object_page_state(&view, page.cursor, 1);
+        assert_eq!(page.entries, [(second_id, None)]);
+        assert_eq!(page.cursor, Some(second_id));
+        assert!(!page.done);
+        let page = object_page_state(&view, page.cursor, 1);
+        assert_eq!(page.entries, [(third_id, None)]);
+        assert_eq!(page.cursor, Some(third_id));
+        assert!(page.done);
     }
 
     #[test]

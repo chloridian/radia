@@ -56,7 +56,7 @@ pub enum ReadQuery {
 
 pub struct ReadJob {
     session: SceneLifetime,
-    epoch: u64,
+    identity: ReadIdentity,
     query: ReadQuery,
     lease: Lease,
     life: Arc<()>,
@@ -65,6 +65,87 @@ pub struct ReadJob {
 impl ReadJob {
     pub fn query(&self) -> &ReadQuery {
         &self.query
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReadIdentity {
+    epoch: u64,
+    request: u64,
+}
+
+enum ReadState {
+    Idle,
+    InFlight { identity: ReadIdentity, life: Weak<()>, world_changed: bool },
+}
+
+impl ReadState {
+    fn is_idle(&self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
+    fn is_abandoned(&self) -> bool {
+        matches!(self, Self::InFlight { life, .. } if life.upgrade().is_none())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PageState<C> {
+    NotStarted,
+    Paging(C),
+    Complete,
+}
+
+impl<C: Copy> PageState<C> {
+    fn cursor(&self) -> Option<C> {
+        match self {
+            Self::Paging(cursor) => Some(*cursor),
+            Self::NotStarted | Self::Complete => None,
+        }
+    }
+
+    fn advance(&mut self, cursor: Option<C>) {
+        *self = cursor.map_or(Self::Complete, Self::Paging);
+    }
+
+    fn refresh(&mut self) {
+        if matches!(*self, Self::Complete) {
+            *self = Self::NotStarted;
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ChangePages {
+    NotStarted,
+    Paging(WorldChangeCursor),
+    Complete(WorldChangeCursor),
+}
+
+impl ChangePages {
+    fn after_barrier(&mut self, cursor: WorldChangeCursor) {
+        *self = Self::Paging(cursor);
+    }
+
+    fn request_cursor(&self) -> Option<WorldChangeCursor> {
+        match self {
+            Self::Paging(cursor) => Some(*cursor),
+            Self::NotStarted | Self::Complete(_) => None,
+        }
+    }
+
+    fn advance(&mut self, cursor: WorldChangeCursor, has_more: bool) {
+        *self = if has_more { Self::Paging(cursor) } else { Self::Complete(cursor) };
+    }
+
+    fn notify(&mut self) {
+        if let Self::Complete(cursor) = self {
+            *self = Self::Paging(*cursor);
+        }
     }
 }
 
@@ -186,7 +267,10 @@ impl Reconciler {
     }
 
     pub fn notify_world_change(&mut self) {
-        self.world.needs_changes = true;
+        self.world.changes.notify();
+        if let ReadState::InFlight { world_changed, .. } = &mut self.world.read {
+            *world_changed = true;
+        }
     }
 
     pub fn set_camera(&mut self, camera: Camera) {
@@ -407,18 +491,16 @@ impl Drop for Reconciler {
 struct WorldSync {
     epoch: u64,
     barrier: Option<WorldReadBarrier>,
-    objects: Option<ObjectPageCursor>,
-    enumerate_objects: bool,
-    regions: Option<RegionPageCursor>,
-    refresh_regions: bool,
+    objects: PageState<ObjectPageCursor>,
+    regions: PageState<RegionPageCursor>,
     terrain: BTreeSet<Region>,
     environments: BTreeSet<Region>,
-    terrain_cursor: Option<(Region, Option<TerrainPageCursor>)>,
-    cursor: Option<WorldChangeCursor>,
+    terrain_page: Option<(Region, PageState<TerrainPageCursor>)>,
+    changes: ChangePages,
     revision: Option<WorldRevision>,
-    needs_changes: bool,
     reads_since_changes: usize,
-    reading: Option<Weak<()>>,
+    read: ReadState,
+    next_read: u64,
     pending: VecDeque<Entity>,
     pending_set: HashSet<Entity>,
 }
@@ -428,18 +510,16 @@ impl WorldSync {
         Self {
             epoch,
             barrier: None,
-            objects: None,
-            enumerate_objects: true,
-            regions: None,
-            refresh_regions: true,
+            objects: PageState::NotStarted,
+            regions: PageState::NotStarted,
             terrain: BTreeSet::new(),
             environments: BTreeSet::new(),
-            terrain_cursor: None,
-            cursor: None,
+            terrain_page: None,
+            changes: ChangePages::NotStarted,
             revision,
-            needs_changes: true,
             reads_since_changes: 0,
-            reading: None,
+            read: ReadState::Idle,
+            next_read: 0,
             pending: VecDeque::new(),
             pending_set: HashSet::new(),
         }

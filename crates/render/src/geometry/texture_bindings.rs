@@ -24,6 +24,21 @@ pub(super) struct TerrainDemand {
 }
 
 impl GeometryRenderer {
+    pub(super) fn request_rebuild_textures(&mut self, view: &SceneView, background: &[Entity]) {
+        let epoch = self.epoch;
+        self.requested_textures.clear();
+        for texture in &self.visible_texture_requests {
+            if self.requested_textures.insert(texture.id()) {
+                self.textures.request(texture, epoch, Priority::Visible);
+            }
+        }
+        for entity in background {
+            if let Some(object) = view.object(*entity).filter(|_| view.object_is_live(*entity)) {
+                self.request_background_textures(object);
+            }
+        }
+    }
+
     pub(super) fn request_frame_textures(&mut self, view: &SceneView, background: &[Entity], gated: &[Entity]) {
         self.requested_textures.clear();
         self.visible_textures.clear();
@@ -59,7 +74,7 @@ impl GeometryRenderer {
             }
         }
         for entity in gated {
-            if let Some(object) = view.object(*entity)
+            if let Some(object) = view.object(*entity).filter(|_| view.object_is_live(*entity))
                 && let Some(faces) = object.materials()
             {
                 for face in faces {
@@ -68,7 +83,7 @@ impl GeometryRenderer {
             }
         }
         for entity in background {
-            if let Some(object) = view.object(*entity) {
+            if let Some(object) = view.object(*entity).filter(|_| view.object_is_live(*entity)) {
                 self.request_background_textures(object);
             }
         }
@@ -80,10 +95,11 @@ impl GeometryRenderer {
         layout: bool,
         changed: &HashSet<TextureId>,
         changed_regions: &[Region],
-    ) {
+    ) -> usize {
         let epoch = self.epoch;
         let (draw_list, textures, pending) = (&self.draw_list, &mut self.textures, &mut self.pending_textures);
         if layout {
+            let entries = draw_list.texture_demands().len() + draw_list.terrain_demands().len();
             pending.clear();
             textures.retain_terrain_bindings(draw_list.terrain_regions());
             for demand in draw_list.texture_demands() {
@@ -95,11 +111,12 @@ impl GeometryRenderer {
                     update_pending_id(pending, handle.id(), textures.is_resident(handle.id()));
                 }
             }
-            return;
+            return entries;
         }
         if changed.is_empty() && changed_regions.is_empty() {
-            return;
+            return 0;
         }
+        let entries = draw_list.texture_demands().len() + draw_list.terrain_demands().len();
         for demand in draw_list.texture_demands().iter().filter(|demand| changed.contains(&demand.key.id)) {
             update_pending(pending, demand.key, textures.resident(device, demand.key));
         }
@@ -111,6 +128,7 @@ impl GeometryRenderer {
                 update_pending_id(pending, handle.id(), textures.is_resident(handle.id()));
             }
         }
+        entries
     }
 
     fn request_background_textures(&mut self, object: &Object) {
