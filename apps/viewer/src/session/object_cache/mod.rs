@@ -130,6 +130,12 @@ struct LoadedRegion {
     complete: bool,
 }
 
+impl LoadedRegion {
+    fn lacks_override(&self, local_id: u32) -> bool {
+        self.complete && !self.overrides.contains_key(&local_id)
+    }
+}
+
 #[derive(Default)]
 struct InFlightRegionLoad {
     invalidated_local_ids: HashSet<u32>,
