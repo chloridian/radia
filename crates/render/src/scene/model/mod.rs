@@ -4,6 +4,7 @@ mod view;
 
 pub(in crate::scene) use delivery::{Delivery, DeliveryState, Receipt};
 pub use object::{Geometry, HiddenReason, Object, Placement};
+pub(crate) use view::VisibilityVersion;
 pub use view::{ApplyError, SceneView, ViewVersion};
 
 use std::{
