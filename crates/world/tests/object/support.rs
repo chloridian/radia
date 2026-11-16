@@ -27,7 +27,7 @@ pub(super) use world::{
 
 pub(super) fn limits() -> WorldLimits {
     WorldLimits {
-        max_region_registrations: 4,
+        max_regions: 4,
         max_entities: 8,
         max_entities_per_region: 8,
         max_tombstones_per_region: 4,
@@ -90,8 +90,8 @@ pub(super) fn object(source: UpdateSource, id: u128, local_id_value: u32, kind: 
     ObjectObservation::new(source, uuid(id), local_id(local_id_value), kind, parent)
 }
 
-pub(super) fn with_region(region: Region) -> World {
+pub(super) fn with_region() -> (World, Region) {
     let mut world = World::new(limits());
-    std::assert_matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. });
-    world
+    let region = world.register_region().unwrap();
+    (world, region)
 }

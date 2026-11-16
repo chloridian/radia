@@ -1,6 +1,7 @@
 use math::{Quat, Vec3};
 use uuid::Uuid;
 
+use super::Origin;
 use super::facet::{FacetChanges, FacetSet, FacetUpdates};
 use crate::FieldRejectionReason::{InvalidRotation, InvalidValue, ParentCycle, ParentDependsOnRejectedParent, StaleFrame, UntrustedSource};
 use crate::UpdateAuthority::{Tracked, Untracked};
@@ -11,8 +12,6 @@ use crate::{
     ObjectObservation, ObjectPatch, Parent, ParentUpdate, Pose, Rejections, UpdateAuthority, WorldPose,
 };
 use crate::{Fences, ObjectOrdering, ObjectState, ParentRejectionBarrier};
-
-pub(super) use super::facet::Origin;
 
 const MOTION_COMPONENT_SANITY_LIMIT: f32 = 4096.0;
 const TERSE_VELOCITY_COMPONENT_LIMIT: f32 = 128.0;

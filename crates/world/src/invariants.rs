@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use uuid::Uuid;
 
-use crate::{Entity, LocalAddress, ObjectMedia, Parent};
+use crate::{Entity, LocalAddress, ObjectMedia, Parent, WorldRevision};
 use crate::{MAX_ENVIRONMENT_BYTES, MAX_PARCEL_BYTES, MAX_TERRAIN_PATCHES, World};
 
 #[cfg(test)]
@@ -25,7 +25,8 @@ impl World {
         }
         crate::object::storage::object_store_invariants_hold(&self.store)?;
         if self.store.len() > self.limits.max_entities
-            || self.regions.len().saturating_add(self.retired.len()) > self.limits.max_region_registrations
+            || self.regions.len() > self.limits.max_regions
+            || self.regions.keys().any(|region| !region.belongs_to(self.id) || region.get() > self.last_region_generation)
             || self
                 .regions
                 .keys()
@@ -34,7 +35,7 @@ impl World {
             return Err("World storage exceeds its configured limits");
         }
         let mut expected_children = HashMap::<Entity, BTreeMap<Uuid, Entity>>::new();
-        let mut expected_pending_children = HashMap::<LocalAddress, HashSet<Entity>>::new();
+        let mut expected_pending_children = HashMap::<LocalAddress, BTreeMap<(WorldRevision, Uuid), Entity>>::new();
         let mut object_media_bytes = 0_usize;
         for (id, entity) in crate::object::storage::object_store_entities(&self.store) {
             let object = self.object(entity).ok_or("UUID index points to an incomplete or dead ECS entity")?;
@@ -55,13 +56,26 @@ impl World {
                     if address.region() != object.address().region() {
                         return Err("pending parent and child belong to different regions");
                     }
-                    expected_pending_children.entry(address).or_default().insert(entity);
+                    let since = self.store.object_record(entity).ok_or("pending child is not live")?.state.pending_since;
+                    if since > self.revision() {
+                        return Err("pending child belongs to a future revision");
+                    }
+                    expected_pending_children.entry(address).or_default().insert((since, id), entity);
                 }
                 Parent::Unknown | Parent::Root => {}
             };
         }
         if self.children != expected_children || self.pending_children != expected_pending_children {
             return Err("parent relationship indexes are inconsistent");
+        }
+        if self.relationship_work.len() > self.limits.max_entities {
+            return Err("pending relationship work exceeds its configured limit");
+        }
+        for ((id, address), work) in &self.relationship_work {
+            let record = self.store.object_record(work.parent).ok_or("queued relationship parent is not live")?;
+            if record.id != *id || record.state.binding.address.region != address.region() || work.binding.address != *address {
+                return Err("queued relationship identity is inconsistent");
+            }
         }
         let mut checked = HashSet::with_capacity(self.store.len());
         let mut path = HashSet::new();
@@ -78,9 +92,7 @@ impl World {
             }
             checked.extend(path.iter().copied());
         }
-        if self.regions.keys().any(|region| self.retired.contains(region))
-            || self.floors.keys().any(|region| !self.regions.contains_key(region))
-        {
+        if self.floors.keys().any(|region| !self.regions.contains_key(region)) {
             return Err("region lifecycle indexes are inconsistent");
         }
         if self.object_media_bytes != object_media_bytes {

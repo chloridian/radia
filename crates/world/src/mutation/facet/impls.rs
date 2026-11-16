@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use super::{Facet, FacetContext, FacetMerge, FacetSupport, FacetUpdates, Origin};
+use super::{Facet, FacetContext, FacetMerge, FacetSupport, FacetUpdates};
 use crate::MAX_OBJECT_MEDIA_BYTES;
 use crate::history::WorldChangeClasses;
-use crate::object::components::Fenced;
 use crate::update::FieldUpdate;
 use crate::{
     Appearance, AvatarAppearance, AvatarAppearanceUpdate, FieldGroup, FieldRejectionReason, Kind, ObjectMedia, ObjectMediaUpdate,
-    PbrMaterialAssignments, PbrMaterialOverrides, Rejections, Shape, SitTarget, SurfaceAppearance, TextureAnimation, UpdateAuthority,
+    PbrMaterialAssignments, PbrMaterialOverrides, Shape, SitTarget, SurfaceAppearance, TextureAnimation, UpdateAuthority,
 };
 
 impl Facet for Shape {
@@ -257,70 +256,4 @@ fn merge_field<T>(update: FieldUpdate<T>) -> FacetMerge<T> {
 
 fn accepts_surface(kind: Kind, appearance: Option<Appearance>) -> bool {
     kind == Kind::Object && appearance == Some(Appearance::Surface)
-}
-
-pub(super) fn check_support<T: Facet>(
-    update: &mut Option<T::Update>,
-    kind: Kind,
-    appearance: Option<Appearance>,
-    rejections: &mut Rejections,
-) {
-    let Some(value) = update.as_ref() else { return };
-    match T::support(kind, appearance, value) {
-        FacetSupport::Supported => {}
-        FacetSupport::Ignored => *update = None,
-        FacetSupport::Rejected(reason) => {
-            rejections.reject(T::GROUP, reason);
-            *update = None;
-        }
-    }
-}
-
-pub(super) fn reject_untrusted<T: Facet>(
-    update: &mut Option<T::Update>,
-    current: &Fenced<T>,
-    authority: UpdateAuthority,
-    rejections: &mut Rejections,
-) {
-    let present = update.is_some();
-    let tracked_fence = current.fence.is_some_and(|fence| fence.stamp.authority == UpdateAuthority::Tracked);
-    if present && ((T::REGIONAL_FENCE && tracked_fence) || (T::TRACKED_ONLY && authority == UpdateAuthority::Untracked)) {
-        rejections.reject(T::GROUP, FieldRejectionReason::UntrustedSource);
-        *update = None;
-    }
-}
-
-pub(super) fn apply_facet<T: Facet>(
-    current: &mut Fenced<T>,
-    update: Option<T::Update>,
-    origin: Origin,
-    context: FacetContext,
-    rejections: &mut Rejections,
-) {
-    let Some(update) = update else { return };
-    match T::support(context.kind, context.appearance, &update) {
-        FacetSupport::Ignored => return,
-        FacetSupport::Rejected(reason) => {
-            rejections.reject(T::GROUP, reason);
-            return;
-        }
-        FacetSupport::Supported => {}
-    }
-    if T::TRACKED_ONLY && context.authority != UpdateAuthority::Tracked {
-        rejections.reject(T::GROUP, FieldRejectionReason::UntrustedSource);
-        return;
-    }
-    if T::REGIONAL_FENCE && !origin.newer_regional(current.fence) {
-        return;
-    }
-    match T::merge(current.value.as_ref(), update, context) {
-        FacetMerge::Ignored => {}
-        FacetMerge::Applied(value) => {
-            current.value = value;
-            if T::REGIONAL_FENCE {
-                current.fence = Some(origin.regional());
-            }
-        }
-        FacetMerge::Rejected(reason) => rejections.reject(T::GROUP, reason),
-    }
 }

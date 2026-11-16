@@ -1,6 +1,6 @@
 use super::support::{
-    Appearance, FieldUpdate, Introduced, Kind, ObjectPatch, Region, Root, TextureAnimation, TextureAnimationError, Updated, local_id,
-    object, source, surface, with_region,
+    Appearance, FieldUpdate, Introduced, Kind, ObjectPatch, Root, TextureAnimation, TextureAnimationError, Updated, local_id, object,
+    source, surface, with_region,
 };
 
 const ON: u8 = 0x01;
@@ -55,8 +55,7 @@ fn animation_targets_a_face_or_every_face() {
 
 #[test]
 fn live_animation_add_clear_and_patch_retention() {
-    let region = Region::new(25);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let value = animation(ON | LOOP, 3, [2, 2], 0.0, 0.0, 1.0);
     let observation = world::ObjectObservation {
         appearance: FieldUpdate::Set(Appearance::Surface),

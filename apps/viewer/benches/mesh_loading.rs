@@ -171,7 +171,7 @@ fn report_counts_once(mode: CacheMode, sample: &Sample) {
 async fn run_measurement(cache: Arc<AssetCache>, mesh_assets: Arc<HashMap<Uuid, Vec<u8>>>, drain_demands: bool) -> Sample {
     let peer_assets = Arc::clone(&mesh_assets);
     let peer = LoopbackPeer::new_parallel(PEER_DELAY, move |request, base| respond(request, base, &peer_assets));
-    let region = Region::new(1);
+    let (mut fixture, region) = scene_fixture();
     let (cancel, cancelled) = oneshot::channel();
     let service = AssetCoordinator::new(
         tokio::runtime::Handle::current(),
@@ -182,7 +182,6 @@ async fn run_measurement(cache: Arc<AssetCache>, mesh_assets: Arc<HashMap<Uuid, 
     );
     service.register(region, Client::new(peer.url().join("seed").expect("build capability URL")).expect("build HTTP client"));
     let handle = service.handle();
-    let mut fixture = scene_fixture(region);
     let (status_sender, mut statuses) = mpsc::channel(1024);
     let start = Instant::now();
     let nearest_count = fixture.mesh_objects.len().div_ceil(10);
@@ -430,12 +429,12 @@ fn read_world(world: &World, job: &ReadJob) -> Result<ReadReply, ReadFailure> {
     result.map_err(ReadFailure::World)
 }
 
-fn scene_fixture(region: Region) -> SceneFixture {
+fn scene_fixture() -> (SceneFixture, Region) {
     let capacity = MESH_OBJECTS + PRIM_OBJECTS;
     let tombstones_per_region = capacity.max(2048);
     let tombstones = tombstones_per_region * 2;
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 40,
+        max_regions: 40,
         max_entities: capacity,
         max_entities_per_region: capacity,
         max_tombstones_per_region: tombstones_per_region,
@@ -447,7 +446,7 @@ fn scene_fixture(region: Region) -> SceneFixture {
         max_region_name_bytes: 256,
         max_recovery_targets: 8,
     });
-    drop(world.adopt_region(region).expect("register benchmark region"));
+    let region = world.register_region().expect("benchmark region registers");
     drop(
         world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("set benchmark region origin"),
     );
@@ -481,7 +480,7 @@ fn scene_fixture(region: Region) -> SceneFixture {
 
     let (mut scene, view) = Reconciler::new(render::scene::Budget::default());
     scene.set_camera(Camera::new(DVec3::ZERO, Vec3::X, std::f64::consts::FRAC_PI_3, [1000, 1000]).expect("benchmark camera"));
-    SceneFixture { world, scene, view, mesh_objects, textures: texture_set }
+    (SceneFixture { world, scene, view, mesh_objects, textures: texture_set }, region)
 }
 
 fn observation(region: Region, id: Uuid, local_id: u32, order: u64, x: f32) -> ObjectObservation {

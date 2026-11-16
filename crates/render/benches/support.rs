@@ -97,7 +97,7 @@ fn scene_world_with(
     terrain_texture_start: Option<usize>,
 ) -> (World, Vec<Row>) {
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 8,
+        max_regions: 8,
         max_entities: 65_536,
         max_entities_per_region: count,
         max_tombstones_per_region: 4_096,
@@ -109,9 +109,8 @@ fn scene_world_with(
         max_region_name_bytes: 256,
         max_recovery_targets: 256,
     });
-    let regions = (0..region_count).map(|index| Region::new(index as u64 + 1)).collect::<Vec<_>>();
+    let regions = (0..region_count).map(|_| world.register_region().expect("benchmark region registers")).collect::<Vec<_>>();
     for (index, region) in regions.iter().copied().enumerate() {
-        let _adopted = world.adopt_region(region).expect("benchmark region adoption");
         let _metadata = world
             .patch_region(region, RegionInfo { origin: Some(DVec3::new(index as f64 * 256.0, 0.0, 0.0)), ..RegionInfo::default() })
             .expect("benchmark region metadata");
@@ -568,7 +567,7 @@ pub fn request_distinct_mesh_refinement(reconciler: &mut Reconciler, view: &mut 
 
 fn distinct_mesh_world(count: usize) -> World {
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 1,
+        max_regions: 1,
         max_entities: count,
         max_entities_per_region: count,
         max_tombstones_per_region: 1,
@@ -580,8 +579,7 @@ fn distinct_mesh_world(count: usize) -> World {
         max_region_name_bytes: 64,
         max_recovery_targets: 4,
     });
-    let region = Region::new(1);
-    let _adopted = world.adopt_region(region).expect("mesh benchmark region adoption");
+    let region = world.register_region().expect("mesh benchmark region registers");
     let _metadata = world
         .patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() })
         .expect("mesh benchmark region metadata");

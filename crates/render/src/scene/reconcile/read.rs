@@ -282,7 +282,7 @@ impl Reconciler {
                 self.preparation.expansion.enqueue_address(to);
                 self.expand(entity);
             }
-            WorldChange::RegionAdopted(region) => {
+            WorldChange::RegionRegistered(region) => {
                 self.world.refresh_regions = true;
                 self.world.terrain.insert(region);
             }

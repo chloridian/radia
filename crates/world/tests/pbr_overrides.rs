@@ -18,9 +18,9 @@ fn local_id(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).expect("local ID is nonzero")
 }
 
-fn with_region(region: Region) -> World {
+fn with_region() -> (World, Region) {
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 4,
+        max_regions: 4,
         max_entities: 8,
         max_entities_per_region: 8,
         max_tombstones_per_region: 4,
@@ -32,8 +32,8 @@ fn with_region(region: Region) -> World {
         max_region_name_bytes: 64,
         max_recovery_targets: 4,
     });
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    world
+    let region = world.register_region().unwrap();
+    (world, region)
 }
 
 fn snapshot(face: u8, roughness: f32) -> PbrMaterialOverrides {
@@ -51,8 +51,7 @@ fn object(source: UpdateSource, id: u128, local_id_value: u32, with_surface: boo
 
 #[test]
 fn snapshot_replaces_and_clears_only_overrides() {
-    let region = Region::new(11);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let introduced = world.observe_object(object(source(region, 1), 17, 7, true)).unwrap();
     let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
 
@@ -87,8 +86,7 @@ fn snapshot_replaces_and_clears_only_overrides() {
 
 #[test]
 fn override_is_retained_before_base_binding() {
-    let region = Region::new(11);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let introduced = world.observe_object(object(source(region, 1), 17, 7, true)).unwrap();
     let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
 
@@ -113,8 +111,7 @@ fn override_is_retained_before_base_binding() {
 
 #[test]
 fn rejects_overrides_without_surface_appearance() {
-    let region = Region::new(11);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let introduced = world.observe_object(object(source(region, 1), 17, 7, false)).unwrap();
     let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
     let mut patch = ObjectPatch::new(source(region, 2), local_id(7));
@@ -131,8 +128,7 @@ fn rejects_overrides_without_surface_appearance() {
 
 #[test]
 fn untracked_snapshot_cannot_replace_tracked_data() {
-    let region = Region::new(11);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let introduced = world.observe_object(object(source(region, 1), 17, 7, true)).unwrap();
     let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
     let mut tracked = ObjectPatch::new(source(region, 2), local_id(7));
@@ -152,10 +148,8 @@ fn untracked_snapshot_cannot_replace_tracked_data() {
 
 #[test]
 fn local_id_is_scoped_to_region() {
-    let first_region = Region::new(11);
-    let second_region = Region::new(12);
-    let mut world = with_region(first_region);
-    assert!(matches!(world.adopt_region(second_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let (mut world, first_region) = with_region();
+    let second_region = world.register_region().unwrap();
     let first = world.observe_object(object(source(first_region, 1), 17, 7, true)).unwrap();
     let Introduced(first_entity) = first.outcome else { panic!("expected first object") };
     let second = world.observe_object(object(source(second_region, 1), 18, 7, true)).unwrap();
@@ -222,8 +216,7 @@ fn texture_overrides_validate_each_slot() {
 
 #[test]
 fn surface_patches_use_accepted_classification() {
-    let region = Region::new(11);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let introduced = world.observe_object(object(source(region, 1), 17, 7, false)).unwrap();
     let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
     assert_eq!(world.object(entity).unwrap().pbr_materials().unwrap().material(2), Some(AssetId::new(Uuid::from_u128(29))));
@@ -280,8 +273,7 @@ fn introduced_roughness(world: &mut World, observation: ObjectObservation) -> Op
 
 #[test]
 fn early_override_applies_on_introduction() {
-    let region = Region::new(11);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
 
     early_override(&mut world, source(region, 2), 7, snapshot(1, 0.4));
 
@@ -291,8 +283,7 @@ fn early_override_applies_on_introduction() {
 #[test]
 fn kill_drops_older_retained_override() {
     for (kill_order, expected) in [(3, None), (1, Some(0.4))] {
-        let region = Region::new(11);
-        let mut world = with_region(region);
+        let (mut world, region) = with_region();
         early_override(&mut world, source(region, 2), 7, snapshot(1, 0.4));
 
         let killed = world.remove_object(source(region, kill_order), local_id(7)).unwrap();
@@ -308,8 +299,7 @@ fn newest_retained_override_wins() {
     for (updates, expected) in
         [([(2, snapshot(1, 0.2)), (3, PbrMaterialOverrides::default())], None), ([(3, snapshot(1, 0.3)), (2, snapshot(1, 0.2))], Some(0.3))]
     {
-        let region = Region::new(11);
-        let mut world = with_region(region);
+        let (mut world, region) = with_region();
         for (order, overrides) in updates {
             early_override(&mut world, source(region, order), 7, overrides);
         }
@@ -320,10 +310,8 @@ fn newest_retained_override_wins() {
 
 #[test]
 fn crossing_consumes_retained_override() {
-    let first_region = Region::new(11);
-    let second_region = Region::new(12);
-    let mut world = with_region(first_region);
-    assert!(matches!(world.adopt_region(second_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let (mut world, first_region) = with_region();
+    let second_region = world.register_region().unwrap();
     let Introduced(entity) = world.observe_object(object(source(first_region, 1), 17, 7, true)).unwrap().outcome else {
         panic!("expected object introduction")
     };
@@ -338,8 +326,7 @@ fn crossing_consumes_retained_override() {
 
 #[test]
 fn full_region_evicts_oldest_retained_override() {
-    let region = Region::new(11);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     for local in 1..=1025 {
         early_override(&mut world, source(region, u64::from(local)), local, snapshot(1, 0.5));
     }
@@ -351,8 +338,7 @@ fn full_region_evicts_oldest_retained_override() {
 #[test]
 fn cached_override_applies_only_to_expected_object() {
     for (observed_id, expected) in [(17, Some(0.4)), (18, None)] {
-        let region = Region::new(11);
-        let mut world = with_region(region);
+        let (mut world, region) = with_region();
         let retained = world.retain_pbr_material_overrides(source(region, 2), local_id(7), Uuid::from_u128(17), snapshot(1, 0.4)).unwrap();
         assert_eq!(retained.outcome, Deferred(DeferredReason::UnknownObject));
         assert!(retained.recovery.requests.is_empty());
@@ -363,8 +349,7 @@ fn cached_override_applies_only_to_expected_object() {
 
 #[test]
 fn cached_override_keeps_session_override() {
-    let region = Region::new(11);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     early_override(&mut world, source(region, 2), 7, snapshot(1, 0.6));
 
     let retained = world.retain_pbr_material_overrides(source(region, 3), local_id(7), Uuid::from_u128(17), snapshot(1, 0.4)).unwrap();
@@ -375,8 +360,7 @@ fn cached_override_keeps_session_override() {
 
 #[test]
 fn cached_override_skips_live_object() {
-    let region = Region::new(11);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let Introduced(entity) = world.observe_object(object(source(region, 1), 17, 7, true)).unwrap().outcome else {
         panic!("expected object introduction")
     };
@@ -389,8 +373,7 @@ fn cached_override_skips_live_object() {
 
 #[test]
 fn override_changes_carry_their_class() {
-    let region = Region::new(11);
-    let mut world = with_region(region);
+    let (mut world, region) = with_region();
     let Introduced(entity) = world.observe_object(object(source(region, 1), 17, 7, true)).unwrap().outcome else {
         panic!("expected object introduction")
     };

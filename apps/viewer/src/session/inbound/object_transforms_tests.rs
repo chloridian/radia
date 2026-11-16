@@ -18,15 +18,16 @@ fn xyz_decoder_tolerance_matches_world() {
 
 #[test]
 fn terse_rotation_roundoff_is_accepted() {
-    let patch = terse_patch(Quat::from_xyzw(-0.54654974, 0.48178887, 0.47275522, -0.4956464), 2);
+    let mut world = world();
+    let region = region(&world);
+    let patch = terse_patch(region, Quat::from_xyzw(-0.54654974, 0.48178887, 0.47275522, -0.4956464), 2);
     let decoded_rotation = patch.pose.expect("terse patch includes pose").rotation.expect("terse patch includes rotation");
     let norm_error = decoded_rotation.length_squared() - 1.0;
     assert!((0.00005..0.00006).contains(&norm_error), "unexpected quantized norm error: {norm_error}");
-    let mut world = world();
     let base = ObjectObservation {
         pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
         ..ObjectObservation::new(
-            UpdateSource::new(REGION, 1, OrderEvidence::Ordered(1), 0),
+            UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0),
             Uuid::from_u128(0xdead),
             patch.local_id,
             Kind::Object,
@@ -44,14 +45,15 @@ fn terse_rotation_roundoff_is_accepted() {
 
 #[test]
 fn bad_terse_rotation_is_rejected() {
-    let patch = terse_patch(Quat::from_xyzw(1.0, 1.0, 1.0, 1.0), 2);
+    let mut world = world();
+    let region = region(&world);
+    let patch = terse_patch(region, Quat::from_xyzw(1.0, 1.0, 1.0, 1.0), 2);
     let decoded_rotation = patch.pose.expect("terse patch includes pose").rotation.expect("terse patch includes rotation");
     assert!(decoded_rotation.length_squared() > 3.9);
-    let mut world = world();
     let base = ObjectObservation {
         pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
         ..ObjectObservation::new(
-            UpdateSource::new(REGION, 1, OrderEvidence::Ordered(1), 0),
+            UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0),
             Uuid::from_u128(0xdead),
             patch.local_id,
             Kind::Object,
@@ -70,9 +72,11 @@ fn bad_terse_rotation_is_rejected() {
 
 #[test]
 fn compressed_update_keeps_parent_and_angular() {
+    let world = world();
+    let region = region(&world);
     let packet = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
     let batch =
-        decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(18), packet.message()).expect("compressed object batch");
+        decode_object_message(region, packet.sequence(), OrderEvidence::Ordered(18), packet.message()).expect("compressed object batch");
 
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
     assert_eq!(observation.parent, ParentUpdate::Local(NonZeroU32::new(0x0506_0708).expect("nonzero parent ID")));
@@ -84,13 +88,14 @@ fn compressed_update_keeps_parent_and_angular() {
 
 #[test]
 fn prim_parameters_follow_ordered_world_updates() {
+    let mut world = world();
+    let region = region(&world);
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full fixture") };
     update.objects.truncate(1);
     let id = update.objects[0].id;
     let local_id = update.objects[0].local_id;
-    let mut world = world_with_regions(1);
-    let batch = decode_object_message(REGION, 1, OrderEvidence::Ordered(1), &full).unwrap();
+    let batch = decode_object_message(region, 1, OrderEvidence::Ordered(1), &full).unwrap();
     let Some(ObjectOperation::Observe(observation)) = &batch.blocks[0] else { panic!("expected observation") };
     let Introduced(entity) = world.observe_object(observation.clone()).unwrap().outcome else { panic!("expected introduction") };
     assert_eq!(world.object(entity).unwrap().shape(), Some(Shape::Prim(full_prim_shape())));
@@ -100,7 +105,7 @@ fn prim_parameters_follow_ordered_world_updates() {
     update.objects[0].id = id;
     update.objects[0].local_id = local_id;
     update.objects[0].shape = None;
-    let batch = decode_object_message(REGION, 2, OrderEvidence::Ordered(2), &compressed).unwrap();
+    let batch = decode_object_message(region, 2, OrderEvidence::Ordered(2), &compressed).unwrap();
     let Some(ObjectOperation::Observe(observation)) = &batch.blocks[0] else { panic!("expected observation") };
     assert_eq!(observation.shape, FieldUpdate::Keep);
     let _ = world.observe_object(observation.clone()).unwrap();
@@ -123,14 +128,14 @@ fn prim_parameters_follow_ordered_world_updates() {
         profile_hollow: u16::MAX,
         ..full_prim_shape()
     };
-    let batch = decode_object_message(REGION, 3, OrderEvidence::Ordered(3), &compressed).unwrap();
+    let batch = decode_object_message(region, 3, OrderEvidence::Ordered(3), &compressed).unwrap();
     let Some(ObjectOperation::Observe(observation)) = &batch.blocks[0] else { panic!("expected observation") };
     assert_eq!(observation.shape, FieldUpdate::Set(Shape::Prim(expected)));
     let _ = world.observe_object(observation.clone()).unwrap();
     assert_eq!(world.object(entity).unwrap().shape(), Some(Shape::Prim(expected)));
 
     let revision = world.revision();
-    let batch = decode_object_message(REGION, 1, OrderEvidence::Ordered(1), &full).unwrap();
+    let batch = decode_object_message(region, 1, OrderEvidence::Ordered(1), &full).unwrap();
     let Some(ObjectOperation::Observe(observation)) = &batch.blocks[0] else { panic!("expected observation") };
     let _ = world.observe_object(observation.clone()).unwrap();
     assert_eq!(world.object(entity).unwrap().shape(), Some(Shape::Prim(expected)));

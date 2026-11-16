@@ -12,7 +12,7 @@ use world::{
     MAX_SURFACE_FACES, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
     OrderEvidence::Ordered,
     ParentUpdate::{Local, Root},
-    Pose, Region, UpdateSource, World, WorldLimits,
+    Pose, UpdateSource, World, WorldLimits,
 };
 
 #[global_allocator]
@@ -20,7 +20,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 fn world_limits() -> WorldLimits {
     WorldLimits {
-        max_region_registrations: 8,
+        max_regions: 8,
         max_entities: 65_536,
         max_entities_per_region: 10_000,
         max_tombstones_per_region: 4_096,
@@ -37,14 +37,12 @@ fn world_limits() -> WorldLimits {
 #[test]
 fn world_memory_baseline() {
     for count in [40_000_usize, 65_536] {
-        let regions = (0..count.div_ceil(10_000)).map(|index| Region::new(index as u64 + 1)).collect::<Vec<_>>();
         let baseline = live_bytes();
-        let (world, allocations) = measure(|| {
+        let ((world, regions), allocations) = measure(|| {
             let limits = world_limits();
             let mut world = World::new(limits);
-            for region in &regions {
-                let _ = world.adopt_region(*region).expect("adopt benchmark region");
-            }
+            let regions =
+                (0..count.div_ceil(10_000)).map(|_| world.register_region().expect("register benchmark region")).collect::<Vec<_>>();
             for index in 0..count {
                 let region_index = index / 10_000;
                 let local_id = NonZeroU32::new((index % 10_000 + 1) as u32).expect("nonzero local ID");
@@ -60,7 +58,7 @@ fn world_memory_baseline() {
                 observation.scale = Some(Vec3::ONE);
                 assert!(matches!(world.observe_object(observation).expect("insert benchmark object").outcome, Introduced(_)));
             }
-            world
+            (world, regions)
         });
 
         assert_eq!(world.object_count(), count);
@@ -80,6 +78,7 @@ fn world_memory_baseline() {
         assert_eq!(removed, count);
         assert_eq!(world.object_count(), 0);
         drop(world);
+        drop(regions);
         let remaining_bytes = live_bytes();
         assert_eq!(
             remaining_bytes,
@@ -112,8 +111,8 @@ fn world_memory_baseline() {
 #[test]
 fn media_snapshot_copy_stays_within_its_budget() {
     let mut world = World::new(world_limits());
-    let region = Region::new(1);
-    let _ = world.adopt_region(region).unwrap();
+    let region = world.register_region().unwrap();
+
     let local_id = NonZeroU32::new(1).unwrap();
     let source = |order| UpdateSource::new(region, order as u32, Ordered(order), 0);
     let observation = ObjectObservation {

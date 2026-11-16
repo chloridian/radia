@@ -21,13 +21,14 @@ struct Scenario {
     name: &'static str,
     edge_depth: usize,
     world: World,
+    region: Region,
     target: Entity,
 }
 
-fn world_with_chain(edge_depth: usize) -> (World, Entity) {
+fn world_with_chain(edge_depth: usize) -> (World, Region, Entity) {
     let entity_count = edge_depth + 1;
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 1,
+        max_regions: 1,
         max_entities: entity_count,
         max_entities_per_region: entity_count,
         max_tombstones_per_region: 1,
@@ -39,8 +40,8 @@ fn world_with_chain(edge_depth: usize) -> (World, Entity) {
         max_region_name_bytes: 0,
         max_recovery_targets: 0,
     });
-    let region = Region::new(1);
-    assert!(matches!(world.adopt_region(region).expect("region adoption").outcome, world::RegionOutcome::Adopted { .. }));
+    let region = world.register_region().unwrap();
+
     assert!(matches!(
         world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("region origin").outcome,
         world::RegionOutcome::Patched { .. }
@@ -61,7 +62,7 @@ fn world_with_chain(edge_depth: usize) -> (World, Entity) {
         target = Some(entity);
     }
 
-    (world, target.expect("chain contains a root"))
+    (world, region, target.expect("chain contains a root"))
 }
 
 fn cycle_patch(region: Region, order: u64, root_local_id: NonZeroU32, tail_local_id: NonZeroU32) -> ObjectPatch {
@@ -99,9 +100,9 @@ pub(super) fn bench(c: &mut Criterion) {
         .iter()
         .copied()
         .map(|(name, edge_depth)| {
-            let (world, target) = world_with_chain(edge_depth);
+            let (world, region, target) = world_with_chain(edge_depth);
             assert_chain_depth(&world, target, edge_depth);
-            let scenario = Scenario { name, edge_depth, world, target };
+            let scenario = Scenario { name, edge_depth, world, region, target };
             assert_pose_contract(&scenario);
             scenario
         })
@@ -120,7 +121,7 @@ pub(super) fn bench(c: &mut Criterion) {
         });
     }
     for scenario in &mut scenarios {
-        let region = Region::new(1);
+        let region = scenario.region;
         let root_local_id = NonZeroU32::new(1).expect("root local ID is nonzero");
         let tail_local_id =
             NonZeroU32::new(u32::try_from(scenario.edge_depth + 1).expect("tail local ID fits u32")).expect("tail local ID is nonzero");

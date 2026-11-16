@@ -188,7 +188,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        ApplyOutcome::Introduced, Kind::Object, ObjectObservation, OrderEvidence::Ordered, ParentUpdate::Root, Pose, Region, RegionInfo,
+        ApplyOutcome::Introduced, Kind::Object, ObjectObservation, OrderEvidence::Ordered, ParentUpdate::Root, Pose, RegionInfo,
         UpdateSource, WorldLimits,
     };
     use math::{DVec3, Vec3};
@@ -196,9 +196,8 @@ mod tests {
 
     #[test]
     fn corrupt_parent_cycle_is_bounded() {
-        let region = Region::new(1);
         let limits = WorldLimits {
-            max_region_registrations: 1,
+            max_regions: 1,
             max_entities: 2,
             max_entities_per_region: 2,
             max_tombstones_per_region: 1,
@@ -211,7 +210,7 @@ mod tests {
             max_recovery_targets: 1,
         };
         let mut world = World::new(limits);
-        assert!(matches!(world.adopt_region(region).unwrap().outcome, crate::RegionOutcome::Adopted { .. }));
+        let region = world.register_region().unwrap();
 
         let mut introduce = |id, local_id, order| {
             let result = world
@@ -244,9 +243,8 @@ mod tests {
 
     #[test]
     fn invalid_canonical_rotation_is_reported() {
-        let region = Region::new(2);
         let limits = WorldLimits {
-            max_region_registrations: 1,
+            max_regions: 1,
             max_entities: 1,
             max_entities_per_region: 1,
             max_tombstones_per_region: 1,
@@ -259,7 +257,7 @@ mod tests {
             max_recovery_targets: 1,
         };
         let mut world = World::new(limits);
-        assert!(matches!(world.adopt_region(region).unwrap().outcome, crate::RegionOutcome::Adopted { .. }));
+        let region = world.register_region().unwrap();
         assert!(matches!(
             world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap().outcome,
             crate::RegionOutcome::Patched { .. }

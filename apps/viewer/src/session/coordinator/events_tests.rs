@@ -200,7 +200,6 @@ async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
     object.motion.position = Vec3::new(31.0, 42.0, 53.0);
     object.motion.rotation = Quat::IDENTITY;
     apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 3, &terse).await;
-    cache.record_update(simulator, terse.clone());
     assert_public_world_invariants(&world, region);
 
     let before_probe = world.world().revision();
@@ -234,6 +233,83 @@ async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
     object.motion.rotation = Quat::IDENTITY;
     apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 7, &terse).await;
     cache.record_update(simulator, terse);
+    assert_public_world_invariants(&world, region);
+    cache.close().await;
+}
+
+#[tokio::test]
+async fn different_cached_identity_requests_full() {
+    let directory = tempfile::tempdir().expect("create isolated cache directory");
+    let simulator = simulator_id();
+    let mut cache = crate::session::object_cache::open_for_test(directory.path().join("objects.sqlite"), network::Grid::Agni);
+    let Message::RegionHandshake(mut handshake) = fixture_packet(vectors::REGION_HANDSHAKE).into_message() else {
+        panic!("region handshake fixture should decode as a handshake");
+    };
+    handshake.region_info1.cache_id = Uuid::from_u128(0x9876);
+    let Some(info) = &mut handshake.region_info2 else { panic!("test handshake includes region identity") };
+    info.region_id = Uuid::from_u128(0x5432);
+    cache.set_region_identity(simulator, &handshake);
+
+    let region_handle = 0x2222_0000_0000_0002;
+    let mut world = SessionWorld::new(viewer_world_limits());
+    world.register_simulator(simulator, Some(RegionHandle::new(region_handle))).expect("register region");
+    let region = world.region_for(simulator).expect("region exists");
+    let mut handoff = WorldHandoff::default();
+    handoff.session_ready(&mut world, simulator, Uuid::nil());
+
+    let local_id = 23_456;
+    let address = LocalAddress::new(region, NonZeroU32::new(local_id).expect("local ID is nonzero"));
+    let id_a = Uuid::from_u128(0xa);
+    let id_b = Uuid::from_u128(0xb);
+    let mut full_a = fixture_packet(vectors::OBJECT_UPDATE).into_message();
+    let ObjectUpdate(update) = &mut full_a else { panic!("full object fixture should decode as an update") };
+    update.region_data.region_handle = region_handle;
+    update.objects.truncate(1);
+    update.objects[0].id = id_a;
+    update.objects[0].local_id = local_id;
+    update.objects[0].parent_local_id = 0;
+    update.objects[0].motion.position = Vec3::new(1.0, 2.0, 3.0);
+    assert!(apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 1, &full_a).await.0.is_empty());
+
+    let mut full_b = fixture_packet(vectors::OBJECT_UPDATE).into_message();
+    let ObjectUpdate(update) = &mut full_b else { panic!("full object fixture should decode as an update") };
+    update.region_data.region_handle = region_handle;
+    update.objects.truncate(1);
+    update.objects[0].id = id_b;
+    update.objects[0].local_id = local_id;
+    update.objects[0].parent_local_id = 0;
+    update.objects[0].motion.position = Vec3::new(4.0, 5.0, 6.0);
+    cache.record_update(simulator, full_b.clone());
+    load_object_cache(&mut cache, simulator).await;
+
+    let ObjectUpdate(update) = &full_b else { unreachable!() };
+    let cached = Message::ObjectUpdateCached(CachedUpdate {
+        region_data: update.region_data,
+        objects: update
+            .objects
+            .iter()
+            .map(|object| CachedObjectReference { local_id: object.local_id, crc: object.crc, update_flags: object.update_flags })
+            .collect(),
+    });
+    let (recovery, media_requests) = apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 2, &cached).await;
+
+    assert_eq!(recovery, [(Some(simulator), address, Full)]);
+    assert!(media_requests.is_empty());
+    let state = world.world();
+    assert_eq!(state.entity(id_a), state.entity_at(address));
+    assert!(state.entity(id_b).is_none());
+    let live_a = state.object(state.entity_at(address).expect("A still owns the address")).expect("A remains live");
+    assert_eq!(live_a.id(), id_a);
+    assert_eq!(live_a.transform().position(), Some(Vec3::new(1.0, 2.0, 3.0)));
+    assert_public_world_invariants(&world, region);
+
+    let (recovery, _) = apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 3, &full_b).await;
+    assert!(recovery.is_empty());
+    let state = world.world();
+    assert!(state.entity(id_a).is_none());
+    let live_b = state.object(state.entity(id_b).expect("authoritative B is live")).expect("B remains live");
+    assert_eq!(live_b.address(), address);
+    assert_eq!(live_b.transform().position(), Some(Vec3::new(4.0, 5.0, 6.0)));
     assert_public_world_invariants(&world, region);
     cache.close().await;
 }
@@ -336,7 +412,8 @@ fn region_connection_lifecycle() {
 
     apply_world_event(&mut intake, &SimulatorConnected { simulator_id, region_handle: Some(handle), endpoint });
     let region = intake.region_for(simulator_id).expect("registered region");
-    assert_eq!(region, Region::new(simulator_id.get()));
+    assert_eq!(intake.region_for(simulator_id), Some(region));
+    assert_eq!(intake.simulator_for_region(region), Some(simulator_id));
     assert_eq!(intake.world().region(region).unwrap().handle, Some(RegionHandle::new(handle)));
 
     apply_world_event(&mut intake, &SimulatorDisconnected { simulator_id, region_handle: Some(handle), endpoint });

@@ -44,9 +44,9 @@ fn newer(stamp: ModelStamp, fence: Option<ModelStamp>) -> bool {
     })
 }
 
-fn world() -> World {
+fn world() -> (World, Region) {
     let mut world = World::new(WorldLimits {
-        max_region_registrations: 1,
+        max_regions: 1,
         max_entities: 1,
         max_entities_per_region: 1,
         max_tombstones_per_region: 1,
@@ -58,8 +58,8 @@ fn world() -> World {
         max_region_name_bytes: 8,
         max_recovery_targets: 1,
     });
-    assert!(matches!(world.adopt_region(Region::new(900)).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    world
+    let region = world.register_region().unwrap();
+    (world, region)
 }
 
 fn source(region: Region, authority: UpdateAuthority, order: u64, block: u32) -> UpdateSource {
@@ -85,10 +85,9 @@ proptest! {
     fn facet_fences_match_model(
         operations in prop::collection::vec((0_u8..2, 0_u8..3, 0_u8..2, 0_u64..24, 0_u32..8, 0_u8..2, 1_u128..128), 1..80)
     ) {
-        let region = Region::new(900);
         let id = Uuid::from_u128(900);
         let local_id = NonZeroU32::new(1).unwrap();
-        let mut world = world();
+        let (mut world, region) = world();
         let initial = ModelStamp { authority: UpdateAuthority::Tracked, order: 0, block: 0 };
         let introduced = world.observe_object(ObjectObservation::new(
             source(region, initial.authority, initial.order, initial.block), id, local_id, Kind::Object, ParentUpdate::Root,

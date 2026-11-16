@@ -7,12 +7,12 @@ use world::{FaceAppearance, SculptFlags, SurfaceAppearance};
 
 use super::support::{
     AssetId, Budget, Camera, DVec3, FieldUpdate, Instant, NonZeroU32, ParentUpdate, Priority, Reconciler, Request, Shape, Uuid, Vec3, add,
-    camera, prepared_asset, settle_materials, source, world,
+    camera, prepared_asset, settle_materials, source, world, world_region,
 };
 
 fn add_mesh(world: &mut world::World, id: u32, asset: AssetId, x: f32) {
     add(world, u128::from(id), id, ParentUpdate::Root, x, u64::from(id) * 4);
-    let mut patch = world::ObjectPatch::new(source(1, u64::from(id) * 4 + 1), NonZeroU32::new(id).unwrap());
+    let mut patch = world::ObjectPatch::new(source(world, 0, u64::from(id) * 4 + 1), NonZeroU32::new(id).unwrap());
     patch.shape = FieldUpdate::Set(Shape::Mesh { asset_id: asset, flags: SculptFlags::default() });
     let _ = world.patch_object(patch).unwrap();
 }
@@ -95,7 +95,7 @@ fn unpublished_mesh_slots_bound_and_release() {
         .collect();
     let mut world = world();
     add_mesh(&mut world, 1, asset, 10.0);
-    let mut patch = world::ObjectPatch::new(source(1, 8), NonZeroU32::new(1).unwrap());
+    let mut patch = world::ObjectPatch::new(source(&world, 0, 8), NonZeroU32::new(1).unwrap());
     patch.surface_appearance =
         Some(SurfaceAppearance::new(FaceAppearance { texture: Some(textures[0]), ..FaceAppearance::default() }, overrides).unwrap());
     let _ = world.patch_object(patch).unwrap();
@@ -141,19 +141,19 @@ fn face_budget_retries_overflow_meshes_and_prims_after_shared_mesh_publication()
     let eight_faces = SurfaceAppearance::new(FaceAppearance::default(), overrides).unwrap();
     for id in 1..=ADMITTED_MESHES {
         add_mesh(&mut world, id, shared_asset, 10.0);
-        let mut patch = world::ObjectPatch::new(source(1, u64::from(id) * 4 + 2), NonZeroU32::new(id).unwrap());
+        let mut patch = world::ObjectPatch::new(source(&world, 0, u64::from(id) * 4 + 2), NonZeroU32::new(id).unwrap());
         patch.surface_appearance = Some(eight_faces.clone());
         let _ = world.patch_object(patch).unwrap();
     }
     let prim_id = ADMITTED_MESHES + 1;
     add(&mut world, u128::from(prim_id), prim_id, ParentUpdate::Root, 10.0, u64::from(prim_id) * 4);
-    let mut prim_appearance = world::ObjectPatch::new(source(1, u64::from(prim_id) * 4 + 1), NonZeroU32::new(prim_id).unwrap());
+    let mut prim_appearance = world::ObjectPatch::new(source(&world, 0, u64::from(prim_id) * 4 + 1), NonZeroU32::new(prim_id).unwrap());
     prim_appearance.surface_appearance =
         Some(SurfaceAppearance::new(FaceAppearance { texture: Some(rejected_texture), ..FaceAppearance::default() }, Vec::new()).unwrap());
     let _ = world.patch_object(prim_appearance).unwrap();
     let mesh_id = prim_id + 1;
     add_mesh(&mut world, mesh_id, rejected_asset, 10.0);
-    let mut mesh_appearance = world::ObjectPatch::new(source(1, u64::from(mesh_id) * 4 + 2), NonZeroU32::new(mesh_id).unwrap());
+    let mut mesh_appearance = world::ObjectPatch::new(source(&world, 0, u64::from(mesh_id) * 4 + 2), NonZeroU32::new(mesh_id).unwrap());
     mesh_appearance.surface_appearance = Some(eight_faces);
     let _ = world.patch_object(mesh_appearance).unwrap();
 
@@ -216,7 +216,7 @@ fn face_budget_retries_overflow_meshes_and_prims_after_shared_mesh_publication()
 
     for id in 1..=ADMITTED_MESHES {
         let order = 20_000 + u64::from(id);
-        let _ = world.remove_object(source(1, order), NonZeroU32::new(id).unwrap()).unwrap();
+        let _ = world.remove_object(source(&world, 0, order), NonZeroU32::new(id).unwrap()).unwrap();
     }
     scene.notify_world_change();
     let _ = settle_materials(&mut scene, &mut view, &world, &mut now);
@@ -320,7 +320,7 @@ fn material_slots_follow_the_published_fallback_lod() {
     let bytes = test_support::mesh::asset_with_lod_faces(&[(2, 2), (3, 1)]);
     let mut world = world();
     add_mesh(&mut world, 1, asset, 2.0);
-    let mut patch = world::ObjectPatch::new(source(1, 8), NonZeroU32::new(1).unwrap());
+    let mut patch = world::ObjectPatch::new(source(&world, 0, 8), NonZeroU32::new(1).unwrap());
     patch.surface_appearance = Some(
         SurfaceAppearance::new(
             FaceAppearance::default(),
@@ -633,7 +633,7 @@ fn removal_releases_pending_lod() {
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(!work.released.contains(&high.ticket));
 
-    let _ = world.remove_object(source(1, 12), NonZeroU32::new(1).unwrap()).unwrap();
+    let _ = world.remove_object(source(&world, 0, 12), NonZeroU32::new(1).unwrap()).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(work.released.contains(&high.ticket));
@@ -700,7 +700,7 @@ fn shared_background_keeps_lowest_only() {
     assert!(work.requested.is_empty(), "the background target joins the existing Lowest ticket");
     assert!(work.released.is_empty());
 
-    let _ = world.remove_object(source(1, 12), NonZeroU32::new(1).unwrap()).unwrap();
+    let _ = world.remove_object(source(&world, 0, 12), NonZeroU32::new(1).unwrap()).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(work.released.contains(&high.ticket), "the background user's demand does not keep another user's High request");
@@ -874,12 +874,12 @@ fn same_asset_shares_geometry_and_releases_on_last_user() {
     let first = mesh_ids.first().copied().unwrap();
     assert!(mesh_ids.iter().all(|id| *id == first), "both objects share one published mesh handle");
 
-    let _ = world.remove_object(source(1, 10), NonZeroU32::new(1).unwrap()).unwrap();
+    let _ = world.remove_object(source(&world, 0, 10), NonZeroU32::new(1).unwrap()).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(work.released.is_empty(), "one remaining object keeps the shared demand alive");
 
-    let _ = world.remove_object(source(1, 11), NonZeroU32::new(2).unwrap()).unwrap();
+    let _ = world.remove_object(source(&world, 0, 11), NonZeroU32::new(2).unwrap()).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(work.released.contains(&high.ticket));
@@ -899,7 +899,7 @@ fn shape_and_asset_changes_release_stale_fetches() {
 
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     let old_header = request_header(&work.requested);
-    let mut patch = world::ObjectPatch::new(source(1, 8), NonZeroU32::new(1).unwrap());
+    let mut patch = world::ObjectPatch::new(source(&world, 0, 8), NonZeroU32::new(1).unwrap());
     patch.shape = FieldUpdate::Set(Shape::Mesh { asset_id: second_asset, flags: SculptFlags::default() });
     let _ = world.patch_object(patch).unwrap();
     scene.notify_world_change();
@@ -921,7 +921,7 @@ fn shape_and_asset_changes_release_stale_fetches() {
     let object = view.objects().next().unwrap();
     assert_eq!(asset_lod(object).map(|(id, _)| id), Some(second_asset));
 
-    let mut patch = world::ObjectPatch::new(source(1, 12), NonZeroU32::new(1).unwrap());
+    let mut patch = world::ObjectPatch::new(source(&world, 0, 12), NonZeroU32::new(1).unwrap());
     patch.shape = FieldUpdate::Set(Shape::Sculpt {
         asset_id: AssetId::new(Uuid::from_u128(704)),
         sculpt_type: world::SculptType::Sphere,
@@ -952,7 +952,7 @@ fn replaced_prim_mesh_is_not_published_for_a_mesh_asset_shape() {
     let (DrawnMeshKey::Prim(_), prim_mesh) = object.mesh().unwrap() else { panic!("fixture prim mesh") };
     let prim_mesh_id = prim_mesh.id();
 
-    let mut patch = world::ObjectPatch::new(source(1, 8), NonZeroU32::new(1).unwrap());
+    let mut patch = world::ObjectPatch::new(source(&world, 0, 8), NonZeroU32::new(1).unwrap());
     patch.shape = FieldUpdate::Set(Shape::Mesh { asset_id: asset, flags: SculptFlags::default() });
     let _ = world.patch_object(patch).unwrap();
     scene.notify_world_change();
@@ -983,7 +983,7 @@ fn removing_mesh_during_header_fetch_ignores_late_completion() {
 
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     let header = request_header(&work.requested);
-    let _ = world.remove_object(source(1, 8), NonZeroU32::new(1).unwrap()).unwrap();
+    let _ = world.remove_object(source(&world, 0, 8), NonZeroU32::new(1).unwrap()).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(work.released.contains(&header.ticket));
@@ -1017,7 +1017,7 @@ fn region_leave_releases_pending_lod() {
     assert!(!work.released.contains(&high.ticket));
     assert!(work.priority_updates.contains(&(high.ticket, Priority::Background)));
 
-    let _ = world.retire_region(world::Region::new(1)).unwrap();
+    let _ = world.retire_region(world_region(&world, 0)).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(work.released.contains(&high.ticket));
@@ -1093,7 +1093,7 @@ fn thousands_of_mesh_objects_share_bounded_asset_and_scene_state() {
     scene.set_camera(Camera::new(DVec3::new(0.01, 0.0, 0.0), Vec3::X, std::f64::consts::FRAC_PI_3, [1000, 1000]).unwrap());
     assert!(settle_materials(&mut scene, &mut view, &world, &mut now).requested.is_empty());
     for id in 1..=2000 {
-        let _ = world.remove_object(source(1, u64::from(id) * 4 + 2), NonZeroU32::new(id).unwrap()).unwrap();
+        let _ = world.remove_object(source(&world, 0, u64::from(id) * 4 + 2), NonZeroU32::new(id).unwrap()).unwrap();
     }
     scene.notify_world_change();
     let teardown = settle_materials(&mut scene, &mut view, &world, &mut now);

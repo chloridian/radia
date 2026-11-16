@@ -71,6 +71,7 @@ enum DriverInput {
     InventoryEdit(Option<InventoryEditEvent>),
     InventoryBootstrap(Result<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>, tokio::task::JoinError>),
     Favorites(Result<FavoritesUpdate, tokio::task::JoinError>),
+    Relationships,
 }
 
 #[derive(Default)]
@@ -259,10 +260,17 @@ impl SessionDriver {
 
     async fn run(mut self) {
         loop {
+            if self.session_world.world().has_pending_relationships() {
+                tokio::task::yield_now().await;
+                if self.resolve_relationships().is_break() {
+                    break;
+                }
+            }
             self.reads.publish(self.session_world.world());
             self.object_cache.persist_overrides(&self.session_world);
             self.media.flush(&self.session_world);
             let terrain_full = self.terrain.is_full();
+            let relationships_pending = self.session_world.world().has_pending_relationships();
             let event = async { if terrain_full { pending::<Option<Event>>().await } else { self.session.recv_event().await } };
             let inventory_bootstrap = async {
                 match self.inventory_bootstrap.as_mut() {
@@ -293,8 +301,10 @@ impl SessionDriver {
                 edit_event = self.inventory_edits.next_event() => DriverInput::InventoryEdit(edit_event),
                 bootstrap = inventory_bootstrap => DriverInput::InventoryBootstrap(bootstrap.expect("bootstrap task must be pending")),
                 favorites = favorites_load => DriverInput::Favorites(favorites.expect("favorites task must be pending")),
+                () = tokio::task::yield_now(), if relationships_pending => DriverInput::Relationships,
             };
             let flow = match input {
+                DriverInput::Relationships => ControlFlow::Continue(()),
                 DriverInput::Favorites(result) => {
                     self::inventory::publish_favorites_refresh(&mut self.favorites_load, &self.mailbox, result);
                     ControlFlow::Continue(())
@@ -829,6 +839,28 @@ impl SessionDriver {
         let agent_data =
             self.active_session.as_ref().map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
         self.recovery.schedule(targets, updated, agent_data);
+    }
+
+    fn resolve_relationships(&mut self) -> ControlFlow<()> {
+        let resolution = match self.session_world.resolve_relationships() {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                tracing::error!(%error, "world relationship resolution stopped");
+                self.mailbox.publish(ViewerUpdate::Failed("The world state could not be updated.".into()));
+                return ControlFlow::Break(());
+            }
+        };
+        let targets = route_recovery_targets(
+            &self.session_world,
+            resolution.recovery.requests.into_iter().map(|address| (address, protocol::messages::CacheMissType::Full)),
+        );
+        let agent_data =
+            self.active_session.as_ref().map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
+        self.recovery.schedule(targets, resolution.recovery_cancellations, agent_data);
+        if resolution.revision.is_some() {
+            self.publish_world_agent_motion(std::time::Instant::now());
+        }
+        ControlFlow::Continue(())
     }
 
     fn summary_touches_agent(&self, summary: &IngestSummary) -> bool {

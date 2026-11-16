@@ -25,42 +25,101 @@ pub(super) fn bench(c: &mut Criterion) {
         let region_count = count.div_ceil(PER_REGION);
         group.throughput(Throughput::Elements((count - region_count) as u64));
         group.bench_with_input(BenchmarkId::new("parent_resolution", size_name(count)), &count, |b, &count| {
-            let (mut verification, roots) = child_first_scene(count);
+            let (mut verification, roots) = child_first_scene(count, PER_REGION);
             for (index, root) in roots.iter().copied().enumerate() {
                 let order = count as u64 + index as u64 + 1;
                 let verified = verification.observe_object(root_observation(root, order)).expect("root arrival");
                 let Introduced(entity) = verified.outcome else { panic!("expected root introduction") };
+                while verification.has_pending_relationships() {
+                    let _ = verification.resolve_relationships(64).expect("resolve waiting children");
+                }
                 assert_eq!(verification.children(entity).count(), root.child_count);
             }
 
             b.iter_batched(
-                || child_first_scene(count),
+                || child_first_scene(count, PER_REGION),
                 |(mut world, roots)| {
                     for (index, root) in roots.into_iter().enumerate() {
                         let order = count as u64 + index as u64 + 1;
                         let applied = world.observe_object(root_observation(root, order)).expect("root arrival");
                         let Introduced(_) = applied.outcome else { panic!("expected root introduction") };
                         let _ = black_box(applied);
+                        while world.has_pending_relationships() {
+                            let _ = black_box(world.resolve_relationships(64).expect("resolve waiting children"));
+                        }
                     }
                 },
                 BatchSize::LargeInput,
             );
         });
     }
+    let count = 65_536;
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("single_region_parent/65k", |b| {
+        let (mut verification, roots) = child_first_scene(count, count);
+        let applied = verification.observe_object(root_observation(roots[0], count as u64 + 1)).expect("root arrival");
+        let Introduced(entity) = applied.outcome else { panic!("expected root introduction") };
+        while verification.has_pending_relationships() {
+            let _ = verification.resolve_relationships(64).expect("resolve waiting children");
+        }
+        assert_eq!(verification.children(entity).count(), count - 1);
+        b.iter_batched(
+            || child_first_scene(count, count),
+            |(mut world, roots)| {
+                let root = roots[0];
+                let applied = world.observe_object(root_observation(root, count as u64 + 1)).expect("root arrival");
+                let Introduced(_) = applied.outcome else { panic!("expected root introduction") };
+                let _ = black_box(applied);
+                world
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    group.throughput(Throughput::Elements(64));
+    group.bench_function("single_region_resolution_batch/65k", |b| {
+        b.iter_batched(
+            || {
+                let (mut world, roots) = child_first_scene(count, count);
+                let _ = world.observe_object(root_observation(roots[0], count as u64 + 1)).expect("root arrival");
+                world
+            },
+            |mut world| {
+                let _ = black_box(world.resolve_relationships(64).expect("resolve waiting children"));
+                world
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    group.throughput(Throughput::Elements((count - 1) as u64));
+    group.bench_function("single_region_resolution_total/65k", |b| {
+        b.iter_batched(
+            || child_first_scene(count, count),
+            |(mut world, roots)| {
+                let _ = black_box(world.observe_object(root_observation(roots[0], count as u64 + 1)).expect("root arrival"));
+                while world.has_pending_relationships() {
+                    let _ = black_box(world.resolve_relationships(64).expect("resolve waiting children"));
+                }
+                world
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    bench_deep_parent_fanout(&mut group);
     bench_deep_reparent(&mut group);
     group.finish();
 }
 
-fn child_first_scene(count: usize) -> (World, Vec<RootCase>) {
-    let mut roots = Vec::with_capacity(count.div_ceil(PER_REGION));
-    let mut world = World::new(limits());
+fn child_first_scene(count: usize, per_region: usize) -> (World, Vec<RootCase>) {
+    let mut roots = Vec::with_capacity(count.div_ceil(per_region));
+    let mut bounds = limits();
+    bounds.max_entities_per_region = per_region;
+    let mut world = World::new(bounds);
     let mut first_child_id = 1_u128;
     let mut remaining = count;
 
-    for region_index in 0..count.div_ceil(PER_REGION) {
-        let region = Region::new(region_index as u64 + 1);
-        assert!(matches!(world.adopt_region(region).expect("region adoption").outcome, world::RegionOutcome::Adopted { .. }));
-        let entity_count = remaining.min(PER_REGION);
+    for region_index in 0..count.div_ceil(per_region) {
+        let region = world.register_region().expect("register relationship region");
+        let entity_count = remaining.min(per_region);
         let child_count = entity_count - 1;
         for local_index in 0..child_count {
             let local_id = NonZeroU32::new(local_index as u32 + 2).expect("child local ID is nonzero");
@@ -86,6 +145,78 @@ fn root_observation(root: RootCase, order: u64) -> ObjectObservation {
     ObjectObservation::new(source(root.region, order), root.id, NonZeroU32::new(1).expect("root local ID is nonzero"), Object, Root)
 }
 
+fn bench_deep_parent_fanout(group: &mut BenchmarkGroup<'_, WallTime>) {
+    const OBJECT_COUNT: usize = 65_536;
+    const CHILD_COUNT: usize = 32_767;
+
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("deep_parent_fanout/65k", |b| {
+        let (mut verification, region) = deep_parent_fanout_scene();
+        let applied = verification.observe_object(late_fanout_parent(region)).expect("late fanout parent arrival");
+        let Introduced(parent) = applied.outcome else { panic!("expected late parent introduction") };
+        while verification.has_pending_relationships() {
+            let _ = verification.resolve_relationships(64).expect("resolve fanout children");
+        }
+        assert_eq!(verification.object_count(), OBJECT_COUNT);
+        assert_eq!(verification.children(parent).count(), CHILD_COUNT);
+
+        b.iter_batched(
+            deep_parent_fanout_scene,
+            |(mut world, region)| {
+                let applied = world.observe_object(late_fanout_parent(region)).expect("late fanout parent arrival");
+                let Introduced(_) = applied.outcome else { panic!("expected late parent introduction") };
+                let _ = black_box(applied);
+                world
+            },
+            BatchSize::LargeInput,
+        );
+    });
+}
+
+fn deep_parent_fanout_scene() -> (World, Region) {
+    const MAX_ENTITIES: usize = 65_536;
+
+    let mut bounds = limits();
+    bounds.max_entities_per_region = MAX_ENTITIES;
+    let mut world = World::new(bounds);
+    let region = world.register_region().expect("register fanout region");
+
+    for local in 2_u32..=32_768 {
+        let child = ObjectObservation::new(
+            source(region, u64::from(local)),
+            Uuid::from_u128(u128::from(local)),
+            NonZeroU32::new(local).expect("child local ID is nonzero"),
+            Object,
+            Local(NonZeroU32::new(1).expect("late parent local ID is nonzero")),
+        );
+        let _ = world.observe_object(child).expect("pending fanout child introduction");
+    }
+
+    for local in 32_769_u32..=65_536 {
+        let parent = if local == 32_769 { Root } else { Local(NonZeroU32::new(local - 1).expect("chain parent local ID is nonzero")) };
+        let chain_object = ObjectObservation::new(
+            source(region, u64::from(local)),
+            Uuid::from_u128(u128::from(local)),
+            NonZeroU32::new(local).expect("chain local ID is nonzero"),
+            Object,
+            parent,
+        );
+        let _ = world.observe_object(chain_object).expect("chain object introduction");
+    }
+
+    (world, region)
+}
+
+fn late_fanout_parent(region: Region) -> ObjectObservation {
+    ObjectObservation::new(
+        source(region, 65_537),
+        Uuid::from_u128(1),
+        NonZeroU32::new(1).expect("late parent local ID is nonzero"),
+        Object,
+        Local(NonZeroU32::new(65_536).expect("chain tail local ID is nonzero")),
+    )
+}
+
 fn bench_deep_reparent(group: &mut BenchmarkGroup<'_, WallTime>) {
     group.throughput(Throughput::Elements(1));
     for &count in SCENE_SIZES {
@@ -93,8 +224,8 @@ fn bench_deep_reparent(group: &mut BenchmarkGroup<'_, WallTime>) {
             let mut bounds = limits();
             bounds.max_entities_per_region = count;
             let mut world = World::new(bounds);
-            let region = Region::new(1);
-            let _ = world.adopt_region(region).expect("adopt deep region");
+            let region = world.register_region().unwrap();
+
             for local in 1..=count as u32 {
                 let parent = if local == 1 { Root } else { Local(NonZeroU32::new(local - 1).unwrap()) };
                 let _ = world

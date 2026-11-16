@@ -10,7 +10,7 @@ use world::{
 
 use super::support::{
     AssetId, Budget, Camera, DVec3, FieldUpdate, Instant, NonZeroU32, ObjectPatch, ParentUpdate, Pose, Priority, ReconcileStep, Reconciler,
-    Region, Request, Uuid, Vec3, add, camera, prepared_asset, settle_materials, source, world,
+    Request, Uuid, Vec3, add, camera, prepared_asset, settle_materials, source, world,
 };
 
 fn color_image(face: &FaceMaterial) -> &TextureHandle {
@@ -55,7 +55,7 @@ fn pbr_texture_size(material_transform: UvTransform, face_transform: UvTransform
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
     let material_id = AssetId::new(Uuid::from_u128(9));
-    let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
+    let mut patch = ObjectPatch::new(source(&world, 0, 2), NonZeroU32::new(1).unwrap());
     patch.surface_appearance =
         Some(SurfaceAppearance::new(FaceAppearance { transform: face_transform, ..FaceAppearance::default() }, Vec::new()).unwrap());
     patch.pbr_materials = Some(PbrMaterialAssignments::new(vec![(0, material_id)]).unwrap());
@@ -88,7 +88,7 @@ fn unseen_objects_get_baselines() {
     let mut world = world();
     for (id, x) in [(1, -10.0), (2, 10.0), (3, -20.0)] {
         add(&mut world, id, id as u32, ParentUpdate::Root, x, id as u64 * 2);
-        let mut patch = ObjectPatch::new(source(1, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
+        let mut patch = ObjectPatch::new(source(&world, 0, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
         patch.surface_appearance = Some(
             SurfaceAppearance::new(
                 FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(100 + id))), ..FaceAppearance::default() },
@@ -137,12 +137,11 @@ fn unseen_objects_get_baselines() {
 
 #[test]
 fn terrain_demand_refines_when_region_origin_arrives() {
-    let region = Region::new(2);
     let textures = std::array::from_fn(|index| Uuid::from_u128(700 + index as u128));
     let settings = TerrainSettings::new(textures, [0.0; 4], [64.0; 4]).unwrap();
     let mut world = world();
-    let _ = world.adopt_region(region).unwrap();
-    let _ = world.observe_terrain_settings(source(2, 1), settings).unwrap();
+    let region = world.register_region().unwrap();
+    let _ = world.observe_terrain_settings(source(&world, 1, 1), settings).unwrap();
 
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
@@ -177,7 +176,7 @@ fn terrain_demand_refines_when_region_origin_arrives() {
 fn view_bounds_control_texture_priority() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 20.0, 1);
-    let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
+    let mut patch = ObjectPatch::new(source(&world, 0, 2), NonZeroU32::new(1).unwrap());
     patch.pose = Some(Pose { position: Some(Vec3::new(20.0, 30.0, 0.0)), rotation: None });
     patch.surface_appearance = Some(
         SurfaceAppearance::new(
@@ -225,7 +224,7 @@ fn view_bounds_control_texture_priority() {
     let farther_size = *farther.size_updates.iter().find_map(|(ticket, size)| (*ticket == visible_ticket).then_some(size)).unwrap();
     assert!(farther_size.edge() < visible_size.edge(), "visible demand may coarsen after the camera moves far enough away");
 
-    let _ = world.remove_object(source(1, 3), NonZeroU32::new(1).unwrap()).unwrap();
+    let _ = world.remove_object(source(&world, 0, 3), NonZeroU32::new(1).unwrap()).unwrap();
     scene.notify_world_change();
     let killed = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(killed.released, [visible_ticket], "object removal releases its retained texture demand");
@@ -237,7 +236,7 @@ fn background_pbr_texture_keeps_uv_adjusted_size() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
     let material_id = AssetId::new(Uuid::from_u128(9));
-    let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
+    let mut patch = ObjectPatch::new(source(&world, 0, 2), NonZeroU32::new(1).unwrap());
     patch.surface_appearance = Some(
         SurfaceAppearance::new(
             FaceAppearance { transform: UvTransform { offset: [0.0; 2], scale: [0.1, 0.15], rotation: 0.0 }, ..FaceAppearance::default() },
@@ -288,7 +287,7 @@ fn background_texture_change_uses_new_asset_baseline() {
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
     let first_id = AssetId::new(Uuid::from_u128(101));
     let next_id = AssetId::new(Uuid::from_u128(102));
-    let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
+    let mut patch = ObjectPatch::new(source(&world, 0, 2), NonZeroU32::new(1).unwrap());
     patch.surface_appearance =
         Some(SurfaceAppearance::new(FaceAppearance { texture: Some(first_id), ..FaceAppearance::default() }, Vec::new()).unwrap());
     let _ = world.patch_object(patch).unwrap();
@@ -305,7 +304,7 @@ fn background_texture_change_uses_new_asset_baseline() {
     assert!(background.released.is_empty());
     assert!(background.size_updates.is_empty());
 
-    let mut patch = ObjectPatch::new(source(1, 3), NonZeroU32::new(1).unwrap());
+    let mut patch = ObjectPatch::new(source(&world, 0, 3), NonZeroU32::new(1).unwrap());
     patch.surface_appearance =
         Some(SurfaceAppearance::new(FaceAppearance { texture: Some(next_id), ..FaceAppearance::default() }, Vec::new()).unwrap());
     let _ = world.patch_object(patch).unwrap();
@@ -322,7 +321,7 @@ fn shared_textures_follow_camera() {
     let mut world = world();
     for (id, x) in [(1, 10.0), (2, 100.0)] {
         add(&mut world, id, id as u32, ParentUpdate::Root, x, id as u64 * 2);
-        let mut patch = ObjectPatch::new(source(1, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
+        let mut patch = ObjectPatch::new(source(&world, 0, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
         patch.surface_appearance = Some(
             SurfaceAppearance::new(
                 FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(100))), ..FaceAppearance::default() },
@@ -341,7 +340,7 @@ fn shared_textures_follow_camera() {
     scene.complete_asset(first.ticket, ready);
     settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(view.objects().all(|obj| { obj.materials().unwrap().iter().all(|face| color_image(face).info().unwrap().size == [128; 2]) }));
-    let _ = world.remove_object(source(1, 10), NonZeroU32::new(1).unwrap()).unwrap();
+    let _ = world.remove_object(source(&world, 0, 10), NonZeroU32::new(1).unwrap()).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(work.released.is_empty());
@@ -410,7 +409,7 @@ fn legacy_texture_demand_is_unchanged() {
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
     let texture = AssetId::new(Uuid::from_u128(100));
     let transform = UvTransform { offset: [0.25, -0.5], scale: [0.5, 2.0], rotation: 0.6 };
-    let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
+    let mut patch = ObjectPatch::new(source(&world, 0, 2), NonZeroU32::new(1).unwrap());
     patch.surface_appearance = Some(
         SurfaceAppearance::new(FaceAppearance { texture: Some(texture), transform, ..FaceAppearance::default() }, Vec::new()).unwrap(),
     );
@@ -429,7 +428,7 @@ fn shared_refinement_preserves_binding() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
     let id = AssetId::new(Uuid::from_u128(100));
-    let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
+    let mut patch = ObjectPatch::new(source(&world, 0, 2), NonZeroU32::new(1).unwrap());
     patch.surface_appearance =
         Some(SurfaceAppearance::new(FaceAppearance { texture: Some(id), ..Default::default() }, Vec::new()).unwrap());
     let _ = world.patch_object(patch).unwrap();
@@ -476,7 +475,7 @@ fn material_arrival_preserves_geometry() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
     let id = AssetId::new(Uuid::from_u128(9));
-    let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
+    let mut patch = ObjectPatch::new(source(&world, 0, 2), NonZeroU32::new(1).unwrap());
     patch.surface_appearance = Some(
         SurfaceAppearance::new(
             FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(6))), color: [255, 0, 0, 128], ..FaceAppearance::default() },
@@ -548,7 +547,7 @@ fn material_arrival_preserves_geometry() {
     assert!(face.base_color_texture.as_ref().is_some_and(|binding| binding.image().is_some()));
     assert_eq!(face.base_color_texture.as_ref().unwrap().state().resolution, Resolution::Ready);
 
-    let mut patch = ObjectPatch::new(source(1, 3), NonZeroU32::new(1).unwrap());
+    let mut patch = ObjectPatch::new(source(&world, 0, 3), NonZeroU32::new(1).unwrap());
     patch.pbr_materials = Some(PbrMaterialAssignments::new(Vec::new()).unwrap());
     assert!(world.patch_object(patch).unwrap().revision.is_some(), "removing PBR bindings must change World state");
     scene.notify_world_change();
@@ -566,7 +565,7 @@ fn material_arrival_preserves_geometry() {
 fn binding_edits_reject_old_completion() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
-    let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
+    let mut patch = ObjectPatch::new(source(&world, 0, 2), NonZeroU32::new(1).unwrap());
     let old = AssetId::new(Uuid::from_u128(9));
     patch.pbr_materials = Some(PbrMaterialAssignments::new(vec![(0, old)]).unwrap());
     let _ = world.patch_object(patch).unwrap();
@@ -578,7 +577,7 @@ fn binding_edits_reject_old_completion() {
     let image = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
     assert_matches!(view.objects().next().unwrap().materials().unwrap()[0].material, assets::MaterialDescription::Pbr(_));
     let current = AssetId::new(Uuid::from_u128(10));
-    let mut patch = ObjectPatch::new(source(1, 3), NonZeroU32::new(1).unwrap());
+    let mut patch = ObjectPatch::new(source(&world, 0, 3), NonZeroU32::new(1).unwrap());
     patch.pbr_materials = Some(PbrMaterialAssignments::new(vec![(0, current)]).unwrap());
     let _ = world.patch_object(patch).unwrap();
     scene.notify_world_change();
@@ -610,7 +609,7 @@ fn shared_demand_releases_last_user() {
     let mut world = world();
     for id in 1..=2 {
         add(&mut world, id, id as u32, ParentUpdate::Root, 10.0, id as u64 * 2);
-        let mut patch = ObjectPatch::new(source(1, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
+        let mut patch = ObjectPatch::new(source(&world, 0, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
         patch.surface_appearance = Some(
             SurfaceAppearance::new(
                 FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(100))), ..FaceAppearance::default() },
@@ -627,7 +626,7 @@ fn shared_demand_releases_last_user() {
     assert_eq!(work.requested.len(), 1);
     let ticket = work.requested[0].ticket;
     for local in 1..=2 {
-        let _ = world.remove_object(source(1, 10 + u64::from(local)), NonZeroU32::new(local).unwrap()).unwrap();
+        let _ = world.remove_object(source(&world, 0, 10 + u64::from(local)), NonZeroU32::new(local).unwrap()).unwrap();
         scene.notify_world_change();
         let work = settle_materials(&mut scene, &mut view, &world, &mut now);
         assert!(work.requested.is_empty());
@@ -645,7 +644,7 @@ fn regional_demands_have_no_cache_cap() {
     let mut world = world();
     for id in 1..=700 {
         add(&mut world, id, id as u32, ParentUpdate::Root, 10.0, id as u64 * 2);
-        let mut patch = ObjectPatch::new(source(1, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
+        let mut patch = ObjectPatch::new(source(&world, 0, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
         patch.surface_appearance = Some(
             SurfaceAppearance::new(
                 FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(10_000 + id * 6))), ..FaceAppearance::default() },
@@ -684,7 +683,7 @@ fn regional_demands_have_no_cache_cap() {
     assert!(budget.charged_bytes() <= render::scene::MEMORY_BYTES);
     let removed = *active[0];
     let local = ((removed.request.resource().id.uuid().as_u128() - 10_000) / 6) as u32;
-    let _ = world.remove_object(source(1, 10_000), NonZeroU32::new(local).unwrap()).unwrap();
+    let _ = world.remove_object(source(&world, 0, 10_000), NonZeroU32::new(local).unwrap()).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(work.released.len(), 6, "retiring an object releases its six unique texture interests");
@@ -697,7 +696,7 @@ fn shared_texture_outlives_scene() {
     let mut world = world();
     for id in 1..=25 {
         add(&mut world, id, id as u32, ParentUpdate::Root, 10.0, id as u64 * 2);
-        let mut patch = ObjectPatch::new(source(1, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
+        let mut patch = ObjectPatch::new(source(&world, 0, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
         patch.surface_appearance = Some(
             SurfaceAppearance::new(
                 FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(101))), ..FaceAppearance::default() },

@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::identity::WorldId;
 use crate::mutation::facet::{FacetChanges, FacetSet, FacetUpdates};
 use crate::object::components::Fenced;
-use crate::{Entity, Kind, LocalAddress, ObjectMedia, Parent, Region};
+use crate::{Entity, Kind, LocalAddress, ObjectMedia, Parent, Region, WorldRevision};
 use crate::{ObjectOrdering, ObjectRecord, ObjectState};
 
 pub(crate) struct ObjectStore {
@@ -123,7 +123,7 @@ impl ObjectStore {
                 .ecs
                 .query_one_mut::<(&mut ObjectRecord, &mut ObjectOrdering)>(entity.0)
                 .expect("mutation target has its required components");
-            record.state = ObjectState { parent: record.state.parent, ..state };
+            record.state = ObjectState { parent: record.state.parent, pending_since: record.state.pending_since, ..state };
             *stored_ordering = ordering;
         }
         if let Some(facets) = facets {
@@ -179,10 +179,6 @@ impl ObjectStore {
         self.ecs.query::<(hecs::Entity, &ObjectRecord)>()
     }
 
-    pub(crate) fn ordered_records(&self) -> ViewBorrow<'_, (&ObjectRecord, &ObjectOrdering)> {
-        self.ecs.view::<(&ObjectRecord, &ObjectOrdering)>()
-    }
-
     pub(crate) fn read(&self, entity: hecs::Entity) -> QueryOne<'_, (&ObjectRecord, &ObjectOrdering)> {
         self.ecs.query_one::<(&ObjectRecord, &ObjectOrdering)>(entity)
     }
@@ -191,9 +187,11 @@ impl ObjectStore {
         self.ecs.get::<&ObjectOrdering>(entity).expect("every object has ordering")
     }
 
-    pub(crate) fn set_parent(&mut self, entity: Entity, parent: Parent) {
+    pub(crate) fn set_parent(&mut self, entity: Entity, parent: Parent, pending_since: WorldRevision) {
         assert_eq!(entity.1, self.world, "parent mutation belongs to another World");
-        self.ecs.query_one_mut::<&mut ObjectRecord>(entity.0).expect("parent mutation target is live").state.parent = parent;
+        let record = self.ecs.query_one_mut::<&mut ObjectRecord>(entity.0).expect("parent mutation target is live");
+        record.state.parent = parent;
+        record.state.pending_since = pending_since;
     }
 
     #[cfg(test)]

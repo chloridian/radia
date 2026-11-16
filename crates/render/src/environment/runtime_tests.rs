@@ -5,7 +5,7 @@ use utils::{AssetId, ExperienceId};
 use uuid::Uuid;
 use world::{
     EnvironmentAssignment, EnvironmentScope, EnvironmentSource, Kind, ObjectObservation, OrderEvidence::Ordered, ParcelLocalId,
-    ParentUpdate, Pose, RegionInfo, UpdateSource, World, WorldLimits,
+    ParentUpdate, Pose, Region, RegionInfo, UpdateSource, World, WorldLimits,
 };
 
 use super::*;
@@ -14,8 +14,8 @@ use crate::scene::{
 };
 
 fn world() -> World {
-    World::new(WorldLimits {
-        max_region_registrations: 2,
+    let mut world = World::new(WorldLimits {
+        max_regions: 2,
         max_entities: 8,
         max_entities_per_region: 8,
         max_tombstones_per_region: 8,
@@ -26,7 +26,14 @@ fn world() -> World {
         max_journal_changes: 64,
         max_region_name_bytes: 64,
         max_recovery_targets: 4,
-    })
+    });
+    world.register_region().expect("first fixture region registers");
+    world.register_region().expect("second fixture region registers");
+    world
+}
+
+fn region(world: &World, index: usize) -> Region {
+    world.region_page(None, 64).expect("fixture regions fit one page").regions[index].region
 }
 
 #[test]
@@ -88,7 +95,6 @@ fn settle(scene: &mut Reconciler, view: &mut SceneView, world: &World) {
 }
 
 fn add_region_environment(world: &mut World, region: Region, bytes: &[u8], altitudes: Option<[f32; 3]>) {
-    let _ = world.adopt_region(region).unwrap();
     let origin = DVec3::new((region.get() - 1) as f64 * 256.0, 0.0, if region.get() == 2 { 500.0 } else { 0.0 });
     let _ = world.patch_region(region, RegionInfo { origin: Some(origin), ..RegionInfo::default() }).unwrap();
     let target = world.environment_target(region, world::EnvironmentScope::Region).unwrap();
@@ -291,8 +297,8 @@ fn push_local_asset(
 #[test]
 fn active_environment_uses_agent_region_and_restarts_identity_on_region_change() {
     let mut world = world();
-    let first_region = Region::new(1);
-    let second_region = Region::new(2);
+    let first_region = region(&world, 0);
+    let second_region = region(&world, 1);
     add_region_environment(&mut world, first_region, b"{'type':'sky','sunlight_color':[r1,r0,r0]}", None);
     add_region_environment(
             &mut world,
@@ -341,7 +347,7 @@ fn active_environment_uses_agent_region_and_restarts_identity_on_region_change()
 #[test]
 fn experience_settings_keep_day_sky_and_water_precedence() {
     let world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
     let geometry_version = view.geometry_version();
@@ -374,7 +380,7 @@ fn experience_settings_keep_day_sky_and_water_precedence() {
 #[test]
 fn cycle_rechecks_intermediate_sunlight() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     add_region_environment(
             &mut world,
             region,
@@ -399,19 +405,19 @@ fn cycle_rechecks_intermediate_sunlight() {
 #[test]
 fn foreign_clear_preserves_shared_transition() {
     let mut world = world();
-    let region = Region::new(1);
-    add_region_environment(&mut world, region, b"{'type':'sky','sunlight_color':[r1,r0,r0]}", None);
+    let first_region = region(&world, 0);
+    add_region_environment(&mut world, first_region, b"{'type':'sky','sunlight_color':[r1,r0,r0]}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
     let mut active = ActiveEnvironment::default();
     let now = Instant::now();
-    active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now);
-    scene.push_environment(Region::new(2), EnvironmentPush::Clear { experience: None, transition: Duration::ZERO }).unwrap();
-    replace_region_environment(&mut world, region, b"{'type':'sky','sunlight_color':[r0,r1,r0]}");
+    active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now);
+    scene.push_environment(region(&world, 1), EnvironmentPush::Clear { experience: None, transition: Duration::ZERO }).unwrap();
+    replace_region_environment(&mut world, first_region, b"{'type':'sky','sunlight_color':[r0,r1,r0]}");
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world);
-    active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(1));
-    active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(101));
+    active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(1));
+    active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(101));
     let color = active.evaluated().unwrap().sky.sunlight;
     assert!(color[0] > 0.9 && color[1] < 0.1, "{color:?}");
 }
@@ -419,7 +425,7 @@ fn foreign_clear_preserves_shared_transition() {
 #[test]
 fn clear_transition_scopes_to_clear() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     add_region_environment(&mut world, region, b"{'type':'sky','sunlight_color':[r1,r0,r0]}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
@@ -446,21 +452,21 @@ fn clear_transition_scopes_to_clear() {
 #[test]
 fn local_preset_beats_shared_and_experience_and_clear_restores_experience() {
     let mut world = world();
-    let region = Region::new(1);
-    let second_region = Region::new(2);
-    add_region_environment(&mut world, region, b"{'type':'sky','sunlight_color':[r0,r1,r0]}", None);
+    let first_region = region(&world, 0);
+    let second_region = region(&world, 1);
+    add_region_environment(&mut world, first_region, b"{'type':'sky','sunlight_color':[r0,r1,r0]}", None);
     add_region_environment(&mut world, second_region, b"{'type':'sky','sunlight_color':[r1,r0,r1]}", None);
-    set_parcel_environment(&mut world, region, b"{'type':'sky','sunlight_color':[r1,r1,r0]}");
+    set_parcel_environment(&mut world, first_region, b"{'type':'sky','sunlight_color':[r1,r1,r0]}");
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
-    let parcel_sources = compose_sources(&view, region, view.viewer_environment(), None, false);
+    let parcel_sources = compose_sources(&view, first_region, view.viewer_environment(), None, false);
     assert_eq!(evaluate(&parcel_sources, 0.0, 0.0).sky.sunlight, [1.0, 1.0, 0.0]);
     let experience = ExperienceId::new(Uuid::from_u128(4)).unwrap();
     push_experience(
         &mut scene,
         &mut view,
         &world,
-        region,
+        first_region,
         experience,
         Duration::from_secs(2),
         b"{'type':'sky','sunlight_color':[r1,r0,r0]}",
@@ -468,7 +474,7 @@ fn local_preset_beats_shared_and_experience_and_clear_restores_experience() {
     let override_property = EnvironmentProperty { name: "sunlight_color".into(), source: b"[r0,r1,r0]".as_slice().into() };
     scene
         .push_environment(
-            region,
+            first_region,
             EnvironmentPush::Partial { experience, sky: vec![override_property], water: Vec::new(), transition: Duration::ZERO },
         )
         .unwrap();
@@ -478,24 +484,24 @@ fn local_preset_beats_shared_and_experience_and_clear_restores_experience() {
         &mut scene,
         &mut view,
         &world,
-        region,
+        first_region,
         water_experience,
         Duration::from_secs(2),
         b"{'type':'water','water_fog_density':r7}",
     );
     let now = Instant::now();
     let mut active = ActiveEnvironment::default();
-    assert!(active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now));
+    assert!(active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now));
     assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([0.0, 1.0, 0.0]));
     push_local(
         &mut scene,
         &mut view,
         &world,
-        region,
+        first_region,
         crate::scene::EnvironmentPreset::Midday,
         b"{'type':'sky','sunlight_color':[r0,r0,r1]}",
     );
-    assert!(active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(1)));
+    assert!(active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(1)));
     assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([0.0, 0.0, 1.0]));
     assert_eq!(active.evaluated().map(|value| value.water.fog_density), Some(7.0));
     assert_eq!(active.next_deadline(), None);
@@ -504,21 +510,21 @@ fn local_preset_beats_shared_and_experience_and_clear_restores_experience() {
         Some(&crate::scene::EnvironmentChoice::Local(crate::scene::LocalChoice::Preset(crate::scene::EnvironmentPreset::Midday)))
     );
 
-    let _ = world.observe_agent_parcel(UpdateSource::new(region, 2, Ordered(4), 0), None).unwrap();
+    let _ = world.observe_agent_parcel(UpdateSource::new(first_region, 2, Ordered(4), 0), None).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world);
-    assert!(!active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(2)));
+    assert!(!active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(2)));
     assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([0.0, 0.0, 1.0]));
     assert!(!active.update(&view, Some((second_region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(3)));
     assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([0.0, 0.0, 1.0]));
     assert_eq!(active.evaluated().map(|value| value.water.fog_density), Some(7.0));
-    assert!(!active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(4)));
+    assert!(!active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(4)));
 
-    scene.set_local_environment(crate::scene::EnvironmentChoice::Shared, region).unwrap();
+    scene.set_local_environment(crate::scene::EnvironmentChoice::Shared, first_region).unwrap();
     settle(&mut scene, &mut view, &world);
-    assert!(active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(5)));
+    assert!(active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(5)));
     assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([0.0, 0.0, 1.0]));
-    active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_secs(6));
+    active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now + Duration::from_secs(6));
     assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([0.0, 1.0, 0.0]));
     assert_eq!(active.evaluated().map(|value| value.water.fog_density), Some(7.0));
     assert_eq!(view.viewer_environment().map(|environment| environment.selected()), Some(&crate::scene::EnvironmentChoice::Shared));
@@ -527,8 +533,8 @@ fn local_preset_beats_shared_and_experience_and_clear_restores_experience() {
 #[test]
 fn completed_local_preset_uses_agent_region_and_updates_active_sky() {
     let mut world = world();
-    let first_region = Region::new(1);
-    let agent_region = Region::new(2);
+    let first_region = region(&world, 0);
+    let agent_region = region(&world, 1);
     add_region_environment(&mut world, first_region, b"{'type':'sky','sunlight_color':[r1,r0,r0]}", None);
     add_region_environment(&mut world, agent_region, b"{'type':'sky','sunlight_color':[r0,r1,r0]}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -574,8 +580,8 @@ fn completed_local_preset_uses_agent_region_and_updates_active_sky() {
 #[test]
 fn crossing_retries_local_asset_in_agent_region() {
     let mut world = world();
-    let first_region = Region::new(1);
-    let agent_region = Region::new(2);
+    let first_region = region(&world, 0);
+    let agent_region = region(&world, 1);
     add_region_environment(&mut world, first_region, b"{'type':'sky'}", None);
     add_region_environment(&mut world, agent_region, b"{'type':'sky'}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -625,7 +631,7 @@ fn crossing_retries_local_asset_in_agent_region() {
 #[test]
 fn inventory_water_preserves_local_sky_and_daycycle_replaces_both() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     add_region_environment(
             &mut world,
             region,
@@ -705,7 +711,7 @@ fn inventory_water_preserves_local_sky_and_daycycle_replaces_both() {
 #[test]
 fn closing_scene_releases_local_asset_request() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     add_region_environment(&mut world, region, b"{'type':'sky'}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
@@ -749,7 +755,7 @@ fn closing_scene_releases_local_asset_request() {
 #[test]
 fn failed_local_preset_publishes_a_typed_error() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     add_region_environment(&mut world, region, b"{'type':'sky'}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
@@ -782,7 +788,7 @@ fn failed_local_preset_publishes_a_typed_error() {
 #[test]
 fn cloud_scroll_follows_windlight_axis_directions() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     add_region_environment(&mut world, region, b"{'type':'sky'}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
@@ -798,7 +804,7 @@ fn cloud_scroll_follows_windlight_axis_directions() {
 #[test]
 fn water_phase_uses_elapsed_runtime_seconds() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     add_region_environment(&mut world, region, b"{'type':'water'}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     scene.notify_world_change();
@@ -815,7 +821,7 @@ fn water_phase_uses_elapsed_runtime_seconds() {
 #[test]
 fn coalesced_properties_keep_independent_deadlines() {
     let world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
     let started = Instant::now();
@@ -845,7 +851,7 @@ fn coalesced_properties_keep_independent_deadlines() {
 #[test]
 fn earlier_short_property_finishes_first() {
     let world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
     let started = Instant::now();
@@ -871,7 +877,7 @@ fn earlier_short_property_finishes_first() {
 fn delayed_replay_preserves_replacement_start() {
     for republish in [false, true] {
         let world = world();
-        let region = Region::new(1);
+        let region = region(&world, 0);
         let (mut scene, mut view) = Reconciler::new(Budget::default());
         settle(&mut scene, &mut view, &world);
         let started = Instant::now();
@@ -910,7 +916,7 @@ fn delayed_replay_preserves_replacement_start() {
 fn completed_replacements_break_old_tweens() {
     for middle_duration in [Duration::ZERO, Duration::from_secs(2)] {
         let world = world();
-        let region = Region::new(1);
+        let region = region(&world, 0);
         let (mut scene, mut view) = Reconciler::new(Budget::default());
         settle(&mut scene, &mut view, &world);
         let started = Instant::now();
@@ -944,7 +950,7 @@ fn completed_replacements_break_old_tweens() {
 #[test]
 fn same_key_replacement_starts_at_current_value() {
     let world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
     let started = Instant::now();
@@ -973,7 +979,7 @@ fn same_key_replacement_starts_at_current_value() {
 #[test]
 fn clearing_one_property_fades_without_interrupting_another() {
     let world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
     let started = Instant::now();
@@ -1014,7 +1020,7 @@ fn clearing_one_property_fades_without_interrupting_another() {
 #[test]
 fn clearing_last_property_fades_to_defaults() {
     let world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
     let started = Instant::now();
@@ -1052,7 +1058,7 @@ fn clearing_last_property_fades_to_defaults() {
 #[test]
 fn clearing_replaced_owner_keeps_current_property() {
     let world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
     let started = Instant::now();
@@ -1083,8 +1089,8 @@ fn clearing_replaced_owner_keeps_current_property() {
 #[test]
 fn unrelated_region_update_does_not_restart_composition() {
     let world = world();
-    let first_region = Region::new(1);
-    let second_region = Region::new(2);
+    let first_region = region(&world, 0);
+    let second_region = region(&world, 1);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
     let started = Instant::now();
@@ -1130,7 +1136,7 @@ fn unrelated_region_update_does_not_restart_composition() {
 #[test]
 fn region_teardown_keeps_original_property_deadline() {
     let world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
     let started = Instant::now();
@@ -1155,7 +1161,7 @@ fn region_teardown_keeps_original_property_deadline() {
 #[test]
 fn property_finishes_during_base_transition() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     add_region_environment(&mut world, region, b"{'type':'sky','sunlight_color':[r1,r0,r0]}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     scene.notify_world_change();
@@ -1186,7 +1192,7 @@ fn property_finishes_during_base_transition() {
 #[test]
 fn property_finishes_during_altitude_transition() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     add_region_environment(
             &mut world,
             region,
@@ -1214,7 +1220,7 @@ fn property_finishes_during_altitude_transition() {
 #[test]
 fn leaving_local_resumes_property_timeline() {
     let mut world = world();
-    let region = Region::new(1);
+    let region = region(&world, 0);
     add_region_environment(&mut world, region, b"{'type':'sky','sunlight_color':[r0,r1,r0]}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     scene.notify_world_change();
@@ -1250,8 +1256,8 @@ fn leaving_local_resumes_property_timeline() {
 #[test]
 fn inactive_region_property_has_no_deadline() {
     let mut world = world();
-    let first_region = Region::new(1);
-    let second_region = Region::new(2);
+    let first_region = region(&world, 0);
+    let second_region = region(&world, 1);
     add_region_environment(&mut world, first_region, b"{'type':'sky'}", None);
     add_region_environment(&mut world, second_region, b"{'type':'sky','sunlight_color':[r0,r0,r1]}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());

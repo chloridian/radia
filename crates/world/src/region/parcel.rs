@@ -719,7 +719,7 @@ mod tests {
 
     fn limits() -> WorldLimits {
         WorldLimits {
-            max_region_registrations: 8,
+            max_regions: 8,
             max_entities: 8,
             max_entities_per_region: 8,
             max_tombstones_per_region: 8,
@@ -805,9 +805,8 @@ mod tests {
 
     #[test]
     fn overlay_publishes_only_after_out_of_order_parts_and_decodes_flags() {
-        let region = Region::new(1);
         let mut world = World::new(limits());
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         let mut first = overlay_part(0);
         first[0] = 0xfd;
         observe_overlay(&mut world, region, 1, 0, first);
@@ -852,9 +851,8 @@ mod tests {
 
     #[test]
     fn incomplete_new_overlay_keeps_last_complete_grid() {
-        let region = Region::new(2);
         let mut world = World::new(limits());
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         complete_overlay(&mut world, region, 1, 0);
         assert_eq!(world.parcel_state(region).unwrap().overlay.as_ref().unwrap().raw_cell(0, 0), Some(0xfd));
 
@@ -867,9 +865,8 @@ mod tests {
 
     #[test]
     fn overlay_restart_preserves_parts_newer_than_its_boundary() {
-        let region = Region::new(3);
         let mut world = World::new(limits());
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
 
         observe_overlay(&mut world, region, 1, 0, overlay_part(0x10));
         observe_overlay(&mut world, region, 21, 1, overlay_part(0x21));
@@ -887,9 +884,8 @@ mod tests {
 
     #[test]
     fn malformed_overlay_parts_do_not_mutate_assembly() {
-        let region = Region::new(3);
         let mut world = World::new(limits());
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
 
         assert_invalid_field(
             world.observe_parcel_overlay(source(region, 1), ParcelOverlayObservation { sequence_id: 4, data: overlay_part(0) }),
@@ -942,9 +938,8 @@ mod tests {
 
     #[test]
     fn walking_updates_only_the_newer_agent_parcel_and_excludes_selected_and_collision_replies() {
-        let region = Region::new(4);
         let mut world = World::new(limits());
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         observe_properties(&mut world, region, 1, 20, 41, 0);
         observe_properties(&mut world, region, 2, 21, 42, 0);
 
@@ -983,9 +978,8 @@ mod tests {
 
     #[test]
     fn effective_restrictions_combine_region_parcel_and_overlay_flags() {
-        let region = Region::new(5);
         let mut world = World::new(limits());
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         let parcel_flags = (1 << 0) | (1 << 1) | (1 << 5) | (1 << 6);
         observe_properties(&mut world, region, 1, 1, 5, parcel_flags);
         let region_flags = (1 << 19) | (1 << 20) | (1 << 21) | (1 << 22) | (1 << 23) | (1 << 13);
@@ -1008,9 +1002,8 @@ mod tests {
 
     #[test]
     fn property_validation_bounds_urls_and_debug_redacts_them() {
-        let region = Region::new(6);
         let mut world = World::new(limits());
-        let _ = world.adopt_region(region).unwrap();
+        let region = world.register_region().unwrap();
         let mut data = properties(1, 0, bitmap(&[]));
         data.music_url = Arc::from("https://secret.invalid/music");
         data.media_url = Arc::from("https://secret.invalid/media");
@@ -1031,11 +1024,9 @@ mod tests {
 
     #[test]
     fn region_crossing_and_interleaved_retirement_preserve_world_invariants() {
-        let first = Region::new(7);
-        let second = Region::new(8);
         let mut world = World::new(limits());
-        let _ = world.adopt_region(first).unwrap();
-        let _ = world.adopt_region(second).unwrap();
+        let first = world.register_region().unwrap();
+        let second = world.register_region().unwrap();
 
         observe_overlay(&mut world, first, 1, 0, overlay_part(1));
         observe_properties(&mut world, first, 2, 7, 70, 0);
@@ -1058,7 +1049,7 @@ mod tests {
                 source(first, 6),
                 ParcelPropertiesObservation { request_result: 0, sequence_id: 8, properties: None },
             ),
-            Err(ApplyError::StaleRegion)
+            Err(ApplyError::RegionRetired)
         );
         assert_eq!(world.check_invariants(), Ok(()));
         let _ = world.retire_region(second).unwrap();

@@ -5,7 +5,7 @@ use protocol::messages::CacheMissType;
 use uuid::Uuid;
 use world::{
     Appearance, Applied, ApplyError,
-    ApplyOutcome::{AgentHandedOff, Introduced, TombstoneRecorded},
+    ApplyOutcome::{AgentHandedOff, Deferred, Introduced, TombstoneRecorded},
     EnvironmentAssignment, EnvironmentTarget, FieldRejectionReason, Kind, LocalAddress, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
     OrderEvidence, ParcelLocalId, ParcelOverlayObservation, ParcelPropertiesObservation, Region, RegionApplied, RegionHandle, RegionInfo,
     RegionOutcome, TerrainSettings, UpdateSource, World, WorldLimits,
@@ -15,7 +15,6 @@ use super::{
     inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation, SitTargetUpdate},
     object_cache::CachedOverride,
     object_media::ObjectMediaTarget,
-    recovery::MAX_RECOVERY_OBJECTS_PER_REQUEST,
     terrain::DecodedTerrain,
 };
 
@@ -26,6 +25,7 @@ const MAX_WORLD_JOURNAL_ENTRIES: usize = 4_096;
 const MAX_REGION_NAME_BYTES: usize = 256;
 const MAX_INGEST_DIAGNOSTIC_ADDRESSES: usize = 8;
 pub(super) const MAX_OBJECTS_PER_INTAKE_QUANTUM: usize = 32;
+const MAX_RELATIONSHIPS_PER_TURN: usize = 64;
 const PARCEL_REJECTION_LOG_INTERVAL: u64 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,7 +148,8 @@ impl IngestSummary {
     pub(super) fn log_incomplete_data(&self, simulator_id: SimulatorId, region: Option<Region>) {
         use ApplyError::{
             AddressGenerationExhausted, EntityBudgetExhausted, EnvironmentBudgetExhausted, FrameGenerationExhausted, InvalidValue,
-            KindMismatch, RegionRetired, RegistrationBudgetExhausted, RevisionExhausted, StaleRegion, TerrainBudgetExhausted,
+            KindMismatch, RegionBudgetExhausted, RegionGenerationExhausted, RegionRetired, RevisionExhausted, StaleRegion,
+            TerrainBudgetExhausted,
         };
         use FieldRejectionReason::{
             InvalidRotation, InvalidValue as RejectedValue, ParentCycle, ParentDependsOnRejectedParent, ResourceLimit, StaleFrame,
@@ -179,7 +180,8 @@ impl IngestSummary {
                         | TerrainBudgetExhausted
                         | EnvironmentBudgetExhausted
                         | world::ApplyError::ParcelBudgetExhausted
-                        | RegistrationBudgetExhausted
+                        | RegionBudgetExhausted
+                        | RegionGenerationExhausted
                         | RevisionExhausted
                         | FrameGenerationExhausted
                         | AddressGenerationExhausted,
@@ -190,6 +192,10 @@ impl IngestSummary {
                 }
                 BlockOutcome::Rejected { error: StaleRegion | RegionRetired, .. } => {}
                 BlockOutcome::Applied { applied, .. } => {
+                    if matches!(&applied.outcome, Deferred(world::DeferredReason::RelationshipCapacity)) {
+                        resource_limits = resource_limits.saturating_add(1);
+                        rejected = true;
+                    }
                     for rejection in applied.rejections.iter() {
                         match rejection.reason {
                             RejectedValue { .. } | InvalidRotation | ParentCycle | ParentDependsOnRejectedParent => {
@@ -254,6 +260,10 @@ impl SessionWorld {
 
     pub(super) fn world(&self) -> &World {
         &self.world
+    }
+
+    pub(super) fn resolve_relationships(&mut self) -> Result<world::RelationshipResolution, ApplyError> {
+        self.world.resolve_relationships(MAX_RELATIONSHIPS_PER_TURN)
     }
 
     pub(super) fn observe_agent_parcel(
@@ -327,8 +337,7 @@ impl SessionWorld {
             return Ok(region);
         }
 
-        let region = Region::new(simulator_id.get());
-        self.world.adopt_region(region).map(|_| ()).map_err(RegistrationError::Apply)?;
+        let region = self.world.register_region().map_err(RegistrationError::Apply)?;
         self.regions.insert(simulator_id, region);
         self.update_region_handle(region, handle).map_err(RegistrationError::Apply)?;
         Ok(region)
@@ -675,7 +684,7 @@ fn apply_operation(world: &mut World, operation: ObjectOperation) -> Result<Appl
 
 pub(super) fn viewer_world_limits() -> WorldLimits {
     WorldLimits {
-        max_region_registrations: MAX_WORLD_ENTITIES,
+        max_regions: MAX_WORLD_ENTITIES,
         max_entities: MAX_WORLD_ENTITIES,
         max_entities_per_region: MAX_WORLD_ENTITIES,
         max_tombstones_per_region: MAX_WORLD_TOMBSTONES_PER_REGION,
@@ -685,7 +694,7 @@ pub(super) fn viewer_world_limits() -> WorldLimits {
         max_journal_entries: MAX_WORLD_JOURNAL_ENTRIES,
         max_journal_changes: MAX_WORLD_ENTITIES,
         max_region_name_bytes: MAX_REGION_NAME_BYTES,
-        max_recovery_targets: MAX_RECOVERY_OBJECTS_PER_REQUEST,
+        max_recovery_targets: MAX_WORLD_ENTITIES,
     }
 }
 
