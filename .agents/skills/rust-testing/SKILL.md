@@ -53,7 +53,7 @@ Test private code only when a complex local invariant is out of reach of public 
 
 ## Naming
 
-Max 5 words, `<subject>_<outcome>`. Add a condition only to separate siblings. Drop the module, type, and function (context already names them), setup, inputs, and filler (`test_`, `should`, `when`, `returns`, `correctly`). Match sibling style. Details go in the assertion message. Needing more words means two contracts (split) or encoded setup (cut). Property tests are named for the invariant. No issue IDs.
+Aim for 5 words or fewer, `<subject>_<outcome>`; 6 or 7 are fine when the extra words name the condition that separates siblings. Drop the module, type, and function (context already names them), setup, inputs, articles, and filler (`test_`, `a`, `the`, `should`, `when`, `returns`, `correctly`). Match sibling style. Details go in the assertion message. More than 7 words, or a name joined by `and`, `then`, or `after`, means two contracts (split) or encoded setup (cut). Property tests are named for the invariant. No issue IDs.
 
 ```rust
 // not: parse_frame_with_truncated_length_prefix_returns_incomplete
