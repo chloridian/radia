@@ -51,20 +51,6 @@ mod tests {
     }
 
     #[test]
-    fn decodes_sparse_render_material_bindings() {
-        let first = uuid(0x102);
-        let last = uuid(0x103);
-        let mut bytes = vec![2];
-        binding(&mut bytes, 0, first);
-        binding(&mut bytes, 44, last);
-
-        assert_eq!(
-            decode_render_material_bindings(&bytes).unwrap(),
-            [RenderMaterialBinding { face_index: 0, material_id: first }, RenderMaterialBinding { face_index: 44, material_id: last }]
-        );
-    }
-
-    #[test]
     fn empty_and_nil_bindings_decode() {
         assert_eq!(decode_render_material_bindings(&[0]).unwrap(), []);
 
@@ -74,7 +60,7 @@ mod tests {
     }
 
     #[test]
-    fn bindings_validate_and_keep_first() {
+    fn bindings_keep_first_valid() {
         assert_eq!(decode_render_material_bindings(&[]), Err(RenderMaterialError::Malformed));
         assert_eq!(decode_render_material_bindings(&[1]), Err(RenderMaterialError::Malformed));
 

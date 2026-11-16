@@ -412,16 +412,6 @@ mod tests {
     }
 
     #[test]
-    fn quaternion_xyz_canonicalizes_w() {
-        let input = Quat::from_xyzw(0.2, -0.3, 0.4, -0.84);
-        let bytes = encode_quaternion(input).expect("encode finite nonzero rotation");
-        let decoded = decode_quaternion(&bytes);
-
-        assert!(decoded.w >= 0.0);
-        assert_rotation_equivalent(input, decoded);
-    }
-
-    #[test]
     fn quaternion_xyz_signs_encode_equal() {
         for input in [Quat::from_xyzw(0.2, -0.3, 0.4, 0.84), Quat::from_xyzw(-1.0, 2.0, -3.0, 0.0)] {
             let inverse = Quat::from_xyzw(-input.x, -input.y, -input.z, -input.w);

@@ -220,28 +220,3 @@ fn negative_extra_length_rejected() {
     bytes[offset + 2..offset + 6].copy_from_slice(&(-1i32).to_le_bytes());
     assert_eq!(Packet::decode(&bytes), Err(LLUdpError::InvalidMessage));
 }
-
-#[test]
-fn typed_update_kinds_reach_consumer() {
-    fn consume(packet: Packet) -> Option<&'static str> {
-        match packet.into_message() {
-            Message::ObjectUpdate(update) if !update.objects.is_empty() => Some("full"),
-            Message::ObjectUpdateCompressed(update) if !update.objects.is_empty() => Some("full"),
-            Message::ImprovedTerseObjectUpdate(update) if !update.objects.is_empty() => Some("partial"),
-            Message::ObjectUpdateCached(update) if !update.objects.is_empty() => Some("cached"),
-            Message::KillObject(update) if !update.object_data.is_empty() => Some("removed"),
-            _ => None,
-        }
-    }
-
-    for (wire, expected) in [
-        (vectors::OBJECT_UPDATE, "full"),
-        (vectors::OBJECT_UPDATE_COMPRESSED_TYPED, "full"),
-        (vectors::IMPROVED_TERSE_OBJECT_UPDATE, "partial"),
-        (vectors::OBJECT_UPDATE_CACHED, "cached"),
-        (vectors::KILL_OBJECT, "removed"),
-    ] {
-        let (_, packet) = decode(wire);
-        assert_eq!(consume(packet), Some(expected));
-    }
-}

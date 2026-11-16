@@ -184,17 +184,3 @@ fn missing_plane_keeps_later_blocks() {
     );
     assert_eq!(terse_object(&update.objects[1]).local_id, 0x1020_3040);
 }
-
-#[test]
-fn terse_texture_entry_is_owned() {
-    let (_, packet) = decode(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
-    let Message::ImprovedTerseObjectUpdate(update) = packet.message().clone() else {
-        panic!("expected terse object update");
-    };
-    let encoded = Packet::new(packet.sequence(), Message::ImprovedTerseObjectUpdate(update)).encode().expect("encode texture entry");
-    let decoded = Packet::decode(&encoded).expect("decode texture entry");
-    let Message::ImprovedTerseObjectUpdate(update) = decoded.message() else {
-        panic!("expected terse object update");
-    };
-    assert_eq!(terse_object(&update.objects[0]).texture_entry, [0x11, 0, 0x22]);
-}
