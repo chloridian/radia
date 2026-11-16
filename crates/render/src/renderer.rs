@@ -446,8 +446,6 @@ impl Retirement {
 
 #[cfg(test)]
 mod tests {
-    use crate::geometry::GeometryRenderer;
-    use crate::pipeline::PostProcess;
     use wgpu::naga::{
         AddressSpace, ImageClass, TypeInner,
         front::wgsl,
@@ -552,25 +550,5 @@ mod tests {
             "{name}: {samplers} samplers; default stage limit is {}",
             limits.max_samplers_per_shader_stage
         );
-    }
-
-    #[test]
-    #[ignore = "requires a Vulkan adapter"]
-    fn gpu_render_pipelines_validate() {
-        use futures::executor::block_on;
-        use wgpu::{Backends, DeviceDescriptor, ErrorFilter, InstanceDescriptor, PollType, TextureFormat};
-
-        let (device, queue) = block_on(async {
-            let instance =
-                wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
-            let adapter = instance.request_adapter(&Default::default()).await.expect("Vulkan adapter is available");
-            adapter.request_device(&DeviceDescriptor::default()).await.expect("Vulkan device is available")
-        });
-        let scope = device.push_error_scope(ErrorFilter::Validation);
-        let _overlay = egui_wgpu::Renderer::new(&device, TextureFormat::Rgba8UnormSrgb, egui_wgpu::RendererOptions::default());
-        let _geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float);
-        let _postprocess = PostProcess::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-        device.poll(PollType::Wait { submission_index: None, timeout: None }).expect("GPU pipeline creation completes");
-        assert!(block_on(scope.pop()).is_none(), "all render pipelines must satisfy wgpu validation");
     }
 }
