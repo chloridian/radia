@@ -1,9 +1,12 @@
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use math::{DVec3, Quat, Vec3};
 use world::Region;
 
-use super::{CacheRebuild, CacheUpdate, FrameCache, ItemId};
+use super::{CacheRebuild, CacheUpdate, FrameCache, ItemId, MeshInfoBuild};
 use crate::geometry::{
     ShadingMode,
     instance::instance_base,
@@ -102,6 +105,28 @@ fn camera_recovery_progresses() {
     assert_eq!(erased_cursors, 0, "camera updates must not erase the in-progress pass cursor");
     assert_eq!(visited.len(), cache.objects.len(), "the pass revisits every cached object");
     assert!(pass_cameras.iter().all(|pass| *pass == camera(1)), "the whole pass evaluates its snapshot camera");
+}
+
+#[test]
+fn mesh_info_resumes_within_byte_limit() {
+    let (_scene, view, _) = crate::geometry::fixtures::scene(255);
+    let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
+    let indices = mesh.mesh().indices().len();
+    let bytes_per_index = size_of::<u32>() + size_of::<Vec3>();
+    let limit = 3 * bytes_per_index;
+    let mut build = MeshInfoBuild::new(mesh.clone());
+    let mut total = 0;
+    let mut steps = 0;
+    while !build.is_complete() {
+        let (bytes, _) = build.advance(limit, usize::MAX, Duration::MAX);
+        assert!(bytes <= limit, "one step stays within its byte limit: {bytes}");
+        total += bytes;
+        steps += 1;
+        assert!(steps <= indices + mesh.mesh().faces().len(), "every step makes progress");
+    }
+    assert!(steps > mesh.mesh().faces().len(), "faces larger than the limit resume across steps");
+    assert_eq!(total, indices * bytes_per_index, "each index is processed exactly once");
+    assert_eq!(build.centers, mesh_info(&mesh).centers, "a resumed build matches the one-shot build");
 }
 
 fn ordered_ids(cache: &mut FrameCache) -> Vec<ItemId> {
