@@ -148,6 +148,7 @@ pub struct Session {
     pending_event: Option<EventEnvelope>,
     surfaced_coverage: HashMap<(SimulatorId, CoverageSource), u64>,
     surfaced_overflow_generation: u64,
+    last_event_watermark: Option<CoverageWatermark>,
 }
 
 impl Session {
@@ -167,6 +168,7 @@ impl Session {
     }
 
     pub async fn recv_event(&mut self) -> Option<Event> {
+        self.last_event_watermark = None;
         loop {
             if let Some(envelope) = self.pending_event.take() {
                 let watermark = envelope.coverage_watermark();
@@ -177,11 +179,11 @@ impl Session {
                 if self.has_unacknowledged_coverage_loss(watermark) {
                     self.pending_event = Some(envelope);
                     if self.coverage_changed.changed().await.is_err() {
-                        return self.pending_event.take().map(EventEnvelope::into_event);
+                        return self.pending_event.take().map(|envelope| self.deliver(envelope));
                     }
                     continue;
                 }
-                return Some(envelope.into_event());
+                return Some(self.deliver(envelope));
             }
 
             match self.events.try_recv() {
@@ -226,6 +228,12 @@ impl Session {
 
     pub fn coverage_losses(&self) -> CoverageSnapshot {
         self.coverage_losses.snapshot()
+    }
+
+    pub fn report_current_event_loss(&mut self, reason: crate::CoverageLossReason) -> Option<CoverageWatermark> {
+        let watermark = self.last_event_watermark.take()?;
+        crate::coverage::record_coverage_loss(&self.coverage_losses, watermark.simulator_id, watermark.source, reason);
+        Some(watermark)
     }
 
     pub fn acknowledge_coverage_loss(&mut self, watermark: CoverageWatermark) {
@@ -280,6 +288,13 @@ impl Session {
             }));
         }
         None
+    }
+
+    fn deliver(&mut self, envelope: EventEnvelope) -> Event {
+        let (event, retained, watermark) = envelope.into_parts();
+        self.last_event_watermark = watermark;
+        drop(retained);
+        event
     }
 
     fn has_unacknowledged_coverage_loss(&self, watermark: Option<CoverageWatermark>) -> bool {

@@ -31,6 +31,7 @@ pub enum CoverageLossReason {
     AcknowledgementAdmission,
     EventAdmission,
     EventQueueAdmission,
+    InventoryAdmission,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

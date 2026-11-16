@@ -1,5 +1,8 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use utils::FolderId;
 
@@ -9,7 +12,7 @@ use crate::state::{
 };
 use crate::{
     Category, CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryError, InventoryLimits, InventoryNodeId, InventoryNodeKey,
-    InventoryOwner, Item, ItemKey, ServerVersion,
+    InventoryOwner, InventoryRevision, InventorySnapshot, Item, ItemKey, ServerVersion,
 };
 
 pub const MAX_FOLDER_FETCH_CHILDREN: usize = 100_000;
@@ -23,6 +26,74 @@ pub enum InventoryChild {
 pub(crate) enum CachedFolderApply {
     Skipped,
     Applied { conflict: bool },
+}
+
+pub struct PreparedFolderFetch {
+    folder: CategoryKey,
+    base_revision: InventoryRevision,
+    folder_generation: InventoryRevision,
+    state: Arc<InventoryState>,
+    changes: ChangeSet,
+}
+
+impl std::fmt::Debug for PreparedFolderFetch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedFolderFetch")
+            .field("folder", &self.folder)
+            .field("base_revision", &self.base_revision)
+            .field("folder_generation", &self.folder_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct InventoryPreparationCancellation(Arc<AtomicBool>);
+
+impl InventoryPreparationCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn check(&self) -> Result<(), InventoryError> {
+        if self.0.load(Ordering::Acquire) { Err(InventoryError::Cancelled) } else { Ok(()) }
+    }
+}
+
+#[derive(Debug)]
+pub enum FolderFetchCommit {
+    Applied(ChangeSet),
+    StaleBase(PreparedFolderFetch),
+}
+
+impl InventorySnapshot {
+    pub fn prepare_folder_fetch(
+        &self,
+        folder: CategoryKey,
+        version: ServerVersion,
+        descendent_count: Option<u32>,
+        children: Vec<InventoryChild>,
+    ) -> Result<PreparedFolderFetch, InventoryError> {
+        self.prepare_folder_fetch_cancellable(folder, version, descendent_count, children, &InventoryPreparationCancellation::default())
+    }
+
+    pub fn prepare_folder_fetch_cancellable(
+        &self,
+        folder: CategoryKey,
+        version: ServerVersion,
+        descendent_count: Option<u32>,
+        children: Vec<InventoryChild>,
+        cancellation: &InventoryPreparationCancellation,
+    ) -> Result<PreparedFolderFetch, InventoryError> {
+        let folder_generation = self.state.folder_generations.get(&folder).copied().ok_or(InventoryError::MissingCategory)?;
+        let mut candidate = Inventory { state: Arc::clone(&self.state), limits: self.limits };
+        let changes = candidate.apply_folder_fetch_state(folder, version, descendent_count, children, cancellation)?;
+        Ok(PreparedFolderFetch { folder, base_revision: self.state.revision, folder_generation, state: candidate.state, changes })
+    }
 }
 
 impl InventoryChild {
@@ -42,6 +113,16 @@ impl InventoryChild {
 }
 
 impl Inventory {
+    pub fn commit_folder_fetch(&mut self, prepared: PreparedFolderFetch) -> Result<FolderFetchCommit, InventoryError> {
+        if self.state.revision != prepared.base_revision
+            || self.state.folder_generations.get(&prepared.folder).copied() != Some(prepared.folder_generation)
+        {
+            return Ok(FolderFetchCommit::StaleBase(prepared));
+        }
+        self.state = prepared.state;
+        Ok(FolderFetchCommit::Applied(prepared.changes))
+    }
+
     pub(crate) fn apply_cached_folder(
         &mut self,
         metadata: &Category,
@@ -52,7 +133,7 @@ impl Inventory {
     ) -> Result<CachedFolderApply, InventoryError> {
         let folder = metadata.key;
         let Some(current_folder) = self.state.categories.get(&folder) else { return Ok(CachedFolderApply::Skipped) };
-        if category_is_complete(current_folder, self.state.children.get(&folder).map_or(0, |children| children.len()))
+        if category_is_complete(&self.state, folder)
             || (current_folder.server_version.is_known() && current_folder.server_version != metadata.server_version)
         {
             return Ok(CachedFolderApply::Skipped);
@@ -187,13 +268,15 @@ impl Inventory {
         self.publish(next, changes)
     }
 
-    pub fn apply_folder_fetch(
+    fn apply_folder_fetch_state(
         &mut self,
         folder: CategoryKey,
         version: ServerVersion,
         descendent_count: Option<u32>,
         children: Vec<InventoryChild>,
+        cancellation: &InventoryPreparationCancellation,
     ) -> Result<ChangeSet, InventoryError> {
+        cancellation.check()?;
         if children.len() > self.limits.max_folder_fetch_children {
             return Err(InventoryError::TooManyFolderChildren);
         }
@@ -207,7 +290,10 @@ impl Inventory {
         let mut incoming = HashSet::with_capacity(children.len());
         let mut new_categories = 0usize;
         let mut new_items = 0usize;
-        for child in &children {
+        for (index, child) in children.iter().enumerate() {
+            if index.is_multiple_of(128) {
+                cancellation.check()?;
+            }
             if child.node_key().owner() != folder.owner() || child.parent() != folder {
                 return Err(InventoryError::InvalidParent);
             }
@@ -236,17 +322,20 @@ impl Inventory {
 
         let old_children = self.state.children.get(&folder).cloned().ok_or(InventoryError::InconsistentIndex)?;
         let mut removal = SubtreeRemoval::default();
-        for stale in old_children.iter().copied() {
+        for (index, stale) in old_children.iter().copied().enumerate() {
+            if index.is_multiple_of(128) {
+                cancellation.check()?;
+            }
             let key = InventoryNodeKey::new(folder.owner(), stale);
             if incoming.contains(&key) {
                 continue;
             }
             match stale {
                 InventoryNodeId::Category(id) => {
-                    removal.collect_category(&self.state, CategoryKey::new(folder.owner(), id), &incoming)?;
+                    removal.collect_category(&self.state, CategoryKey::new(folder.owner(), id), &incoming, Some(cancellation))?;
                 }
                 InventoryNodeId::Item(id) => {
-                    removal.collect_item(&self.state, ItemKey::new(folder.owner(), id), folder, &incoming)?;
+                    removal.collect_item(&self.state, ItemKey::new(folder.owner(), id), folder, &incoming, Some(cancellation))?;
                 }
             }
         }
@@ -256,7 +345,10 @@ impl Inventory {
         let mut changes = Vec::new();
         let preserved = std::mem::take(&mut removal.preserved);
         if !preserved.is_empty() {
-            for child in &children {
+            for (index, child) in children.iter().enumerate() {
+                if index.is_multiple_of(128) {
+                    cancellation.check()?;
+                }
                 if !preserved.contains(&child.node_key()) {
                     continue;
                 }
@@ -266,8 +358,11 @@ impl Inventory {
                 }
             }
         }
-        removal.apply(&mut next, &mut changes)?;
-        for child in children {
+        removal.apply(&mut next, &mut changes, Some(cancellation))?;
+        for (index, child) in children.into_iter().enumerate() {
+            if index.is_multiple_of(128) {
+                cancellation.check()?;
+            }
             if preserved.contains(&child.node_key()) {
                 continue;
             }
@@ -287,8 +382,13 @@ impl Inventory {
             let updated_folder = next.categories.get(&folder).cloned().ok_or(InventoryError::InconsistentIndex)?;
             changes.push(InventoryChange::CategoryUpserted(updated_folder));
         }
+        let was_incomplete = !category_is_complete(&next, folder);
+        let refresh_generation = next.owner_refresh_generations.get(&folder.owner()).copied().unwrap_or_default();
+        next.folder_refresh_generations.insert(folder, refresh_generation);
+        let is_incomplete = !category_is_complete(&next, folder);
+        crate::state::update_incomplete_count(&mut next, folder.owner(), was_incomplete, is_incomplete)?;
         changes.push(InventoryChange::FolderFetchApplied { folder, child_count: incoming.len() });
-        self.publish(next, changes)
+        self.publish_cancellable(next, changes, cancellation)
     }
 
     pub fn set_version(&mut self, folder: CategoryKey, version: ServerVersion) -> Result<ChangeSet, InventoryError> {
@@ -410,8 +510,8 @@ pub(crate) fn remove_category_subtree(
     changes: &mut Vec<InventoryChange>,
 ) -> Result<(), InventoryError> {
     let mut removal = SubtreeRemoval::default();
-    removal.collect_category(state, root, &HashSet::new())?;
-    removal.apply(state, changes)
+    removal.collect_category(state, root, &HashSet::new(), None)?;
+    removal.apply(state, changes, None)
 }
 
 #[derive(Default)]
@@ -428,6 +528,7 @@ impl SubtreeRemoval {
         state: &InventoryState,
         root: CategoryKey,
         preserved: &HashSet<InventoryNodeKey>,
+        cancellation: Option<&InventoryPreparationCancellation>,
     ) -> Result<(), InventoryError> {
         if state.roots.contains(root) {
             return Err(InventoryError::FixedRoot);
@@ -435,7 +536,14 @@ impl SubtreeRemoval {
         let category = state.categories.get(&root).ok_or(InventoryError::InconsistentIndex)?;
         let parent = category.parent.ok_or(InventoryError::InvalidRoot)?;
         let mut pending = vec![(InventoryNodeId::Category(root.id()), parent)];
+        let mut visited_count = 0usize;
         while let Some((node, expected_parent)) = pending.pop() {
+            if visited_count.is_multiple_of(128)
+                && let Some(cancellation) = cancellation
+            {
+                cancellation.check()?;
+            }
+            visited_count = visited_count.saturating_add(1);
             if !self.visited.insert(node) {
                 return Err(InventoryError::Cycle);
             }
@@ -453,7 +561,14 @@ impl SubtreeRemoval {
                     }
                     self.categories.push(key);
                     let children = state.children.get(&key).ok_or(InventoryError::InconsistentIndex)?;
-                    pending.extend(children.iter().map(|child| (*child, key)));
+                    for (index, child) in children.iter().enumerate() {
+                        if index.is_multiple_of(128)
+                            && let Some(cancellation) = cancellation
+                        {
+                            cancellation.check()?;
+                        }
+                        pending.push((*child, key));
+                    }
                 }
                 InventoryNodeId::Item(id) => {
                     let key = ItemKey::new(root.owner(), id);
@@ -474,7 +589,11 @@ impl SubtreeRemoval {
         key: ItemKey,
         parent: CategoryKey,
         preserved: &HashSet<InventoryNodeKey>,
+        cancellation: Option<&InventoryPreparationCancellation>,
     ) -> Result<(), InventoryError> {
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
         let node = InventoryNodeId::Item(key.id());
         if !self.visited.insert(node) {
             return Err(InventoryError::Cycle);
@@ -492,11 +611,26 @@ impl SubtreeRemoval {
         Ok(())
     }
 
-    fn apply(self, state: &mut InventoryState, changes: &mut Vec<InventoryChange>) -> Result<(), InventoryError> {
-        for key in self.items {
+    fn apply(
+        self,
+        state: &mut InventoryState,
+        changes: &mut Vec<InventoryChange>,
+        cancellation: Option<&InventoryPreparationCancellation>,
+    ) -> Result<(), InventoryError> {
+        for (index, key) in self.items.into_iter().enumerate() {
+            if index.is_multiple_of(128)
+                && let Some(cancellation) = cancellation
+            {
+                cancellation.check()?;
+            }
             remove_item(state, key, changes)?;
         }
-        for key in self.categories.into_iter().rev() {
+        for (index, key) in self.categories.into_iter().rev().enumerate() {
+            if index.is_multiple_of(128)
+                && let Some(cancellation) = cancellation
+            {
+                cancellation.check()?;
+            }
             let category = state.categories.get(&key).cloned().ok_or(InventoryError::InconsistentIndex)?;
             if let Some(parent) = category.parent {
                 remove_child(state, parent, InventoryNodeId::Category(key.id()))?;

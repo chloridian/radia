@@ -61,8 +61,14 @@ fn inventory_working_sets() {
     let decoded = decoded.expect("large item response fits current wire limits");
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].id, folder);
-    assert_eq!(decoded[0].items.len(), requested.len());
-    assert!(decoded[0].items.iter().zip(&requested).all(|(item, id)| item.id == *id && item.parent_id == Some(folder) && item.name == "x"));
+    assert_eq!(decoded[0].direct_items.len(), requested.len());
+    assert!(
+        decoded[0]
+            .direct_items
+            .iter()
+            .zip(&requested)
+            .all(|(item, id)| item.id == *id && item.parent_id == Some(folder) && item.name == "x")
+    );
     drop(decoded);
     assert_eq!(allocation::live_bytes(), baseline, "item output releases all decoded allocations");
     println!(

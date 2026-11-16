@@ -1,8 +1,14 @@
-use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write as _,
+    sync::Arc,
+    time::Instant,
+};
 
 use ::inventory::{
-    Category, CategoryKey, FolderType, Inventory, InventoryDelta, InventoryLimits, InventoryOwner, MAX_FOLDER_FETCH_CHILDREN,
-    MAX_INVENTORY_ITEMS, ServerVersion,
+    AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryDelta, InventoryLimits, InventoryOwner,
+    InventoryType, Item, ItemKey, LinkResolution, MAX_FOLDER_FETCH_CHILDREN, MAX_INVENTORY_ITEMS, PermissionMask, Permissions, SaleInfo,
+    SaleType, ServerVersion,
 };
 use futures::{
     FutureExt,
@@ -15,21 +21,21 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
-use utils::FolderId;
+use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
 use super::{
-    BACKGROUND_CONCURRENCY, ForegroundRequest, InventoryFetchHandle, InventoryFetchOutcome, InventoryLoadingStatus, MAX_AIS_DEPTH,
-    REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, run_scheduler,
+    BACKGROUND_CONCURRENCY, ForegroundRequest, InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequests, InventoryLoadingStatus,
+    MAX_AIS_DEPTH, REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, run_scheduler,
 };
 use crate::inventory::fetch::{
-    FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais,
+    FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais, legacy,
 };
 use crate::inventory::test_support::{LoopbackPeer, TEST_TIMEOUT};
 use crate::session::{FolderFetchApply, apply_inventory_fetch};
 
 type SchedulerTask = (
-    mpsc::Sender<ForegroundRequest>,
+    InventoryFetchRequests,
     mpsc::Receiver<InventoryFetchEvent>,
     watch::Sender<Option<::inventory::InventorySnapshot>>,
     JoinHandle<()>,
@@ -49,6 +55,32 @@ fn category(key: CategoryKey, parent: Option<CategoryKey>) -> Category {
         name: Arc::from(format!("folder-{}", key.id().uuid().as_u128())),
         server_version: ServerVersion::UNKNOWN,
         server_descendent_count: None,
+    }
+}
+
+fn item(key: ItemKey, parent: CategoryKey, name: &str, description: &str, flags: u32) -> Item {
+    Item {
+        key,
+        parent,
+        asset_id: AssetId::new(Uuid::nil()),
+        asset_type: AssetType::Notecard,
+        inventory_type: InventoryType::Notecard,
+        flags,
+        name: Arc::from(name),
+        description: Arc::from(description),
+        created_at: 0,
+        permissions: Permissions {
+            creator: AvatarId::new(Uuid::nil()),
+            owner: AvatarId::new(Uuid::nil()),
+            group: GroupId::new(Uuid::nil()),
+            last_owner: AvatarId::new(Uuid::nil()),
+            base: PermissionMask::new(0),
+            owner_mask: PermissionMask::new(0),
+            group_mask: PermissionMask::new(0),
+            everyone: PermissionMask::new(0),
+            next_owner: PermissionMask::new(0),
+        },
+        sale: SaleInfo { sale_type: SaleType::NotForSale, price: 0 },
     }
 }
 
@@ -114,6 +146,42 @@ fn ais_root_response(root: CategoryKey, categories: Map) -> Vec<u8> {
         ])),
     );
     xml::to_vec(&response).expect("encode root response")
+}
+
+fn ais_folder_response(folder: CategoryKey, categories: Map, items: Map) -> Vec<u8> {
+    let mut response = ais_category(folder.id().uuid(), folder.owner().id(), None, format!("folder-{}", folder.id().uuid().as_u128()), 1);
+    let Value::Map(fields) = &mut response else { unreachable!() };
+    fields.insert(
+        "_embedded".into(),
+        Value::Map(Map::from([
+            ("categories".into(), Value::Map(categories)),
+            ("items".into(), Value::Map(items)),
+            ("links".into(), Value::Map(Map::new())),
+        ])),
+    );
+    xml::to_vec(&response).expect("encode AIS folder response")
+}
+
+fn ais_child_category(folder: CategoryKey, parent: CategoryKey, descendent_count: usize) -> Value {
+    let mut value = ais_category(
+        folder.id().uuid(),
+        folder.owner().id(),
+        Some(parent.id().uuid()),
+        format!("folder-{}", folder.id().uuid().as_u128()),
+        1,
+    );
+    let Value::Map(fields) = &mut value else { unreachable!() };
+    fields.insert("descendents".into(), Value::Integer(descendent_count as i32));
+    value
+}
+
+fn ais_item_details(folder: CategoryKey, item_id: Uuid, name: &str, description: &str, flags: u32) -> Value {
+    let mut value = ais_item(folder, item_id);
+    let Value::Map(fields) = &mut value else { unreachable!() };
+    fields.insert("name".into(), Value::String(name.into()));
+    fields.insert("desc".into(), Value::String(description.into()));
+    fields.insert("flags".into(), Value::Integer(flags as i32));
+    value
 }
 
 fn root_response(root: CategoryKey, children: &[CategoryKey]) -> Vec<u8> {
@@ -204,6 +272,18 @@ fn llsd_folder_with_children(folder: CategoryKey, children: &[CategoryKey]) -> V
     ]))
 }
 
+fn llsd_item(id: Uuid, parent: Uuid, owner: Uuid, asset_id: Uuid, asset_type: i32, inventory_type: i32) -> Value {
+    Value::Map(Map::from([
+        ("item_id".into(), Value::Uuid(id)),
+        ("owner_id".into(), Value::Uuid(owner)),
+        ("parent_id".into(), Value::Uuid(parent)),
+        ("asset_id".into(), Value::Uuid(asset_id)),
+        ("type".into(), Value::Integer(asset_type)),
+        ("inv_type".into(), Value::Integer(inventory_type)),
+        ("name".into(), Value::String(format!("item-{}", id.as_u128()))),
+    ]))
+}
+
 fn llsd_category(folder: CategoryKey, parent: CategoryKey) -> Value {
     Value::Map(Map::from([
         ("folder_id".into(), Value::Uuid(folder.id().uuid())),
@@ -217,9 +297,11 @@ fn llsd_category(folder: CategoryKey, parent: CategoryKey) -> Value {
 }
 
 fn scheduler(client: Client, snapshot: ::inventory::InventorySnapshot) -> SchedulerTask {
-    let (requests_tx, requests_rx) = mpsc::channel(REQUEST_CAPACITY);
+    let (request_sender, requests_rx) = mpsc::channel(REQUEST_CAPACITY);
     let (events_tx, events_rx) = mpsc::channel(RESULT_CAPACITY);
     let (model_tx, model_rx) = watch::channel(Some(snapshot.clone()));
+    let (refresh_incomplete, refresh_receiver) = watch::channel(0);
+    let requests = InventoryFetchRequests { sender: request_sender, refresh_incomplete };
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let cancellation: Shared<BoxFuture<'static, ()>> = async move {
         drop(cancel_rx.await);
@@ -227,8 +309,8 @@ fn scheduler(client: Client, snapshot: ::inventory::InventorySnapshot) -> Schedu
     .boxed()
     .shared();
     let (stop_tx, stop_rx) = oneshot::channel();
-    let task = tokio::spawn(run_scheduler(client, snapshot, model_rx, requests_rx, events_tx, cancellation, stop_rx));
-    (requests_tx, events_rx, model_tx, task, cancel_tx, stop_tx)
+    let task = tokio::spawn(run_scheduler(client, snapshot, model_rx, requests_rx, events_tx, refresh_receiver, cancellation, stop_rx));
+    (requests, events_rx, model_tx, task, cancel_tx, stop_tx)
 }
 
 async fn next_event(events: &mut mpsc::Receiver<InventoryFetchEvent>) -> InventoryFetchEvent {
@@ -454,6 +536,69 @@ async fn fallback_uses_personal_and_library_descendents_capabilities() {
     drop(requests);
     stop.send(()).expect("stop fallback scheduler");
     task.await.expect("scheduler stopped");
+}
+
+#[tokio::test]
+async fn legacy_mapping_omits_auxiliary_targets() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let capability = CapabilityUrl::parse(peer.url("/legacy").as_str()).expect("valid legacy capability URL");
+    let owner = InventoryOwner::new(Uuid::from_u128(1));
+    let source = key(owner, 10);
+    let target_parent = key(owner, 11);
+    let link_id = Uuid::from_u128(12);
+    let target_id = Uuid::from_u128(13);
+    let response = Value::Map(Map::from([(
+        "folders".into(),
+        Value::Array(vec![Value::Map(Map::from([
+            ("folder_id".into(), Value::Uuid(source.id().uuid())),
+            ("owner_id".into(), Value::Uuid(owner.id())),
+            ("version".into(), Value::Integer(4)),
+            ("descendents".into(), Value::Integer(2)),
+            ("categories".into(), Value::Array(Vec::new())),
+            (
+                "items".into(),
+                Value::Array(vec![
+                    llsd_item(link_id, source.id().uuid(), owner.id(), target_id, 24, 24),
+                    llsd_item(target_id, target_parent.id().uuid(), owner.id(), Uuid::from_u128(14), 7, 7),
+                ]),
+            ),
+        ]))]),
+    )]));
+    let responder = tokio::spawn(async move {
+        let request = peer.next().await;
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/legacy");
+        request.respond(200, xml::to_vec(&response).expect("encode legacy link response")).await;
+    });
+
+    let mut fetched = legacy::fetch_batch(&client, &capability, &[source]).await.expect("decode legacy link response");
+    responder.await.expect("legacy response sent");
+
+    assert_eq!(fetched.len(), 1);
+    let fetch = fetched.pop().expect("one requested folder");
+    assert_eq!(fetch.folder, source);
+    assert_eq!(fetch.children.len(), 1);
+    assert_eq!(fetch.descendent_count, None);
+    let InventoryChild::Item(link) = &fetch.children[0] else { panic!("expected the direct link item") };
+    assert_eq!(link.key.id().uuid(), link_id);
+    assert_eq!(link.parent, source);
+    assert_eq!(link.asset_id.uuid(), target_id);
+
+    let root = key(owner, 9);
+    let mut inventory = Inventory::new(category(root, None), None, InventoryLimits::default()).expect("valid inventory root");
+    inventory.upsert_category(category(source, Some(root))).expect("add source folder");
+    inventory.upsert_category(category(target_parent, Some(root))).expect("add target parent");
+    let FolderFetchApply::Applied(_) = apply_inventory_fetch(&mut inventory, fetch).expect("apply direct folder children") else {
+        panic!("current source fetch should apply");
+    };
+    let snapshot = inventory.snapshot();
+    let link_key = ItemKey::new(owner, utils::ItemId::new(link_id));
+    let target_key = ItemKey::new(owner, utils::ItemId::new(target_id));
+    assert_eq!(snapshot.item(link_key).map(|item| item.parent), Some(source));
+    assert_eq!(snapshot.link_resolution(link_key), Some(LinkResolution::NotLoaded(target_id)));
+    assert!(snapshot.item(target_key).is_none());
+    assert!(snapshot.category(target_parent).is_some());
 }
 
 #[tokio::test]
@@ -719,7 +864,7 @@ async fn stale_live_response_requeues_incomplete_folder() {
 
     request.respond(200, folder_response(root, 1, 44_000, -1)).await;
     let (fetch, applied) = take_folder_event(next_event(&mut events).await, root);
-    assert_eq!(fetch.provenance, FolderFetchProvenance::StartedAt(Some(start_generation)));
+    assert_eq!(fetch.provenance, FolderFetchProvenance::StartedAt { folder: Some(start_generation), owner: 0 });
     let FolderFetchApply::Stale = apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("discard stale response") else {
         panic!("live update should make the response stale");
     };
@@ -777,7 +922,7 @@ async fn unrelated_folder_change_keeps_fetch_fresh() {
 
     request.respond(200, folder_response(root, 1, 53_000, 8)).await;
     let (fetch, applied) = take_folder_event(next_event(&mut events).await, root);
-    assert_eq!(fetch.provenance, FolderFetchProvenance::StartedAt(Some(target_generation)));
+    assert_eq!(fetch.provenance, FolderFetchProvenance::StartedAt { folder: Some(target_generation), owner: 0 });
     let FolderFetchApply::Applied(_) =
         apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply unchanged folder response")
     else {
@@ -836,7 +981,7 @@ async fn recursive_child_refetches_after_parent_update() {
     assert!(!inventory.snapshot().is_complete(child));
 
     let (child_fetch, child_applied) = take_folder_event(next_event(&mut events).await, child);
-    assert_eq!(child_fetch.provenance, FolderFetchProvenance::StartedAt(Some(child_generation)));
+    assert_eq!(child_fetch.provenance, FolderFetchProvenance::StartedAt { folder: Some(child_generation), owner: 0 });
     let FolderFetchApply::Stale =
         apply_and_acknowledge(&mut inventory, &model, child_fetch, child_applied).expect("discard child response")
     else {
@@ -882,7 +1027,7 @@ async fn rejected_folder_can_be_requested_again() {
     std::assert_matches!(error, InventoryFetchError::InvalidResponse);
     assert!(!inventory.snapshot().is_complete(root));
 
-    requests.send(ForegroundRequest::background(root)).await.expect("queue retry after rejected folder response");
+    requests.sender.send(ForegroundRequest::background(root)).await.expect("queue retry after rejected folder response");
     let retry = peer.next().await;
     assert_eq!(retry.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));
     retry.respond(200, empty_folder_response(root, 2)).await;
@@ -1022,7 +1167,7 @@ async fn foreground_request_preempts_in_flight_background_folders() {
     let second_path = format!("/ais/category/{}/children?depth=0", second.id().uuid());
     assert_eq!(background_paths, HashSet::from([first_path.as_str(), second_path.as_str()]));
 
-    requests.send(ForegroundRequest::background(first)).await.expect("enqueue foreground folder");
+    requests.sender.send(ForegroundRequest::background(first)).await.expect("enqueue foreground folder");
     tokio::join!(background_one.wait_for_close(), background_two.wait_for_close());
     let foreground = peer.next().await;
     assert_eq!(foreground.path, first_path);
@@ -1129,4 +1274,206 @@ async fn one_hundred_thousand_items_load_with_bounded_responses_and_concurrency(
         peak_in_flight,
         largest_response
     );
+}
+
+#[tokio::test]
+async fn owner_refresh_reconciles_deep_personal_and_library_folders() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let personal = InventoryOwner::new(Uuid::from_u128(701));
+    let library = InventoryOwner::new(Uuid::from_u128(702));
+    let personal_root = key(personal, 1_000);
+    let library_root = key(library, 2_000);
+    let mut personal_root_category = category(personal_root, None);
+    personal_root_category.server_version = ServerVersion::from_raw(1);
+    personal_root_category.server_descendent_count = Some(1);
+    let mut library_root_category = category(library_root, None);
+    library_root_category.server_version = ServerVersion::from_raw(1);
+    library_root_category.server_descendent_count = Some(1);
+    let mut inventory = Inventory::new(personal_root_category, Some(library_root_category), InventoryLimits::default())
+        .expect("valid personal and Library roots");
+    let mut children_by_folder = HashMap::<CategoryKey, Vec<CategoryKey>>::new();
+    let depth = usize::from(MAX_AIS_DEPTH) + 1;
+    let mut add_owner_tree = |owner: InventoryOwner, root: CategoryKey, first_id: u128, leaf_ids: (u128, u128)| {
+        let mut path = vec![root];
+        let mut parent = root;
+        for level in 1..=depth {
+            let folder = key(owner, first_id + level as u128);
+            let child_count = if level == depth { 2 } else { 1 };
+            let mut value = category(folder, Some(parent));
+            value.server_version = ServerVersion::from_raw(1);
+            value.server_descendent_count = Some(child_count);
+            inventory.upsert_category(value).expect("add nested folder");
+            children_by_folder.entry(parent).or_default().push(folder);
+            path.push(folder);
+            parent = folder;
+        }
+        let source = key(owner, leaf_ids.0);
+        let target = key(owner, leaf_ids.1);
+        for (folder, child_count) in [(source, if owner == personal { 4 } else { 0 }), (target, 0)] {
+            let mut value = category(folder, Some(parent));
+            value.server_version = ServerVersion::from_raw(1);
+            value.server_descendent_count = Some(child_count);
+            inventory.upsert_category(value).expect("add deep leaf folder");
+            children_by_folder.entry(parent).or_default().push(folder);
+        }
+        (path, source, target)
+    };
+    let (personal_path, personal_source, personal_target) = add_owner_tree(personal, personal_root, 1_000, (1_100, 1_101));
+    let (library_path, library_source, library_target) = add_owner_tree(library, library_root, 2_000, (2_100, 2_101));
+    drop(add_owner_tree);
+
+    let rename_id = Uuid::from_u128(90_001);
+    let update_id = Uuid::from_u128(90_002);
+    let delete_id = Uuid::from_u128(90_003);
+    let move_id = Uuid::from_u128(90_004);
+    let rename_key = ItemKey::new(personal, ItemId::new(rename_id));
+    let update_key = ItemKey::new(personal, ItemId::new(update_id));
+    let delete_key = ItemKey::new(personal, ItemId::new(delete_id));
+    let move_key = ItemKey::new(personal, ItemId::new(move_id));
+    inventory.upsert_item(item(rename_key, personal_source, "old name", "fixture", 0)).expect("insert item before lost rename");
+    inventory.upsert_item(item(update_key, personal_source, "same name", "old description", 0)).expect("insert item before lost update");
+    inventory.upsert_item(item(delete_key, personal_source, "delete me", "fixture", 0)).expect("insert item before lost delete");
+    inventory.upsert_item(item(move_key, personal_source, "move me", "fixture", 0)).expect("insert item before lost move");
+    let initial = inventory.snapshot();
+    assert!(initial.owner_is_complete(personal));
+    assert!(initial.owner_is_complete(library));
+    let expected_root_children = initial.children(personal_root).collect::<HashSet<_>>();
+    let expected_root_count = initial.child_count(personal_root);
+    let mut expected = inventory.clone();
+    let renamed = item(rename_key, personal_source, "new name", "fixture", 0);
+    let updated = item(update_key, personal_source, "same name", "new description", 8);
+    let moved = item(move_key, personal_target, "move me", "fixture", 0);
+    let FolderFetchApply::Applied(_) = apply_inventory_fetch(
+        &mut expected,
+        FolderFetch {
+            folder: personal_source,
+            version: ServerVersion::from_raw(1),
+            descendent_count: Some(2),
+            children: vec![InventoryChild::Item(renamed.clone()), InventoryChild::Item(updated.clone())],
+            provenance: FolderFetchProvenance::Untracked,
+        },
+    )
+    .expect("sequential oracle applies source response") else {
+        panic!("source response applies against the sequential oracle");
+    };
+    let FolderFetchApply::Applied(_) = apply_inventory_fetch(
+        &mut expected,
+        FolderFetch {
+            folder: personal_target,
+            version: ServerVersion::from_raw(1),
+            descendent_count: Some(1),
+            children: vec![InventoryChild::Item(moved.clone())],
+            provenance: FolderFetchProvenance::Untracked,
+        },
+    )
+    .expect("sequential oracle applies target response") else {
+        panic!("target response applies against the sequential oracle");
+    };
+
+    let all_folders = personal_path
+        .iter()
+        .copied()
+        .chain([personal_source, personal_target])
+        .chain(library_path.iter().copied())
+        .chain([library_source, library_target])
+        .collect::<HashSet<_>>();
+    let mut direct_counts = HashMap::new();
+    for folder in &all_folders {
+        let item_count = if *folder == personal_source {
+            2
+        } else if *folder == personal_target {
+            1
+        } else {
+            0
+        };
+        direct_counts.insert(*folder, children_by_folder.get(folder).map_or(0, Vec::len) + item_count);
+    }
+    let mut responses = HashMap::new();
+    for folder in &all_folders {
+        let categories = children_by_folder
+            .get(folder)
+            .into_iter()
+            .flatten()
+            .map(|child| {
+                (child.id().uuid().to_string(), ais_child_category(*child, *folder, direct_counts.get(child).copied().unwrap_or_default()))
+            })
+            .collect::<Map>();
+        let items = if *folder == personal_source {
+            Map::from([
+                (rename_id.to_string(), ais_item_details(*folder, rename_id, "new name", "fixture", 0)),
+                (update_id.to_string(), ais_item_details(*folder, update_id, "same name", "new description", 8)),
+            ])
+        } else if *folder == personal_target {
+            Map::from([(move_id.to_string(), ais_item_details(*folder, move_id, "move me", "fixture", 0))])
+        } else {
+            Map::new()
+        };
+        responses.insert(*folder, ais_folder_response(*folder, categories, items));
+    }
+
+    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, initial);
+    peer.grant(&[("InventoryAPIv3", "/ais"), ("LibraryAPIv3", "/ais")]).await;
+    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+    inventory.invalidate_all_owners().expect("invalidate personal and Library contents");
+    model.send_replace(Some(inventory.snapshot()));
+    let handle = InventoryFetchHandle {
+        requests: requests.clone(),
+        status: watch::channel(InventoryLoadingStatus::default()).1,
+        edits: crate::inventory::InventoryEditController::new().handle(),
+    };
+    handle.refetch_incomplete().expect("request bounded owner refresh");
+
+    let mut requested = HashSet::new();
+    let mut applied_folders = HashSet::new();
+    loop {
+        tokio::select! {
+            request = peer.next() => {
+                let folder = all_folders.iter().copied().find(|folder| {
+                    request.path == format!("/ais/category/{}/children?depth=0", folder.id().uuid())
+                }).expect("owner refresh requests each folder directly at depth zero");
+                requested.insert(folder);
+                request.respond(200, responses.get(&folder).expect("response exists for each folder").clone()).await;
+            }
+            event = events.recv() => {
+                match event.expect("owner refresh keeps its scheduler event channel open") {
+                    InventoryFetchEvent::Folder { fetch, applied } => {
+                        let folder = fetch.folder;
+                        let outcome = apply_and_acknowledge(&mut inventory, &model, fetch, applied);
+                        match outcome.expect("refreshed response agrees with the sequential oracle") {
+                            FolderFetchApply::Applied(_) => { applied_folders.insert(folder); }
+                            FolderFetchApply::Stale => {}
+                        }
+                    }
+                    InventoryFetchEvent::Failed { folder, error } => panic!("refresh of {folder:?} failed: {error}"),
+                    InventoryFetchEvent::BackgroundDone => break,
+                }
+            }
+        }
+    }
+
+    assert_eq!(requested, all_folders);
+    assert_eq!(applied_folders, all_folders);
+    let actual = inventory.snapshot();
+    let expected = expected.snapshot();
+    for folder in &all_folders {
+        assert_eq!(actual.category(*folder), expected.category(*folder));
+        assert_eq!(actual.children(*folder).collect::<HashSet<_>>(), expected.children(*folder).collect::<HashSet<_>>());
+        assert_eq!(actual.child_count(*folder), expected.child_count(*folder));
+        assert!(actual.is_complete(*folder));
+    }
+    assert_eq!(actual.item(rename_key), expected.item(rename_key));
+    assert_eq!(actual.item(update_key), expected.item(update_key));
+    assert!(actual.item(delete_key).is_none());
+    assert_eq!(actual.item(move_key).map(|item| item.parent), Some(personal_target));
+    assert_eq!(actual.item(move_key), expected.item(move_key));
+    assert_eq!(actual.children(personal_root).collect::<HashSet<_>>(), expected_root_children);
+    assert_eq!(actual.child_count(personal_root), expected_root_count);
+    assert!(actual.owner_is_complete(personal));
+    assert!(actual.owner_is_complete(library));
+
+    drop(handle);
+    drop(requests);
+    stop.send(()).expect("stop owner refresh scheduler");
+    task.await.expect("scheduler stopped");
 }

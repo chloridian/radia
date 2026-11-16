@@ -157,6 +157,7 @@ impl EventEnvelope {
         (event, retained_bytes, coverage_watermark)
     }
 
+    #[cfg(test)]
     pub(crate) fn into_event(self) -> Event {
         let (event, retained_bytes, _) = self.into_parts();
         drop(retained_bytes);

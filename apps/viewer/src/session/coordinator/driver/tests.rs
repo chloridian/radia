@@ -1,24 +1,150 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use ::inventory::{
-    AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryLimits, InventoryNodeId, InventoryNodeKey,
-    InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
+    AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryDelta, InventoryLimits, InventoryNodeId,
+    InventoryNodeKey, InventoryOwner, InventoryPreparationCancellation, InventoryType, Item, ItemKey, PermissionMask, Permissions,
+    SaleInfo, SaleType, ServerVersion,
 };
 use tokio::sync::oneshot;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
 use crate::inventory::{FolderFetch, FolderFetchProvenance, favorites::FavoritesError};
+use crate::session::coordinator::inventory_cache::{
+    CACHE_WRITER_QUEUE_CAPACITY, InventoryCacheEvent, InventoryCacheSession, MAX_PENDING_BYTES, MAX_PENDING_ROWS, MAX_PENDING_WRITES,
+    RECLAIMER_QUEUE_CAPACITY,
+};
 
 use super::inventory::{
-    FolderFetchApply, apply_inventory_fetch, cache_restore_move_changes, cancel_favorites_refresh, publish_favorites_refresh,
-    resolve_pending_inventory_moves, stop_favorites_refresh,
+    FolderFetchApply, PreparedInventoryFetch, apply_inventory_fetch, cache_restore_move_changes, cancel_favorites_refresh,
+    prepare_inventory_fetch, publish_favorites_refresh, resolve_pending_inventory_moves, stop_favorites_refresh,
 };
-use super::{MoveExpectation, PendingHandshakeReplies, network_end_after_stream_close};
+use super::{
+    MoveExpectation, PendingFolderPreparation, PendingHandshakeReplies, cancel_pending_folder_preparation, network_end_after_stream_close,
+};
 use crate::session::{
     SessionEnd,
     coordinator::{FavoritesUpdate, PresentationMailbox},
 };
+
+#[global_allocator]
+static ALLOCATOR: test_support::allocation::CountingAllocator = test_support::allocation::CountingAllocator;
+
+const OWNER_PATH_ENTRY_COUNT: usize = 100_000;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "manual faithful inventory owner-path measurement"]
+async fn owner_path_reclaim_measurement() {
+    for replace in [false, true] {
+        let owner = InventoryOwner::new(Uuid::from_u128(if replace { 72 } else { 71 }));
+        let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(73)));
+        let fixture_baseline = test_support::allocation::live_bytes();
+        let fixture_started = Instant::now();
+        let mut inventory = Inventory::new(category(root, None, ServerVersion::UNKNOWN, None), None, InventoryLimits::default())
+            .expect("valid inventory root");
+        let initial_children = (0..OWNER_PATH_ENTRY_COUNT)
+            .map(|index| {
+                let item_key = ItemKey::new(owner, ItemId::new(Uuid::from_u128(1_000_000 + index as u128)));
+                InventoryChild::Item(item(item_key, root))
+            })
+            .collect();
+        let initial = FolderFetch {
+            folder: root,
+            version: ServerVersion::from_raw(1),
+            descendent_count: Some(OWNER_PATH_ENTRY_COUNT as u32),
+            children: initial_children,
+            provenance: FolderFetchProvenance::Untracked,
+        };
+        std::assert_matches!(apply_inventory_fetch(&mut inventory, initial), Ok(FolderFetchApply::Applied(_)));
+        let fixture_elapsed = fixture_started.elapsed();
+        let fixture_retained_bytes = test_support::allocation::live_bytes().saturating_sub(fixture_baseline);
+
+        let (inventory_changes, _inventory_change_receiver) = tokio::sync::watch::channel(None);
+        let mut cache = InventoryCacheSession::new(&tokio::runtime::Handle::current());
+        cache.handle_event(
+            &tokio::runtime::Handle::current(),
+            InventoryCacheEvent::OpenFailed("owner-path measurement cache unavailable".into()),
+            &mut inventory,
+        );
+        let before = inventory.snapshot();
+        let worker_snapshot = before.clone();
+        let cancellation = InventoryPreparationCancellation::default();
+        let (prepared, worker_allocations, worker_elapsed) = tokio::task::spawn_blocking(move || {
+            let worker_started = Instant::now();
+            let (prepared, allocations) = test_support::allocation::measure(|| {
+                let children = if replace {
+                    (0..OWNER_PATH_ENTRY_COUNT)
+                        .map(|index| {
+                            let item_key = ItemKey::new(owner, ItemId::new(Uuid::from_u128(2_000_000 + index as u128)));
+                            InventoryChild::Item(item(item_key, root))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let fetch = FolderFetch {
+                    folder: root,
+                    version: ServerVersion::from_raw(2),
+                    descendent_count: Some(if replace { OWNER_PATH_ENTRY_COUNT as u32 } else { 0 }),
+                    children,
+                    provenance: FolderFetchProvenance::Untracked,
+                };
+                prepare_inventory_fetch(&worker_snapshot, fetch, &cancellation)
+            });
+            (prepared.expect("worker preparation succeeds"), allocations, worker_started.elapsed())
+        })
+        .await
+        .expect("preparation worker completes");
+        let PreparedInventoryFetch::Prepared(prepared) = prepared else {
+            panic!("folder response is current");
+        };
+        let disposal = cache.try_reserve_disposal().expect("owner mutation reserves bounded reclamation");
+        let (applied, applied_result) = oneshot::channel();
+        let owner_started = Instant::now();
+        let (_, owner_allocations) = test_support::allocation::measure(|| {
+            let changes = match inventory.commit_folder_fetch(prepared).expect("prepared folder commits") {
+                ::inventory::FolderFetchCommit::Applied(changes) => changes,
+                ::inventory::FolderFetchCommit::StaleBase(_) => panic!("single owner kept the base revision current"),
+            };
+            let after = inventory.snapshot();
+            super::inventory::publish_inventory_change(&inventory_changes, &mut cache, changes, before, after, disposal);
+            if applied.send(crate::inventory::FolderApplyOutcome::Applied).is_err() {
+                tracing::trace!("inventory fetch worker stopped before apply acknowledgement");
+            }
+        });
+        let owner_elapsed = owner_started.elapsed();
+        std::assert_matches!(applied_result.await, Ok(crate::inventory::FolderApplyOutcome::Applied));
+        let cleanup_started = Instant::now();
+        let final_snapshot = inventory_changes.send_replace(None);
+        cache.close_with_payload((inventory, final_snapshot)).await;
+        let cleanup_elapsed = cleanup_started.elapsed();
+        let label = if replace { "replace" } else { "delete" };
+        eprintln!(
+            "inventory_owner_path case={label} entries={OWNER_PATH_ENTRY_COUNT} cache=disabled fixture_build_ms={} fixture_retained_bytes={} worker_input_plus_prepare_ms={} worker_input_plus_prepare_live_delta_bytes={} worker_input_plus_prepare_peak_delta_bytes={} worker_alloc_calls={} worker_realloc_calls={} owner_commit_publish_handoff_ack_ms={} owner_thread_live_delta_bytes={} owner_thread_peak_delta_bytes={} owner_alloc_calls={} owner_realloc_calls={} cleanup_completion_ms={} cleanup_complete=true reclaimer_queued_capacity={} reclaimer_active_limit=1 deferred_inventory_event_limit={} deferred_inventory_byte_limit={} deferred_network_event_limit_bytes={} cache_writer_queue_capacity={} cache_pending_write_limit={} cache_pending_row_limit={} cache_pending_byte_limit={} memory_scope=per_thread_allocator_deltas_fixture_and_worker_peak_are_separate_and_exclude_whole_process_concurrency",
+            fixture_elapsed.as_secs_f64() * 1_000.0,
+            fixture_retained_bytes,
+            worker_elapsed.as_secs_f64() * 1_000.0,
+            worker_allocations.live_bytes,
+            worker_allocations.peak_bytes,
+            worker_allocations.allocation_calls,
+            worker_allocations.reallocation_calls,
+            owner_elapsed.as_secs_f64() * 1_000.0,
+            owner_allocations.live_bytes,
+            owner_allocations.peak_bytes,
+            owner_allocations.allocation_calls,
+            owner_allocations.reallocation_calls,
+            cleanup_elapsed.as_secs_f64() * 1_000.0,
+            RECLAIMER_QUEUE_CAPACITY,
+            super::MAX_DEFERRED_INVENTORY_EVENTS,
+            super::MAX_DEFERRED_INVENTORY_BYTES,
+            super::MAX_DEFERRED_NETWORK_EVENT_BYTES,
+            CACHE_WRITER_QUEUE_CAPACITY,
+            MAX_PENDING_WRITES,
+            MAX_PENDING_ROWS,
+            MAX_PENDING_BYTES,
+        );
+    }
+}
 
 #[test]
 fn pending_handshake_replies_share_one_drain_and_keep_each_reply() {
@@ -75,6 +201,32 @@ fn category(key: CategoryKey, parent: Option<CategoryKey>, version: ServerVersio
     }
 }
 
+fn item(key: ItemKey, parent: CategoryKey) -> Item {
+    Item {
+        key,
+        parent,
+        asset_id: AssetId::new(Uuid::nil()),
+        asset_type: AssetType::Notecard,
+        inventory_type: InventoryType::Notecard,
+        flags: 0,
+        name: Arc::from("item"),
+        description: Arc::from("fixture"),
+        created_at: 0,
+        permissions: Permissions {
+            creator: AvatarId::new(Uuid::nil()),
+            owner: AvatarId::new(Uuid::nil()),
+            group: GroupId::new(Uuid::nil()),
+            last_owner: AvatarId::new(Uuid::nil()),
+            base: PermissionMask::new(0),
+            owner_mask: PermissionMask::new(0),
+            group_mask: PermissionMask::new(0),
+            everyone: PermissionMask::new(0),
+            next_owner: PermissionMask::new(0),
+        },
+        sale: SaleInfo { sale_type: SaleType::NotForSale, price: 0 },
+    }
+}
+
 #[test]
 fn stale_fetch_does_not_replace_a_complete_newer_folder() {
     let owner = InventoryOwner::new(Uuid::from_u128(1));
@@ -125,6 +277,160 @@ fn stale_fetch_does_not_replace_a_complete_newer_folder() {
     assert_eq!(snapshot.revision(), revision);
     assert_eq!(snapshot.items().count(), 0);
     assert_eq!(snapshot.category(folder).map(|category| category.server_version), Some(ServerVersion::from_raw(10)));
+}
+
+#[test]
+fn prepared_fetch_commits_before_a_deferred_live_delta() {
+    let owner = InventoryOwner::new(Uuid::from_u128(11));
+    let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(12)));
+    let old_item = ItemKey::new(owner, ItemId::new(Uuid::from_u128(13)));
+    let new_item = ItemKey::new(owner, ItemId::new(Uuid::from_u128(14)));
+    let mut root_category = category(root, None, ServerVersion::from_raw(7), Some(1));
+    root_category.name = Arc::from("root");
+    let mut inventory = Inventory::new(root_category, None, InventoryLimits::default()).expect("valid root");
+    inventory.upsert_item(item(old_item, root)).expect("old child applies");
+    let snapshot = inventory.snapshot();
+    let generation = snapshot.folder_generation(root);
+    let owner_generation = snapshot.owner_refresh_generation(owner);
+    let fetch = FolderFetch {
+        folder: root,
+        version: ServerVersion::from_raw(8),
+        descendent_count: Some(0),
+        children: Vec::new(),
+        provenance: FolderFetchProvenance::StartedAt { folder: generation, owner: owner_generation },
+    };
+    let cancellation = InventoryPreparationCancellation::default();
+    let worker_cancellation = cancellation;
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+    let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).expect("test is waiting for worker");
+        continue_rx.recv().expect("test releases worker");
+        prepare_inventory_fetch(&snapshot, fetch, &worker_cancellation)
+    });
+    started_rx.recv().expect("worker reached controlled delay");
+    let deferred_delta = InventoryDelta {
+        created_items: vec![item(new_item, root)],
+        updated_category_versions: vec![(root, ServerVersion::from_raw(9))],
+        ..InventoryDelta::default()
+    };
+    continue_tx.send(()).expect("worker is waiting to prepare");
+    let prepared = worker.join().expect("worker completes").expect("fetch transaction prepares");
+    let PreparedInventoryFetch::Prepared(prepared) = prepared else {
+        panic!("fetch should be prepared against its base revision");
+    };
+    let ::inventory::FolderFetchCommit::Applied(_) = inventory.commit_folder_fetch(prepared).expect("owner commits prepared fetch") else {
+        panic!("base revision is still current");
+    };
+    let changes = inventory.apply_delta(deferred_delta).expect("deferred live delta applies after the fetch");
+
+    let current = inventory.snapshot();
+    assert!(current.item(old_item).is_none());
+    assert!(current.item(new_item).is_some());
+    assert_eq!(current.category(root).map(|folder| folder.server_version), Some(ServerVersion::from_raw(9)));
+    assert!(current.is_complete(root));
+    assert!(changes.refetch_categories.is_empty());
+}
+
+#[test]
+fn same_folder_change_makes_inflight_preparation_stale_and_next_fetch_commits() {
+    let owner = InventoryOwner::new(Uuid::from_u128(41));
+    let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(42)));
+    let old_item = ItemKey::new(owner, ItemId::new(Uuid::from_u128(43)));
+    let fetched_item = ItemKey::new(owner, ItemId::new(Uuid::from_u128(44)));
+    let live_item = ItemKey::new(owner, ItemId::new(Uuid::from_u128(45)));
+    let mut root_category = category(root, None, ServerVersion::from_raw(7), Some(1));
+    root_category.name = Arc::from("root");
+    let mut inventory = Inventory::new(root_category, None, InventoryLimits::default()).expect("valid root");
+    inventory.upsert_item(item(old_item, root)).expect("old child applies");
+    let snapshot = inventory.snapshot();
+    let generation = snapshot.folder_generation(root);
+    let owner_generation = snapshot.owner_refresh_generation(owner);
+    let fetch = FolderFetch {
+        folder: root,
+        version: ServerVersion::from_raw(8),
+        descendent_count: Some(1),
+        children: vec![InventoryChild::Item(item(fetched_item, root))],
+        provenance: FolderFetchProvenance::StartedAt { folder: generation, owner: owner_generation },
+    };
+    let worker_cancellation = InventoryPreparationCancellation::default();
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+    let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+    let worker = std::thread::spawn(move || {
+        let prepared = prepare_inventory_fetch(&snapshot, fetch, &worker_cancellation);
+        started_tx.send(()).expect("test is waiting for prepared candidate");
+        continue_rx.recv().expect("test releases preparation");
+        prepared
+    });
+    started_rx.recv().expect("worker finished preparation and holds the candidate");
+
+    inventory
+        .apply_delta(InventoryDelta {
+            created_items: vec![item(live_item, root)],
+            updated_category_versions: vec![(root, ServerVersion::from_raw(9))],
+            ..InventoryDelta::default()
+        })
+        .expect("live update changes the same folder during preparation");
+    continue_tx.send(()).expect("worker is waiting to prepare");
+
+    let prepared = worker.join().expect("worker completes").expect("fetch transaction prepares");
+    let PreparedInventoryFetch::Prepared(prepared) = prepared else { panic!("response should prepare against its captured snapshot") };
+    let ::inventory::FolderFetchCommit::StaleBase(prepared) = inventory.commit_folder_fetch(prepared).expect("stale base is an outcome")
+    else {
+        panic!("the owner must not publish a result prepared against the changed folder");
+    };
+    drop(prepared);
+
+    let current = inventory.snapshot();
+    assert!(current.item(old_item).is_some());
+    assert!(current.item(live_item).is_some());
+    assert!(current.item(fetched_item).is_none());
+    assert_eq!(current.category(root).map(|folder| folder.server_version), Some(ServerVersion::from_raw(9)));
+
+    let replacement = current
+        .prepare_folder_fetch(root, ServerVersion::from_raw(10), Some(1), vec![InventoryChild::Item(item(live_item, root))])
+        .expect("next operation prepares from the current revision");
+    let ::inventory::FolderFetchCommit::Applied(_) = inventory.commit_folder_fetch(replacement).expect("next operation commits") else {
+        panic!("fresh transaction must commit against the current folder");
+    };
+    let current = inventory.snapshot();
+    assert!(current.item(old_item).is_none());
+    assert!(current.item(live_item).is_some());
+    assert!(current.item(fetched_item).is_none());
+    assert_eq!(current.category(root).map(|folder| folder.server_version), Some(ServerVersion::from_raw(10)));
+    assert!(current.is_complete(root));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shutdown_cancels_and_joins_active_inventory_preparation() {
+    let owner = InventoryOwner::new(Uuid::from_u128(51));
+    let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(52)));
+    let inventory =
+        Inventory::new(category(root, None, ServerVersion::UNKNOWN, None), None, InventoryLimits::default()).expect("valid inventory root");
+    let cache = InventoryCacheSession::new(&tokio::runtime::Handle::current());
+    let disposal = cache.try_reserve_disposal().expect("reserve bounded shutdown reclamation");
+    let before = inventory.snapshot();
+    let cancellation = InventoryPreparationCancellation::default();
+    let (started, started_rx) = oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::sync_channel(0);
+    let task = tokio::task::spawn_blocking(move || {
+        started.send(()).expect("test waits for preparation worker");
+        release_rx.recv().expect("test releases active preparation");
+        Ok(PreparedInventoryFetch::Stale)
+    });
+    let (applied, applied_rx) = oneshot::channel();
+    let preparation = PendingFolderPreparation { folder: root, before, applied, cancellation: cancellation.clone(), disposal, task };
+    started_rx.await.expect("worker started");
+
+    let shutdown = cancel_pending_folder_preparation(preparation);
+    assert!(cancellation.is_cancelled());
+    release.send(()).expect("active preparation is waiting for shutdown release");
+    shutdown.await;
+    std::assert_matches!(
+        applied_rx.await.expect("shutdown acknowledges the pending fetch"),
+        crate::inventory::FolderApplyOutcome::Rejected
+    );
+    cache.close().await;
 }
 
 #[test]
