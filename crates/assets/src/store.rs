@@ -16,7 +16,7 @@ use utils::AssetId;
 use crate::{
     Blob, Budget, Content, TextureEvents, TextureHandle, TextureSize, WeakTexture,
     budget::{Reservation, TEXTURE_WORK_BYTES, WORK_BYTES},
-    cache::{AssetCache, AssetLookup, CacheUnit, CacheWrite, cache_unit, read_work_bytes_for_request},
+    cache::{AssetCache, AssetLookup, CacheWrite, read_work_bytes_for_request},
     content::{Finished, Prepared, StoredContent},
     mesh::{MeshLod, MeshLodRequest},
 };
@@ -118,10 +118,6 @@ impl Request {
         }
     }
 
-    fn unit(self) -> CacheUnit {
-        cache_unit(self)
-    }
-
     fn size(self) -> Option<TextureSize> {
         match self {
             Self::Texture { size, .. } => Some(size),
@@ -140,7 +136,7 @@ impl Request {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct LoadKey {
     resource: Resource,
-    unit: CacheUnit,
+    lod: Option<MeshLod>,
 }
 
 #[derive(Debug)]
@@ -365,6 +361,7 @@ impl RouteState {
 
 struct WorkLife {
     maintenance: Arc<AtomicBool>,
+    transport_pending: AtomicBool,
 }
 
 impl Drop for WorkLife {
@@ -409,6 +406,10 @@ impl AssetEntry {
     fn texture(&self) -> Option<TextureHandle> {
         self.texture.as_ref().and_then(WeakTexture::upgrade)
     }
+    fn publish_content(&self, content: Content) {
+        let status = if content_satisfies(&content, self.requested_size()) { Status::Ready(content) } else { Status::Refining(content) };
+        self.broadcast_status(status);
+    }
     fn effective_priority(&self) -> Priority {
         self.views
             .values()
@@ -424,6 +425,9 @@ impl AssetEntry {
 
     fn has_active_demand(&self) -> bool {
         self.views.values().any(|view| view.count() > 0)
+    }
+    fn has_live_demand(&self, now: Instant) -> bool {
+        self.views.values().any(|view| view.count() > 0 && now < view.deadline)
     }
     fn broadcast_status(&self, status: Status) {
         let ready = self.ready();
@@ -528,6 +532,8 @@ impl FetchJob {
 
     pub fn complete_response(self, response: Result<FetchResponse, Failure>) -> Result<DecodeInput, FetchFailure> {
         let Self { mut job } = self;
+        job._life.transport_pending.store(false, Ordering::Release);
+        job._life.maintenance.store(true, Ordering::Release);
         let response = match response {
             Ok(response) if !job.is_cancelled() => response,
             Ok(_) => return Err(FetchFailure::new(job, Failure::Cancelled)),
@@ -804,8 +810,9 @@ impl Store {
             if let Some(view) = entry.views.remove(&route) {
                 view.publish_status(Status::Failed { failure: Failure::RouteClosed, retry_at: None });
             }
-            if let LoadPhase::Running { route: running, cancelled, .. } = &entry.phase
-                && *running == route
+            if let LoadPhase::Running { route: running, life, cancelled, .. } = &entry.phase
+                && (!entry.has_active_demand()
+                    || *running == route && life.upgrade().is_some_and(|life| life.transport_pending.load(Ordering::Acquire)))
             {
                 cancelled.send_replace(true);
             }
@@ -825,7 +832,15 @@ impl Store {
         now: Instant,
     ) -> Result<Demand, AdmissionError> {
         let resource = request.resource();
-        let key = LoadKey { resource, unit: request.unit() };
+        let lod = match request {
+            Request::MeshLod(block) => Some(block.lod()),
+            Request::Texture { .. }
+            | Request::PbrMaterial(_)
+            | Request::LegacyMaterial(_)
+            | Request::Environment(_)
+            | Request::MeshHeader(_) => None,
+        };
+        let key = LoadKey { resource, lod };
         if self.closed {
             return Err(AdmissionError::Closed);
         }
@@ -960,7 +975,8 @@ impl Store {
                 entry.broadcast_status(Status::Ready((*content).clone()));
             }
             if let LoadPhase::Running { life, cancelled, route, stage, .. } = &entry.phase {
-                if !entry.has_active_demand() || entry.views.get(route).is_none_or(|view| now >= view.deadline) {
+                let transport_pending = life.upgrade().is_some_and(|life| life.transport_pending.load(Ordering::Acquire));
+                if !entry.has_live_demand(now) || transport_pending && entry.views.get(route).is_none_or(|view| now >= view.deadline) {
                     cancelled.send_replace(true);
                 }
                 if life.upgrade().is_none() {
@@ -1073,7 +1089,7 @@ impl Store {
         let key = candidate.key;
         let route = candidate.route;
         let resource = key.resource;
-        let life = Arc::new(WorkLife { maintenance: Arc::clone(&self.maintenance_dirty) });
+        let life = Arc::new(WorkLife { maintenance: Arc::clone(&self.maintenance_dirty), transport_pending: AtomicBool::new(false) });
         let (cancelled, receiver) = watch::channel(false);
         let entry = self.entries.get_mut(&key).expect("selected demanded entry");
         if entry.cache_retry_at.is_some_and(|retry_at| retry_at <= now) {
@@ -1134,13 +1150,14 @@ impl Store {
         entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::Fetching };
         start_fetch(resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
         entry.broadcast_status(Status::Fetching);
+        job._life.transport_pending.store(true, Ordering::Release);
         Some(LoadJob::Fetch(FetchJob { job }))
     }
 
     fn mesh_lod_prefix(&self, request: Request) -> Option<(MeshLodRequest, Vec<u8>)> {
         let Request::MeshLod(block) = request else { return None };
         let resource = Resource { id: block.asset_id(), kind: Kind::Mesh };
-        let key = LoadKey { resource, unit: CacheUnit::Header };
+        let key = LoadKey { resource, lod: None };
         let Content::MeshHeader(header) = self.entries.get(&key)?.ready()? else { return None };
         let source = header.lod_bytes(block)?;
         let mut bytes = Vec::new();
@@ -1203,11 +1220,7 @@ impl Store {
         if job.resource.kind != Kind::Mesh {
             finish_cache_read(&mut self.running_non_mesh_cache_reads);
         }
-        if !self.routes.contains(&job.route)
-            || job.is_cancelled()
-            || !entry.has_active_demand()
-            || entry.views.get(&job.route).is_none_or(|view| now >= view.deadline)
-        {
+        if job.is_cancelled() || !entry.has_live_demand(now) {
             entry.phase = LoadPhase::Queued;
             return None;
         }
@@ -1234,6 +1247,11 @@ impl Store {
                 None
             }
             _ => {
+                if entry.views.get(&job.route).is_none_or(|view| view.count() == 0 || now >= view.deadline) {
+                    entry.phase = LoadPhase::Queued;
+                    entry.broadcast_status(Status::Queued);
+                    return None;
+                }
                 let fetch = Self::cache_read_fallback(entry, job, now)?;
                 start_fetch(fetch.resource().kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
                 Some(LoadJob::Fetch(fetch))
@@ -1259,6 +1277,7 @@ impl Store {
         if let LoadPhase::Running { stage, .. } = &mut entry.phase {
             *stage = Stage::Fetching;
         }
+        job._life.transport_pending.store(true, Ordering::Release);
         Some(FetchJob { job })
     }
 
@@ -1297,11 +1316,7 @@ impl Store {
         }
         entry.phase = LoadPhase::Queued;
         self.maintenance_dirty.store(true, Ordering::Release);
-        if !self.routes.contains(&job.route)
-            || job.is_cancelled()
-            || !entry.has_active_demand()
-            || entry.views.get(&job.route).is_none_or(|view| now >= view.deadline)
-        {
+        if job.is_cancelled() || !entry.has_live_demand(now) {
             return writes;
         }
         if origin == DecodeOrigin::Disk && result.as_ref().is_err_and(|failure| *failure == Failure::MemoryPressure) {
@@ -1343,7 +1358,7 @@ impl Store {
                     && entry.requested_size().is_some_and(|size| size != job.size)
                     && let Some(ready) = entry.ready()
                 {
-                    entry.broadcast_status(Status::Ready(ready));
+                    entry.publish_content(ready);
                     return writes;
                 }
                 let content = match content {
@@ -1358,7 +1373,7 @@ impl Store {
                 if satisfied {
                     entry.phase = LoadPhase::Idle;
                 }
-                entry.broadcast_status(Status::Ready(content.clone()));
+                entry.publish_content(content.clone());
                 entry.ready = Some(content.downgrade());
             }
             Err(failure) => {
@@ -1366,7 +1381,7 @@ impl Store {
                     return writes;
                 }
                 let ready = entry.ready();
-                let view = entry.views.get_mut(&job.route).expect("active job route");
+                let Some(view) = entry.views.get_mut(&job.route) else { return writes };
                 let retry_at = match failure {
                     Failure::Transient { retry_after } if view.attempts < MAX_ATTEMPTS => {
                         let delay = retry_after.max(Duration::from_secs(u64::from(view.attempts.max(1))));

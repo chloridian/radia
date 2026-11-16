@@ -1,6 +1,6 @@
 use std::{
     hint::black_box,
-    sync::{Arc, Barrier},
+    sync::{Arc, Barrier, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -73,26 +73,42 @@ pub(crate) fn bench(c: &mut Criterion) {
     group.throughput(Throughput::Elements(BURST_WRITES as u64));
     group.bench_function(BenchmarkId::new("put_burst_16", EXISTING_ENTRIES), |b| {
         let keys: [Key; BURST_WRITES] = std::array::from_fn(|index| key(EXISTING_ENTRIES + index as u64));
-        b.iter_batched(
-            || {
-                for item_key in keys {
-                    cache_ref.remove(item_key).expect("reset burst insertion");
-                }
-            },
-            |_| {
-                let barrier = Arc::new(Barrier::new(BURST_WRITES));
-                thread::scope(|scope| {
-                    for item_key in keys {
-                        let barrier = Arc::clone(&barrier);
-                        scope.spawn(move || {
-                            barrier.wait();
+        let start = Barrier::new(BURST_WRITES + 1);
+        thread::scope(|scope| {
+            let producers: Vec<_> = keys
+                .into_iter()
+                .map(|item_key| {
+                    let (sender, receiver) = mpsc::sync_channel(0);
+                    let (completed, completion) = mpsc::channel();
+                    let start = &start;
+                    scope.spawn(move || {
+                        while receiver.recv().is_ok() {
+                            start.wait();
                             put_until_accepted(cache_ref, item_key);
-                        });
+                            completed.send(()).expect("report burst completion");
+                        }
+                    });
+                    (sender, completion)
+                })
+                .collect();
+            b.iter_batched(
+                || {
+                    for item_key in keys {
+                        cache_ref.remove(item_key).expect("reset burst insertion");
                     }
-                });
-            },
-            BatchSize::PerIteration,
-        );
+                },
+                |_| {
+                    for (producer, _) in &producers {
+                        producer.send(()).expect("start burst insertion");
+                    }
+                    start.wait();
+                    for (_, completion) in &producers {
+                        completion.recv().expect("burst insertion completed");
+                    }
+                },
+                BatchSize::PerIteration,
+            );
+        });
         for item_key in keys {
             assert!(cache_ref.remove(item_key).expect("remove burst entry"));
         }

@@ -16,7 +16,6 @@ const MAX_AIS_DEPTH: usize = 50;
 const MAX_CATEGORIES: usize = 131_074;
 const MAX_ITEMS: usize = 1_000_000;
 const MAX_FOLDER_CHILDREN: usize = 100_000;
-const MAX_FOLDERS_PER_BATCH: usize = 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecodeError {
@@ -215,13 +214,13 @@ pub fn decode_created_category_response(bytes: &[u8]) -> Result<CreatedCategoryR
 }
 
 pub fn decode_fetch_inventory_descendents2(bytes: &[u8], requested: &[RequestedFolder]) -> Result<Vec<FolderDescendents>, DecodeError> {
-    if requested.is_empty() || requested.len() > MAX_FOLDERS_PER_BATCH {
+    if requested.is_empty() {
         return Err(DecodeError::InvalidResponse);
     }
     let response = decode_llsd(bytes)?;
     let fields = map(&response)?;
     let folders = array(fields.get("folders"))?;
-    if folders.len() != requested.len() || folders.len() > MAX_FOLDERS_PER_BATCH {
+    if folders.len() != requested.len() {
         return Err(DecodeError::InvalidResponse);
     }
     let mut by_id = std::collections::HashMap::with_capacity(folders.len());
@@ -243,9 +242,6 @@ pub fn decode_fetch_inventory_descendents2(bytes: &[u8], requested: &[RequestedF
 }
 
 pub fn decode_fetch_inventory2(bytes: &[u8], expected_owner: Uuid, requested_items: &[Uuid]) -> Result<Vec<Item>, DecodeError> {
-    if requested_items.len() > MAX_FOLDERS_PER_BATCH {
-        return Err(DecodeError::InvalidResponse);
-    }
     let response = decode_llsd(bytes)?;
     let fields = map(&response)?;
     let items = array(fields.get("items"))?;
@@ -1345,5 +1341,51 @@ mod tests {
         let item_id = Uuid::from_u128(3);
         let response = Value::Map(Map::from([("items".into(), Value::Array(vec![legacy_item(item_id, parent, owner)]))]));
         assert_eq!(decode_fetch_inventory2(&encode(&response), owner, &[Uuid::from_u128(4)]), Err(DecodeError::InvalidResponse));
+    }
+
+    #[test]
+    fn item_batches_follow_requested_ids() {
+        let owner = Uuid::from_u128(1);
+        let parent = Uuid::from_u128(2);
+        let requested = (100..111).map(Uuid::from_u128).collect::<Vec<_>>();
+        let mut items = requested.iter().map(|id| legacy_item(*id, parent, owner)).collect::<Vec<_>>();
+        let response = map_value([("items".into(), Value::Array(items.clone()))]);
+        let decoded = decode_fetch_inventory2(&encode(&response), owner, &requested).expect("item batches are not folder-scheduler policy");
+        assert_eq!(decoded.iter().map(|item| item.id).collect::<Vec<_>>(), requested);
+        assert!(decoded.iter().all(|item| item.parent_id == Some(parent) && item.owner_id == Some(owner)));
+        items[10] = items[0].clone();
+        let response = map_value([("items".into(), Value::Array(items))]);
+        assert_eq!(decode_fetch_inventory2(&encode(&response), owner, &requested), Err(DecodeError::InvalidResponse));
+    }
+
+    #[test]
+    fn folder_batches_follow_requested_ids() {
+        let owner = Uuid::from_u128(1);
+        let requested = (100..111).map(|id| RequestedFolder { id: Uuid::from_u128(id), owner_id: owner }).collect::<Vec<_>>();
+        let mut folders = requested
+            .iter()
+            .rev()
+            .map(|folder| {
+                map_value([
+                    ("folder_id".into(), Value::Uuid(folder.id)),
+                    ("owner_id".into(), Value::Uuid(owner)),
+                    ("version".into(), Value::Integer(8)),
+                    ("descendents".into(), Value::Integer(0)),
+                    ("categories".into(), Value::Array(Vec::new())),
+                    ("items".into(), Value::Array(Vec::new())),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let response = map_value([("folders".into(), Value::Array(folders.clone()))]);
+        let decoded =
+            decode_fetch_inventory_descendents2(&encode(&response), &requested).expect("folder batch sizing belongs to the caller");
+        assert_eq!(
+            decoded.iter().map(|folder| folder.id).collect::<Vec<_>>(),
+            requested.iter().map(|folder| folder.id).collect::<Vec<_>>()
+        );
+        assert!(decoded.iter().all(|folder| folder.version == 8 && folder.categories.is_empty() && folder.items.is_empty()));
+        folders[10] = folders[0].clone();
+        let response = map_value([("folders".into(), Value::Array(folders))]);
+        assert_eq!(decode_fetch_inventory_descendents2(&encode(&response), &requested), Err(DecodeError::InvalidResponse));
     }
 }

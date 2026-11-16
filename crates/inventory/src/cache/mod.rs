@@ -21,7 +21,9 @@ use storage::{
 use uuid::Uuid;
 
 use crate::mutation::CachedFolderApply;
-use crate::{Category, CategoryKey, ChangeSet, Inventory, InventoryChild, InventoryError, InventoryLimits, InventorySnapshot};
+use crate::{
+    Category, CategoryKey, ChangeSet, Inventory, InventoryChild, InventoryError, InventoryLimits, InventoryNodeId, InventorySnapshot,
+};
 
 pub use storage::sqlite::OpenStatus as InventoryCacheOpenStatus;
 
@@ -271,8 +273,12 @@ fn restore_children(children: &[InventoryChild], parent: CategoryKey, skeleton: 
             InventoryChild::Item(item) => restored.push(InventoryChild::Item(item.clone())),
         }
     }
-    for category in skeleton.categories().filter(|category| category.parent == Some(parent)) {
-        if categories.insert(category.key) {
+    for child in skeleton.children(parent) {
+        let InventoryNodeId::Category(id) = child.id() else { continue };
+        let key = CategoryKey::new(parent.owner(), id);
+        if categories.insert(key)
+            && let Some(category) = skeleton.category(key)
+        {
             restored.push(InventoryChild::Category(category.clone()));
             changed = true;
         }
@@ -506,9 +512,6 @@ fn category_depth(key: CategoryKey, snapshot: &InventorySnapshot, depths: &mut H
                 }
                 return depths.get(&key).copied();
             }
-        }
-        if path.len() > snapshot.categories().count() {
-            return None;
         }
     }
 }
