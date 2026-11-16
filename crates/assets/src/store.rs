@@ -27,6 +27,8 @@ pub const MAX_TEXTURE_DECODES: usize = 2;
 const MAX_NON_TEXTURE_DECODES: usize = 2;
 pub const MAX_NON_MESH_FETCHES: usize = 8;
 const MAX_MESH_FETCHES: usize = 32;
+const MAX_LEGACY_MATERIAL_FETCHES: usize = 50;
+const FETCH_LIMITS: [usize; 3] = [MAX_MESH_FETCHES, MAX_LEGACY_MATERIAL_FETCHES, MAX_NON_MESH_FETCHES];
 const DEMAND_DEADLINE: Duration = Duration::from_secs(60);
 const NEGATIVE_TTL: Duration = Duration::from_secs(30);
 const CACHE_PRESSURE_RETRY: Duration = Duration::from_secs(1);
@@ -888,8 +890,7 @@ pub struct Store {
     entries: BTreeMap<LoadKey, AssetEntry>,
     candidates: Vec<ScheduleKey>,
     candidate_generation: u64,
-    mesh_candidates: BTreeSet<ScheduleKey>,
-    other_candidates: BTreeSet<ScheduleKey>,
+    candidate_queues: [BTreeSet<ScheduleKey>; 3],
     deadlines: BTreeSet<DeadlineKey>,
     dirty_signals: Arc<DirtySignals>,
     dirty_receiver: Receiver<DirtyNotification>,
@@ -901,8 +902,7 @@ pub struct Store {
     maintained_at: Option<Instant>,
     maintained_generation: u64,
     maintenance_pending: bool,
-    running_mesh_fetches: usize,
-    running_other_fetches: usize,
+    running_fetches: [usize; 3],
     running_cache_reads: usize,
     running_non_mesh_cache_reads: usize,
     pending_non_mesh_cache_decodes: usize,
@@ -940,10 +940,9 @@ impl Store {
             sequence: 0,
             routes: BTreeSet::new(),
             entries: BTreeMap::new(),
-            candidates: Vec::with_capacity(MAX_NON_MESH_FETCHES + MAX_MESH_FETCHES),
+            candidates: Vec::with_capacity(FETCH_LIMITS.iter().sum()),
             candidate_generation: 0,
-            mesh_candidates: BTreeSet::new(),
-            other_candidates: BTreeSet::new(),
+            candidate_queues: Default::default(),
             deadlines: BTreeSet::new(),
             dirty_signals,
             dirty_receiver,
@@ -955,8 +954,7 @@ impl Store {
             maintained_at: None,
             maintained_generation: 0,
             maintenance_pending: false,
-            running_mesh_fetches: 0,
-            running_other_fetches: 0,
+            running_fetches: [0; 3],
             running_cache_reads: 0,
             running_non_mesh_cache_reads: 0,
             pending_non_mesh_cache_decodes: 0,
@@ -1264,10 +1262,8 @@ impl Store {
             entries,
             deadlines,
             dirty_signals,
-            mesh_candidates,
-            other_candidates,
-            running_mesh_fetches,
-            running_other_fetches,
+            candidate_queues,
+            running_fetches,
             running_cache_reads,
             running_non_mesh_cache_reads,
             pending_non_mesh_cache_decodes,
@@ -1281,8 +1277,7 @@ impl Store {
             key,
             deadlines,
             now,
-            running_mesh_fetches,
-            running_other_fetches,
+            running_fetches,
             running_cache_reads,
             running_non_mesh_cache_reads,
             pending_non_mesh_cache_decodes,
@@ -1290,9 +1285,9 @@ impl Store {
             running_other_decodes,
         );
         if entry.dirty.is_dirty() {
-            Self::remove_candidate(mesh_candidates, other_candidates, entry);
+            Self::remove_candidate(candidate_queues, entry);
         } else {
-            Self::refresh_candidate_queues(mesh_candidates, other_candidates, key, entry, now);
+            Self::refresh_candidate_queues(candidate_queues, key, entry, now);
         }
         Self::refresh_deadline_index(deadlines, key, entry, now);
         if !entry.has_active_demand()
@@ -1304,13 +1299,7 @@ impl Store {
         }
     }
 
-    fn refresh_candidate_queues(
-        mesh_candidates: &mut BTreeSet<ScheduleKey>,
-        other_candidates: &mut BTreeSet<ScheduleKey>,
-        key: LoadKey,
-        entry: &mut AssetEntry,
-        now: Instant,
-    ) {
+    fn refresh_candidate_queues(candidate_queues: &mut [BTreeSet<ScheduleKey>; 3], key: LoadKey, entry: &mut AssetEntry, now: Instant) {
         let candidate = if matches!(entry.phase, LoadPhase::Queued) && cache_retry_ready(entry.cache_eligibility, now) {
             entry
                 .views
@@ -1335,24 +1324,16 @@ impl Store {
         if entry.candidate == candidate {
             return;
         }
-        Self::remove_candidate(mesh_candidates, other_candidates, entry);
+        Self::remove_candidate(candidate_queues, entry);
         if let Some(candidate) = candidate {
-            if key.resource.kind == Kind::Mesh {
-                mesh_candidates.insert(candidate);
-            } else {
-                other_candidates.insert(candidate);
-            }
+            candidate_queues[fetch_pool(key.resource.kind)].insert(candidate);
             entry.candidate = Some(candidate);
         }
     }
 
-    fn remove_candidate(mesh_candidates: &mut BTreeSet<ScheduleKey>, other_candidates: &mut BTreeSet<ScheduleKey>, entry: &mut AssetEntry) {
+    fn remove_candidate(candidate_queues: &mut [BTreeSet<ScheduleKey>; 3], entry: &mut AssetEntry) {
         if let Some(previous) = entry.candidate.take() {
-            if previous.key.resource.kind == Kind::Mesh {
-                mesh_candidates.remove(&previous);
-            } else {
-                other_candidates.remove(&previous);
-            }
+            candidate_queues[fetch_pool(previous.key.resource.kind)].remove(&previous);
         }
     }
 
@@ -1417,9 +1398,7 @@ impl Store {
                 {
                     continue;
                 }
-            } else if (resource.kind == Kind::Mesh && self.running_mesh_fetches >= MAX_MESH_FETCHES)
-                || (resource.kind != Kind::Mesh && self.running_other_fetches >= MAX_NON_MESH_FETCHES)
-            {
+            } else if self.running_fetches[fetch_pool(resource.kind)] >= FETCH_LIMITS[fetch_pool(resource.kind)] {
                 continue;
             }
             let prefix_lod = (!cache_read).then(|| self.mesh_lod_prefix(request)).flatten();
@@ -1479,9 +1458,9 @@ impl Store {
             }
             entry.views.get_mut(&route).expect("selected route").begin_attempt(&mut self.deadlines, key, route);
             entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::Fetching };
-            start_fetch(resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
+            start_fetch(resource.kind, &mut self.running_fetches);
             entry.broadcast_status(Status::Fetching);
-            Self::refresh_candidate_queues(&mut self.mesh_candidates, &mut self.other_candidates, key, entry, now);
+            Self::refresh_candidate_queues(&mut self.candidate_queues, key, entry, now);
             Self::refresh_deadline_index(&mut self.deadlines, key, entry, now);
             return Some(LoadJob::Decode(DecodeInput { source: DecodeSource::Cached(source), job }));
         }
@@ -1497,9 +1476,9 @@ impl Store {
             }
             entry.views.get_mut(&route).expect("selected route").begin_attempt(&mut self.deadlines, key, route);
             entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::Fetching };
-            start_fetch(resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
+            start_fetch(resource.kind, &mut self.running_fetches);
             entry.broadcast_status(Status::Fetching);
-            Self::refresh_candidate_queues(&mut self.mesh_candidates, &mut self.other_candidates, key, entry, now);
+            Self::refresh_candidate_queues(&mut self.candidate_queues, key, entry, now);
             Self::refresh_deadline_index(&mut self.deadlines, key, entry, now);
             let response = FetchResponse::Partial { bytes, range: block.range(), total_length: Some(block.asset_length()) };
             return Some(LoadJob::Decode(DecodeInput { source: DecodeSource::Response(response), job }));
@@ -1522,7 +1501,7 @@ impl Store {
                 self.running_non_mesh_cache_reads += 1;
             }
             entry.broadcast_status(Status::Fetching);
-            Self::refresh_candidate_queues(&mut self.mesh_candidates, &mut self.other_candidates, key, entry, now);
+            Self::refresh_candidate_queues(&mut self.candidate_queues, key, entry, now);
             Self::refresh_deadline_index(&mut self.deadlines, key, entry, now);
             return Some(LoadJob::ReadCache(CacheReadJob { job, cache: Arc::clone(cache) }));
         }
@@ -1537,10 +1516,10 @@ impl Store {
         }
         entry.views.get_mut(&route).expect("selected route").begin_attempt(&mut self.deadlines, key, route);
         entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::Fetching };
-        start_fetch(resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
+        start_fetch(resource.kind, &mut self.running_fetches);
         entry.broadcast_status(Status::Fetching);
         job._life.transport_pending.store(true, Ordering::Release);
-        Self::refresh_candidate_queues(&mut self.mesh_candidates, &mut self.other_candidates, key, entry, now);
+        Self::refresh_candidate_queues(&mut self.candidate_queues, key, entry, now);
         Self::refresh_deadline_index(&mut self.deadlines, key, entry, now);
         Some(LoadJob::Fetch(FetchJob { job }))
     }
@@ -1588,7 +1567,7 @@ impl Store {
             finish_cache_read(&mut self.pending_non_mesh_cache_decodes);
         } else {
             if !cached {
-                finish_fetch(input.job.resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
+                finish_fetch(input.job.resource.kind, &mut self.running_fetches);
             }
         }
         start_decode(input.job.resource.kind, &mut self.running_texture_decodes, &mut self.running_other_decodes);
@@ -1643,7 +1622,7 @@ impl Store {
                     return None;
                 }
                 let fetch = Self::cache_read_fallback(entry, job, now, &mut self.deadlines)?;
-                start_fetch(fetch.resource().kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
+                start_fetch(fetch.resource().kind, &mut self.running_fetches);
                 Some(LoadJob::Fetch(fetch))
             }
         }
@@ -1696,7 +1675,7 @@ impl Store {
                 }
             }
             Stage::Fetching => {
-                finish_fetch(job.resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
+                finish_fetch(job.resource.kind, &mut self.running_fetches);
             }
             Stage::Cached if job.resource.kind != Kind::Mesh => {
                 finish_cache_read(&mut self.pending_non_mesh_cache_decodes);
@@ -1802,8 +1781,7 @@ impl Store {
             return;
         }
         self.closed = true;
-        self.running_mesh_fetches = 0;
-        self.running_other_fetches = 0;
+        self.running_fetches = [0; 3];
         self.running_cache_reads = 0;
         self.running_non_mesh_cache_reads = 0;
         self.pending_non_mesh_cache_decodes = 0;
@@ -1819,8 +1797,7 @@ impl Store {
         self.entries.clear();
         self.candidates.clear();
         self.candidates_dirty = true;
-        self.mesh_candidates.clear();
-        self.other_candidates.clear();
+        self.candidate_queues.iter_mut().for_each(BTreeSet::clear);
         self.deadlines.clear();
         self.routes.clear();
     }
@@ -1831,25 +1808,19 @@ impl Store {
             return;
         }
         self.candidates.clear();
-        let (mesh_more, other_more) = {
-            let Store { entries, candidates, mesh_candidates, other_candidates, .. } = self;
-            (
-                collect_candidates(mesh_candidates, entries, candidates, MAX_MESH_FETCHES),
-                collect_candidates(other_candidates, entries, candidates, MAX_NON_MESH_FETCHES),
-            )
-        };
+        let mut more = false;
+        let Store { entries, candidates, candidate_queues, .. } = self;
+        for (queue, limit) in candidate_queues.iter_mut().zip(FETCH_LIMITS) {
+            more |= collect_candidates(queue, entries, candidates, limit);
+        }
         self.candidates.sort_unstable_by(|left, right| right.cmp(left));
         self.candidate_generation = generation;
-        self.candidates_dirty = mesh_more || other_more || self.dirty_signals.change_generation.load(Ordering::Acquire) != generation;
+        self.candidates_dirty = more || self.dirty_signals.change_generation.load(Ordering::Acquire) != generation;
     }
 
     fn quarantine_candidate(&mut self, candidate: ScheduleKey) {
-        let Store { entries, mesh_candidates, other_candidates, candidates_dirty, .. } = self;
-        if candidate.key.resource.kind == Kind::Mesh {
-            mesh_candidates.remove(&candidate);
-        } else {
-            other_candidates.remove(&candidate);
-        }
+        let Store { entries, candidate_queues, candidates_dirty, .. } = self;
+        candidate_queues[fetch_pool(candidate.key.resource.kind)].remove(&candidate);
         if let Some(entry) = entries.get_mut(&candidate.key)
             && entry.candidate == Some(candidate)
         {
@@ -1998,8 +1969,7 @@ fn reconcile_entry(
     key: LoadKey,
     deadlines: &mut BTreeSet<DeadlineKey>,
     now: Instant,
-    running_mesh_fetches: &mut usize,
-    running_other_fetches: &mut usize,
+    running_fetches: &mut [usize; 3],
     running_cache_reads: &mut usize,
     running_non_mesh_cache_reads: &mut usize,
     pending_non_mesh_cache_decodes: &mut usize,
@@ -2080,8 +2050,7 @@ fn reconcile_entry(
             release_stage(
                 stage,
                 entry.request.resource().kind,
-                running_mesh_fetches,
-                running_other_fetches,
+                running_fetches,
                 running_cache_reads,
                 running_non_mesh_cache_reads,
                 pending_non_mesh_cache_decodes,
@@ -2105,8 +2074,7 @@ fn reconcile_entry(
 fn release_stage(
     stage: Stage,
     kind: Kind,
-    running_mesh_fetches: &mut usize,
-    running_other_fetches: &mut usize,
+    running_fetches: &mut [usize; 3],
     running_cache_reads: &mut usize,
     running_non_mesh_cache_reads: &mut usize,
     pending_non_mesh_cache_decodes: &mut usize,
@@ -2122,7 +2090,7 @@ fn release_stage(
         }
         Stage::Cached if kind != Kind::Mesh => finish_cache_read(pending_non_mesh_cache_decodes),
         Stage::Cached => {}
-        Stage::Fetching => finish_fetch(kind, running_mesh_fetches, running_other_fetches),
+        Stage::Fetching => finish_fetch(kind, running_fetches),
         Stage::Decoding => finish_decode(kind, running_texture_decodes, running_other_decodes),
     }
 }
@@ -2136,24 +2104,24 @@ fn content_satisfies(content: &Content, desired: Option<TextureSize>) -> bool {
     }
 }
 
-fn start_fetch(kind: Kind, mesh: &mut usize, other: &mut usize) {
-    if kind == Kind::Mesh {
-        *mesh += 1;
-    } else {
-        *other += 1;
+fn fetch_pool(kind: Kind) -> usize {
+    match kind {
+        Kind::Mesh => 0,
+        Kind::LegacyMaterial => 1,
+        Kind::Texture | Kind::PbrMaterial | Kind::Environment => 2,
     }
+}
+
+fn start_fetch(kind: Kind, running: &mut [usize; 3]) {
+    running[fetch_pool(kind)] += 1;
 }
 
 fn finish_cache_read(reads: &mut usize) {
     *reads -= 1;
 }
 
-fn finish_fetch(kind: Kind, mesh: &mut usize, other: &mut usize) {
-    if kind == Kind::Mesh {
-        *mesh -= 1;
-    } else {
-        *other -= 1;
-    }
+fn finish_fetch(kind: Kind, running: &mut [usize; 3]) {
+    running[fetch_pool(kind)] -= 1;
 }
 
 fn start_decode(kind: Kind, texture: &mut usize, other: &mut usize) {
