@@ -64,6 +64,9 @@ impl World {
             return Ok(applied);
         }
         let mut fields = Fields::observed(observation);
+        if kind == Kind::Object {
+            fields.facets.pbr_material_overrides = self.retained.applicable(&address, id).cloned();
+        }
         let rejections = fields.validate(current.and_then(|state| state.transform.rotation()));
         let observed = Observed { id, kind, parent, address, origin: Origin { source, stamp }, fields, rejections };
         match existing {
@@ -108,6 +111,7 @@ impl World {
         self.tombstones.remove(&address);
         let facets = facets.map(|changes| changes.after).unwrap_or_default();
         let entity = self.store.insert(ObjectRecord { id, kind, state }, facets, ordering);
+        self.retained.remove(&address);
         self.apply_parent(entity, parent, &mut effects);
         self.resolve_waiting_children(address, entity, id, &mut effects);
         effects.changes.push(EntityAdded { id, entity, address });
@@ -225,6 +229,7 @@ impl World {
         }
         self.store.commit(entity, state, facets, ordering);
         if binding_changed {
+            self.retained.remove(&address);
             self.insert_tombstone(old_binding.address, if transfer { old_binding.fence() } else { origin.stamp });
         }
         if parent_changed {

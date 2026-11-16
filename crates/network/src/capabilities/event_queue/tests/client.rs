@@ -98,7 +98,10 @@ async fn event_queue_ack_advances_after_batch_admission() {
 
     let second_poll = harness.server.next_request();
     assert!(request_line(&seed_request).starts_with("POST /seed HTTP/1.1"));
-    assert!(request_body(&seed_request).contains("EventQueueGet"));
+    assert_eq!(
+        decode_request_body(&seed_request),
+        Value::Array(vec![Value::String("EventQueueGet".into()), Value::String("ModifyMaterialParams".into())])
+    );
     assert!(request_line(&first_poll).starts_with("POST /opaque/event/queue-token HTTP/1.1"));
     let first_poll = decode_request_body(&first_poll);
     assert_eq!(map_field(&first_poll, "ack"), Some(&Value::Undefined));

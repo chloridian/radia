@@ -49,6 +49,7 @@ const MAX_EVENT_QUEUE_ERRORS: u32 = 15;
 const SEED_LOOKUP_RETRY_LIMIT: u32 = 5;
 const MAX_SEED_RETRY_AFTER: Duration = Duration::from_secs(30);
 pub(crate) const EVENT_QUEUE_NAME: &str = "EventQueueGet";
+const MATERIAL_OVERRIDES_NAME: &str = "ModifyMaterialParams";
 const LINDEN_HTTP_INTERNAL_ERROR: u16 = 499;
 const MAX_QUEUED_CAPABILITY_EVENT_BYTES: usize = 256 * 1024;
 
@@ -402,7 +403,7 @@ fn allocate_event_queue_incarnation() -> Option<u64> {
 }
 
 async fn discover_capability(context: &EventQueueContext, stop: &Stop) -> Result<Url, EventQueueExit> {
-    let names = [EVENT_QUEUE_NAME.to_owned()];
+    let names = [EVENT_QUEUE_NAME.to_owned(), MATERIAL_OVERRIDES_NAME.to_owned()];
     let mut retries = 0;
     loop {
         let Some(request_permit) = acquire_budget_permit(Arc::clone(&context.budget.ordinary_requests), stop).await else {

@@ -42,7 +42,8 @@ pub(crate) fn extract(resource: Resource, bytes: Vec<u8>) -> Result<Vec<u8>, Fai
             }
         }
         Kind::PbrMaterial => {
-            let Value::Map(mut fields) = binary::from_slice_with_limits(&bytes, limits(bytes.len())).map_err(|_| Failure::Malformed)?
+            let (Value::Map(mut fields), _) =
+                binary::from_slice_prefix_with_limits(&bytes, limits(bytes.len())).map_err(|_| Failure::Malformed)?
             else {
                 return Err(Failure::Malformed);
             };
@@ -114,6 +115,13 @@ mod tests {
         unsupported[invalid..invalid + 3].copy_from_slice(b"9.9");
         assert_eq!(extract(resource(Kind::PbrMaterial), unsupported), Err(Failure::Unsupported));
         assert_eq!(extract(resource(Kind::PbrMaterial), bytes[..bytes.len() - 1].to_vec()), Err(Failure::Malformed));
+    }
+
+    #[test]
+    fn pbr_ignores_trailing_bytes() {
+        let mut bytes = b"<? LLSD/Binary ?>\n{\0\0\0\x03k\0\0\0\x04datas\0\0\0\x02{}k\0\0\0\x04types\0\0\0\x08GLTF 2.0k\0\0\0\x07versions\0\0\0\x031.1}".to_vec();
+        bytes.push(0);
+        assert_eq!(extract(resource(Kind::PbrMaterial), bytes), Ok(b"{}".to_vec()));
     }
 
     fn stored_zlib(bytes: &[u8]) -> Vec<u8> {

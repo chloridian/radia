@@ -73,6 +73,7 @@ impl World {
         } else if self.floors.get(&source.region).is_some_and(|floor| stamp <= *floor) {
             return Ok(self.defer(DeferredReason::AmbiguousOrder, address));
         }
+        self.retained.remove_older(address, stamp);
         if self.tombstone_would_change(address, stamp) && self.insert_tombstone(address, stamp) {
             return Ok(Applied::new(ApplyOutcome::TombstoneRecorded(address)));
         }

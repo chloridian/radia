@@ -341,7 +341,7 @@ impl WorldHandoff {
         let update = match (update, message) {
             (DecodedWorldUpdate::Object(batch), Message::ObjectUpdateCached(cached)) => {
                 let region = world.region_for(simulator_id)?;
-                let (batch, requests) = object_cache
+                let (batch, requests, overrides) = object_cache
                     .resolve_cached(
                         simulator_id,
                         region,
@@ -352,6 +352,9 @@ impl WorldHandoff {
                         batch,
                     )
                     .await;
+                if let Err(error) = world.retain_cached_overrides(overrides) {
+                    tracing::warn!(?error, "cached PBR material overrides could not be restored");
+                }
                 recovered_media_requests = requests;
                 DecodedWorldUpdate::Object(batch)
             }

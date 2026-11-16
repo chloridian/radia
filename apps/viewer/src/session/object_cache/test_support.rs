@@ -152,8 +152,9 @@ pub(super) async fn cache_totals(db: &SqliteDb) -> (i64, i64, i64, i64) {
     let receipt = db
         .read(64, |transaction| {
             transaction.query_row(
-                "SELECT (SELECT COUNT(*) FROM object_entries),
-                        (SELECT COALESCE(SUM(length(payload)), 0) FROM object_entries),
+                "SELECT (SELECT COUNT(*) FROM object_entries) + (SELECT COUNT(*) FROM pbr_overrides),
+                        (SELECT COALESCE(SUM(length(payload)), 0) FROM object_entries)
+                            + (SELECT COALESCE(SUM(length(payload)), 0) FROM pbr_overrides),
                         entry_count,
                         payload_bytes
                  FROM object_cache_totals WHERE singleton = 1",
@@ -163,6 +164,18 @@ pub(super) async fn cache_totals(db: &SqliteDb) -> (i64, i64, i64, i64) {
         })
         .expect("queue cache totals");
     receipt.wait().await.expect("read cache totals")
+}
+
+pub(super) async fn override_rows(db: &SqliteDb) -> Vec<(u32, Uuid)> {
+    let receipt = db
+        .read(64, |transaction| {
+            let mut statement = transaction.prepare("SELECT local_id, object_id FROM pbr_overrides ORDER BY local_id")?;
+            let rows = statement.query_map([], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+            rows.map(|row| row.map(|(local_id, object_id)| (local_id, Uuid::from_slice(&object_id).expect("stored object IDs are UUIDs"))))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("queue override row read");
+    receipt.wait().await.expect("read override rows")
 }
 
 pub(super) fn synthetic_region_updates() -> (protocol::messages::object::RegionData, Vec<Message>, Vec<CachedObjectReference>) {

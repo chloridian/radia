@@ -1,3 +1,4 @@
+mod overrides;
 mod resolution;
 mod storage;
 mod validation;
@@ -7,6 +8,7 @@ mod worker;
 use std::path::Path;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    num::NonZeroU32,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -14,19 +16,24 @@ use std::{
 use ::storage::sqlite::MAX_BATCH_BYTES;
 use ::storage::sqlite::{OpenStatus, SqliteDb};
 use network::{Grid, SimulatorId};
-use protocol::{lludp::Message, messages::RegionHandshake};
+use protocol::{
+    lludp::Message,
+    messages::{RegionHandshake, generic_streaming_message::MAX_DATA_BYTES},
+};
 use tokio::{
     runtime::Handle,
     sync::{OwnedSemaphorePermit, Semaphore, mpsc},
     time::timeout,
 };
 use uuid::Uuid;
+use world::{PbrMaterialOverrides, UpdateSource, WorldChangeCursor};
 
 #[cfg(test)]
 use self::storage::open_for_test as open_for_test_storage;
 use self::storage::{PendingSubmission, make_access_submission, open_default, queue_scope_load};
 use self::worker::{CacheWriteJob, CacheWriteOperation, CacheWriteWorker};
-const SCHEMA_VERSION: i64 = 2;
+
+const SCHEMA_VERSION: i64 = 1;
 const SQLITE_PAGE_SIZE: i64 = 4096;
 const MAX_DATABASE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_DATABASE_PAGES: i64 = (MAX_DATABASE_BYTES as i64) / SQLITE_PAGE_SIZE;
@@ -35,6 +42,9 @@ const MIN_OBJECT_CACHE_ENTRY_BYTES: usize = 64;
 const MAX_ENTRY_BATCH_ROWS: usize = MAX_BATCH_BYTES / (MAX_OBJECT_CACHE_ENTRY_BYTES + 64);
 const MAX_REGION_ENTRIES: usize = 10_000;
 const MAX_REGION_BYTES: usize = 32 * 1024 * 1024;
+const MAX_REGION_OVERRIDES: usize = 2_048;
+const MAX_REGION_OVERRIDE_BYTES: usize = 1024 * 1024;
+const MAX_OVERRIDE_BATCH_ROWS: usize = MAX_BATCH_BYTES / (MAX_DATA_BYTES + 64);
 const MAX_TOTAL_ENTRIES: usize = 50_000;
 const MAX_TOTAL_BYTES: usize = 192 * 1024 * 1024;
 const MAX_GLOBAL_PRUNE_ROWS: usize = 255;
@@ -71,9 +81,48 @@ pub(super) struct StoredEntry {
     payload: Option<Arc<[u8]>>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct StoredOverride {
+    object_id: Uuid,
+    payload: Arc<[u8]>,
+}
+
+pub(super) struct StoredScope {
+    entries: HashMap<u32, StoredEntry>,
+    overrides: HashMap<u32, StoredOverride>,
+}
+
+pub(super) enum OverrideWrite {
+    Upsert(u32, StoredOverride),
+    Delete(u32),
+}
+
+impl OverrideWrite {
+    fn local_id(&self) -> u32 {
+        match self {
+            Self::Upsert(local_id, _) | Self::Delete(local_id) => *local_id,
+        }
+    }
+
+    fn payload_bytes(&self) -> usize {
+        match self {
+            Self::Upsert(_, stored) => stored.payload.len(),
+            Self::Delete(_) => 0,
+        }
+    }
+}
+
+pub(in crate::session) struct CachedOverride {
+    pub(in crate::session) source: UpdateSource,
+    pub(in crate::session) local_id: NonZeroU32,
+    pub(in crate::session) expected_id: Uuid,
+    pub(in crate::session) overrides: PbrMaterialOverrides,
+}
+
 struct LoadedRegion {
     scope: CacheScope,
     entries: HashMap<u32, StoredEntry>,
+    overrides: HashMap<u32, StoredOverride>,
     bytes: usize,
     last_used: u64,
     complete: bool,
@@ -113,7 +162,7 @@ pub(super) enum ObjectCacheEvent {
 }
 
 pub(super) enum RegionLoadResult {
-    Loaded(HashMap<u32, StoredEntry>),
+    Loaded(StoredScope),
     Failed(String),
     TimedOut,
 }
@@ -143,6 +192,7 @@ pub(super) struct ObjectCacheSession {
     disabled: bool,
     warned: bool,
     dropped_writes: u64,
+    override_cursor: Option<WorldChangeCursor>,
 }
 
 impl ObjectCacheSession {
@@ -173,6 +223,7 @@ impl ObjectCacheSession {
             disabled: false,
             warned: false,
             dropped_writes: 0,
+            override_cursor: None,
         }
     }
 
@@ -243,17 +294,19 @@ impl ObjectCacheSession {
             ObjectCacheEvent::RegionLoaded { simulator_id, scope, result, _permit } => {
                 let in_flight = self.in_flight_loads.remove(&(simulator_id, scope.clone()));
                 match result {
-                    RegionLoadResult::Loaded(mut entries) => {
+                    RegionLoadResult::Loaded(mut stored) => {
                         if self.identities.get(&simulator_id) == Some(&scope) {
                             if let Some(in_flight) = in_flight {
                                 if in_flight.stale {
-                                    entries.clear();
+                                    stored.entries.clear();
+                                    stored.overrides.clear();
                                 } else {
-                                    entries.retain(|local_id, _| !in_flight.invalidated_local_ids.contains(local_id));
+                                    stored.entries.retain(|local_id, _| !in_flight.invalidated_local_ids.contains(local_id));
+                                    stored.overrides.retain(|local_id, _| !in_flight.invalidated_local_ids.contains(local_id));
                                 }
                             }
-                            self.merge_partial_region(simulator_id, &scope, &mut entries);
-                            self.install_loaded_region(simulator_id, scope.clone(), entries);
+                            self.merge_partial_region(simulator_id, &scope, &mut stored);
+                            self.install_loaded_region(simulator_id, scope.clone(), stored);
                         }
                     }
                     RegionLoadResult::Failed(error) => self.warn(&error),
@@ -381,17 +434,7 @@ impl ObjectCacheSession {
             let generation = self.next_cache_generation();
             let versions: CacheEntryVersions = local_ids.iter().map(|local_id| (*local_id, generation)).collect::<Vec<_>>().into();
             let local_id_set = local_ids.iter().copied().collect::<HashSet<_>>();
-            if let Some(load) = self.in_flight_loads.get_mut(&(simulator_id, scope.clone()))
-                && !load.stale
-            {
-                let additional = local_id_set.iter().filter(|local_id| !load.invalidated_local_ids.contains(local_id)).count();
-                if load.invalidated_local_ids.len().saturating_add(additional) > MAX_REGION_ENTRIES {
-                    load.invalidated_local_ids.clear();
-                    load.stale = true;
-                } else {
-                    load.invalidated_local_ids.extend(local_id_set.iter().copied());
-                }
-            }
+            self.invalidate_in_flight_load(simulator_id, &scope, &local_id_set);
             self.remove_loaded_entries(simulator_id, &local_id_set);
             let queued = self.queue_invalidation(CacheWriteJob {
                 operation: CacheWriteOperation::DeleteEntries {
@@ -472,7 +515,7 @@ impl ObjectCacheSession {
         let sender = self.event_sender.clone();
         drop(runtime.spawn(async move {
             let result = match timeout(HANDSHAKE_CACHE_LOAD_TIMEOUT, receipt.wait()).await {
-                Ok(Ok(entries)) => RegionLoadResult::Loaded(entries),
+                Ok(Ok(stored)) => RegionLoadResult::Loaded(stored),
                 Ok(Err(error)) => RegionLoadResult::Failed(error.to_string()),
                 Err(_) => RegionLoadResult::TimedOut,
             };
@@ -559,6 +602,17 @@ impl ObjectCacheSession {
         self.pending_write_bytes = 0;
         self.outstanding_writes = 0;
         self.disable_after_invalidation_failure();
+    }
+
+    fn invalidate_in_flight_load(&mut self, simulator_id: SimulatorId, scope: &CacheScope, local_ids: &HashSet<u32>) {
+        let Some(load) = self.in_flight_loads.get_mut(&(simulator_id, scope.clone())).filter(|load| !load.stale) else { return };
+        let additional = local_ids.iter().filter(|local_id| !load.invalidated_local_ids.contains(local_id)).count();
+        if load.invalidated_local_ids.len().saturating_add(additional) > MAX_REGION_ENTRIES {
+            load.invalidated_local_ids.clear();
+            load.stale = true;
+        } else {
+            load.invalidated_local_ids.extend(local_ids.iter().copied());
+        }
     }
 
     fn enqueue(&mut self, submission: PendingSubmission) -> bool {
