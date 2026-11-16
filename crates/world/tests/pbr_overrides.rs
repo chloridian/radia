@@ -327,7 +327,7 @@ fn full_region_evicts_oldest_retained_override() {
 }
 
 #[test]
-fn cached_override_applies_only_to_expected_object() {
+fn cached_override_requires_expected_id() {
     for (observed_id, expected) in [(17, Some(0.4)), (18, None)] {
         let (mut world, region) = with_region();
         let retained = world.retain_pbr_material_overrides(source(region, 2), local_id(7), Uuid::from_u128(17), snapshot(1, 0.4)).unwrap();
@@ -363,7 +363,7 @@ fn cached_override_skips_live_object() {
 }
 
 #[test]
-fn override_changes_carry_their_class() {
+fn override_changes_carry_class() {
     let (mut world, region) = with_region();
     let Introduced(entity) = world.observe_object(object(source(region, 1), 17, 7, true)).unwrap().outcome else {
         panic!("expected object introduction")

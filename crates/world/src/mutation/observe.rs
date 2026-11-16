@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn full_and_terse_motion_bounds() {
+    fn update_kind_sets_motion_bounds() {
         let (mut world, regions) = test_world(1);
         let region = regions[0];
         let mut full = observation(region, 28, 1, 1);

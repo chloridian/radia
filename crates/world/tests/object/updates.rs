@@ -79,7 +79,7 @@ fn stale_kind_mismatch_is_rejected() {
 }
 
 #[test]
-fn partial_patch_merge_and_ordering() {
+fn partial_patches_merge_per_group() {
     let (mut world, region) = with_region();
     let mut initial = object(source(region, 10), 1, 10, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::new(1.0, 2.0, 3.0)), rotation: None });

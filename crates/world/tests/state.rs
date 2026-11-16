@@ -341,7 +341,7 @@ fn region_index_tracks_transfer() {
 }
 
 #[test]
-fn retirement_clears_and_blocks_reuse() {
+fn retirement_clears_region_permanently() {
     let mut world_limits = limits();
     world_limits.max_regions = 2;
     world_limits.max_entities = 3;
