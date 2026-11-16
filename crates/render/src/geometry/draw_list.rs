@@ -14,7 +14,7 @@ use world::Region;
 
 use super::{
     INSTANCE_BUFFER_BYTES, TRANSFORM_BYTES,
-    instance::PARAMETER_BYTES,
+    instance::{PARAMETER_BYTES, instance_base},
     items::{CachedFace, CachedItem, ItemId, ItemIndex, ItemSlab, draw_priority, surface_pipeline},
     mesh::GpuMesh,
     storage::Buffers,
@@ -36,6 +36,16 @@ const LAYOUT_ITEMS_PER_FRAME: usize = 1_024;
 const RETIRED_LAYOUT_ENTRIES_PER_FRAME: usize = 256;
 const LAYOUT_BYTES_PER_FRAME: usize = 8 * 1024 * 1024;
 const LAYOUT_TIME_PER_FRAME: Duration = Duration::from_millis(1);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct LayoutId(u64);
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FaceSlot {
+    layout: LayoutId,
+    slot: u32,
+    blended_index: Option<usize>,
+}
 
 #[derive(Default)]
 pub(super) struct UploadStats {
@@ -340,7 +350,9 @@ impl PartialOrd for PriorityItem {
 }
 
 struct LayoutBuild {
+    layout: LayoutId,
     state: LayoutState,
+    uploads: HashSet<u32>,
     previous: Vec<ItemIndex>,
     visible: Vec<ItemIndex>,
     mesh_pins: HashSet<MeshId>,
@@ -394,9 +406,18 @@ enum LayoutPhase {
 }
 
 impl LayoutBuild {
-    fn new(previous: &[ItemIndex], visible: &[ItemIndex], camera: Camera, retire_previous: bool, items: &ItemSlab) -> Self {
+    fn new(
+        layout: LayoutId,
+        previous: &[ItemIndex],
+        visible: &[ItemIndex],
+        camera: Camera,
+        retire_previous: bool,
+        items: &ItemSlab,
+    ) -> Self {
         Self {
+            layout,
             state: LayoutState::default(),
+            uploads: HashSet::new(),
             previous: if retire_previous { previous.to_vec() } else { Vec::new() },
             visible: visible.to_vec(),
             mesh_pins: visible.iter().filter_map(|index| items.get(*index).map(|item| item.mesh.id())).collect(),
@@ -427,6 +448,12 @@ impl LayoutBuild {
             items_visited: 0,
             faces_visited: 0,
             stale: false,
+        }
+    }
+
+    fn upload(&mut self, slot: u32) {
+        if self.uploads.insert(slot) {
+            self.state.dirty_slots.push(slot);
         }
     }
 
@@ -544,7 +571,8 @@ pub(super) struct DrawList {
     batches_dirty: bool,
     pending: Option<LayoutBuild>,
     retired: Option<LayoutBuild>,
-    patch_slots_out_of_sync: bool,
+    layout: LayoutId,
+    last_layout: LayoutId,
 }
 
 impl DrawList {
@@ -555,8 +583,26 @@ impl DrawList {
         if self.retired.is_some() {
             return false;
         }
-        self.pending = Some(LayoutBuild::new(&self.layout_items, visible, camera, retire_previous, items));
+        let layout = self.next_layout();
+        self.pending = Some(LayoutBuild::new(layout, &self.layout_items, visible, camera, retire_previous, items));
         true
+    }
+
+    fn next_layout(&mut self) -> LayoutId {
+        self.last_layout = LayoutId(self.last_layout.0.checked_add(1).expect("layout id space exhausted"));
+        self.last_layout
+    }
+
+    #[cfg(test)]
+    pub(super) fn committed_slot(&self, face: &CachedFace) -> Option<u32> {
+        self.committed_address(face).map(|address| address.slot)
+    }
+
+    fn committed_address(&self, face: &CachedFace) -> Option<FaceSlot> {
+        if face.layout == self.layout {
+            return face.slot.map(|slot| FaceSlot { layout: face.layout, slot, blended_index: face.blended_index });
+        }
+        face.retained.filter(|retained| retained.layout == self.layout)
     }
 
     pub(super) fn pins_mesh(&self, mesh: MeshId) -> bool {
@@ -646,10 +692,6 @@ impl DrawList {
 
     pub(super) fn layout_building(&self) -> bool {
         self.pending.is_some()
-    }
-
-    pub(super) fn layout_patching_suspended(&self) -> bool {
-        self.patch_slots_out_of_sync
     }
 
     pub(super) fn mark_layout_stale(&mut self) {
@@ -959,11 +1001,6 @@ impl DrawList {
                         break;
                     };
                     if face.blended {
-                        if face.slot.is_some() || face.blended_index.is_some() {
-                            self.patch_slots_out_of_sync = true;
-                        }
-                        face.slot = None;
-                        face.blended_index = None;
                         build.item_has_slot = true;
                         build.blended.push(BlendedFace {
                             distance_squared: blend_distance(item.position, item.rotation, item.scale, face.center, build.camera),
@@ -998,11 +1035,7 @@ impl DrawList {
                                 &face.parameter_bytes,
                             )
                         });
-                        if face.slot != slot || face.blended_index.is_some() {
-                            self.patch_slots_out_of_sync = true;
-                        }
-                        face.slot = slot;
-                        face.blended_index = None;
+                        assign_slot(face, build.layout, self.layout, slot, None);
                         build.item_has_slot |= slot.is_some();
                     }
                     build.face_cursor += 1;
@@ -1048,11 +1081,7 @@ impl DrawList {
                         build.stale = true;
                         break;
                     };
-                    if face.slot != Some(slot) || face.blended_index != Some(blend_index) {
-                        self.patch_slots_out_of_sync = true;
-                    }
-                    face.slot = Some(slot);
-                    face.blended_index = Some(blend_index);
+                    assign_slot(face, build.layout, self.layout, Some(slot), Some(blend_index));
                     build.state.mesh_references.insert(key.mesh);
                     build.state.draws.push(key.command(blended.group, slot, 1));
                     self.retain_layout_group(&mut build.state, blended.group);
@@ -1197,7 +1226,7 @@ impl DrawList {
             let omitted_faces = build.omitted;
             let stale = build.stale;
             self.swap_state(&mut build.state);
-            self.patch_slots_out_of_sync = false;
+            self.layout = build.layout;
             self.retired = Some(build);
             commit_ms += commit_started.elapsed().as_secs_f64() * 1000.0;
             Some(LayoutProgress {
@@ -1281,6 +1310,8 @@ impl DrawList {
     pub(super) fn layout(&mut self, previous: &[ItemIndex], visible: &[ItemIndex], items: &mut ItemSlab, camera: Camera) -> LayoutStats {
         let mut items_visited = 0usize;
         let mut faces_visited = 0usize;
+        let layout = self.next_layout();
+        self.layout = layout;
         self.release_draw_group_refs();
         self.draws.clear();
         self.mesh_references.clear();
@@ -1414,6 +1445,8 @@ impl DrawList {
                     let Ok(slot) = u32::try_from(self.opaque_instances.saturating_add(self.blended.len())) else { continue };
                     face.slot = Some(slot);
                     face.blended_index = Some(self.blended.len());
+                    face.layout = layout;
+                    face.retained = None;
                     self.instance_bytes.extend_from_slice(&item.transform);
                     self.instance_bytes.extend_from_slice(&face.parameter_bytes);
                     self.blended.push(BlendedFace {
@@ -1431,6 +1464,8 @@ impl DrawList {
                     let Ok(slot) = u32::try_from(offset) else { continue };
                     if write_instance(&mut self.instance_bytes, slot, &item.transform, &face.parameter_bytes) {
                         face.slot = Some(slot);
+                        face.layout = layout;
+                        face.retained = None;
                         *cursor += 1;
                     }
                 }
@@ -1459,23 +1494,38 @@ impl DrawList {
 
     pub(super) fn patch(
         &mut self,
-        items: &mut ItemSlab,
+        items: &ItemSlab,
         faces: &[(ItemIndex, usize)],
         pose_items: &[ItemIndex],
         camera: Camera,
+        origin: DVec3,
+        transform_origin: DVec3,
     ) -> PatchStats {
         let mut stats = PatchStats::default();
         for (item_id, face_index) in faces {
-            let Some(item) = items.get_mut(*item_id) else { continue };
-            let Some(face) = item.faces.get_mut(*face_index) else { continue };
-            let Some(slot) = face.slot else { continue };
-            if !write_instance(&mut self.instance_bytes, slot, &item.transform, &face.parameter_bytes) {
+            let Some(item) = items.get(*item_id) else { continue };
+            let Some(face) = item.faces.get(*face_index) else { continue };
+            if let Some(build) = self.pending.as_mut()
+                && !build.stale
+                && face.layout == build.layout
+                && let Some(slot) = face.slot
+                && write_instance(&mut build.state.instance_bytes, slot, &item.transform, &face.parameter_bytes)
+            {
+                build.upload(slot);
+            }
+            let Some(address) = self.committed_address(face) else { continue };
+            let transform = if origin == transform_origin {
+                item.transform
+            } else {
+                instance_base(item.position, item.rotation, item.scale, item.invert_normals, origin)
+            };
+            if !write_instance(&mut self.instance_bytes, address.slot, &transform, &face.parameter_bytes) {
                 continue;
             }
-            self.dirty_slots.push(slot);
+            self.committed_written(address.slot);
             stats.faces_patched += 1;
             if pose_items.binary_search(item_id).is_ok()
-                && let Some(index) = face.blended_index
+                && let Some(index) = address.blended_index
                 && let Some(blended) = self.blended.get_mut(index)
             {
                 blended.distance_squared = blend_distance(item.position, item.rotation, item.scale, face.center, camera);
@@ -1485,6 +1535,15 @@ impl DrawList {
         self.dirty_slots.sort_unstable();
         self.dirty_slots.dedup();
         stats
+    }
+
+    fn committed_written(&mut self, slot: u32) {
+        self.dirty_slots.push(slot);
+        if let Some(build) = self.pending.as_mut()
+            && (slot as usize) < build.state.instance_bytes.len() / INSTANCE_BYTES
+        {
+            build.upload(slot);
+        }
     }
 
     pub(super) fn sort_blended(&mut self, items: &ItemSlab, camera: Camera) -> bool {
@@ -1695,18 +1754,23 @@ impl DrawList {
     }
 
     pub(super) fn hide_face(&mut self, face: &mut CachedFace) -> bool {
-        let Some(slot) = face.slot.take() else {
-            face.blended_index = None;
-            return false;
-        };
+        if let Some(build) = self.pending.as_mut()
+            && face.layout == build.layout
+        {
+            build.stale = true;
+        }
+        let committed = self.committed_address(face);
+        face.slot = None;
+        face.blended_index = None;
+        face.retained = None;
+        let Some(FaceSlot { slot, .. }) = committed else { return false };
         let start = slot as usize * INSTANCE_BYTES;
         if let Some(instance) = self.instance_bytes.get_mut(start..start + INSTANCE_BYTES) {
             instance.fill(0);
             self.hidden_slots.insert(slot);
             self.batches_dirty = true;
-            self.dirty_slots.push(slot);
+            self.committed_written(slot);
         }
-        face.blended_index = None;
         true
     }
 
@@ -1828,7 +1892,7 @@ impl DrawList {
         self.visible_items = 0;
         self.omitted = 0;
         self.valid = false;
-        self.patch_slots_out_of_sync = false;
+        self.layout = self.next_layout();
         self.batch_order.clear();
         self.draw_batches.clear();
         self.indirect_bytes.clear();
@@ -1925,6 +1989,17 @@ impl DrawList {
             }
         }
     }
+}
+
+fn assign_slot(face: &mut CachedFace, layout: LayoutId, committed: LayoutId, slot: Option<u32>, blended_index: Option<usize>) {
+    if face.layout != layout {
+        if face.layout == committed {
+            face.retained = face.slot.map(|slot| FaceSlot { layout: committed, slot, blended_index: face.blended_index });
+        }
+        face.layout = layout;
+    }
+    face.slot = slot;
+    face.blended_index = blended_index;
 }
 
 fn write_instance(bytes: &mut [u8], slot: u32, transform: &[u8; TRANSFORM_BYTES], parameters: &[u8; PARAMETER_BYTES]) -> bool {

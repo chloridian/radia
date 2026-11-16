@@ -165,6 +165,34 @@ impl CacheRebuild {
             self.phase = RebuildPhase::PruneMeshInfo;
         }
     }
+
+    fn finish_mesh_info(&mut self) {
+        if self.visibility_restart {
+            self.phase = RebuildPhase::VisibilityObjects;
+            self.visibility_restart = false;
+            self.visibility_object_after = None;
+            self.visibility_surface_after = None;
+        } else {
+            self.phase = RebuildPhase::Finalize;
+        }
+    }
+
+    fn note_camera(&mut self, camera: Camera) -> Camera {
+        let Some(previous) = self.candidate_camera else {
+            self.candidate_camera = Some(camera);
+            return camera;
+        };
+        if previous == camera {
+            return camera;
+        }
+        self.layout_changed = true;
+        if matches!(self.phase, RebuildPhase::VisibilityObjects | RebuildPhase::VisibilitySurfaces | RebuildPhase::Finalize) {
+            return previous;
+        }
+        self.visibility_restart = true;
+        self.candidate_camera = Some(camera);
+        camera
+    }
 }
 
 struct MeshInfoBuild {
@@ -422,25 +450,94 @@ impl FrameCache {
         self.item_order_dirty = false;
         self.item_order.len()
     }
+
+    fn advance_visibility(
+        &mut self,
+        view: &SceneView,
+        view_sequence: u64,
+        started: Instant,
+        items: &mut usize,
+        update: &mut CacheUpdate,
+    ) -> bool {
+        let Some(rebuild) = self.rebuild.as_mut() else { return false };
+        match rebuild.phase {
+            RebuildPhase::VisibilityObjects => {
+                let after = rebuild.visibility_object_after;
+                let page = view.object_page(after, REBUILD_ITEMS_PER_FRAME - *items);
+                if page.entries.is_empty() && page.done {
+                    rebuild.phase = RebuildPhase::VisibilitySurfaces;
+                    return true;
+                }
+                let page_len = page.entries.len();
+                let mut last = after;
+                let mut processed = 0;
+                for (id, object) in page.entries {
+                    if *items >= REBUILD_ITEMS_PER_FRAME || started.elapsed() >= REBUILD_TIME_PER_FRAME {
+                        break;
+                    }
+                    if let Some(index) = object.and_then(|object| self.objects.get(&object.detail().summary.entity)) {
+                        update.visibility_items.push(*index);
+                    }
+                    last = Some(id);
+                    *items += 1;
+                    processed += 1;
+                }
+                rebuild.visibility_object_after = if processed == page_len { page.cursor } else { last };
+                if processed == page_len && page.done {
+                    rebuild.phase = RebuildPhase::VisibilitySurfaces;
+                }
+                *items < REBUILD_ITEMS_PER_FRAME && processed == page_len && page.done
+            }
+            RebuildPhase::VisibilitySurfaces => {
+                let after = rebuild.visibility_surface_after;
+                let (surfaces, _, done) = view.surface_page(after, REBUILD_ITEMS_PER_FRAME - *items);
+                if surfaces.is_empty() && done {
+                    rebuild.phase = RebuildPhase::Finalize;
+                    return true;
+                }
+                let page_len = surfaces.len();
+                let mut last = after;
+                for surface in surfaces {
+                    if let Some(index) = self.item_indices.get(&surface_item_id(surface.region, surface.kind)) {
+                        update.visibility_items.push(*index);
+                    }
+                    last = Some((surface.region, surface.kind));
+                    *items += 1;
+                }
+                rebuild.visibility_surface_after = last;
+                if done {
+                    rebuild.phase = RebuildPhase::Finalize;
+                }
+                *items < REBUILD_ITEMS_PER_FRAME && done && page_len > 0
+            }
+            RebuildPhase::Finalize => {
+                if !rebuild.object_change_page_complete
+                    || !rebuild.added_object_page_complete
+                    || view_sequence > rebuild.object_change_page_sequence
+                {
+                    return false;
+                }
+                update.full_visibility = false;
+                update.layout_changed |= rebuild.layout_changed;
+                update.mesh_dirty |= rebuild.mesh_dirty;
+                update.rebuild_visibility_changed |= rebuild.visibility_changed;
+                update.mesh_demand_missing |= rebuild.mesh_demand_missing;
+                self.rebuild = None;
+                update.rebuild_pending = false;
+                update.rebuild_completed = true;
+                self.rescan_pending = false;
+                self.version = Some(view.version());
+                self.visibility_version = Some(view.visibility_version());
+                false
+            }
+            RebuildPhase::Objects | RebuildPhase::Surfaces | RebuildPhase::Sweep | RebuildPhase::PruneMeshInfo => false,
+        }
+    }
 }
 
 impl GeometryRenderer {
-    pub(super) fn note_rebuild_camera(&mut self, camera: Camera) {
-        let Some(rebuild) = self.cache.rebuild.as_ref() else { return };
-        let camera_changed = rebuild.candidate_camera.is_some_and(|previous| previous != camera);
-        if camera_changed && let Some(rebuild) = self.cache.rebuild.as_mut() {
-            rebuild.visibility_restart = true;
-            rebuild.layout_changed = true;
-            if matches!(rebuild.phase, RebuildPhase::VisibilityObjects | RebuildPhase::VisibilitySurfaces | RebuildPhase::Finalize) {
-                rebuild.phase = RebuildPhase::VisibilityObjects;
-                rebuild.visibility_object_after = None;
-                rebuild.visibility_surface_after = None;
-                rebuild.visibility_restart = false;
-            }
-        }
-        if let Some(rebuild) = self.cache.rebuild.as_mut() {
-            rebuild.candidate_camera = Some(camera);
-        }
+    pub(super) fn note_rebuild_camera(&mut self, camera: Camera) -> Option<Camera> {
+        self.cache.rebuild.as_mut().map(|rebuild| rebuild.note_camera(camera))
     }
 
     #[cfg(test)]
@@ -623,7 +720,6 @@ impl GeometryRenderer {
             self.draw_list.cancel_layout();
             self.layout_required = true;
             self.layout_pose_items.clear();
-            self.layout_parameter_items.clear();
         }
         update
     }
@@ -1055,14 +1151,7 @@ impl GeometryRenderer {
                     }
                     if rebuild.mesh_info_cursor >= self.cache.mesh_info_order.len() {
                         let Some(rebuild) = self.cache.rebuild.as_mut() else { break };
-                        if rebuild.visibility_restart {
-                            rebuild.phase = RebuildPhase::VisibilityObjects;
-                            rebuild.visibility_restart = false;
-                            rebuild.visibility_object_after = None;
-                            rebuild.visibility_surface_after = None;
-                        } else {
-                            rebuild.phase = RebuildPhase::Finalize;
-                        }
+                        rebuild.finish_mesh_info();
                         continue;
                     }
                     let Some(rebuild) = self.cache.rebuild.as_mut() else { break };
@@ -1090,98 +1179,10 @@ impl GeometryRenderer {
                     items += 1;
                     bytes += size_of::<MeshInfo>();
                 }
-                Some(RebuildPhase::VisibilityObjects) => {
-                    let after = self.cache.rebuild.as_ref().and_then(|rebuild| rebuild.visibility_object_after);
-                    let remaining = REBUILD_ITEMS_PER_FRAME - items;
-                    let page = view.object_page(after, remaining);
-                    if page.entries.is_empty() && page.done {
-                        if let Some(rebuild) = self.cache.rebuild.as_mut() {
-                            rebuild.phase = RebuildPhase::VisibilitySurfaces;
-                        }
-                        continue;
-                    }
-                    let page_len = page.entries.len();
-                    let next = page.cursor;
-                    let done = page.done;
-                    let mut last = after;
-                    let mut processed = 0;
-                    for (id, object) in page.entries {
-                        if items >= REBUILD_ITEMS_PER_FRAME || started.elapsed() >= REBUILD_TIME_PER_FRAME {
-                            break;
-                        }
-                        if let Some(object) = object {
-                            let entity = object.detail().summary.entity;
-                            if let Some(index) = self.cache.objects.get(&entity).copied() {
-                                update.visibility_items.push(index);
-                            }
-                        }
-                        last = Some(id);
-                        items += 1;
-                        processed += 1;
-                    }
-                    if let Some(rebuild) = self.cache.rebuild.as_mut() {
-                        rebuild.visibility_object_after = if processed == page_len { next } else { last };
-                        if processed == page_len && done {
-                            rebuild.phase = RebuildPhase::VisibilitySurfaces;
-                        }
-                    }
-                    if items >= REBUILD_ITEMS_PER_FRAME || processed < page_len || !done {
+                Some(RebuildPhase::VisibilityObjects | RebuildPhase::VisibilitySurfaces | RebuildPhase::Finalize) => {
+                    if !self.cache.advance_visibility(view, view_sequence, started, &mut items, update) {
                         break;
                     }
-                }
-                Some(RebuildPhase::VisibilitySurfaces) => {
-                    let after = self.cache.rebuild.as_ref().and_then(|rebuild| rebuild.visibility_surface_after);
-                    let remaining = REBUILD_ITEMS_PER_FRAME - items;
-                    let (surfaces, _, done) = view.surface_page(after, remaining);
-                    if surfaces.is_empty() && done {
-                        if let Some(rebuild) = self.cache.rebuild.as_mut() {
-                            rebuild.phase = RebuildPhase::Finalize;
-                        }
-                        continue;
-                    }
-                    let page_len = surfaces.len();
-                    let mut last = after;
-                    for surface in surfaces {
-                        if let Some(index) = self.cache.index(surface_item_id(surface.region, surface.kind)) {
-                            update.visibility_items.push(index);
-                        }
-                        last = Some((surface.region, surface.kind));
-                        items += 1;
-                    }
-                    if let Some(rebuild) = self.cache.rebuild.as_mut() {
-                        rebuild.visibility_surface_after = last;
-                        if done {
-                            rebuild.phase = RebuildPhase::Finalize;
-                        }
-                    }
-                    if items >= REBUILD_ITEMS_PER_FRAME || !done || page_len == 0 {
-                        break;
-                    }
-                }
-                Some(RebuildPhase::Finalize) => {
-                    let Some(rebuild) = self.cache.rebuild.as_ref() else { break };
-                    if !rebuild.object_change_page_complete
-                        || !rebuild.added_object_page_complete
-                        || view_sequence > rebuild.object_change_page_sequence
-                    {
-                        break;
-                    }
-                    let layout_changed = rebuild.layout_changed;
-                    let mesh_dirty = rebuild.mesh_dirty;
-                    let visibility_changed = rebuild.visibility_changed;
-                    let mesh_demand_missing = rebuild.mesh_demand_missing;
-                    update.full_visibility = false;
-                    update.layout_changed |= layout_changed;
-                    update.mesh_dirty |= mesh_dirty;
-                    update.rebuild_visibility_changed |= visibility_changed;
-                    update.mesh_demand_missing |= mesh_demand_missing;
-                    self.cache.rebuild = None;
-                    update.rebuild_pending = false;
-                    update.rebuild_completed = true;
-                    self.cache.rescan_pending = false;
-                    self.cache.version = Some(view.version());
-                    self.cache.visibility_version = Some(view.visibility_version());
-                    break;
                 }
                 None => {
                     break;
@@ -2081,6 +2082,8 @@ fn retain_draw_slots(previous: &CachedItem, next: &mut CachedItem) {
         if previous.order == next.order && previous.indices == next.indices {
             next.slot = previous.slot;
             next.blended_index = previous.blended_index;
+            next.layout = previous.layout;
+            next.retained = previous.retained;
         }
     }
 }

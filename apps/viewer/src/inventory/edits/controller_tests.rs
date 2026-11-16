@@ -169,6 +169,7 @@ async fn confirm_udp_move(
         }
         (_, message) => panic!("unexpected outbound move: {message:?}"),
     }
+    let before = inventory.snapshot();
     let update = crate::session::apply_inventory_udp(inventory, owner.id(), &message)
         .expect("intake inbound UDP move update")
         .expect("move update belongs to the active owner");
@@ -183,7 +184,7 @@ async fn confirm_udp_move(
         Some(::inventory::InventoryChange::NodeMoved { node, from, to })
             if *node == expectation.node && *from == expectation.from && *to == expectation.to
     );
-    crate::session::resolve_pending_inventory_moves(&mut pending, &update.changes);
+    crate::session::confirm_pending_moves(&mut pending, &before, &inventory.snapshot());
     assert!(pending.is_empty());
     model.send_replace(Some(inventory.snapshot()));
 }

@@ -16,8 +16,8 @@ use crate::session::coordinator::inventory_cache::{
 };
 
 use super::inventory::{
-    FolderFetchApply, PreparedInventoryFetch, apply_inventory_fetch, cache_restore_move_changes, cancel_favorites_refresh,
-    prepare_inventory_fetch, publish_favorites_refresh, resolve_pending_inventory_moves, stop_favorites_refresh,
+    FolderFetchApply, PreparedInventoryFetch, apply_inventory_fetch, cancel_favorites_refresh, confirm_pending_moves,
+    prepare_inventory_fetch, publish_favorites_refresh, stop_favorites_refresh,
 };
 use super::{
     MoveExpectation, PendingFolderPreparation, PendingHandshakeReplies, cancel_pending_folder_preparation, network_end_after_stream_close,
@@ -1006,6 +1006,7 @@ async fn folder_fetch_move_resolves_pending_inventory_edit() {
     let expectation = MoveExpectation { node, from: first, to: second };
     let (confirmed, confirmation) = oneshot::channel();
     let mut pending = HashMap::from([(node, (expectation, confirmed))]);
+    let before = inventory.snapshot();
     let FolderFetchApply::Applied(changes) = apply_inventory_fetch(
         &mut inventory,
         FolderFetch {
@@ -1028,7 +1029,7 @@ async fn folder_fetch_move_resolves_pending_inventory_edit() {
         Some(::inventory::InventoryChange::NodeMoved { node: changed, from, to })
             if *changed == node && *from == first && *to == second
     );
-    resolve_pending_inventory_moves(&mut pending, &changes);
+    confirm_pending_moves(&mut pending, &before, &inventory.snapshot());
     confirmation.await.expect("fetch change set confirms pending edit");
     assert!(pending.is_empty());
 }
@@ -1053,10 +1054,71 @@ async fn cache_restore_move_resolves_pending_inventory_edit() {
     let expectation = MoveExpectation { node, from: first, to: second };
     let (confirmed, confirmation) = oneshot::channel();
     let mut pending = HashMap::from([(node, (expectation, confirmed))]);
-    let changes = cache_restore_move_changes(&pending, &before, &after);
-    resolve_pending_inventory_moves(&mut pending, &changes);
+    confirm_pending_moves(&mut pending, &before, &after);
     confirmation.await.expect("cache restore change set confirms pending edit");
     assert!(pending.is_empty());
+}
+
+#[test]
+fn snapshot_moves_confirm_only_matches() {
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Case {
+        Match,
+        WrongDestination,
+        WrongSource,
+        Unrelated,
+    }
+
+    let owner = InventoryOwner::new(Uuid::from_u128(41));
+    let key = |value: u128| CategoryKey::new(owner, FolderId::new(Uuid::from_u128(value)));
+    let (root, first, second, third) = (key(42), key(43), key(44), key(45));
+    let moved_folder = key(46);
+    let moved_item = ItemKey::new(owner, ItemId::new(Uuid::from_u128(47)));
+    let bystander = key(48);
+    let nodes = [
+        InventoryNodeKey::new(owner, InventoryNodeId::Category(moved_folder.id())),
+        InventoryNodeKey::new(owner, InventoryNodeId::Item(moved_item.id())),
+    ];
+    for node in nodes {
+        for case in [Case::Match, Case::WrongDestination, Case::WrongSource, Case::Unrelated] {
+            let mut inventory = Inventory::new(category(root, None, ServerVersion::UNKNOWN, None), None, InventoryLimits::default())
+                .expect("valid inventory root");
+            for folder in [first, second, third] {
+                inventory.upsert_category(category(folder, Some(root), ServerVersion::UNKNOWN, None)).expect("add folder");
+            }
+            inventory.upsert_category(category(moved_folder, Some(first), ServerVersion::UNKNOWN, None)).expect("add moved folder");
+            inventory.upsert_category(category(bystander, Some(first), ServerVersion::UNKNOWN, None)).expect("add bystander folder");
+            inventory.upsert_item(item(moved_item, first)).expect("add moved item");
+
+            let expectation = match case {
+                Case::Match | Case::Unrelated => MoveExpectation { node, from: first, to: second },
+                Case::WrongDestination => MoveExpectation { node, from: first, to: third },
+                Case::WrongSource => MoveExpectation { node, from: third, to: second },
+            };
+            let (confirmed, mut confirmation) = oneshot::channel();
+            let mut pending = HashMap::from([(node, (expectation, confirmed))]);
+            let before = inventory.snapshot();
+            let mover = match case {
+                Case::Unrelated => InventoryNodeKey::new(owner, InventoryNodeId::Category(bystander.id())),
+                _ => node,
+            };
+            inventory.move_node(mover, second).expect("apply move");
+            confirm_pending_moves(&mut pending, &before, &inventory.snapshot());
+
+            match case {
+                Case::Match => {
+                    assert_eq!(confirmation.try_recv(), Ok(()), "{node:?} {case:?}");
+                    assert!(pending.is_empty(), "{node:?} {case:?}");
+                }
+                _ => {
+                    assert_eq!(confirmation.try_recv(), Err(TryRecvError::Empty), "{node:?} {case:?}");
+                    assert_eq!(pending.len(), 1, "{node:?} {case:?}");
+                }
+            }
+        }
+    }
 }
 
 fn favorites_update(username: &str) -> FavoritesUpdate {

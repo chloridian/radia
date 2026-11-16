@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     num::NonZeroU32,
     ops::Bound::{Excluded, Unbounded},
 };
@@ -12,6 +11,7 @@ use crate::history::{
 };
 use crate::mutation::Effects;
 use crate::read::{MAX_OBJECT_LOOKUP_WORK_ITEMS, ObjectLookupCursor, ObjectLookupProgress};
+use crate::removal::{VisibilityCache, VisibilityCursor, VisibilityStep};
 use crate::update::{FieldStamp, Stamp};
 use crate::{ApplyError, Recovery, RecoveryCancellation, UpdateSource, WorldRevision};
 use crate::{AttachmentPoint, Entity, Kind, LocalAddress, ObjectRecord, Parent, ParentUpdate, Region};
@@ -29,18 +29,37 @@ enum LinkPlan {
     Recover,
 }
 
-enum ParentAncestry {
-    Root(Entity),
-    Chain(HashSet<Entity>),
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Ancestry {
+    Unknown,
+    Walking { next: Entity, steps: usize },
+    Complete(Option<Entity>),
 }
 
-impl ParentAncestry {
-    fn contains(&self, entity: Entity) -> bool {
-        match self {
-            Self::Root(root) => *root == entity,
-            Self::Chain(ancestors) => ancestors.contains(&entity),
-        }
+#[derive(Clone, Copy)]
+enum VisibilityCheck {
+    Walking(VisibilityCursor),
+    Visible(Entity),
+}
+
+#[derive(Clone, Copy)]
+struct ResolutionProgress {
+    revision: WorldRevision,
+    parent_visible: bool,
+    check: Option<VisibilityCheck>,
+    ancestry: Ancestry,
+}
+
+impl ResolutionProgress {
+    fn new(revision: WorldRevision) -> Self {
+        Self { revision, parent_visible: false, check: None, ancestry: Ancestry::Unknown }
     }
+}
+
+#[derive(Clone, Copy)]
+struct BatchLimits {
+    children: usize,
+    recovery: usize,
 }
 
 struct PlannedChild {
@@ -55,6 +74,7 @@ pub(crate) struct PendingResolution {
     pub(crate) parent: Entity,
     pub(crate) binding: Binding,
     after: Option<PendingChildKey>,
+    progress: ResolutionProgress,
 }
 
 #[must_use]
@@ -145,6 +165,7 @@ impl World {
                 parent,
                 binding: previous.map_or(binding, |work| work.binding),
                 after: previous.and_then(|work| work.after),
+                progress: ResolutionProgress::new(self.revision()),
             },
         );
     }
@@ -177,73 +198,121 @@ impl World {
         parent: Parent,
     ) -> bool {
         let previous = self.relationship_work.get(&(parent_uuid, address));
-        let work = PendingResolution {
+        let mut resolution = PendingResolution {
             parent: entity,
             binding: previous.map_or(parent_binding, |work| work.binding),
             after: previous.and_then(|work| work.after),
+            progress: ResolutionProgress::new(self.revision()),
         };
-        let (_, children) = self.plan_children(
-            (parent_uuid, address),
-            work,
-            parent_binding,
-            IMMEDIATE_RELATIONSHIPS,
-            self.limits.max_recovery_targets,
-            Some(parent),
-        );
-        children.iter().any(|child| matches!(child.plan, LinkPlan::Resolve | LinkPlan::Cycle))
+        let limits = BatchLimits { children: IMMEDIATE_RELATIONSHIPS, recovery: self.limits.max_recovery_targets };
+        let mut work = MAX_OBJECT_LOOKUP_WORK_ITEMS;
+        let (children, exhausted) =
+            self.plan_children((parent_uuid, address), &mut resolution, parent_binding, limits, Some(parent), &mut work);
+        exhausted || children.iter().any(|child| matches!(child.plan, LinkPlan::Resolve | LinkPlan::Cycle))
     }
 
-    fn parent_ancestry(&self, start: Entity, parent_override: Option<Parent>) -> ParentAncestry {
-        let mut current = start;
-        let mut first_parent = parent_override.or_else(|| self.store.object_record(current).map(|record| record.state.parent));
-        let mut ancestors = None;
-        while let Some(Parent::Resolved(next)) = first_parent.take() {
-            let set = ancestors.get_or_insert_with(|| {
-                let mut ancestors = HashSet::new();
-                ancestors.insert(start);
-                ancestors
-            });
-            if !set.insert(next) {
-                break;
-            }
-            current = next;
-            first_parent = self.store.object_record(current).map(|record| record.state.parent);
+    fn ancestry_within(
+        &self,
+        start: Entity,
+        parent_override: Option<Parent>,
+        ancestry: &mut Ancestry,
+        work: &mut usize,
+    ) -> Option<Option<Entity>> {
+        loop {
+            *ancestry = match *ancestry {
+                Ancestry::Complete(terminal) => return Some(terminal),
+                Ancestry::Unknown => match parent_override.or_else(|| self.store.object_record(start).map(|record| record.state.parent)) {
+                    Some(Parent::Resolved(next)) => Ancestry::Walking { next, steps: 0 },
+                    _ => Ancestry::Complete(None),
+                },
+                Ancestry::Walking { next, steps } => {
+                    if *work == 0 {
+                        return None;
+                    }
+                    *work -= 1;
+                    if next == start || steps >= self.store.physical_len() {
+                        Ancestry::Complete(None)
+                    } else {
+                        match self.store.object_record(next).map(|record| record.state.parent) {
+                            Some(Parent::Resolved(parent)) => Ancestry::Walking { next: parent, steps: steps + 1 },
+                            _ => Ancestry::Complete(Some(next)),
+                        }
+                    }
+                }
+            };
         }
-        match ancestors {
-            Some(ancestors) => ParentAncestry::Chain(ancestors),
-            None => ParentAncestry::Root(start),
+    }
+
+    fn visible_within(&self, entity: Entity, check: &mut Option<VisibilityCheck>, work: &mut usize) -> Option<bool> {
+        let mut cursor = match *check {
+            Some(VisibilityCheck::Visible(visible)) if visible == entity => return Some(true),
+            Some(VisibilityCheck::Walking(cursor)) if cursor.entity() == entity => cursor,
+            _ => {
+                if *work == 0 {
+                    return None;
+                }
+                *work -= 1;
+                *check = None;
+                let Some(record) = self.store.object_record(entity).filter(|_| self.store.is_current_entity(entity)) else {
+                    return Some(false);
+                };
+                let known = if self.has_pending_removals() {
+                    self.lookup_visibility.get(entity, self.revision()).map(|visibility| visibility.visible)
+                } else {
+                    Some(true)
+                };
+                if let Some(visible) = known {
+                    *check = visible.then_some(VisibilityCheck::Visible(entity));
+                    return Some(visible);
+                }
+                self.begin_visibility(entity, record.id)
+            }
+        };
+        let mut cache = VisibilityCache::default();
+        loop {
+            if *work == 0 {
+                *check = Some(VisibilityCheck::Walking(cursor));
+                return None;
+            }
+            *work -= 1;
+            if let VisibilityStep::Complete(visibility) =
+                self.advance_visibility_with_lookup_cache(&mut cursor, &mut cache, &self.lookup_visibility)
+            {
+                *check = visibility.visible.then_some(VisibilityCheck::Visible(entity));
+                return Some(visibility.visible);
+            }
         }
     }
 
     fn plan_pending_child(
         &self,
         key: (Uuid, LocalAddress),
-        work: &PendingResolution,
+        resolution: &mut PendingResolution,
         current: Binding,
         child: Entity,
         parent_override: Option<Parent>,
-        ancestry: &mut Option<ParentAncestry>,
-    ) -> Option<PlannedChild> {
-        if !self.entity_is_visible(child) {
-            return None;
+        work: &mut usize,
+    ) -> Option<Option<PlannedChild>> {
+        if !self.visible_within(child, &mut resolution.progress.check, work)? {
+            return Some(None);
         }
         let mut read = self.store.read(child.0);
-        let (record, ordering) = read.get().ok()?;
-        let Parent::Pending { address, expected_uuid } = record.state.parent else { return None };
+        let Ok((record, ordering)) = read.get() else { return Some(None) };
+        let Parent::Pending { address, expected_uuid } = record.state.parent else { return Some(None) };
         if address != key.1 {
-            return None;
+            return Some(None);
         }
-        let plan = if !Self::pending_link_admitted(current, work.binding, expected_uuid, ordering.fences.parent, key.0) {
+        let plan = if !Self::pending_link_admitted(current, resolution.binding, expected_uuid, ordering.fences.parent, key.0) {
             LinkPlan::Recover
         } else {
-            let ancestry = ancestry.get_or_insert_with(|| self.parent_ancestry(work.parent, parent_override));
-            if ancestry.contains(child) {
+            let terminal = self.ancestry_within(resolution.parent, parent_override, &mut resolution.progress.ancestry, work)?;
+            if child == resolution.parent || terminal == Some(child) {
                 if expected_uuid.is_none() { LinkPlan::Cycle } else { LinkPlan::Recover }
             } else {
                 LinkPlan::Resolve
             }
         };
-        Some(PlannedChild { id: record.id, entity: child, address: record.state.binding.address, plan })
+        Some(Some(PlannedChild { id: record.id, entity: child, address: record.state.binding.address, plan }))
     }
 
     fn next_relationship_job(&self) -> Option<((Uuid, LocalAddress), PendingResolution)> {
@@ -666,17 +735,15 @@ impl World {
             parent,
             binding: previous.map_or(binding, |work| work.binding),
             after: previous.and_then(|work| work.after),
+            progress: ResolutionProgress::new(self.revision()),
         };
-        let (after, children) = self.plan_children(
-            key,
-            resolution,
-            binding,
-            IMMEDIATE_RELATIONSHIPS,
-            self.limits.max_recovery_targets.saturating_sub(effects.recovery_targets.len()),
-            None,
-        );
+        let limits = BatchLimits {
+            children: IMMEDIATE_RELATIONSHIPS,
+            recovery: self.limits.max_recovery_targets.saturating_sub(effects.recovery_targets.len()),
+        };
+        let mut work = MAX_OBJECT_LOOKUP_WORK_ITEMS;
+        let (children, _) = self.plan_children(key, &mut resolution, binding, limits, None, &mut work);
         self.apply_child_plans(address, parent_uuid, parent, &children, effects);
-        resolution.after = after;
         if self.next_pending_child(address, resolution.after).is_some() {
             self.insert_relationship_work(key, resolution);
         }
@@ -687,6 +754,10 @@ impl World {
     }
 
     pub fn resolve_relationships(&mut self, max_children: usize) -> Result<RelationshipResolution, ApplyError> {
+        self.resolve_relationships_within(max_children, MAX_OBJECT_LOOKUP_WORK_ITEMS)
+    }
+
+    fn resolve_relationships_within(&mut self, max_children: usize, mut work: usize) -> Result<RelationshipResolution, ApplyError> {
         if max_children == 0 || self.relationship_work.is_empty() {
             return Ok(RelationshipResolution::default());
         }
@@ -694,33 +765,46 @@ impl World {
             return Ok(RelationshipResolution::default());
         };
         let address = key.1;
-        let Some(record) = self.store.object_record(resolution.parent) else {
+        let Some(binding) = self
+            .store
+            .object_record(resolution.parent)
+            .filter(|record| record.id == key.0 && record.state.binding.address.region == address.region)
+            .map(|record| record.state.binding)
+        else {
             self.remove_relationship_work(&key);
             self.relationship_cursor = Some(key);
             return Ok(RelationshipResolution::default());
         };
-        if !self.entity_is_visible(resolution.parent) {
-            if self.relationship_work.get(&key).is_some_and(|work| work.parent == resolution.parent) {
-                self.remove_relationship_work(&key);
+        let revision = self.revision();
+        if resolution.progress.revision != revision {
+            resolution.progress = ResolutionProgress::new(revision);
+        }
+        if !resolution.progress.parent_visible {
+            match self.visible_within(resolution.parent, &mut resolution.progress.check, &mut work) {
+                Some(true) => {
+                    resolution.progress.parent_visible = true;
+                    resolution.progress.check = None;
+                }
+                Some(false) => {
+                    self.remove_relationship_work(&key);
+                    self.relationship_cursor = Some(key);
+                    return Ok(RelationshipResolution::default());
+                }
+                None => {
+                    self.insert_relationship_work(key, resolution);
+                    self.relationship_cursor = Some(key);
+                    return Ok(RelationshipResolution::default());
+                }
             }
-            self.relationship_cursor = Some(key);
-            return Ok(RelationshipResolution::default());
         }
-        if record.id != key.0 || record.state.binding.address.region != address.region {
-            self.remove_relationship_work(&key);
-            self.relationship_cursor = Some(key);
-            return Ok(RelationshipResolution::default());
-        }
-        let parent_uuid = record.id;
-        let binding = record.state.binding;
-        let (after, children) = self.plan_children(key, resolution, binding, max_children, self.limits.max_recovery_targets, None);
+        let limits = BatchLimits { children: max_children, recovery: self.limits.max_recovery_targets };
+        let (children, _) = self.plan_children(key, &mut resolution, binding, limits, None, &mut work);
         let changes = children.iter().any(|child| matches!(child.plan, LinkPlan::Resolve | LinkPlan::Cycle));
         if changes {
             self.ensure_revision_available()?;
         }
         let mut effects = Effects::default();
-        self.apply_child_plans(address, parent_uuid, resolution.parent, &children, &mut effects);
-        resolution.after = after;
+        self.apply_child_plans(address, key.0, resolution.parent, &children, &mut effects);
         self.relationship_cursor = Some(key);
         if self.next_pending_child(address, resolution.after).is_none() {
             self.remove_relationship_work(&key);
@@ -743,20 +827,21 @@ impl World {
     fn plan_children(
         &self,
         key: (Uuid, LocalAddress),
-        resolution: PendingResolution,
+        resolution: &mut PendingResolution,
         binding: Binding,
-        limit: usize,
-        recovery_limit: usize,
+        limits: BatchLimits,
         parent_override: Option<Parent>,
-    ) -> (Option<PendingChildKey>, Vec<PlannedChild>) {
-        let Some(waiting) = self.pending_children.get(&key.1) else { return (resolution.after, Vec::new()) };
+        work: &mut usize,
+    ) -> (Vec<PlannedChild>, bool) {
+        let Some(waiting) = self.pending_children.get(&key.1) else { return (Vec::new(), false) };
         let lower = resolution.after.map_or(Unbounded, Excluded);
-        let mut after = resolution.after;
         let mut children = Vec::new();
-        let mut ancestry = None;
-        let mut remaining = recovery_limit;
-        for (&child_key, &child) in waiting.range((lower, Unbounded)).take(limit) {
-            if let Some(plan) = self.plan_pending_child(key, &resolution, binding, child, parent_override, &mut ancestry) {
+        let mut remaining = limits.recovery;
+        for (&child_key, &child) in waiting.range((lower, Unbounded)).take(limits.children) {
+            let Some(planned) = self.plan_pending_child(key, resolution, binding, child, parent_override, work) else {
+                return (children, true);
+            };
+            if let Some(plan) = planned {
                 if self.limits.max_recovery_targets != 0 && matches!(plan.plan, LinkPlan::Cycle | LinkPlan::Recover) {
                     if remaining == 0 {
                         break;
@@ -765,9 +850,10 @@ impl World {
                 }
                 children.push(plan);
             }
-            after = Some(child_key);
+            resolution.after = Some(child_key);
+            resolution.progress.check = None;
         }
-        (after, children)
+        (children, false)
     }
 
     fn apply_child_plans(
@@ -840,7 +926,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        ApplyOutcome::{Introduced, Removed},
+        ApplyOutcome::{Introduced, Removed, Unchanged},
         Kind::{Avatar, Object},
         ObjectObservation,
         OrderEvidence::Ordered,
@@ -848,6 +934,10 @@ mod tests {
         ParentUpdate::{Local, Root},
         Pose, RegionInfo, UpdateSource, WorldRevision,
     };
+
+    const DEEP_CHAIN: u32 = MAX_OBJECT_LOOKUP_WORK_ITEMS as u32 + 44;
+    const DEEP_CHILDREN: u32 = 4;
+    const SIBLING_CHILDREN: usize = IMMEDIATE_RELATIONSHIPS + 6;
 
     fn test_limits() -> WorldLimits {
         WorldLimits {
@@ -961,6 +1051,91 @@ mod tests {
     }
 
     #[test]
+    fn ancestry_work_is_bounded() {
+        for pending_removal in [false, true] {
+            for allowance in [1, 2, 7] {
+                let (mut world, region, chain, parent) = deep_job(pending_removal);
+                let sibling = observation(&mut world, region, 9_000, DEEP_CHAIN + 60, Object, Root);
+                assert_eq!(world.children(sibling).count(), IMMEDIATE_RELATIONSHIPS);
+                assert_eq!(world.has_pending_removals(), pending_removal);
+                let key = (Uuid::from_u128(u128::from(DEEP_CHAIN + 1)), world.object(parent).unwrap().address());
+                let mut calls = 0;
+                let mut sibling_done = None;
+                let mut walked = None;
+                let mut visibility_calls = 0;
+                while world.has_pending_relationships() {
+                    calls += 1;
+                    assert!(calls < 20_000, "allowance {allowance} must finish");
+                    let before = world.relationship_work.get(&key).map(|job| (job.progress.revision, job.progress.ancestry));
+                    let resolved = world.children(parent).count();
+                    let _ = world.resolve_relationships_within(64, allowance).unwrap();
+                    if sibling_done.is_none() && world.children(sibling).count() == SIBLING_CHILDREN {
+                        sibling_done = Some(calls);
+                    }
+                    let Some(job) = world.relationship_work.get(&key) else { continue };
+                    if !job.progress.parent_visible && matches!(job.progress.check, Some(VisibilityCheck::Walking(_))) {
+                        assert_eq!(job.progress.ancestry, Ancestry::Unknown);
+                        visibility_calls += 1;
+                    }
+                    let Ancestry::Walking { next, steps } = job.progress.ancestry else { continue };
+                    assert_eq!(next, chain[chain.len() - 1 - steps], "allowance {allowance} follows the chain");
+                    assert_eq!(world.children(parent).count(), resolved, "allowance {allowance} cannot link mid-walk");
+                    walked = walked.max(Some(steps));
+                    if let Some((revision, Ancestry::Walking { steps: previous, .. })) = before
+                        && revision == world.revision()
+                    {
+                        assert!(steps >= previous && steps - previous <= allowance, "allowance {allowance} bounds a call");
+                    }
+                }
+                assert!(walked.is_some_and(|steps| steps >= chain.len() - allowance), "allowance {allowance} resumes the walk");
+                assert!(calls >= chain.len() / allowance, "allowance {allowance} spreads work over {calls} calls");
+                if pending_removal {
+                    assert!(visibility_calls >= chain.len() / allowance - 1, "allowance {allowance} splits parent visibility");
+                } else {
+                    assert_eq!(visibility_calls, 0);
+                }
+                assert!(sibling_done.is_some_and(|sibling| sibling < chain.len() / allowance));
+                assert_eq!(world.children(parent).count(), DEEP_CHILDREN as usize);
+                assert_eq!(world.children(sibling).count(), SIBLING_CHILDREN);
+                assert_eq!(world.check_invariants(), Ok(()));
+            }
+        }
+    }
+
+    #[test]
+    fn deep_preflight_reserves_revision() {
+        let (mut world, region, chain, parent) = deep_job(false);
+        let observe = |order| {
+            ObjectObservation::new(
+                source(region, order),
+                Uuid::from_u128(u128::from(DEEP_CHAIN + 1)),
+                NonZeroU32::new(DEEP_CHAIN + 1).unwrap(),
+                Object,
+                Local(NonZeroU32::new(DEEP_CHAIN).unwrap()),
+            )
+        };
+        let _ = world.observe_object(observe(8_500)).unwrap();
+        assert_eq!(world.children(parent).count(), 0);
+        world.journal.revision = WorldRevision(u64::MAX);
+
+        assert_eq!(world.observe_object(observe(9_000)).unwrap_err(), ApplyError::RevisionExhausted);
+        assert_eq!(world.object(parent).unwrap().parent(), Parent::Resolved(chain[chain.len() - 1]));
+        assert_eq!(world.children(parent).count(), 0);
+        assert!(world.has_pending_relationships());
+        assert_eq!(world.check_invariants(), Ok(()));
+
+        world.journal.revision = WorldRevision(u64::MAX - 4);
+        let applied = world.observe_object(observe(9_001)).unwrap();
+        assert_eq!(applied.outcome, Unchanged);
+        assert_eq!(world.children(parent).count(), 0);
+        while world.has_pending_relationships() {
+            let _ = world.resolve_relationships(64).unwrap();
+        }
+        assert_eq!(world.children(parent).count(), DEEP_CHILDREN as usize);
+        assert_eq!(world.check_invariants(), Ok(()));
+    }
+
+    #[test]
     fn generation_limit_detaches_avatar_without_pose() {
         let mut world = World::new(test_limits());
         let region = world.register_region().unwrap();
@@ -1043,6 +1218,36 @@ mod tests {
         assert!(world.object(child).is_none());
         assert!(retired.recovery_cancellations.is_empty());
         assert_eq!(drain_removals(&mut world).1.len(), 2);
+    }
+
+    fn deep_job(pending_removal: bool) -> (World, Region, Vec<Entity>, Entity) {
+        let mut limits = test_limits();
+        limits.max_entities = 400;
+        limits.max_entities_per_region = 400;
+        let mut world = World::new(limits);
+        let region = world.register_region().unwrap();
+        let chain = (1..=DEEP_CHAIN)
+            .map(|local_id| {
+                let parent = NonZeroU32::new(local_id - 1).map_or(Root, Local);
+                observation(&mut world, region, u64::from(local_id), local_id, Object, parent)
+            })
+            .collect::<Vec<_>>();
+        let pending = Local(NonZeroU32::new(DEEP_CHAIN + 1).unwrap());
+        for child in 1..=DEEP_CHILDREN {
+            observation(&mut world, region, u64::from(DEEP_CHAIN + child), DEEP_CHAIN + 10 + child, Object, pending);
+        }
+        let sibling = Local(NonZeroU32::new(DEEP_CHAIN + 60).unwrap());
+        for child in 1..=SIBLING_CHILDREN as u32 {
+            observation(&mut world, region, u64::from(DEEP_CHAIN + 100 + child), DEEP_CHAIN + 100 + child, Object, sibling);
+        }
+        if pending_removal {
+            observation(&mut world, region, 7_000, DEEP_CHAIN + 50, Object, Root);
+            let _ = world.remove_object(source(region, 7_001), NonZeroU32::new(DEEP_CHAIN + 50).unwrap()).unwrap();
+        }
+        let parent = observation(&mut world, region, 8_000, DEEP_CHAIN + 1, Object, Local(NonZeroU32::new(DEEP_CHAIN).unwrap()));
+        assert_eq!(world.children(parent).count(), 0, "introduction must not walk the whole chain");
+        assert!(world.has_pending_relationships());
+        (world, region, chain, parent)
     }
 
     fn observation(world: &mut World, region: Region, order: u64, local_id: u32, kind: Kind, parent: ParentUpdate) -> Entity {
