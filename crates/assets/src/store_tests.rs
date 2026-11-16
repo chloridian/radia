@@ -1830,7 +1830,16 @@ fn retry_limits_and_server_delays() {
         .expect_err("transient fetch failure completes without decode input");
     store.complete(completion.into(), retry_at);
     assert_matches!(demand.status(), Status::Failed { retry_at: None, .. });
-    assert!(store.next_job(retry_at + Duration::from_secs(29)).is_none(), "an excessive server delay ends the burst");
+    assert!(store.next_job(retry_at + Duration::from_secs(30)).is_none(), "an excessive server delay is not retried early");
+    let LoadJob::Fetch(restart) = store.next_job(retry_at + Duration::from_secs(120)).expect("the server delay elapses") else {
+        panic!("a restart fetches again")
+    };
+    let failed_at = retry_at + Duration::from_secs(120);
+    let completion = restart.complete(Err(Failure::Transient { retry_after: Duration::MAX })).unwrap_err();
+    store.complete(completion.into(), failed_at);
+    assert!(store.next_job(failed_at + MAX_RETRY_AFTER - Duration::from_secs(1)).is_none(), "a capped server delay is honoured");
+    assert_matches!(store.next_job(failed_at + MAX_RETRY_AFTER), Some(LoadJob::Fetch(_)), "an unbounded server delay is capped");
+    drop(demand);
 }
 
 #[test]
