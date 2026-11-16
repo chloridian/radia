@@ -99,12 +99,10 @@ pub(super) fn material_slots(object: &Object, asset: bool, mesh: Option<&SharedM
             None => BTreeSet::new(),
         };
     }
-    if priority == Priority::Visible
-        && let Some(mesh) = mesh
-    {
-        return mesh.mesh().faces().iter().map(|face| face.slot).collect();
+    match mesh {
+        Some(mesh) => mesh.mesh().faces().iter().map(|face| face.slot).collect(),
+        None => fallback_slots(object),
     }
-    fallback_slots(object)
 }
 
 fn fallback_slots(object: &Object) -> BTreeSet<u8> {
