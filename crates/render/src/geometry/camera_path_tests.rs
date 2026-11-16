@@ -80,6 +80,9 @@ struct Report {
     budget_blocked_frames: u32,
     mesh_wait: Latencies,
     mesh_unresolved: Latencies,
+    parity: Latencies,
+    parity_unresolved: Latencies,
+    parity_abandoned: u32,
     first_entry: Latencies,
     reentry: Latencies,
     unresolved: Latencies,
@@ -90,12 +93,20 @@ struct Report {
     examples: Vec<String>,
 }
 
+impl Report {
+    fn parity_within_one(&self) -> f64 {
+        let total = self.parity.0.len() + self.parity_unresolved.0.len();
+        let within = self.parity.0.iter().filter(|latency| **latency <= 1).count();
+        within as f64 * 100.0 / total.max(1) as f64
+    }
+}
+
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let per_hundred = f64::from(self.commits) * 100.0 / f64::from(self.frames.max(1));
         write!(
             f,
-            "frames={} commits={} commits_per_100={per_hundred:.1} stale={:?} invalidations={:?} build_frames=({}) building={} draining={} layout_required={} phases={:?} mesh_bytes_changes={} mesh_revision_changes={} retry_frames={} longest_retry={} restart_frames={} appearance_frames={} budget_blocked_frames={} mesh_wait=({}) mesh_unresolved=({}) pop_in_first=({}) pop_in_reentry=({}) unresolved=({}) abandoned={} returned_during_build={} pop_outs={} margin_pop_outs={} examples={:?}",
+            "frames={} commits={} commits_per_100={per_hundred:.1} stale={:?} invalidations={:?} build_frames=({}) building={} draining={} layout_required={} phases={:?} mesh_bytes_changes={} mesh_revision_changes={} retry_frames={} longest_retry={} restart_frames={} appearance_frames={} budget_blocked_frames={} mesh_wait=({}) mesh_unresolved=({}) parity=({}) parity_within_1={:.1}% parity_unresolved=({}) parity_abandoned={} pop_in_first=({}) pop_in_reentry=({}) unresolved=({}) abandoned={} returned_during_build={} pop_outs={} margin_pop_outs={} examples={:?}",
             self.frames,
             self.commits,
             self.stale,
@@ -114,6 +125,10 @@ impl fmt::Display for Report {
             self.budget_blocked_frames,
             self.mesh_wait,
             self.mesh_unresolved,
+            self.parity,
+            self.parity_within_one(),
+            self.parity_unresolved,
+            self.parity_abandoned,
             self.first_entry,
             self.reentry,
             self.unresolved,
@@ -130,6 +145,8 @@ impl fmt::Display for Report {
 struct Track {
     shown: bool,
     ever_shown: bool,
+    strict: bool,
+    parity_since: Option<u32>,
     entered: Option<u32>,
     waiting_since: Option<u32>,
     slots: Vec<u32>,
@@ -290,12 +307,25 @@ impl Rig {
                 let strict = sphere.is_some_and(|sphere| sphere.visible(item.shading, camera, &bands.strict));
                 let retained = sphere.is_some_and(|sphere| sphere.visible(item.shading, camera, &bands.retained));
                 let resident = geometry.meshes.contains_key(&item.mesh.id());
-                let track =
-                    tracks.entry(item.id).or_insert_with(|| Track { slots: committed_slots(geometry, &item.faces), ..Track::default() });
+                let track = tracks.entry(item.id).or_insert_with(|| Track {
+                    slots: committed_slots(geometry, &item.faces),
+                    strict,
+                    ..Track::default()
+                });
                 if committed_now {
                     track.slots = committed_slots(geometry, &item.faces);
                 }
                 let shown = drawn(geometry, &track.slots);
+                if strict && !track.strict && resident {
+                    track.parity_since = Some(frame_index);
+                }
+                if !strict && track.parity_since.take().is_some() {
+                    report.parity_abandoned += 1;
+                }
+                if shown && let Some(since) = track.parity_since.take() {
+                    report.parity.0.push(frame_index - since);
+                }
+                track.strict = strict;
                 if track.shown && retained && !shown {
                     if strict {
                         report.pop_outs += 1;
@@ -337,6 +367,7 @@ impl Rig {
         }
         let frames = report.frames;
         report.unresolved.0.extend(tracks.values().filter_map(|track| track.waiting_since.map(|since| frames - since)));
+        report.parity_unresolved.0.extend(tracks.values().filter_map(|track| track.parity_since.map(|since| frames - since)));
         report.mesh_unresolved.0.extend(
             tracks.values().filter(|track| track.waiting_since.is_none()).filter_map(|track| track.entered.map(|entered| frames - entered)),
         );
