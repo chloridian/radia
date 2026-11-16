@@ -29,7 +29,7 @@ use crate::capabilities::budget::{
 };
 use crate::capabilities::event_queue::{MAX_EVENT_QUEUE_ERRORS, MAX_QUEUED_CAPABILITY_EVENT_BYTES};
 use crate::fixtures::{
-    event_queue::{EventReceiver, decode_request_body, map_field, receive_poll_error, request_body, set_sequence, test_fixture},
+    event_queue::{EventReceiver, decode_request_body, map_field, receive_poll_error, set_sequence, test_fixture},
     http::{
         ConcurrentCapabilityTestServer, EventQueueBudgetTestServer, EventQueueTestServer, EventServerResponse, LocalServer,
         event_batch_response, hold_response, request_line, response, seed_grant, seed_response, write_response,

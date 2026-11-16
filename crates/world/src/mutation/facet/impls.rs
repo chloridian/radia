@@ -130,7 +130,7 @@ impl Facet for Arc<PbrMaterialOverrides> {
     type View = PbrMaterialOverrides;
 
     const GROUP: FieldGroup = FieldGroup::PbrMaterialOverrides;
-    const CLASSES: WorldChangeClasses = WorldChangeClasses::APPEARANCE;
+    const CLASSES: WorldChangeClasses = WorldChangeClasses::APPEARANCE.union(WorldChangeClasses::PBR_MATERIAL_OVERRIDES);
     const AVATAR: bool = false;
 
     fn support(kind: Kind, appearance: Option<Appearance>, update: &Self::Update) -> FacetSupport {
