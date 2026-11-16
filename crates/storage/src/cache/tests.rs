@@ -123,7 +123,7 @@ fn lock_helper() {
 }
 
 #[test]
-fn key_paths_shard_and_validate() {
+fn key_paths_shard_safely() {
     let name = [0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89];
     let cache_key = Key::new(NamespaceId::new(1), name);
     assert_eq!(
@@ -208,7 +208,7 @@ fn namespace_change_remaps_entries() {
 }
 
 #[test]
-fn discard_handles_missing_and_unknown() {
+fn discard_rejects_only_unknown_namespace() {
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     cache.discard(key(24)).expect("discard absent key");
@@ -316,7 +316,7 @@ fn unexpected_index_trigger_is_discarded() {
 }
 
 #[test]
-fn contains_checks_index() {
+fn contains_tracks_stored_keys() {
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     assert!(!cache.contains(key(1)));
@@ -360,7 +360,7 @@ fn damaged_payloads_are_corrupt() {
 }
 
 #[test]
-fn busy_usage_requeues_and_merges() -> Result<(), Box<dyn std::error::Error>> {
+fn busy_usage_retry_keeps_newest() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;
     let hooks = Arc::new(writer::FaultHooks::default());
     let cache = Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::new(LruPolicy), hooks)?;
@@ -422,7 +422,7 @@ fn write_failure_keeps_existing_entries() {
 }
 
 #[test]
-fn writer_panic_shutdown_returns() {
+fn writer_panic_unblocks_shutdown() {
     let directory = tempdir().expect("cache directory");
     let empty = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open empty cache");
     let empty_size = empty.accounted_size();

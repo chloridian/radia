@@ -684,7 +684,7 @@ fn protected_scan_latches_until_release() {
 }
 
 #[test]
-fn staged_replacement_evicts_and_restores() {
+fn staged_writes_apply_in_order() {
     const ENTRY_BYTES: usize = 256 * 1024;
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");

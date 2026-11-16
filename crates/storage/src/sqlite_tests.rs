@@ -165,7 +165,7 @@ fn panic_resolves_queued_receipt() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn second_process_write_returns_busy() -> Result<(), Box<dyn Error>> {
+fn second_process_write_is_busy() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let path = directory.path().join("inventory.sqlite");
     let (db, _) = SqliteDb::open(&path, migrate)?;
