@@ -6,9 +6,10 @@ mod mutation;
 mod object;
 mod read;
 mod region;
+mod removal;
 mod update;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use uuid::Uuid;
 
@@ -23,6 +24,7 @@ use crate::object::relationships::{PendingChildKey, PendingResolution};
 use crate::object::storage::ObjectStore;
 use crate::object::view::IndexedObjects;
 use crate::region::RegionState;
+use crate::removal::{ReclamationFrame, ReclamationTask, RemovalCause, TransferProgress, VisibilityLookupCache};
 use crate::update::Stamp;
 
 pub use history::{WorldChange, WorldChangeClasses, WorldEntityRemovalReason};
@@ -40,7 +42,7 @@ pub use object::media::{
     MAX_MEDIA_DIMENSION, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MAX_MEDIA_WHITELIST_ENTRIES, MediaControls, MediaEntry,
     ObjectMedia, ObjectMediaError, ObjectMediaUpdate,
 };
-pub use object::relationships::RelationshipResolution;
+pub use object::relationships::{ParentResolutionCursor, ParentResolutionPlan, ParentResolutionProgress, RelationshipResolution};
 pub use object::shape::{PrimShape, SculptFlags, SculptType, Shape};
 pub use object::transform::{
     AttachmentPoint, CoordinateFrame, LinearMotion, LocalTransform, Pose, PoseError, PoseState, SitTarget, Transform, UnresolvedReason,
@@ -49,10 +51,12 @@ pub use object::transform::{
 pub use object::view::{Object, Objects};
 pub use object::{Kind, Parent, ParentUpdate};
 pub use read::{
-    MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_MEDIA_READ_BYTES,
-    MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectDetail, ObjectDetailBatch,
-    ObjectDetailResult, ObjectListItem, ObjectListPage, ObjectMediaRead, ObjectPageCursor, ObjectSummary, RegionPage, RegionPageCursor,
-    RegionSummary, WorldChangeCursor, WorldChangePage, WorldChangeRecord, WorldReadBarrier, WorldReadError,
+    MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_DETAIL_WORK_ITEMS,
+    MAX_OBJECT_LOOKUP_WORK_ITEMS, MAX_OBJECT_MEDIA_READ_BYTES, MAX_OBJECT_PAGE_ITEMS, MAX_OBJECT_PAGE_WORK_ITEMS, MAX_REGION_PAGE_BYTES,
+    MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectBindingFence, ObjectDetail, ObjectDetailBatch, ObjectDetailBatchPage,
+    ObjectDetailCursor, ObjectDetailResult, ObjectListItem, ObjectListPage, ObjectLookupCursor, ObjectLookupProgress, ObjectMediaRead,
+    ObjectPageCursor, ObjectSummary, RegionPage, RegionPageCursor, RegionSummary, WorldChangeCursor, WorldChangePage, WorldChangeRecord,
+    WorldReadBarrier, WorldReadError,
 };
 pub use region::environment::{
     EnvironmentAssignment, EnvironmentRead, EnvironmentScope, EnvironmentSource, EnvironmentTarget, MAX_ENVIRONMENT_BYTES,
@@ -68,10 +72,11 @@ pub use region::terrain::{
     MAX_TERRAIN_PAGE_PATCHES, MAX_TERRAIN_PATCHES, TERRAIN_PATCH_SAMPLES, TERRAIN_PATCH_SIZE, TERRAIN_REGION_SIZE, TerrainPage,
     TerrainPageCursor, TerrainPatch, TerrainPatchError, TerrainPatchId, TerrainSettings, TerrainSettingsError,
 };
+pub use removal::{MAX_REMOVAL_WORK_PER_TURN, RemovalFence, RemovalProgress};
 pub use update::{
     Applied, ApplyError, ApplyOutcome, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, MotionUpdateKind,
-    ObjectObservation, ObjectPatch, OrderEvidence, Recovery, RegionApplied, RegionOutcome, Rejections, UpdateAuthority, UpdateSource,
-    WorldLimits, WorldRevision,
+    ObjectObservation, ObjectPatch, OrderEvidence, Recovery, RecoveryCancellation, RegionApplied, RegionOutcome, Rejections,
+    UpdateAuthority, UpdateSource, WorldLimits, WorldRevision,
 };
 
 const MAX_OBJECT_MEDIA_BYTES: usize = 64 * 1024 * 1024;
@@ -80,11 +85,22 @@ pub struct World {
     id: WorldId,
     store: ObjectStore,
     regions: BTreeMap<Region, RegionState>,
+    retiring_regions: HashMap<Region, RegionState>,
+    removal_tasks: std::collections::VecDeque<ReclamationTask>,
+    reclamation: Vec<ReclamationFrame>,
+    transfer_cursors: HashMap<Entity, TransferProgress>,
+    transfer_address_count: usize,
+    invalidations: HashMap<Entity, RemovalCause>,
+    counted_invalidations: HashSet<Entity>,
+    lookup_visibility: VisibilityLookupCache,
+    removal_fences: HashMap<LocalAddress, (Entity, Uuid, RemovalCause)>,
+    invalidated_region_counts: HashMap<Region, usize>,
     last_region_generation: u64,
     self_agent: Option<Uuid>,
     children: HashMap<Entity, BTreeMap<Uuid, Entity>>,
     pending_children: HashMap<LocalAddress, BTreeMap<PendingChildKey, Entity>>,
     relationship_work: BTreeMap<(Uuid, LocalAddress), PendingResolution>,
+    relationship_work_parents: HashMap<LocalAddress, BTreeMap<Uuid, Entity>>,
     relationship_cursor: Option<(Uuid, LocalAddress)>,
     tombstones: Tombstones,
     retained: RetainedOverrides,
@@ -104,11 +120,22 @@ impl World {
             id,
             store: ObjectStore::new(id),
             regions: BTreeMap::new(),
+            retiring_regions: HashMap::new(),
+            removal_tasks: std::collections::VecDeque::new(),
+            reclamation: Vec::new(),
+            transfer_cursors: HashMap::new(),
+            transfer_address_count: 0,
+            invalidations: HashMap::new(),
+            counted_invalidations: HashSet::new(),
+            lookup_visibility: VisibilityLookupCache::default(),
+            removal_fences: HashMap::new(),
+            invalidated_region_counts: HashMap::new(),
             last_region_generation: 0,
             self_agent: None,
             children: HashMap::new(),
             pending_children: HashMap::new(),
             relationship_work: BTreeMap::new(),
+            relationship_work_parents: HashMap::new(),
             relationship_cursor: None,
             tombstones: Tombstones::default(),
             retained: RetainedOverrides::default(),
@@ -138,15 +165,17 @@ impl World {
     }
 
     pub fn entity(&self, id: Uuid) -> Option<Entity> {
-        self.store.entity(id)
+        let entity = self.store.entity(id)?;
+        self.entity_is_visible(entity).then_some(entity)
     }
 
     pub fn entity_at(&self, address: LocalAddress) -> Option<Entity> {
-        self.store.entity_at(address)
+        let entity = self.store.entity_at(address)?;
+        self.entity_is_visible(entity).then_some(entity)
     }
 
     pub fn object_binding_target(&self, entity: Entity) -> Option<ObjectBindingTarget> {
-        let object = self.store.object_record(entity)?;
+        let object = self.object(entity)?.record();
         Some(ObjectBindingTarget {
             entity,
             id: object.id,
@@ -166,6 +195,9 @@ impl World {
     }
 
     pub fn object(&self, entity: Entity) -> Option<Object<'_>> {
+        if !self.entity_is_visible(entity) {
+            return None;
+        }
         let record = self.store.object_record(entity)?;
         Some(Object::new(entity, record, self))
     }
@@ -175,19 +207,24 @@ impl World {
     }
 
     pub fn object_count(&self) -> usize {
-        self.store.len()
+        self.visible_entity_count()
     }
 
     pub fn objects_in_region(&self, region: Region) -> impl Iterator<Item = Object<'_>> {
-        self.store.region_ids(region).into_iter().flat_map(|ids| IndexedObjects::new(ids.iter(), self))
+        let needs_filter = self.has_pending_removals();
+        self.store.region_ids(region).into_iter().flat_map(move |ids| IndexedObjects::new(ids.values().copied(), self, needs_filter))
     }
 
     pub fn children(&self, entity: Entity) -> impl Iterator<Item = Object<'_>> {
-        self.children.get(&entity).into_iter().flat_map(|children| children.values()).filter_map(|child| self.object(*child))
+        self.children
+            .get(&entity)
+            .into_iter()
+            .flat_map(|children| children.values())
+            .filter_map(move |child| self.object(*child).filter(|object| object.parent() == Parent::Resolved(entity)))
     }
 
     pub fn avatars(&self) -> impl Iterator<Item = Object<'_>> {
-        IndexedObjects::new(self.store.avatar_ids().iter(), self)
+        IndexedObjects::new(self.store.avatar_ids().values().copied(), self, self.has_pending_removals())
     }
 
     pub fn regions(&self) -> impl Iterator<Item = (Region, &RegionInfo)> {

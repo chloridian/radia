@@ -1,16 +1,16 @@
 use uuid::Uuid;
 
 use super::fields::{Draft, Fields, Settlement, validate_uuid};
-use super::lifecycle::RemovalCause;
 use super::{Effects, Origin};
 use crate::ParentUpdate::Local;
 use crate::UpdateAuthority::Untracked;
 use crate::history::WorldChange::{EntityAdded, EntityRebound, EntityTransferred, EntityUpdated};
 use crate::mutation::facet::FacetSet;
-use crate::object::relationships::ParentResolution;
+use crate::object::relationships::{ParentResolution, ParentResolutionPlan};
+use crate::removal::RemovalCause;
 use crate::{
-    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, ObjectObservation, Parent, ParentUpdate, Region,
-    Rejections,
+    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, ObjectObservation, Parent, ParentUpdate,
+    RecoveryCancellation, Region, Rejections,
 };
 use crate::{Binding, ObjectOrdering, ObjectRecord, ObjectState, World, newer_field};
 
@@ -26,7 +26,18 @@ struct Observed {
 
 impl World {
     pub fn observe_object(&mut self, observation: ObjectObservation) -> Result<Applied, ApplyError> {
-        self.observe(observation, false)
+        self.observe(observation, false, None)
+    }
+
+    pub fn observe_object_with_parent_resolution(
+        &mut self,
+        observation: ObjectObservation,
+        plan: ParentResolutionPlan,
+    ) -> Result<Applied, ApplyError> {
+        if !plan.matches(self, observation.source, observation.local_id, observation.parent) {
+            return Err(ApplyError::InvalidValue { field: "parent_resolution" });
+        }
+        self.observe(observation, false, Some(plan))
     }
 
     pub fn handoff_agent(&mut self, from: Region, observation: ObjectObservation) -> Result<Applied, ApplyError> {
@@ -43,10 +54,15 @@ impl World {
         if self.store.object_record(entity).expect("UUID index contains a live entity").state.binding.address.region != from {
             return Err(ApplyError::StaleRegion);
         }
-        self.observe(observation, true)
+        self.observe(observation, true, None)
     }
 
-    fn observe(&mut self, observation: ObjectObservation, allow_agent_handoff: bool) -> Result<Applied, ApplyError> {
+    fn observe(
+        &mut self,
+        observation: ObjectObservation,
+        allow_agent_handoff: bool,
+        parent_resolution: Option<ParentResolutionPlan>,
+    ) -> Result<Applied, ApplyError> {
         let ObjectObservation { source, id, local_id, kind, parent, .. } = observation;
         self.require_active_region(source.region)?;
         validate_uuid(id, "object_id")?;
@@ -54,7 +70,7 @@ impl World {
         let Some(stamp) = source.stamp() else {
             return Ok(self.defer(DeferredReason::AmbiguousOrder, address));
         };
-        let existing = self.entity(id);
+        let existing = parent_resolution.map_or_else(|| self.entity(id), |plan| plan.child);
         let current = existing.and_then(|entity| self.store.object_record(entity)).map(|record| record.state);
         if source.authority() == Untracked && current.is_none_or(|state| state.binding.address != address) {
             let applied = self.unknown_address(address, stamp);
@@ -70,22 +86,35 @@ impl World {
         let rejections = fields.validate(current.and_then(|state| state.transform.rotation()));
         let observed = Observed { id, kind, parent, address, origin: Origin { source, stamp }, fields, rejections };
         match existing {
-            Some(entity) => self.update_observed(entity, observed, allow_agent_handoff),
-            None => self.introduce(observed),
+            Some(entity) => self.update_observed(entity, observed, allow_agent_handoff, parent_resolution),
+            None => self.introduce(observed, parent_resolution),
         }
     }
 
-    fn introduce(&mut self, observed: Observed) -> Result<Applied, ApplyError> {
+    fn introduce(&mut self, observed: Observed, parent_resolution: Option<ParentResolutionPlan>) -> Result<Applied, ApplyError> {
         let Observed { id, kind, parent: parent_update, address, origin, fields, mut rejections } = observed;
         let displaced = self.entity_at(address);
-        if displaced.is_none()
-            && (self.store.len() >= self.limits.max_entities
-                || self.region_object_count(address.region) >= self.limits.max_entities_per_region)
+        let displaced_physical = self.store.entity_at(address);
+        let reuses_hidden_address = displaced_physical.is_some_and(|entity| !self.entity_is_visible(entity));
+        let reuses_hidden_count = reuses_hidden_address
+            && displaced_physical.is_some_and(|entity| {
+                self.store.object_record(entity).is_some_and(|record| self.store.entity(record.id) == Some(entity))
+                    && !self.counted_invalidations.contains(&entity)
+            });
+        if self.store.physical_len() >= self.limits.max_entities.saturating_mul(2)
+            || displaced.is_none()
+                && (self.visible_entity_upper_bound().saturating_sub(usize::from(reuses_hidden_count)) >= self.limits.max_entities
+                    || self.region_object_count_upper_bound(address.region).saturating_sub(usize::from(reuses_hidden_count))
+                        >= self.limits.max_entities_per_region)
         {
             return Err(ApplyError::EntityBudgetExhausted);
         }
         let address_was_reused = self.address_was_reused(address);
-        let parent = match self.resolve_parent(address.region, address.local_id, parent_update, origin.field(), None) {
+        let resolution = parent_resolution.map_or_else(
+            || self.resolve_parent(address.region, address.local_id, parent_update, origin.field(), None),
+            |plan| plan.resolution,
+        );
+        let parent = match resolution {
             ParentResolution::Accepted(parent) => parent,
             ParentResolution::Cycle => return Err(ApplyError::InvalidValue { field: "parent_cycle" }),
         };
@@ -109,10 +138,13 @@ impl World {
 
         let mut effects = Effects::default();
         if let Some(displaced) = displaced {
-            self.remove_entity(displaced, RemovalCause::AddressReplaced(origin.stamp), None, &mut effects);
+            self.remove_entity(displaced, RemovalCause::AddressReplaced(origin.stamp), None, &mut effects)?;
         }
         self.tombstones.remove(&address);
         let facets = facets.map(|changes| changes.after).unwrap_or_default();
+        for previous in [self.store.entity(id), self.store.entity_at(address)].into_iter().flatten() {
+            self.untrack_current_invalidation(previous);
+        }
         let entity = self.store.insert(ObjectRecord { id, kind, state }, facets, ordering);
         self.retained.remove(&address);
         self.apply_parent(entity, parent, &mut effects);
@@ -121,17 +153,27 @@ impl World {
         Ok(self.finish(ApplyOutcome::Introduced(entity), effects).with_rejections(rejections).with_recovery_satisfied(true))
     }
 
-    fn update_observed(&mut self, entity: Entity, observed: Observed, allow_agent_handoff: bool) -> Result<Applied, ApplyError> {
+    fn update_observed(
+        &mut self,
+        entity: Entity,
+        observed: Observed,
+        allow_agent_handoff: bool,
+        parent_resolution: Option<ParentResolutionPlan>,
+    ) -> Result<Applied, ApplyError> {
         let Observed { id, kind, parent: parent_update, address, origin, mut fields, mut rejections } = observed;
         let source = origin.source;
         let mut read = self.store.read(entity.0);
         let (record, ordering) = read.get().expect("UUID index contains a complete entity");
         let before = record.state;
+        let logical_before_parent =
+            parent_resolution.map_or_else(|| self.logical_parent_for(entity, before.parent), |plan| plan.logical_before_parent);
+        let logical_before = ObjectState { parent: logical_before_parent, ..before };
         let old_binding = before.binding;
         if record.kind != kind {
             return Err(ApplyError::KindMismatch { current: record.kind, observed: kind });
         }
         let transfer = old_binding.address.region != source.region;
+        let parent_removal_fence = (!transfer).then(|| self.parent_removal_fence(before.parent, old_binding.address.region())).flatten();
         let facets = if transfer || fields.has_facet_updates() {
             self.store.facets(entity.0, &fields.facets, transfer)
         } else {
@@ -149,16 +191,25 @@ impl World {
         if stale {
             return Ok(Applied::new(ApplyOutcome::IgnoredStale).with_rejections(rejections));
         }
-        if transfer && self.entity_at(address).is_none() && self.region_object_count(source.region) >= self.limits.max_entities_per_region {
+        if transfer
+            && self.entity_at(address).is_none()
+            && self.region_object_count_upper_bound(source.region) >= self.limits.max_entities_per_region
+        {
             return Err(ApplyError::EntityBudgetExhausted);
         }
         let address_was_reused = self.address_was_reused(address);
         let displaced = self.entity_at(address).filter(|displaced| *displaced != entity);
+        let displaced_physical = self.store.entity_at(address).filter(|displaced| *displaced != entity);
 
-        let parent_admitted =
-            (transfer || newer_field(origin.field(), ordering.fences.parent)) && ordering.admits_parent(source, origin.stamp);
+        let parent_admitted = (transfer || newer_field(origin.field(), ordering.fences.parent))
+            && ordering.admits_parent(source, origin.stamp)
+            && parent_removal_fence.is_none_or(|fence| origin.stamp > fence);
         let (parent, parent_cycle) = if parent_admitted {
-            match self.resolve_parent(source.region, address.local_id, parent_update, origin.field(), Some(entity)) {
+            let resolution = parent_resolution.map_or_else(
+                || self.resolve_parent(source.region, address.local_id, parent_update, origin.field(), Some(entity)),
+                |plan| plan.resolution,
+            );
+            match resolution {
                 ParentResolution::Accepted(parent) => (parent, false),
                 ParentResolution::Cycle => (Parent::Unknown, true),
             }
@@ -182,12 +233,12 @@ impl World {
         } else {
             old_binding.address_generation
         };
-        let next_parent = if parent_applied { parent } else { before.parent };
+        let next_parent = if parent_applied { parent } else { logical_before_parent };
         let next_attachment = fields.next_attachment_point(before.attachment_point, &ordering.fences, origin);
         let frame_changed =
-            transfer || self.relationship_frame_changed(before.parent, next_parent, before.attachment_point, next_attachment);
+            transfer || self.relationship_frame_changed(logical_before_parent, next_parent, before.attachment_point, next_attachment);
         let detach_snapshot =
-            (parent_applied && !transfer).then(|| self.detach_snapshot(entity, kind, before.parent, next_parent)).flatten();
+            (parent_applied && !transfer).then(|| self.detach_snapshot(entity, kind, logical_before_parent, next_parent)).flatten();
 
         let mut draft = Draft::new(before, *ordering, facets);
         if transfer {
@@ -203,8 +254,9 @@ impl World {
         let pose_affects_descendants = !transfer && pose_accepted && draft.pose_changes(fields.pose);
         let settlement = Settlement { frame, pose_accepted, detach_snapshot, parent_applied, parent_cycle, advance_binding: true };
         draft.update(fields, kind, origin, settlement, self.object_media_bytes, &mut rejections);
-        let parent_changed = parent_applied && draft.state.parent != parent;
-        let change_classes = draft.change_classes(&before, if parent_applied { parent } else { draft.state.parent });
+        let parent_changed = parent_applied && logical_before_parent != parent;
+        let parent_needs_relink = parent_applied && before.parent != parent;
+        let change_classes = draft.change_classes(&logical_before, if parent_applied { parent } else { logical_before_parent });
         let waiting_children_change = (parent_applied || binding_changed)
             && self.waiting_children_will_change(address, entity, id, draft.state.binding, draft.state.parent);
         if (parent_applied || binding_changed) && !self.relationship_capacity_available(address, id) {
@@ -215,30 +267,37 @@ impl World {
         }
         let (state, facets, ordering) = draft.into_parts();
         drop(read);
+        let parent_transfer = if transfer { Some(self.prepare_parent_transfer(entity, old_binding)?) } else { None };
 
         let mut effects = Effects::default();
         if let Some(displaced) = displaced {
-            self.remove_entity(displaced, RemovalCause::AddressReplaced(origin.stamp), Some(entity), &mut effects);
+            self.remove_entity(displaced, RemovalCause::AddressReplaced(origin.stamp), Some(entity), &mut effects)?;
+            self.untrack_current_invalidation(displaced);
+        }
+        if let Some(displaced) = displaced_physical {
+            self.untrack_current_invalidation(displaced);
         }
         if binding_changed {
-            effects.recovery_cancellations.push(old_binding.address);
+            effects.recovery_cancellations.push(RecoveryCancellation::new(entity, old_binding.address));
             effects.changes.push(if transfer {
                 EntityTransferred { id, entity, from: old_binding.address, to: address }
             } else {
                 EntityRebound { id, entity, from: old_binding.address, to: address }
             });
             if transfer {
-                self.pend_source_children(entity, old_binding.address, id, &mut effects);
                 self.set_parent(entity, Parent::Unknown);
             }
             self.tombstones.remove(&address);
         }
         self.store.commit(entity, state, facets, ordering);
+        if let Some(parent_transfer) = parent_transfer {
+            self.schedule_parent_transfer(parent_transfer);
+        }
         if binding_changed {
             self.retained.remove(&address);
             self.insert_tombstone(old_binding.address, if transfer { old_binding.fence() } else { origin.stamp });
         }
-        if parent_changed {
+        if parent_changed || parent_needs_relink || (transfer && parent_applied) {
             self.apply_parent(entity, parent, &mut effects);
         }
         if parent_applied || binding_changed {
@@ -262,12 +321,8 @@ impl World {
         Ok(self.finish(outcome, effects).with_rejections(rejections).with_recovery_satisfied(recovery_satisfied))
     }
 
-    fn region_object_count(&self, region: Region) -> usize {
-        self.store.region_ids(region).map_or(0, |ids| ids.len())
-    }
-
     fn address_was_reused(&self, address: LocalAddress) -> bool {
-        self.entity_at(address).is_some() || self.tombstones.contains_key(&address) || self.floors.contains_key(&address.region)
+        self.store.entity_at(address).is_some() || self.tombstones.contains_key(&address) || self.floors.contains_key(&address.region)
     }
 
     fn pend_cascaded_parent(&self, displaced: Entity, parent: Parent, update: ParentUpdate, region: Region, origin: Origin) -> Parent {

@@ -1,9 +1,15 @@
 use super::support::{
     AmbiguousOrder, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, FieldRejectionReason, HashSet, IgnoredStale, Introduced,
     InvalidValue, Local, Object, ObjectPatch, Parent, ParentCycle, ParentDependsOnRejectedParent, Pending, Pose, Quat, Region, Removed,
-    Resolved, Root, SitTarget, Unchanged, UnknownObject, UntrustedSource, UpdateSource, Updated, Vec3, World, address, limits, local_id,
-    object, source, untracked, uuid, with_region,
+    Resolved, Root, SitTarget, Unchanged, UnknownObject, UntrustedSource, UpdateSource, Updated, Vec3, World, address, drain_removals,
+    limits, local_id, object, source, untracked, uuid, with_region,
 };
+
+fn drain_relationships(world: &mut World) {
+    while world.has_pending_relationships() {
+        let _ = world.resolve_relationships(64).unwrap();
+    }
+}
 
 fn child_first_world() -> (World, Region, world::Entity) {
     let mut bounds = limits();
@@ -236,6 +242,8 @@ fn pending_children_follow_parent_removal() {
             let _ = world.remove_object(source(region, 300), local_id(1)).unwrap();
         }
         assert_eq!(world.object_count(), 0);
+        let _ = drain_removals(&mut world);
+        drain_relationships(&mut world);
         assert!(!world.has_pending_relationships());
         assert_eq!(world.resolve_relationships(7).unwrap().revision, None);
     }
@@ -247,12 +255,48 @@ fn transfer_preserves_pending_children() {
     let destination = world.register_region().unwrap();
     let _ = world.observe_object(object(source(destination, 300), 1000, 1, Object, Root)).unwrap();
     assert_eq!(world.object(parent).unwrap().address(), address(destination, 1));
+    assert!(world.has_pending_removals());
+    assert!(world.has_pending_relationships());
+    let _ = drain_removals(&mut world);
+    drain_relationships(&mut world);
+    assert!(!world.has_pending_removals());
     assert!(!world.has_pending_relationships());
     for child in 1..=200 {
         let entity = world.entity(uuid(child)).unwrap();
         assert_eq!(world.object(entity).unwrap().parent(), Pending { address: address(region, 1), expected_uuid: Some(uuid(1000)) });
     }
     assert_eq!(world.resolve_relationships(7).unwrap().revision, None);
+}
+
+#[test]
+fn transfer_coalescing_keeps_old_region_recovery_addresses() {
+    let (mut world, source_region, parent) = child_first_world();
+    let first_destination = world.register_region().unwrap();
+    let second_destination = world.register_region().unwrap();
+    let _ = world.observe_object(object(source(first_destination, 300), 1000, 20, Object, Root)).unwrap();
+    let _ = world.observe_object(object(source(second_destination, 301), 1000, 30, Object, Root)).unwrap();
+    assert_eq!(world.object(parent).unwrap().address(), address(second_destination, 30));
+    let _ = drain_removals(&mut world);
+    drain_relationships(&mut world);
+    for child in 1..=200 {
+        let entity = world.entity(uuid(child)).unwrap();
+        assert_eq!(world.object(entity).unwrap().parent(), Pending { address: address(source_region, 1), expected_uuid: Some(uuid(1000)) });
+    }
+}
+
+#[test]
+fn transfer_back_preserves_current_relationship_work() {
+    let (mut world, source_region, parent) = child_first_world();
+    let destination = world.register_region().unwrap();
+    let _ = world.observe_object(object(source(destination, 300), 1000, 20, Object, Root)).unwrap();
+    let _ = world.observe_object(object(source(source_region, 301), 1000, 1, Object, Root)).unwrap();
+    let _ = drain_removals(&mut world);
+    drain_relationships(&mut world);
+    assert_eq!(world.object(parent).unwrap().address(), address(source_region, 1));
+    for child in 1..=200 {
+        let entity = world.entity(uuid(child)).unwrap();
+        assert_eq!(world.object(entity).unwrap().parent(), Resolved(parent));
+    }
 }
 
 #[test]
@@ -273,6 +317,9 @@ fn queued_resolution_respects_newer_updates() {
     assert!(world.object(parent).is_none());
     assert_eq!(world.object_count(), 1);
     assert_eq!(world.entity_at(address(region, 1)), Some(replacement));
+    drain_relationships(&mut world);
+    let _ = drain_removals(&mut world);
+    drain_relationships(&mut world);
     assert!(!world.has_pending_relationships());
     assert_eq!(world.resolve_relationships(7).unwrap().revision, None);
 }
@@ -297,6 +344,8 @@ fn rebinding_keeps_original_dependents() {
         assert_eq!(world.object_count(), 1);
         assert!(world.object(parent).is_none());
         assert_eq!(world.object(later_child).unwrap().parent(), Pending { address: address(region, 1), expected_uuid: None });
+        let _ = drain_removals(&mut world);
+        drain_relationships(&mut world);
         assert!(!world.has_pending_relationships());
     }
 }
@@ -531,13 +580,42 @@ fn transfer_pends_old_region_children() {
 
     let moved_parent = world.observe_object(object(source(destination, 1), 330, 20, Object, Root)).unwrap();
     assert_eq!(moved_parent.outcome, Updated(parent_entity));
-    assert_eq!(moved_parent.recovery.requests, [child_address]);
+    assert!(moved_parent.recovery.requests.is_empty());
     assert_eq!(world.object(parent_entity).unwrap().address(), address(destination, 20));
     assert_eq!(world.object(child_entity).unwrap().parent(), Pending { address: parent_address, expected_uuid: Some(uuid(330)) });
+    let progress = drain_removals(&mut world);
+    assert!(progress.iter().flat_map(|turn| &turn.recovery.requests).any(|target| *target == child_address));
 
     let replacement = world.observe_object(object(source(source_region, 10), 332, 10, Object, Root)).unwrap();
     assert!(matches!(replacement.outcome, Introduced(_)));
     assert_eq!(world.object(child_entity).unwrap().parent(), Pending { address: parent_address, expected_uuid: Some(uuid(330)) });
+}
+
+#[test]
+fn transfer_retention_is_bounded_until_reclamation() {
+    let mut world_limits = limits();
+    world_limits.max_regions = 3;
+    world_limits.max_entities = 2;
+    world_limits.max_entities_per_region = 2;
+    let mut world = World::new(world_limits);
+    let first = world.register_region().unwrap();
+    let second = world.register_region().unwrap();
+    let third = world.register_region().unwrap();
+    let Introduced(parent) = world.observe_object(object(source(first, 1), 330, 1, Object, Root)).unwrap().outcome else {
+        panic!("expected first parent introduction")
+    };
+    let Introduced(other) = world.observe_object(object(source(first, 2), 331, 2, Object, Root)).unwrap().outcome else {
+        panic!("expected second parent introduction")
+    };
+    let _ = world.observe_object(object(source(second, 1), 330, 1, Object, Root)).unwrap();
+    let _ = world.observe_object(object(source(second, 2), 331, 2, Object, Root)).unwrap();
+
+    assert_eq!(world.observe_object(object(source(third, 1), 330, 1, Object, Root)), Err(world::ApplyError::RemovalCapacityExhausted));
+    assert_eq!(world.object(parent).unwrap().address(), address(second, 1));
+    assert_eq!(world.object(other).unwrap().address(), address(second, 2));
+
+    let _ = drain_removals(&mut world);
+    assert_eq!(world.observe_object(object(source(third, 1), 330, 1, Object, Root)).unwrap().outcome, Updated(parent));
 }
 
 #[test]
@@ -610,12 +688,15 @@ fn parent_cascade_respects_child_order() {
     let removed = world.remove_object(source(region, 12), local_id(1)).unwrap();
     assert_eq!(removed.outcome, Removed(parent_id));
     assert_eq!(world.revision().get(), revision.get() + 1);
-    assert_eq!(removed.recovery.requests, [address(region, 2)]);
+    assert!(removed.recovery.requests.is_empty());
     assert!(world.entity(child_id).is_some());
     assert_eq!(world.object(child_entity).unwrap().parent(), Pending { address: parent_address, expected_uuid: Some(parent_id) });
 
     let replacement = world.observe_object(object(source(region, 14), 30, 1, Object, Root)).unwrap();
     let Introduced(replacement_entity) = replacement.outcome else { panic!("expected parent reintroduction") };
+    let progress = drain_removals(&mut world);
+    assert!(!progress.iter().flat_map(|turn| &turn.recovery.requests).any(|target| *target == address(region, 2)));
+    drain_relationships(&mut world);
     assert_eq!(world.object(child_entity).unwrap().parent(), Resolved(replacement_entity));
 
     let revision = world.revision();
@@ -623,11 +704,57 @@ fn parent_cascade_respects_child_order() {
     assert_eq!(world.revision().get(), revision.get() + 1);
     assert_eq!(world.entity(child_id), None);
     assert!(world.object(replacement_entity).is_none());
+    let _ = drain_removals(&mut world);
 
     assert_eq!(world.observe_object(object(source(region, 14), 32, 2, Object, Root)).unwrap().outcome, IgnoredStale);
     let reintroduced = world.observe_object(object(source(region, 16), 32, 2, Object, Root)).unwrap();
     let Introduced(reintroduced) = reintroduced.outcome else { panic!("expected a new child after the cascade tombstone") };
     assert_ne!(child_entity, reintroduced);
+}
+
+#[test]
+fn pending_ancestor_uses_its_own_parent_fence() {
+    let mut bounds = limits();
+    bounds.max_entities = 80;
+    bounds.max_entities_per_region = 80;
+    let mut world = World::new(bounds);
+    let region = world.register_region().unwrap();
+    for id in 1u64..=70 {
+        let _ = world.observe_object(object(source(region, id), u128::from(id), id as u32 + 1, Object, Local(local_id(1)))).unwrap();
+    }
+    let Introduced(parent) = world.observe_object(object(source(region, 71), 1000, 1, Object, Root)).unwrap().outcome else {
+        panic!("expected parent introduction")
+    };
+    let child = world.entity(uuid(70)).unwrap();
+    assert!(matches!(world.object(child).unwrap().parent(), Pending { .. }));
+    let descendant_id = uuid(65);
+    let descendant = world.entity(descendant_id).unwrap();
+    assert_eq!(
+        world
+            .patch_object(ObjectPatch { parent: Some(Local(local_id(71))), ..ObjectPatch::new(source(region, 300), local_id(66)) })
+            .unwrap()
+            .outcome,
+        Updated(descendant)
+    );
+    assert_eq!(world.object(descendant).unwrap().parent(), Resolved(child));
+
+    let _ = world.remove_object(source(region, 203), local_id(1)).unwrap();
+
+    let mut cursor = None;
+    let mut visible = HashSet::new();
+    loop {
+        let page = world.object_list_page(cursor, 256).unwrap();
+        visible.extend(page.objects.into_iter().map(|object| object.id));
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    assert!(visible.contains(&descendant_id));
+    assert!(!visible.contains(&uuid(70)));
+    assert_eq!(world.entity(uuid(1000)), None);
+    assert!(world.object(parent).is_none());
 }
 
 #[test]
@@ -646,7 +773,10 @@ fn pending_cycle_pins_parent_identity() {
     assert_eq!(world.object(waiting).unwrap().parent(), Resolved(parent));
     assert_eq!(world.children(parent).map(|object| object.entity()).collect::<HashSet<_>>(), HashSet::from([waiting]));
     assert_eq!(parent_applied.recovery.requests, [address(region, 1)]);
-    assert_eq!(parent_applied.recovery_cancellations, [address(region, 3)]);
+    assert_eq!(
+        parent_applied.recovery_cancellations.iter().map(|cancellation| cancellation.address()).collect::<Vec<_>>(),
+        [address(region, 3)]
+    );
 
     let unrelated = world.observe_object(object(source(region, 4), 373, 2, Object, Root)).unwrap();
     let Introduced(unrelated) = unrelated.outcome else { panic!("expected local-ID replacement") };
@@ -787,7 +917,7 @@ fn parent_resolution_keeps_parent_fence() {
 }
 
 #[test]
-fn parent_removal_keeps_seated_avatar_pending() {
+fn parent_removal_detaches_avatar_without_resolved_pose() {
     let (mut world, region) = with_region();
     let parent = world.observe_object(object(source(region, 10), 150, 1, Object, Root)).unwrap();
     let Introduced(parent_entity) = parent.outcome else { panic!("expected parent introduction") };
@@ -795,9 +925,15 @@ fn parent_removal_keeps_seated_avatar_pending() {
     let Introduced(avatar_entity) = avatar.outcome else { panic!("expected avatar introduction") };
 
     let removed = world.remove_object(source(region, 12), local_id(1)).unwrap();
+    let cleanup = drain_removals(&mut world);
     assert_eq!(removed.outcome, Removed(uuid(150)));
     assert!(world.object(parent_entity).is_none());
     assert_eq!(world.entity(uuid(151)), Some(avatar_entity));
-    assert_eq!(world.object(avatar_entity).unwrap().parent(), Pending { address: address(region, 1), expected_uuid: Some(uuid(150)) });
-    assert_eq!(removed.recovery.requests, [address(region, 2)]);
+    assert_eq!(world.object(avatar_entity).unwrap().parent(), Parent::Root);
+    assert_eq!(
+        world.object(avatar_entity).unwrap().world_pose().unwrap(),
+        world::PoseState::Unresolved(world::UnresolvedReason::MissingLocalPose)
+    );
+    assert!(removed.recovery.requests.is_empty());
+    assert!(cleanup.iter().all(|turn| turn.recovery.requests.is_empty()));
 }

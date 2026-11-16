@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     error::Error,
     fmt::{self, Display, Formatter},
     mem::size_of,
@@ -38,6 +38,10 @@ impl SceneChanges {
             match change {
                 Change::Object(object) => changes.objects.push(object.detail().summary.entity),
                 Change::Remove(entity) => changes.objects.push(*entity),
+                Change::InvalidateSubtree(entity, _) => {
+                    changes.objects.push(*entity);
+                    changes.reconcile_all = true;
+                }
                 Change::Mesh(MeshChange::Set(entity, ..) | MeshChange::Clear(entity, _)) => changes.objects.push(*entity),
                 Change::Material(change) => changes.objects.push(change.source.detail().summary.entity),
                 Change::Region(region) => changes.regions.push(region.summary().region),
@@ -198,6 +202,16 @@ impl SceneView {
         self.sequence
     }
     pub fn object_count(&self) -> usize {
+        if !self.session.is_active() {
+            return 0;
+        }
+        if self.mirror.invalidations.is_empty() && self.mirror.retired_regions.is_empty() {
+            return self.mirror.objects.len();
+        }
+        let mut visibility = HashMap::new();
+        self.mirror.objects.keys().filter(|entity| self.mirror.visibility(**entity, &mut visibility).visible).count()
+    }
+    pub fn tracked_object_count(&self) -> usize {
         if self.session.is_active() { self.mirror.objects.len() } else { 0 }
     }
     pub fn region_count(&self) -> usize {
@@ -218,10 +232,20 @@ impl SceneView {
         }
     }
     pub fn objects(&self) -> impl Iterator<Item = &Object> {
-        self.mirror.objects.values().filter(|_| self.session.is_active())
+        let active = self.session.is_active();
+        let needs_filter = !self.mirror.invalidations.is_empty() || !self.mirror.retired_regions.is_empty();
+        let mirror = &self.mirror;
+        let mut visibility = HashMap::new();
+        self.mirror
+            .objects
+            .values()
+            .filter(move |object| active && (!needs_filter || mirror.visibility(object.detail().summary.entity, &mut visibility).visible))
     }
     pub fn object(&self, entity: Entity) -> Option<&Object> {
-        if self.session.is_active() { self.mirror.objects.get(&entity) } else { None }
+        if !self.session.is_active() || !self.mirror.object_visible(entity) {
+            return None;
+        }
+        self.mirror.objects.get(&entity)
     }
     pub fn regions(&self) -> impl Iterator<Item = &RegionData> {
         self.mirror.regions.values().filter(|_| self.session.is_active())
@@ -280,6 +304,7 @@ fn change_affects_geometry(change: &Change) -> bool {
             | Change::Mesh(_)
             | Change::Material(_)
             | Change::Remove(_)
+            | Change::InvalidateSubtree(..)
             | Change::Region(_)
             | Change::Retire(_)
             | Change::Patch(..)

@@ -168,7 +168,7 @@ async fn batch_yields_between_chunks() {
             .apply_object_batch_cooperatively(
                 simulator_id,
                 ObjectBatch { region, region_handle: None, blocks, invalid_blocks: 1, invalid_fields: 2 },
-                |_, _, _| {
+                |_, _| {
                     if let Some(sender) = first_chunk_tx.take() {
                         sender.send(()).expect("observer waits for the first chunk");
                     } else {
@@ -189,6 +189,52 @@ async fn batch_yields_between_chunks() {
     assert_eq!(summary.invalid_blocks, 1);
     assert_eq!(summary.invalid_fields, 2);
     assert!(summary.blocks[..MAX_OBJECTS_PER_INTAKE_QUANTUM].iter().all(|block| block.applied().is_some()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn deep_point_lookup_yields_while_retaining_the_ordered_update() {
+    let simulator = simulator_id();
+    let mut session = SessionWorld::new(viewer_world_limits());
+    let region = session.register_simulator(simulator, None).expect("register simulator");
+    let depth = 600_u32;
+    for local_id in 1..=depth {
+        let parent = if local_id == 1 { ParentUpdate::Root } else { ParentUpdate::Local(NonZeroU32::new(local_id - 1).unwrap()) };
+        apply_one(
+            &mut session,
+            simulator,
+            region,
+            ObjectOperation::Observe(observation(region, local_id, u128::from(local_id), NonZeroU32::new(local_id).unwrap(), parent)),
+        );
+    }
+
+    let order = depth + 1;
+    let local_id = NonZeroU32::new(depth).unwrap();
+    let mut patch = ObjectPatch::new(UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0), local_id);
+    patch.scale = Some(Vec3::splat(2.0));
+    let batch = ObjectBatch {
+        region,
+        region_handle: None,
+        blocks: vec![Some(ObjectOperation::Patch(patch))],
+        invalid_blocks: 0,
+        invalid_fields: 0,
+    };
+    let (progress_tx, progress_rx) = channel();
+    let worker = tokio::spawn(async move {
+        let summary = session.apply_object_batch_cooperatively(simulator, batch, |_, _| {}).await.expect("registered simulator");
+        (session, summary)
+    });
+    tokio::spawn(async move {
+        progress_tx.send(()).expect("owner is waiting for unrelated progress");
+    });
+
+    progress_rx.await.expect("unrelated task gets a turn during ancestry traversal");
+    assert!(!worker.is_finished(), "the 600-edge lookup spans multiple bounded turns");
+    let (session, summary) = worker.await.expect("world owner completes update");
+    assert!(
+        matches!(summary.blocks[0], BlockOutcome::Applied { ref applied, .. } if matches!(applied.outcome, world::ApplyOutcome::Updated(_)))
+    );
+    let entity = session.world().entity_at(LocalAddress::new(region, local_id)).expect("patched object remains visible");
+    assert_eq!(session.world().object(entity).expect("patched object").scale(), Some(Vec3::splat(2.0)));
 }
 
 #[test]
@@ -271,14 +317,13 @@ fn local_intake_limits_preserve_existing_objects() {
 }
 
 #[test]
-fn stale_full_observation_does_not_cancel_pending_parent_recovery() {
+fn stale_full_observation_does_not_reattach_avatar_after_seat_removal() {
     let simulator_id = simulator_id();
     let mut session = SessionWorld::new(viewer_world_limits());
     let region = session.register_simulator(simulator_id, None).expect("register simulator");
     let parent_local_id = NonZeroU32::new(2).expect("parent local ID is nonzero");
     let child_local_id = NonZeroU32::new(1).expect("child local ID is nonzero");
     let child_address = LocalAddress::new(region, child_local_id);
-
     apply_one(
         &mut session,
         simulator_id,
@@ -296,12 +341,16 @@ fn stale_full_observation_does_not_cancel_pending_parent_recovery() {
         region,
         ObjectOperation::Remove { source: UpdateSource::new(region, 3, OrderEvidence::Ordered(3), 0), local_id: parent_local_id },
     );
+    while session.world().has_pending_removals() {
+        let progress = session.reclaim_removals();
+        assert!(progress.work_units <= world::MAX_REMOVAL_WORK_PER_TURN);
+    }
     let child_entity = session.world().entity(child.id).expect("child remains after parent removal");
-    assert_matches!(session.world().object(child_entity).unwrap().parent(), Parent::Pending { .. });
+    assert_matches!(session.world().object(child_entity).unwrap().parent(), Parent::Root);
 
     let stale = apply_one(&mut session, simulator_id, region, ObjectOperation::Observe(child));
-    assert!(!stale.recovery_cancellation_addresses().any(|address| address == child_address));
-    assert_matches!(session.world().object(child_entity).unwrap().parent(), Parent::Pending { .. });
+    assert!(stale.recovery_cancellation_addresses().next().is_none());
+    assert_matches!(session.world().object(child_entity).unwrap().parent(), Parent::Root);
 
     let mut repaired = observation(region, 4, 0x1001, child_local_id, ParentUpdate::Root);
     repaired.kind = Kind::Avatar;
@@ -381,9 +430,10 @@ fn avatar_targets_sender() {
     .unwrap();
     let message = AvatarAppearanceMessage { object_id: avatar_id, update, invalid_fields: 0 };
     let source = UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0);
+    let entity = session.world().entity(avatar_id);
 
-    assert!(session.apply_avatar_appearance(other_simulator, source, message.clone()).is_none());
-    assert!(session.apply_avatar_appearance(first_simulator, source, message).is_some_and(|result| result.is_ok()));
+    assert!(session.apply_avatar_appearance(other_simulator, source, entity, message.clone()).is_none());
+    assert!(session.apply_avatar_appearance(first_simulator, source, entity, message).is_some_and(|result| result.is_ok()));
 
     let state = session.world();
     let avatar = state.object(state.entity_at(LocalAddress::new(region, local_id)).unwrap()).unwrap();
@@ -410,12 +460,14 @@ fn avatar_targets_local_avatar() {
     apply_one(&mut session, first_simulator, region, ObjectOperation::Observe(object));
     let update = AvatarAppearanceUpdate::default();
     let source = UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0);
+    let entity = session.world().entity(Uuid::from_u128(0x811));
 
     assert!(
         session
             .apply_avatar_appearance(
                 first_simulator,
                 source,
+                entity,
                 AvatarAppearanceMessage { object_id: Uuid::from_u128(0x811), update: update.clone(), invalid_fields: 0 }
             )
             .is_none()
@@ -425,6 +477,7 @@ fn avatar_targets_local_avatar() {
             .apply_avatar_appearance(
                 first_simulator,
                 source,
+                None,
                 AvatarAppearanceMessage { object_id: Uuid::from_u128(0x812), update: update.clone(), invalid_fields: 0 }
             )
             .is_none()
@@ -434,14 +487,15 @@ fn avatar_targets_local_avatar() {
             .apply_avatar_appearance(
                 other_simulator,
                 source,
+                None,
                 AvatarAppearanceMessage { object_id: Uuid::from_u128(0x813), update, invalid_fields: 0 },
             )
             .is_none()
     );
 }
 
-#[test]
-fn media_results_reject_stale_targets() {
+#[tokio::test]
+async fn media_results_reject_stale_targets() {
     let sim_id = simulator_id();
     let other_simulator = simulator_id();
     let mut session = SessionWorld::new(viewer_world_limits());
@@ -456,12 +510,12 @@ fn media_results_reject_stale_targets() {
 
     let request =
         ObjectMediaRequest { source: UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0), object_id, local_id, version: 5 };
-    assert!(session.prepare_object_media(other_simulator, request).is_none());
-    let target = session.prepare_object_media(sim_id, request).expect("matching object target");
+    assert!(session.prepare_object_media(other_simulator, request).await.is_none());
+    let target = session.prepare_object_media(sim_id, request).await.expect("matching object target");
     let stale = ObjectMediaUpdate::new(4, vec![Some(MediaEntry::default())]).expect("valid media response");
-    assert!(session.apply_object_media(target, stale).is_none());
+    assert!(session.apply_object_media(target, stale).await.is_none());
     let update = ObjectMediaUpdate::new(5, vec![Some(MediaEntry::default())]).expect("valid media response");
-    assert_matches!(session.apply_object_media(target, update), Some(Ok(_)));
+    assert_matches!(session.apply_object_media(target, update).await, Some(Ok(_)));
 
     let remove = UpdateSource::new(region, 3, OrderEvidence::Ordered(3), 0);
     apply_one(&mut session, sim_id, region, ObjectOperation::Remove { source: remove, local_id });
@@ -471,15 +525,15 @@ fn media_results_reject_stale_targets() {
     apply_one(&mut session, sim_id, region, ObjectOperation::Observe(replacement));
 
     let late = ObjectMediaUpdate::new(6, vec![Some(MediaEntry::default())]).expect("valid late response");
-    assert!(session.apply_object_media(target, late).is_none());
+    assert!(session.apply_object_media(target, late).await.is_none());
     let state = session.world();
     assert_eq!(state.entity_at(LocalAddress::new(other_region, local_id)), None);
     let current = state.object(state.entity_at(LocalAddress::new(region, local_id)).unwrap()).unwrap();
     assert_eq!(current.object_media(), None);
 }
 
-#[test]
-fn media_results_reject_rebound_address_aba_targets() {
+#[tokio::test]
+async fn media_results_reject_rebound_address_aba_targets() {
     let simulator_id = simulator_id();
     let mut session = SessionWorld::new(viewer_world_limits());
     let region = session.register_simulator(simulator_id, None).expect("register simulator");
@@ -492,7 +546,7 @@ fn media_results_reject_rebound_address_aba_targets() {
 
     let request =
         ObjectMediaRequest { source: UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0), object_id, local_id, version: 5 };
-    let stale_target = session.prepare_object_media(simulator_id, request).expect("initial media target");
+    let stale_target = session.prepare_object_media(simulator_id, request).await.expect("initial media target");
 
     let other_local_id = NonZeroU32::new(8).expect("nonzero replacement local ID");
     apply_one(
@@ -508,13 +562,14 @@ fn media_results_reject_rebound_address_aba_targets() {
             simulator_id,
             ObjectMediaRequest { source: UpdateSource::new(region, 5, OrderEvidence::Ordered(5), 0), ..request },
         )
+        .await
         .expect("target after address is rebound");
     assert_ne!(stale_target.binding, rebound_target.binding);
 
     let late = ObjectMediaUpdate::new(5, vec![Some(MediaEntry::default())]).expect("valid media response");
-    assert!(session.apply_object_media(stale_target, late).is_none());
+    assert!(session.apply_object_media(stale_target, late).await.is_none());
     let current = ObjectMediaUpdate::new(5, vec![Some(MediaEntry::default())]).expect("valid media response");
-    assert_matches!(session.apply_object_media(rebound_target, current), Some(Ok(_)));
+    assert_matches!(session.apply_object_media(rebound_target, current).await, Some(Ok(_)));
 
     let entity = session.world().entity_at(LocalAddress::new(region, local_id)).expect("rebound object");
     let object = session.world().object(entity).expect("object is retained");
@@ -544,7 +599,10 @@ fn partial_child_update_keeps_recovery_pending() {
         region,
         ObjectOperation::Remove { source: UpdateSource::new(region, 3, OrderEvidence::Ordered(3), 0), local_id: parent_local_id },
     );
-    assert_eq!(removed.recovery_targets().collect::<Vec<_>>(), [child_address]);
+    assert_eq!(removed.recovery_targets().count(), 0);
+
+    let cleanup = world.reclaim_removals();
+    assert_eq!(cleanup.recovery.requests, [child_address]);
 
     let mut pose = ObjectPatch::new(UpdateSource::new(region, 5, OrderEvidence::Ordered(5), 0), child_local_id);
     pose.pose = Some(Pose { position: Some(Vec3::new(1.0, 2.0, 3.0)), rotation: None });
@@ -618,8 +676,8 @@ fn fresh_full_observation_satisfies_cached_recovery_but_stale_and_partial_update
     assert_eq!(partial.recovery_cancellation_addresses().count(), 0);
 }
 
-#[test]
-fn live_kill_cancels_removed_entities() {
+#[tokio::test]
+async fn live_kill_cancels_removed_entities() {
     let simulator_id = simulator_id();
     let mut world = SessionWorld::new(viewer_world_limits());
     let region = world.register_simulator(simulator_id, None).expect("register simulator");
@@ -643,11 +701,13 @@ fn live_kill_cancels_removed_entities() {
         ObjectOperation::Remove { source: UpdateSource::new(region, 3, OrderEvidence::Ordered(3), 0), local_id: parent_local_id },
     );
     let cancelled = killed.recovery_cancellation_addresses().collect::<Vec<_>>();
-
-    assert_eq!(cancelled.len(), 2);
-    assert!(cancelled.contains(&parent_address));
-    assert!(cancelled.contains(&child_address));
+    assert_eq!(cancelled, [parent_address]);
     assert_eq!(killed.recovery_targets().count(), 0);
+
+    let cleanup = world.reclaim_removals();
+    assert!(!world.world().has_pending_removals());
+    let cancelled = cleanup.recovery_cancellations.iter().map(|cancellation| cancellation.address()).collect::<Vec<_>>();
+    assert!(cancelled.contains(&child_address));
 }
 
 #[test]
@@ -748,7 +808,15 @@ async fn parent_removal_batches_all_children() {
         region,
         ObjectOperation::Remove { source: UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0), local_id: parent_local_id },
     );
-    let requests = removed.recovery_requests().collect::<Vec<_>>();
+    assert_eq!(removed.recovery_requests().count(), 0);
+    let mut addresses = Vec::new();
+    while session.world().has_pending_removals() {
+        let progress = session.reclaim_removals();
+        assert!(progress.work_units <= world::MAX_REMOVAL_WORK_PER_TURN);
+        assert!(progress.recovery.requests.len() <= world::MAX_REMOVAL_WORK_PER_TURN);
+        addresses.extend(progress.recovery.requests);
+    }
+    let requests = addresses.into_iter().map(|address| (address, CacheMissType::Full)).collect::<Vec<_>>();
     assert_eq!(requests.len(), children.len());
     assert_eq!(requests.iter().map(|(address, _)| *address).collect::<HashSet<_>>(), children);
     assert!(requests.iter().all(|(_, cache_miss_type)| *cache_miss_type == CacheMissType::Full));
@@ -781,6 +849,62 @@ async fn parent_removal_batches_all_children() {
 }
 
 #[test]
+fn session_teardown_drains_retired_regions_in_bounded_turns() {
+    let first_simulator = simulator_id();
+    let second_simulator = simulator_id();
+    let mut session = SessionWorld::new(viewer_world_limits());
+    let first_region = session.register_simulator(first_simulator, None).expect("register first simulator");
+    let second_region = session.register_simulator(second_simulator, None).expect("register second simulator");
+    for local_id in 1..=10 {
+        let local_id = NonZeroU32::new(local_id).unwrap();
+        apply_one(
+            &mut session,
+            first_simulator,
+            first_region,
+            ObjectOperation::Observe(observation(
+                first_region,
+                local_id.get(),
+                40 + u128::from(local_id.get()),
+                local_id,
+                ParentUpdate::Root,
+            )),
+        );
+        apply_one(
+            &mut session,
+            second_simulator,
+            second_region,
+            ObjectOperation::Observe(observation(
+                second_region,
+                local_id.get(),
+                50 + u128::from(local_id.get()),
+                local_id,
+                ParentUpdate::Root,
+            )),
+        );
+    }
+
+    assert!(session.retire_all().is_empty());
+    assert_eq!(session.world().object_count(), 0);
+    assert_eq!(session.world().region(first_region), None);
+    assert_eq!(session.world().region(second_region), None);
+    assert!(session.world().has_pending_removals());
+
+    let mut turns = 0;
+    while session.world().has_pending_removals() {
+        let progress = session.reclaim_removals();
+        assert!(progress.work_units <= world::MAX_REMOVAL_WORK_PER_TURN);
+        assert!(progress.work_units > 0 || !progress.pending);
+        turns += 1;
+    }
+
+    assert!(turns > 1);
+    assert_eq!(session.world().object_count(), 0);
+    assert!(!session.world().has_pending_removals());
+    assert_eq!(session.region_for(first_simulator), None);
+    assert_eq!(session.region_for(second_simulator), None);
+}
+
+#[test]
 fn parent_reintroduction_cancels_child_retry() {
     let simulator_id = simulator_id();
     let mut world = SessionWorld::new(viewer_world_limits());
@@ -803,7 +927,7 @@ fn parent_reintroduction_cancels_child_retry() {
         region,
         ObjectOperation::Remove { source: UpdateSource::new(region, 3, OrderEvidence::Ordered(3), 0), local_id: parent_local_id },
     );
-    assert_eq!(removed.recovery_targets().collect::<Vec<_>>(), [child_address]);
+    assert_eq!(removed.recovery_targets().count(), 0);
 
     let restored = apply_one(
         &mut world,
@@ -811,8 +935,15 @@ fn parent_reintroduction_cancels_child_retry() {
         region,
         ObjectOperation::Observe(observation(region, 5, 31, parent_local_id, ParentUpdate::Root)),
     );
-    assert!(restored.recovery_cancellation_addresses().any(|address| address == child_address));
-    assert!(restored.recovery_cancellation_addresses().any(|address| address == parent_address));
+    assert!(!restored.recovery_cancellation_addresses().any(|address| address == child_address));
+
+    while world.world().has_pending_removals() {
+        let progress = world.reclaim_removals();
+        assert!(!progress.recovery.requests.contains(&child_address));
+    }
+    while world.world().has_pending_relationships() {
+        let _ = world.resolve_relationships().expect("resolve replacement parent relationship");
+    }
 
     let state = world.world();
     let child = state.object(state.entity_at(child_address).expect("child remains live")).expect("child object");

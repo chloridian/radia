@@ -11,7 +11,7 @@ use crate::history::WorldChange::EntityUpdated;
 use crate::history::WorldChangeClasses;
 use crate::history::retained::RetainedOverride;
 use crate::object::components::Fenced;
-use crate::object::relationships::ParentResolution;
+use crate::object::relationships::{ParentResolution, ParentResolutionPlan};
 use crate::update::FieldStamp;
 use crate::{
     Applied, ApplyError, ApplyOutcome, AvatarAppearance, DeferredReason, FieldGroup, FieldRejectionReason, LocalAddress, ObjectPatch,
@@ -23,13 +23,29 @@ const UNKNOWN_COF_VERSION: i32 = -1;
 
 impl World {
     pub fn patch_object(&mut self, patch: ObjectPatch) -> Result<Applied, ApplyError> {
+        self.patch_object_with_parent_resolution_inner(patch, None)
+    }
+
+    pub fn patch_object_with_parent_resolution(&mut self, patch: ObjectPatch, plan: ParentResolutionPlan) -> Result<Applied, ApplyError> {
+        let Some(update) = patch.parent else { return Err(ApplyError::InvalidValue { field: "parent_resolution" }) };
+        if !plan.matches(self, patch.source, patch.local_id, update) {
+            return Err(ApplyError::InvalidValue { field: "parent_resolution" });
+        }
+        self.patch_object_with_parent_resolution_inner(patch, Some(plan))
+    }
+
+    fn patch_object_with_parent_resolution_inner(
+        &mut self,
+        patch: ObjectPatch,
+        parent_resolution: Option<ParentResolutionPlan>,
+    ) -> Result<Applied, ApplyError> {
         let source = patch.source;
         self.require_active_region(source.region)?;
         let address = LocalAddress::new(source.region, patch.local_id);
         let Some(stamp) = source.stamp() else {
             return Ok(self.defer(DeferredReason::AmbiguousOrder, address));
         };
-        let Some(entity) = self.entity_at(address) else {
+        let Some(entity) = parent_resolution.map_or_else(|| self.entity_at(address), |plan| plan.child) else {
             let applied = self.unknown_address(address, stamp);
             if applied.outcome == ApplyOutcome::Deferred(DeferredReason::UnknownObject)
                 && let Some(overrides) = patch.pbr_material_overrides
@@ -58,9 +74,14 @@ impl World {
                 fields.facets.avatar_appearance = None;
             }
         }
-        let parent_admitted = newer_field(origin.field(), ordering.fences.parent) && ordering.admits_parent(source, stamp);
+        let parent_admitted = newer_field(origin.field(), ordering.fences.parent)
+            && ordering.admits_parent(source, stamp)
+            && self.parent_removal_fence(before.parent, before.binding.address.region()).is_none_or(|fence| stamp > fence);
         let (parent, parent_cycle) = match parent_update.filter(|_| parent_admitted) {
-            Some(update) => match self.resolve_parent(source.region, address.local_id, update, origin.field(), Some(entity)) {
+            Some(update) => match parent_resolution.map_or_else(
+                || self.resolve_parent(source.region, address.local_id, update, origin.field(), Some(entity)),
+                |plan| plan.resolution,
+            ) {
                 ParentResolution::Accepted(parent) => (Some(parent), false),
                 ParentResolution::Cycle => (None, true),
             },

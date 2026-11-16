@@ -476,7 +476,7 @@ mod tests {
         FetchError, ObjectMediaTarget, PendingMedia, RetirementState, media_version, parse_entry, parse_response, response_is_stale,
     };
 
-    fn replacement_targets() -> (ObjectMediaTarget, ObjectMediaTarget) {
+    async fn replacement_targets() -> (ObjectMediaTarget, ObjectMediaTarget) {
         let simulator_id = simulator_id();
         let mut world = SessionWorld::new(viewer_world_limits());
         let region = world.register_simulator(simulator_id, None).expect("register simulator");
@@ -510,10 +510,10 @@ mod tests {
         };
 
         apply(&mut world, ObjectOperation::Observe(observation(1, local_id)));
-        let active = world.prepare_object_media(simulator_id, request(2, local_id)).expect("current surface target");
+        let active = world.prepare_object_media(simulator_id, request(2, local_id)).await.expect("current surface target");
         apply(&mut world, ObjectOperation::Observe(observation(3, other_local_id)));
         apply(&mut world, ObjectOperation::Observe(observation(4, local_id)));
-        let replacement = world.prepare_object_media(simulator_id, request(5, local_id)).expect("current rebound target");
+        let replacement = world.prepare_object_media(simulator_id, request(5, local_id)).await.expect("current rebound target");
         (active, replacement)
     }
 
@@ -538,9 +538,9 @@ mod tests {
         assert!(!response_is_stale(8, 8));
     }
 
-    #[test]
-    fn replacement_target_is_retried() {
-        let (active, replacement) = replacement_targets();
+    #[tokio::test]
+    async fn replacement_target_is_retried() {
+        let (active, replacement) = replacement_targets().await;
         assert_eq!(active.binding.entity(), replacement.binding.entity());
         assert_eq!(active.key(), replacement.key());
         assert_ne!(active.binding, replacement.binding);
@@ -552,9 +552,9 @@ mod tests {
         assert_eq!(pending.retry, Some(replacement));
     }
 
-    #[test]
-    fn older_marker_does_not_replace_retry() {
-        let (active, _) = replacement_targets();
+    #[tokio::test]
+    async fn older_marker_does_not_replace_retry() {
+        let (active, _) = replacement_targets().await;
         let latest = ObjectMediaTarget { version: 8, ..active };
         let older = ObjectMediaTarget { version: 7, ..active };
         let mut pending = PendingMedia { active, retry: Some(latest) };

@@ -25,6 +25,14 @@ fn new_world() -> (World, Region) {
     (world, region)
 }
 
+fn drain_removals(world: &mut World) {
+    while world.has_pending_removals() {
+        let progress = world.reclaim_removals(world::MAX_REMOVAL_WORK_PER_TURN);
+        assert!(progress.work_units <= world::MAX_REMOVAL_WORK_PER_TURN);
+        assert!(progress.work_units != 0 || !progress.pending);
+    }
+}
+
 fn source(region: Region, order: u32) -> UpdateSource {
     UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0)
 }
@@ -169,6 +177,11 @@ fn retirement_releases_source_capacity() {
     let _ = world.retire_region(first_region).unwrap();
     let final_region = world.register_region().unwrap();
     let target = world.environment_target(final_region, EnvironmentScope::Region).unwrap();
+    assert_eq!(
+        world.observe_environment(target, source(final_region, 1), assignment(EnvironmentSource::Inline(bytes.clone()), 1)),
+        Err(ApplyError::EnvironmentBudgetExhausted)
+    );
+    drain_removals(&mut world);
     let _ = world.observe_environment(target, source(final_region, 1), assignment(EnvironmentSource::Inline(bytes), 1)).unwrap();
     assert!(world.environment(final_region).unwrap().region_assignment.is_some());
 }

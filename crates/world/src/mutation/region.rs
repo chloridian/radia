@@ -1,5 +1,3 @@
-use super::Effects;
-use super::lifecycle::RemovalCause;
 use crate::history::WorldChange::{RegionRegistered, RegionRetired, RegionUpdated};
 use crate::update::FieldStamp;
 use crate::{ApplyError, Region, RegionApplied, RegionInfo, RegionOutcome, UpdateSource};
@@ -67,26 +65,17 @@ impl World {
             return Ok(RegionApplied::unchanged());
         }
         self.require_active_region(region)?;
+        if !self.retired_region_capacity_available() {
+            return Err(ApplyError::RemovalCapacityExhausted);
+        }
         self.ensure_revision_available()?;
         let removed = self.store.region_ids(region).map_or(0, |ids| ids.len());
-        let mut effects = Effects { changes: Vec::with_capacity(removed.saturating_add(1)), ..Effects::default() };
-        while let Some(id) = self.store.region_ids(region).and_then(|ids| ids.first()).copied() {
-            let entity = self.entity(id).expect("object index contains only live entities");
-            self.remove_entity(entity, RemovalCause::RegionRetired, None, &mut effects);
-        }
+        self.schedule_region_retirement(region)?;
         let removed_region = self.regions.remove(&region).expect("active region remains registered");
-        self.terrain_patches -= removed_region.terrain.patch_count();
-        self.environment_bytes -= removed_region.environment.source_bytes();
-        self.parcel_bytes -= removed_region.parcels.retained_bytes();
-        self.tombstones.remove_region(region);
-        self.retained.remove_region(region);
-        self.floors.remove(&region);
-        effects.changes.push(RegionRetired { region, entities_removed: removed });
-        let revision = self.publish_changes(effects.changes).expect("retiring a region journals a change");
-        Ok(RegionApplied {
-            outcome: RegionOutcome::Retired { revision, entities_removed: removed },
-            recovery_cancellations: effects.recovery_cancellations,
-        })
+        self.retiring_regions.insert(region, removed_region);
+        let revision =
+            self.publish_changes(vec![RegionRetired { region, entities_removed: removed }]).expect("retiring a region journals a change");
+        Ok(RegionApplied { outcome: RegionOutcome::Retired { revision, entities_removed: removed }, recovery_cancellations: Vec::new() })
     }
     fn validate_region_info(&self, info: &RegionInfo) -> Result<(), ApplyError> {
         if info.region_id.is_some_and(|id| id.is_nil()) {
@@ -133,7 +122,7 @@ mod tests {
 
     use crate::{
         ApplyError::{RegionGenerationExhausted, RevisionExhausted},
-        ApplyOutcome, DeferredReason, ObjectPatch, PbrMaterialOverrides, WorldLimits, WorldRevision,
+        ApplyOutcome, DeferredReason, LocalAddress, ObjectPatch, PbrMaterialOverrides, WorldLimits, WorldRevision,
     };
     fn limits() -> WorldLimits {
         WorldLimits {
@@ -212,15 +201,22 @@ mod tests {
     fn retirement_clears_retained_overrides() {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
-        let source = UpdateSource::new(region, 1, crate::OrderEvidence::Ordered(1), 0);
-        let patch = ObjectPatch {
+        let address = LocalAddress::new(region, NonZeroU32::new(1).unwrap());
+        let patch = |order| ObjectPatch {
             pbr_material_overrides: Some(PbrMaterialOverrides::default()),
-            ..ObjectPatch::new(source, NonZeroU32::new(1).unwrap())
+            ..ObjectPatch::new(UpdateSource::new(region, order, crate::OrderEvidence::Ordered(u64::from(order)), 0), address.local_id())
         };
-        assert_eq!(world.patch_object(patch).unwrap().outcome, ApplyOutcome::Deferred(DeferredReason::UnknownObject));
+        assert_eq!(world.patch_object(patch(1)).unwrap().outcome, ApplyOutcome::Deferred(DeferredReason::UnknownObject));
 
         std::assert_matches!(world.retire_region(region).unwrap().outcome, RegionOutcome::Retired { entities_removed: 0, .. });
+        assert_eq!(world.patch_object(patch(2)), Err(ApplyError::RegionRetired));
+        assert_eq!(world.check_invariants(), Ok(()));
+        while world.has_pending_removals() {
+            let progress = world.reclaim_removals(crate::MAX_REMOVAL_WORK_PER_TURN);
+            assert!(progress.work_units <= crate::MAX_REMOVAL_WORK_PER_TURN);
+        }
 
+        assert!(!world.retained.contains(&address));
         assert_eq!(world.check_invariants(), Ok(()));
     }
 }

@@ -4,6 +4,8 @@ mod storage;
 mod validation;
 mod worker;
 
+pub(in crate::session) use resolution::{CachedObjectContinuation, CachedObjectProgress};
+
 #[cfg(test)]
 use std::path::Path;
 use std::{

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use network::SimulatorId;
 use protocol::messages::CacheMissType;
@@ -6,9 +6,11 @@ use uuid::Uuid;
 use world::{
     Appearance, Applied, ApplyError,
     ApplyOutcome::{AgentHandedOff, Deferred, Introduced, TombstoneRecorded},
-    EnvironmentAssignment, EnvironmentTarget, FieldRejectionReason, Kind, LocalAddress, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
-    OrderEvidence, ParcelLocalId, ParcelOverlayObservation, ParcelPropertiesObservation, Region, RegionApplied, RegionHandle, RegionInfo,
-    RegionOutcome, TerrainSettings, UpdateSource, World, WorldLimits,
+    Entity, EnvironmentAssignment, EnvironmentTarget, FieldRejectionReason, Kind, LocalAddress, MAX_OBJECT_LOOKUP_WORK_ITEMS,
+    ObjectLookupCursor, ObjectLookupProgress, ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, ParcelLocalId,
+    ParcelOverlayObservation, ParcelPropertiesObservation, ParentResolutionCursor, ParentResolutionPlan, ParentResolutionProgress,
+    ParentUpdate, Region, RegionApplied, RegionHandle, RegionInfo, RegionOutcome, TerrainSettings, UpdateSource, World, WorldLimits,
+    WorldRevision,
 };
 
 use super::{
@@ -40,6 +42,32 @@ pub(super) enum IngestStatus {
 pub(super) enum RegistrationError {
     HandleChanged,
     Apply(ApplyError),
+}
+
+pub(super) enum ObjectMediaPreparationProgress {
+    Pending(ObjectLookupCursor),
+    Complete { target: Option<ObjectMediaTarget>, work_units: usize },
+}
+
+#[derive(Default)]
+pub(super) struct ObjectMediaTargetCheck {
+    revision: Option<WorldRevision>,
+    entity_cursor: Option<ObjectLookupCursor>,
+    address_cursor: Option<ObjectLookupCursor>,
+    stage: ObjectMediaTargetCheckStage,
+}
+
+#[derive(Clone, Copy, Default)]
+enum ObjectMediaTargetCheckStage {
+    #[default]
+    Entity,
+    Address,
+    Complete,
+}
+
+pub(super) enum ObjectMediaTargetCheckProgress {
+    Pending,
+    Complete { current: bool, work_units: usize },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -131,25 +159,39 @@ impl IngestSummary {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn recovery_cancellation_addresses(&self) -> impl Iterator<Item = LocalAddress> + '_ {
+        self.recovery_cancellations().map(|(_, address)| address)
+    }
+
+    pub(super) fn recovery_cancellations(&self) -> impl Iterator<Item = (Option<Entity>, LocalAddress)> + '_ {
         self.blocks
             .iter()
             .filter_map(|block| {
                 let BlockOutcome::Applied { applied, recovered, .. } = block else { return None };
-                let address = match &applied.outcome {
-                    TombstoneRecorded(address) => Some(*address),
-                    _ => *recovered,
+                let (entity, address) = match &applied.outcome {
+                    TombstoneRecorded(address) => (None, Some(*address)),
+                    world::ApplyOutcome::Introduced(entity) | world::ApplyOutcome::Updated(entity) | AgentHandedOff(entity) => {
+                        (Some(*entity), *recovered)
+                    }
+                    _ => (None, *recovered),
                 };
-                Some((applied, address))
+                Some((applied, entity, address))
             })
-            .flat_map(|(result, address)| result.recovery_cancellations.iter().copied().chain(address))
+            .flat_map(|(result, recovered_entity, address)| {
+                result
+                    .recovery_cancellations
+                    .iter()
+                    .map(|cancellation| (Some(cancellation.entity()), cancellation.address()))
+                    .chain(address.map(|address| (recovered_entity, address)))
+            })
     }
 
     pub(super) fn log_incomplete_data(&self, simulator_id: SimulatorId, region: Option<Region>) {
         use ApplyError::{
             AddressGenerationExhausted, EntityBudgetExhausted, EnvironmentBudgetExhausted, FrameGenerationExhausted, InvalidValue,
-            KindMismatch, RegionBudgetExhausted, RegionGenerationExhausted, RegionRetired, RevisionExhausted, StaleRegion,
-            TerrainBudgetExhausted,
+            KindMismatch, RegionBudgetExhausted, RegionGenerationExhausted, RegionRetired, RemovalCapacityExhausted, RevisionExhausted,
+            StaleRegion, TerrainBudgetExhausted,
         };
         use FieldRejectionReason::{
             InvalidRotation, InvalidValue as RejectedValue, ParentCycle, ParentDependsOnRejectedParent, ResourceLimit, StaleFrame,
@@ -182,6 +224,7 @@ impl IngestSummary {
                         | world::ApplyError::ParcelBudgetExhausted
                         | RegionBudgetExhausted
                         | RegionGenerationExhausted
+                        | RemovalCapacityExhausted
                         | RevisionExhausted
                         | FrameGenerationExhausted
                         | AddressGenerationExhausted,
@@ -252,6 +295,74 @@ pub(super) struct SessionWorld {
     parcel_rejections: u64,
 }
 
+#[derive(Clone, Copy)]
+enum BatchStage {
+    Operations,
+    Cancellations,
+}
+
+#[derive(Clone, Copy)]
+enum ObjectLookupTarget {
+    Id(Uuid),
+    Address(LocalAddress),
+}
+
+#[derive(Debug)]
+pub(super) enum ObjectBatchProgress {
+    Pending,
+    Complete(IngestSummary),
+}
+
+pub(super) struct ObjectBatchContinuation {
+    summary: IngestSummary,
+    operations: std::vec::IntoIter<Option<ObjectOperation>>,
+    part: IngestSummary,
+    current: Option<Option<ObjectOperation>>,
+    lookup_index: u8,
+    lookup_cursor: Option<ObjectLookupCursor>,
+    lookup_entity: Option<Entity>,
+    parent_cursor: Option<ParentResolutionCursor>,
+    parent_plan: Option<ParentResolutionPlan>,
+    cancellations: VecDeque<(Option<Entity>, LocalAddress)>,
+    current_cancellation: Option<(Option<Entity>, LocalAddress)>,
+    cancellation_cursor: Option<ObjectLookupCursor>,
+    updated: Vec<LocalAddress>,
+    operation_count: usize,
+    stage: BatchStage,
+    callback_summary: bool,
+}
+
+impl ObjectBatchContinuation {
+    fn begin_cancellations(&mut self) {
+        self.cancellations.extend(self.part.recovery_cancellations());
+        self.stage = BatchStage::Cancellations;
+    }
+}
+
+fn operation_lookup(operation: &Option<ObjectOperation>, index: u8) -> Option<ObjectLookupTarget> {
+    match (operation.as_ref(), index) {
+        (Some(ObjectOperation::Observe(observation)), 0) => Some(ObjectLookupTarget::Id(observation.id)),
+        (Some(ObjectOperation::Observe(observation)), 1) => {
+            Some(ObjectLookupTarget::Address(LocalAddress::new(observation.source.region(), observation.local_id)))
+        }
+        (Some(ObjectOperation::Patch(patch)), 0) => {
+            Some(ObjectLookupTarget::Address(LocalAddress::new(patch.source.region(), patch.local_id)))
+        }
+        (Some(ObjectOperation::Remove { source, local_id }), 0) => {
+            Some(ObjectLookupTarget::Address(LocalAddress::new(source.region(), *local_id)))
+        }
+        _ => None,
+    }
+}
+
+fn operation_parent(operation: &Option<ObjectOperation>) -> Option<(UpdateSource, std::num::NonZeroU32, ParentUpdate)> {
+    match operation.as_ref()? {
+        ObjectOperation::Observe(observation) => Some((observation.source, observation.local_id, observation.parent)),
+        ObjectOperation::Patch(patch) => patch.parent.map(|parent| (patch.source, patch.local_id, parent)),
+        ObjectOperation::Remove { .. } | ObjectOperation::Cached { .. } => None,
+    }
+}
+
 impl SessionWorld {
     pub(super) fn new(limits: WorldLimits) -> Self {
         let world = World::new(limits);
@@ -262,8 +373,59 @@ impl SessionWorld {
         &self.world
     }
 
+    pub(super) fn world_mut(&mut self) -> &mut World {
+        &mut self.world
+    }
+
+    pub(super) fn lookup_entity_step(&mut self, id: Uuid, cursor: Option<ObjectLookupCursor>, work_limit: usize) -> ObjectLookupProgress {
+        self.world.lookup_entity_with_budget(id, cursor, work_limit)
+    }
+
+    pub(super) fn lookup_entity_at_step(
+        &mut self,
+        address: LocalAddress,
+        cursor: Option<ObjectLookupCursor>,
+        work_limit: usize,
+    ) -> ObjectLookupProgress {
+        self.world.lookup_entity_at_with_budget(address, cursor, work_limit)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn lookup_entity(&mut self, id: Uuid) -> Option<Entity> {
+        let mut cursor: Option<ObjectLookupCursor> = None;
+        loop {
+            match self.world.lookup_entity(id, cursor) {
+                ObjectLookupProgress::Visible { entity, .. } => return Some(entity),
+                ObjectLookupProgress::Hidden { .. } => return None,
+                ObjectLookupProgress::Pending { cursor: next, .. } => {
+                    cursor = Some(next);
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn lookup_entity_at(&mut self, address: LocalAddress) -> Option<Entity> {
+        let mut cursor: Option<ObjectLookupCursor> = None;
+        loop {
+            match self.world.lookup_entity_at(address, cursor) {
+                ObjectLookupProgress::Visible { entity, .. } => return Some(entity),
+                ObjectLookupProgress::Hidden { .. } => return None,
+                ObjectLookupProgress::Pending { cursor: next, .. } => {
+                    cursor = Some(next);
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+    }
+
     pub(super) fn resolve_relationships(&mut self) -> Result<world::RelationshipResolution, ApplyError> {
         self.world.resolve_relationships(MAX_RELATIONSHIPS_PER_TURN)
+    }
+
+    pub(super) fn reclaim_removals(&mut self) -> world::RemovalProgress {
+        self.world.reclaim_removals(world::MAX_REMOVAL_WORK_PER_TURN)
     }
 
     pub(super) fn observe_agent_parcel(
@@ -433,117 +595,416 @@ impl SessionWorld {
         summary.invalid_blocks = batch.invalid_blocks;
         summary.invalid_fields = batch.invalid_fields;
         for operation in batch.blocks {
-            let outcome = match operation {
-                Some(ObjectOperation::Cached { source, local_id, cache_miss_type }) => {
-                    let address = LocalAddress::new(source.region(), local_id);
-                    BlockOutcome::RecoveryRequired { address, cache_miss_type }
-                }
-                Some(operation) => {
-                    let address = operation.address();
-                    match apply_operation(&mut self.world, operation) {
-                        Ok(applied) => {
-                            let recovered = applied.recovery.satisfied.then_some(address);
-                            BlockOutcome::Applied { address: Some(address), applied, recovered }
-                        }
-                        Err(error) => BlockOutcome::Rejected { address: Some(address), error },
-                    }
-                }
-                None => BlockOutcome::Invalid,
-            };
-            summary.blocks.push(outcome);
+            summary.blocks.push(self.apply_object_operation(operation, None));
         }
         Some(summary)
     }
 
+    fn apply_object_operation(
+        &mut self,
+        operation: Option<ObjectOperation>,
+        parent_resolution: Option<ParentResolutionPlan>,
+    ) -> BlockOutcome {
+        match operation {
+            Some(ObjectOperation::Cached { source, local_id, cache_miss_type }) => {
+                let address = LocalAddress::new(source.region(), local_id);
+                BlockOutcome::RecoveryRequired { address, cache_miss_type }
+            }
+            Some(operation) => {
+                let address = operation.address();
+                match apply_operation(&mut self.world, operation, parent_resolution) {
+                    Ok(applied) => {
+                        let recovered = applied.recovery.satisfied.then_some(address);
+                        BlockOutcome::Applied { address: Some(address), applied, recovered }
+                    }
+                    Err(error) => BlockOutcome::Rejected { address: Some(address), error },
+                }
+            }
+            None => BlockOutcome::Invalid,
+        }
+    }
+
+    pub(super) fn begin_object_batch(&mut self, simulator_id: SimulatorId, batch: ObjectBatch) -> Option<ObjectBatchContinuation> {
+        let ObjectBatch { region, region_handle, blocks, invalid_blocks, invalid_fields } = batch;
+        let has_object_operations = blocks.iter().any(Option::is_some);
+        let summary = if blocks.is_empty() || has_object_operations {
+            self.apply_object_batch(
+                simulator_id,
+                ObjectBatch { region, region_handle, blocks: Vec::new(), invalid_blocks, invalid_fields },
+            )?
+        } else {
+            let registered_region = self.region_for(simulator_id)?;
+            let status = if registered_region == region { IngestStatus::Applied } else { IngestStatus::RegionContextMismatch };
+            let mut summary = IngestSummary::new(status);
+            summary.invalid_blocks = invalid_blocks;
+            summary.invalid_fields = invalid_fields;
+            summary
+        };
+        let callback_summary = blocks.is_empty() || summary.status != IngestStatus::Applied;
+        Some(ObjectBatchContinuation {
+            summary,
+            operations: blocks.into_iter(),
+            part: IngestSummary::new(IngestStatus::Applied),
+            current: None,
+            lookup_index: 0,
+            lookup_cursor: None,
+            lookup_entity: None,
+            parent_cursor: None,
+            parent_plan: None,
+            cancellations: VecDeque::new(),
+            current_cancellation: None,
+            cancellation_cursor: None,
+            updated: Vec::new(),
+            operation_count: 0,
+            stage: BatchStage::Operations,
+            callback_summary,
+        })
+    }
+
+    pub(super) fn advance_object_batch(
+        &mut self,
+        continuation: &mut ObjectBatchContinuation,
+        on_chunk: &mut impl FnMut(Vec<(Option<SimulatorId>, LocalAddress, CacheMissType)>, Vec<LocalAddress>),
+    ) -> ObjectBatchProgress {
+        if continuation.callback_summary {
+            let targets = continuation
+                .summary
+                .recovery_requests()
+                .map(|(address, cache_miss_type)| (self.simulator_for_region(address.region()), address, cache_miss_type))
+                .collect();
+            on_chunk(targets, Vec::new());
+            continuation.callback_summary = false;
+            return ObjectBatchProgress::Complete(std::mem::replace(&mut continuation.summary, IngestSummary::new(IngestStatus::Applied)));
+        }
+
+        let mut lookup_work = 0;
+        loop {
+            if lookup_work >= MAX_OBJECT_LOOKUP_WORK_ITEMS {
+                return ObjectBatchProgress::Pending;
+            }
+            match continuation.stage {
+                BatchStage::Operations => {
+                    if continuation.operation_count == MAX_OBJECTS_PER_INTAKE_QUANTUM {
+                        continuation.begin_cancellations();
+                        continue;
+                    }
+                    if continuation.current.is_none() {
+                        let Some(operation) = continuation.operations.next() else {
+                            if continuation.part.blocks.is_empty() && continuation.operation_count == 0 {
+                                let summary = std::mem::replace(&mut continuation.summary, IngestSummary::new(IngestStatus::Applied));
+                                on_chunk(Vec::new(), Vec::new());
+                                return ObjectBatchProgress::Complete(summary);
+                            }
+                            continuation.begin_cancellations();
+                            continue;
+                        };
+                        continuation.current = Some(operation);
+                        continuation.lookup_index = 0;
+                        continuation.lookup_entity = None;
+                        continuation.parent_cursor = None;
+                        continuation.parent_plan = None;
+                    }
+                    let lookup = continuation.current.as_ref().and_then(|operation| operation_lookup(operation, continuation.lookup_index));
+                    if let Some(target) = lookup {
+                        let work_limit = MAX_OBJECT_LOOKUP_WORK_ITEMS.saturating_sub(lookup_work);
+                        let progress = match target {
+                            ObjectLookupTarget::Id(id) => {
+                                self.world.lookup_entity_with_budget(id, continuation.lookup_cursor.take(), work_limit)
+                            }
+                            ObjectLookupTarget::Address(address) => {
+                                self.world.lookup_entity_at_with_budget(address, continuation.lookup_cursor.take(), work_limit)
+                            }
+                        };
+                        match progress {
+                            ObjectLookupProgress::Visible { entity, work_units } => {
+                                lookup_work = lookup_work.saturating_add(work_units);
+                                if continuation.lookup_index == 0 {
+                                    continuation.lookup_entity = Some(entity);
+                                }
+                                continuation.lookup_index = continuation.lookup_index.saturating_add(1);
+                            }
+                            ObjectLookupProgress::Hidden { work_units } => {
+                                lookup_work = lookup_work.saturating_add(work_units);
+                                continuation.lookup_index = continuation.lookup_index.saturating_add(1);
+                            }
+                            ObjectLookupProgress::Pending { cursor, .. } => {
+                                continuation.lookup_cursor = Some(cursor);
+                                return ObjectBatchProgress::Pending;
+                            }
+                        }
+                        continue;
+                    }
+                    let parent_update = continuation.current.as_ref().and_then(operation_parent);
+                    let patch_needs_target = matches!(continuation.current, Some(Some(ObjectOperation::Patch(_))));
+                    if continuation.parent_plan.is_none()
+                        && (!patch_needs_target || continuation.lookup_entity.is_some())
+                        && let Some((source, local_id, update)) = parent_update
+                    {
+                        match self.world.prepare_parent_resolution_with_budget(
+                            source,
+                            local_id,
+                            update,
+                            continuation.lookup_entity,
+                            continuation.parent_cursor.take(),
+                            MAX_OBJECT_LOOKUP_WORK_ITEMS.saturating_sub(lookup_work),
+                        ) {
+                            ParentResolutionProgress::Ready { plan, work_units } => {
+                                lookup_work = lookup_work.saturating_add(work_units);
+                                continuation.parent_plan = Some(plan);
+                            }
+                            ParentResolutionProgress::Pending { cursor, .. } => {
+                                continuation.parent_cursor = Some(cursor);
+                                return ObjectBatchProgress::Pending;
+                            }
+                        }
+                    }
+                    let operation = continuation.current.take().flatten();
+                    let parent_resolution = continuation.parent_plan.take();
+                    continuation.part.blocks.push(self.apply_object_operation(operation, parent_resolution));
+                    continuation.operation_count += 1;
+                    continuation.lookup_index = 0;
+                    continuation.lookup_cursor = None;
+                    continuation.lookup_entity = None;
+                    continuation.parent_cursor = None;
+                    continuation.parent_plan = None;
+                }
+                BatchStage::Cancellations => {
+                    let (expected, address) = match continuation.current_cancellation {
+                        Some(cancellation) => cancellation,
+                        None => {
+                            let Some(cancellation) = continuation.cancellations.pop_front() else {
+                                let targets = continuation
+                                    .part
+                                    .recovery_requests()
+                                    .map(|(address, cache_miss_type)| {
+                                        (self.simulator_for_region(address.region()), address, cache_miss_type)
+                                    })
+                                    .collect();
+                                let updated = std::mem::take(&mut continuation.updated);
+                                on_chunk(targets, updated);
+                                continuation
+                                    .summary
+                                    .append(std::mem::replace(&mut continuation.part, IngestSummary::new(IngestStatus::Applied)));
+                                continuation.operation_count = 0;
+                                continuation.current_cancellation = None;
+                                continuation.cancellation_cursor = None;
+                                if continuation.summary.status != IngestStatus::Applied || continuation.operations.len() == 0 {
+                                    return ObjectBatchProgress::Complete(std::mem::replace(
+                                        &mut continuation.summary,
+                                        IngestSummary::new(IngestStatus::Applied),
+                                    ));
+                                }
+                                continuation.stage = BatchStage::Operations;
+                                return ObjectBatchProgress::Pending;
+                            };
+                            continuation.current_cancellation = Some(cancellation);
+                            cancellation
+                        }
+                    };
+                    let work_limit = MAX_OBJECT_LOOKUP_WORK_ITEMS.saturating_sub(lookup_work);
+                    match self.world.lookup_entity_at_with_budget(address, continuation.cancellation_cursor.take(), work_limit) {
+                        ObjectLookupProgress::Visible { entity: current, work_units } => {
+                            lookup_work = lookup_work.saturating_add(work_units);
+                            if expected.is_none_or(|expected| expected == current) {
+                                continuation.updated.push(address);
+                            }
+                            continuation.current_cancellation = None;
+                        }
+                        ObjectLookupProgress::Hidden { work_units } => {
+                            lookup_work = lookup_work.saturating_add(work_units);
+                            continuation.updated.push(address);
+                            continuation.current_cancellation = None;
+                        }
+                        ObjectLookupProgress::Pending { cursor, .. } => {
+                            continuation.cancellation_cursor = Some(cursor);
+                            return ObjectBatchProgress::Pending;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(super) async fn apply_object_batch_cooperatively(
         &mut self,
         simulator_id: SimulatorId,
         batch: ObjectBatch,
-        mut on_chunk: impl FnMut(&IngestSummary, Vec<(Option<SimulatorId>, LocalAddress, CacheMissType)>, Vec<LocalAddress>),
+        mut on_chunk: impl FnMut(Vec<(Option<SimulatorId>, LocalAddress, CacheMissType)>, Vec<LocalAddress>),
     ) -> Option<IngestSummary> {
-        let ObjectBatch { region, region_handle, blocks, invalid_blocks, invalid_fields } = batch;
-        let mut remaining = blocks.into_iter().peekable();
-        let mut summary: Option<IngestSummary> = None;
+        let mut continuation = self.begin_object_batch(simulator_id, batch)?;
         loop {
-            let operations = remaining.by_ref().take(MAX_OBJECTS_PER_INTAKE_QUANTUM).collect::<Vec<_>>();
-            let empty = operations.is_empty();
-            if empty && summary.is_some() {
-                break;
-            }
-            let has_more = remaining.peek().is_some();
-            let part = self.apply_object_batch(
-                simulator_id,
-                ObjectBatch {
-                    region,
-                    region_handle,
-                    blocks: operations,
-                    invalid_blocks: if summary.is_none() { invalid_blocks } else { 0 },
-                    invalid_fields: if summary.is_none() { invalid_fields } else { 0 },
-                },
-            )?;
-            let recovery_targets = part
-                .recovery_requests()
-                .map(|(address, cache_miss_type)| (self.simulator_for_region(address.region()), address, cache_miss_type))
-                .collect();
-            let recovery_cancellations = part.recovery_cancellation_addresses().collect();
-            on_chunk(&part, recovery_targets, recovery_cancellations);
-            match &mut summary {
-                Some(summary) => summary.append(part),
-                None => summary = Some(part),
-            }
-            if summary.as_ref().is_some_and(|summary| summary.status != IngestStatus::Applied) {
-                break;
-            }
-            if empty {
-                break;
-            }
-            if has_more {
-                tokio::task::yield_now().await;
+            match self.advance_object_batch(&mut continuation, &mut on_chunk) {
+                ObjectBatchProgress::Pending => tokio::task::yield_now().await,
+                ObjectBatchProgress::Complete(summary) => return Some(summary),
             }
         }
-        summary
     }
 
-    pub(super) fn prepare_object_media(&self, simulator_id: SimulatorId, request: ObjectMediaRequest) -> Option<ObjectMediaTarget> {
-        let region = self.region_for(simulator_id)?;
+    #[cfg(test)]
+    pub(super) async fn prepare_object_media(
+        &mut self,
+        simulator_id: SimulatorId,
+        request: ObjectMediaRequest,
+    ) -> Option<ObjectMediaTarget> {
+        let mut cursor = None;
+        loop {
+            match self.prepare_object_media_step(simulator_id, request, cursor.take(), MAX_OBJECT_LOOKUP_WORK_ITEMS) {
+                ObjectMediaPreparationProgress::Pending(next) => {
+                    cursor = Some(next);
+                    tokio::task::yield_now().await;
+                }
+                ObjectMediaPreparationProgress::Complete { target, .. } => return target,
+            }
+        }
+    }
+
+    pub(super) fn prepare_object_media_step(
+        &mut self,
+        simulator_id: SimulatorId,
+        request: ObjectMediaRequest,
+        cursor: Option<ObjectLookupCursor>,
+        work_limit: usize,
+    ) -> ObjectMediaPreparationProgress {
+        let Some(region) = self.region_for(simulator_id) else {
+            return ObjectMediaPreparationProgress::Complete { target: None, work_units: 0 };
+        };
         if region != request.source.region() || !matches!(request.source.order(), OrderEvidence::Ordered(_)) {
-            return None;
+            return ObjectMediaPreparationProgress::Complete { target: None, work_units: 0 };
         }
         let address = LocalAddress::new(region, request.local_id);
-        let entity = self.world.entity_at(address)?;
-        let object = self.world.object(entity)?;
-        if object.id() != request.object_id
-            || object.kind() != Kind::Object
-            || object.appearance() != Some(Appearance::Surface)
-            || object.object_media().is_some_and(|media| media.version() >= request.version)
-        {
-            return None;
+        match self.world.lookup_entity_at_with_budget(address, cursor, work_limit) {
+            ObjectLookupProgress::Visible { entity, work_units } => {
+                let target = if self.world.object(entity).is_some_and(|object| {
+                    object.id() == request.object_id
+                        && object.kind() == Kind::Object
+                        && object.appearance() == Some(Appearance::Surface)
+                        && !object.object_media().is_some_and(|media| media.version() >= request.version)
+                }) {
+                    self.world.object_binding_target(entity).map(|binding| ObjectMediaTarget {
+                        simulator_id,
+                        binding,
+                        source: request.source,
+                        version: request.version,
+                    })
+                } else {
+                    None
+                };
+                ObjectMediaPreparationProgress::Complete { target, work_units }
+            }
+            ObjectLookupProgress::Hidden { work_units } => ObjectMediaPreparationProgress::Complete { target: None, work_units },
+            ObjectLookupProgress::Pending { cursor, .. } => ObjectMediaPreparationProgress::Pending(cursor),
         }
-        let object_binding_target = self.world.object_binding_target(entity)?;
-        Some(ObjectMediaTarget { simulator_id, binding: object_binding_target, source: request.source, version: request.version })
     }
 
-    pub(super) fn object_media_target_is_current(&self, target: ObjectMediaTarget) -> bool {
-        let Some(region) = self.region_for(target.simulator_id) else { return false };
+    pub(super) fn object_media_target_is_current_step(
+        &mut self,
+        target: ObjectMediaTarget,
+        check: &mut ObjectMediaTargetCheck,
+        work_limit: usize,
+    ) -> ObjectMediaTargetCheckProgress {
+        let Some(region) = self.region_for(target.simulator_id) else {
+            return ObjectMediaTargetCheckProgress::Complete { current: false, work_units: 0 };
+        };
         if region != target.source.region() || !matches!(target.source.order(), OrderEvidence::Ordered(_)) {
-            return false;
+            return ObjectMediaTargetCheckProgress::Complete { current: false, work_units: 0 };
         }
-        if target.binding.address().region() != region || !self.world.object_binding_target_is_current(target.binding) {
-            return false;
+        if target.binding.address().region() != region {
+            return ObjectMediaTargetCheckProgress::Complete { current: false, work_units: 0 };
         }
-        self.world.object(target.binding.entity()).is_some_and(|object| {
-            object.kind() == Kind::Object
-                && object.appearance() == Some(Appearance::Surface)
-                && object.object_media().is_none_or(|media| media.version() < target.version)
-        })
+        let revision = self.world.revision();
+        if check.revision != Some(revision) {
+            check.revision = Some(revision);
+            check.entity_cursor = None;
+            check.address_cursor = None;
+            check.stage = ObjectMediaTargetCheckStage::Entity;
+        }
+        let work_limit = work_limit.min(MAX_OBJECT_LOOKUP_WORK_ITEMS);
+        if work_limit == 0 {
+            return ObjectMediaTargetCheckProgress::Pending;
+        }
+        let mut work = 0usize;
+        loop {
+            if work >= work_limit {
+                return ObjectMediaTargetCheckProgress::Pending;
+            }
+            match check.stage {
+                ObjectMediaTargetCheckStage::Entity => {
+                    match self.world.lookup_entity_with_budget(
+                        target.binding.object_id(),
+                        check.entity_cursor.take(),
+                        work_limit.saturating_sub(work),
+                    ) {
+                        ObjectLookupProgress::Visible { entity, work_units } => {
+                            work = work.saturating_add(work_units);
+                            if entity != target.binding.entity() {
+                                return ObjectMediaTargetCheckProgress::Complete { current: false, work_units: work };
+                            }
+                            check.stage = ObjectMediaTargetCheckStage::Address;
+                        }
+                        ObjectLookupProgress::Hidden { work_units } => {
+                            work = work.saturating_add(work_units);
+                            return ObjectMediaTargetCheckProgress::Complete { current: false, work_units: work };
+                        }
+                        ObjectLookupProgress::Pending { cursor, .. } => {
+                            check.entity_cursor = Some(cursor);
+                            return ObjectMediaTargetCheckProgress::Pending;
+                        }
+                    }
+                }
+                ObjectMediaTargetCheckStage::Address => {
+                    match self.world.lookup_entity_at_with_budget(
+                        target.binding.address(),
+                        check.address_cursor.take(),
+                        work_limit.saturating_sub(work),
+                    ) {
+                        ObjectLookupProgress::Visible { entity, work_units } => {
+                            work = work.saturating_add(work_units);
+                            if entity != target.binding.entity() {
+                                return ObjectMediaTargetCheckProgress::Complete { current: false, work_units: work };
+                            }
+                            check.stage = ObjectMediaTargetCheckStage::Complete;
+                        }
+                        ObjectLookupProgress::Hidden { work_units } => {
+                            work = work.saturating_add(work_units);
+                            return ObjectMediaTargetCheckProgress::Complete { current: false, work_units: work };
+                        }
+                        ObjectLookupProgress::Pending { cursor, .. } => {
+                            check.address_cursor = Some(cursor);
+                            return ObjectMediaTargetCheckProgress::Pending;
+                        }
+                    }
+                }
+                ObjectMediaTargetCheckStage::Complete => {
+                    if !self.world.object_binding_target_is_current(target.binding) {
+                        return ObjectMediaTargetCheckProgress::Complete { current: false, work_units: work };
+                    }
+                    return ObjectMediaTargetCheckProgress::Complete {
+                        current: self.world.object(target.binding.entity()).is_some_and(|object| {
+                            object.kind() == Kind::Object
+                                && object.appearance() == Some(Appearance::Surface)
+                                && object.object_media().is_none_or(|media| media.version() < target.version)
+                        }),
+                        work_units: work,
+                    };
+                }
+            }
+        }
     }
 
-    pub(super) fn apply_object_media(
+    pub(super) fn apply_object_media_after_check(
         &mut self,
         target: ObjectMediaTarget,
         update: ObjectMediaUpdate,
     ) -> Option<Result<Applied, ApplyError>> {
-        if update.version() < target.version || !self.object_media_target_is_current(target) {
+        if update.version() < target.version
+            || !self.world.object_binding_target_is_current(target.binding)
+            || !self.world.object(target.binding.entity()).is_some_and(|object| {
+                object.kind() == Kind::Object
+                    && object.appearance() == Some(Appearance::Surface)
+                    && object.object_media().is_none_or(|media| media.version() < target.version)
+            })
+        {
             return None;
         }
         let mut patch = ObjectPatch::new(target.source, target.binding.address().local_id());
@@ -557,6 +1018,24 @@ impl SessionWorld {
             drop(self.world.retain_pbr_material_overrides(cached.source, cached.local_id, cached.expected_id, cached.overrides)?);
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) async fn apply_object_media(
+        &mut self,
+        target: ObjectMediaTarget,
+        update: ObjectMediaUpdate,
+    ) -> Option<Result<Applied, ApplyError>> {
+        let mut check = ObjectMediaTargetCheck::default();
+        loop {
+            match self.object_media_target_is_current_step(target, &mut check, MAX_OBJECT_LOOKUP_WORK_ITEMS) {
+                ObjectMediaTargetCheckProgress::Pending => tokio::task::yield_now().await,
+                ObjectMediaTargetCheckProgress::Complete { current: true, .. } => {
+                    return self.apply_object_media_after_check(target, update);
+                }
+                ObjectMediaTargetCheckProgress::Complete { current: false, .. } => return None,
+            }
+        }
     }
 
     pub(super) fn apply_sit_target_update(
@@ -577,13 +1056,14 @@ impl SessionWorld {
         &mut self,
         simulator_id: SimulatorId,
         source: UpdateSource,
+        entity: Option<Entity>,
         update: AvatarAppearanceMessage,
     ) -> Option<Result<Applied, ApplyError>> {
         let region = self.region_for(simulator_id)?;
         if region != source.region() {
             return None;
         }
-        let entity = self.world.entity(update.object_id)?;
+        let entity = entity?;
         let object = self.world.object(entity)?;
         if object.id() != update.object_id || object.kind() != Kind::Avatar || object.address().region() != region {
             return None;
@@ -595,31 +1075,23 @@ impl SessionWorld {
         Some(result)
     }
 
-    pub(super) fn object_address(&self, simulator_id: SimulatorId, object_id: Uuid) -> Option<LocalAddress> {
-        let region = self.region_for(simulator_id)?;
-        let entity = self.world.entity(object_id)?;
-        self.world.object(entity).filter(|object| object.address().region() == region).map(|object| object.address())
-    }
-
     pub(super) fn complete_agent_handoff(
         &mut self,
         from_simulator: SimulatorId,
         to_simulator: SimulatorId,
+        current_entity: Option<Entity>,
         observation: ObjectObservation,
     ) -> (bool, Option<Applied>) {
         let Some(to) = self.region_for(to_simulator) else { return (false, None) };
         if observation.source.region() != to || observation.kind != Kind::Avatar {
             return (false, None);
         }
-        let Some(entity) = self.world.entity(observation.id) else {
+        let Some(entity) = current_entity else {
             let applied = match self.world.observe_object(observation) {
                 Ok(applied) => applied,
                 Err(_) => return (false, None),
             };
-            let introduced = matches!(
-                applied.outcome,
-                Introduced(entity) if self.world.object(entity).is_some_and(|object| object.address().region() == to)
-            );
+            let introduced = matches!(applied.outcome, Introduced(_));
             return (introduced, Some(applied));
         };
         let Some(current_region) = self.world.object(entity).map(|object| object.address().region()) else { return (false, None) };
@@ -634,10 +1106,7 @@ impl SessionWorld {
                 return (false, None);
             }
         };
-        let completed = matches!(
-            applied.outcome,
-            AgentHandedOff(entity) if self.world.object(entity).is_some_and(|object| object.address().region() == to)
-        );
+        let completed = matches!(applied.outcome, AgentHandedOff(_));
         (completed, Some(applied))
     }
 
@@ -673,10 +1142,20 @@ fn resolve_region_handle(
     Ok(current_handle)
 }
 
-fn apply_operation(world: &mut World, operation: ObjectOperation) -> Result<Applied, ApplyError> {
+fn apply_operation(
+    world: &mut World,
+    operation: ObjectOperation,
+    parent_resolution: Option<ParentResolutionPlan>,
+) -> Result<Applied, ApplyError> {
     match operation {
-        ObjectOperation::Observe(observation) => world.observe_object(observation),
-        ObjectOperation::Patch(patch) => world.patch_object(patch),
+        ObjectOperation::Observe(observation) => match parent_resolution {
+            Some(plan) => world.observe_object_with_parent_resolution(observation, plan),
+            None => world.observe_object(observation),
+        },
+        ObjectOperation::Patch(patch) => match parent_resolution {
+            Some(plan) => world.patch_object_with_parent_resolution(patch, plan),
+            None => world.patch_object(patch),
+        },
         ObjectOperation::Remove { source, local_id } => world.remove_object(source, local_id),
         ObjectOperation::Cached { .. } => unreachable!("cached operations are recovery intents"),
     }
