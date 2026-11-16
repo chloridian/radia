@@ -89,7 +89,7 @@ struct Report {
     abandoned: u32,
     pop_outs: u32,
     missed: u32,
-    unencoded: u32,
+    extras: u32,
     mesh_switches: u32,
     removals: u32,
     returned_during_build: u32,
@@ -109,7 +109,7 @@ impl fmt::Display for Report {
         let per_hundred = f64::from(self.commits) * 100.0 / f64::from(self.frames.max(1));
         write!(
             f,
-            "frames={} commits={} commits_per_100={per_hundred:.1} stale={:?} invalidations={:?} build_frames=({}) building={} draining={} layout_required={} phases={:?} mesh_bytes_changes={} mesh_revision_changes={} retry_frames={} longest_retry={} restart_frames={} appearance_frames={} budget_blocked_frames={} mesh_wait=({}) mesh_unresolved=({}) parity=({}) parity_within_1={:.1}% parity_unresolved=({}) parity_abandoned={} pop_in_first=({}) pop_in_reentry=({}) unresolved=({}) abandoned={} returned_during_build={} pop_outs={} missed={} unencoded={} mesh_switches={} removals={} examples={:?}",
+            "frames={} commits={} commits_per_100={per_hundred:.1} stale={:?} invalidations={:?} build_frames=({}) building={} draining={} layout_required={} phases={:?} mesh_bytes_changes={} mesh_revision_changes={} retry_frames={} longest_retry={} restart_frames={} appearance_frames={} budget_blocked_frames={} mesh_wait=({}) mesh_unresolved=({}) parity=({}) parity_within_1={:.1}% parity_unresolved=({}) parity_abandoned={} pop_in_first=({}) pop_in_reentry=({}) unresolved=({}) abandoned={} returned_during_build={} pop_outs={} missed={} extras={} mesh_switches={} removals={} examples={:?}",
             self.frames,
             self.commits,
             self.stale,
@@ -139,7 +139,7 @@ impl fmt::Display for Report {
             self.returned_during_build,
             self.pop_outs,
             self.missed,
-            self.unencoded,
+            self.extras,
             self.mesh_switches,
             self.removals,
             self.examples,
@@ -310,8 +310,8 @@ impl Rig {
             report.budget_blocked_frames += u32::from(geometry.stats.mesh_budget_blocked > 0);
 
             let frustum = Frustum::from_clip_matrix(projection(camera, SIZE));
-            let (emitted, unencoded) = emitted_slots(geometry);
-            report.unencoded += unencoded;
+            let (emitted, extras) = emitted_slots(geometry);
+            report.extras += extras;
             for (_, item) in geometry.cache.items.iter() {
                 let sphere = WorldSphere::new(item.position, item.rotation, item.scale, item.info.bounds, camera);
                 let strict = sphere.is_some_and(|sphere| sphere.visible(item.shading, camera, &frustum));
@@ -399,22 +399,21 @@ fn committed_slots(geometry: &GeometryRenderer, faces: &[CachedFace]) -> Vec<u32
 }
 
 fn emitted_slots(geometry: &GeometryRenderer) -> (HashSet<u32>, u32) {
-    let list = &geometry.draw_list;
+    let view = &geometry.main_view;
+    let commands = geometry.draw_list.draws().iter().map(|draw| (draw.first, draw.count)).collect::<HashSet<_>>();
     let mut slots = HashSet::new();
-    let mut unencoded = 0;
-    for batch in list.draw_batches() {
+    let mut extras = 0;
+    for batch in view.batches() {
         for command in 0..batch.count {
             let start = usize::try_from(batch.offset).expect("indirect offset fits") + command as usize * INDIRECT_DRAW_BYTES;
-            let encoded = list.indirect_bytes().get(start + 4..start + 8).zip(list.first_instance(batch.offset, command));
-            let Some((count, first)) = encoded else {
-                unencoded += 1;
-                continue;
-            };
+            let count = view.indirect_bytes().get(start + 4..start + 8).expect("emitted command is encoded");
             let count = u32::from_le_bytes(count.try_into().expect("instance count is four bytes"));
+            let first = view.first_instance(batch.offset, command).expect("emitted command has a first instance");
+            extras += u32::from(!commands.contains(&(first, count)));
             slots.extend(first..first + count);
         }
     }
-    (slots, unencoded)
+    (slots, extras)
 }
 
 fn written(geometry: &GeometryRenderer, slot: u32) -> bool {
@@ -445,6 +444,8 @@ fn run(path: &Path, regime: Regime) {
         path.name,
         rig.geometry.memory.mesh_state().bytes
     );
+    assert_eq!(report.missed, 0, "a strictly visible face with written instance bytes was not emitted");
+    assert_eq!(report.extras, 0, "an emitted command matches no committed command");
 }
 
 fn run_regimes(path: &Path) {

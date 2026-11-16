@@ -27,6 +27,13 @@ impl Frustum {
             && radius >= 0.0
             && self.planes.iter().all(|(plane, length)| plane.truncate().dot(center) + plane.w >= -radius * length)
     }
+
+    pub fn contains_sphere(&self, center: DVec3, radius: f64) -> bool {
+        center.is_finite()
+            && radius.is_finite()
+            && radius >= 0.0
+            && self.planes.iter().all(|(plane, length)| plane.truncate().dot(center) + plane.w >= radius * length)
+    }
 }
 
 #[cfg(test)]
@@ -75,5 +82,9 @@ mod tests {
         assert!(!frustum.intersects_sphere(DVec3::NAN, 0.5));
         assert!(!frustum.intersects_sphere(DVec3::ZERO, f64::NAN));
         assert!(!frustum.intersects_sphere(DVec3::ZERO, -1.0));
+        assert!(frustum.contains_sphere(DVec3::new(0.0, 0.0, 0.5), 0.5));
+        assert!(!frustum.contains_sphere(DVec3::new(0.0, 0.0, 0.5), 0.51));
+        assert!(!frustum.contains_sphere(DVec3::new(1.5, 0.0, 0.5), 0.5));
+        assert!(!frustum.contains_sphere(DVec3::NAN, 0.5));
     }
 }
