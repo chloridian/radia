@@ -91,6 +91,7 @@ impl FirstAppearances {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn has_pending(&self) -> bool {
         self.pending > 0
     }

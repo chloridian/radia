@@ -2,7 +2,7 @@ use std::{
     assert_matches,
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use assets::{Budget, Content, LoadJob, Priority, Request, Resource, Sampler, Status, Store};
@@ -50,7 +50,7 @@ fn canceled_layout_retires_in_chunks() {
     assert!(list.pending.is_none());
     assert_eq!(staged_entry_count(list.retired.as_ref().expect("full staged build is retained")), initial_entries);
     for _ in 0..8 {
-        assert!(!list.request_layout(&[index], camera, false, &items.items));
+        assert!(!list.request_layout(&[index], camera, &items.items));
         list.cancel_layout();
         assert!(list.pending.is_none());
         assert!(list.retired.is_some(), "repeated requests cannot add retired builds");
@@ -60,8 +60,8 @@ fn canceled_layout_retires_in_chunks() {
     let mut steps = 0;
     while list.layout_pending() {
         let before = list.retired_entries_remaining();
-        let _ = list.advance_layout(&mut items.items);
-        assert!(before.saturating_sub(list.retired_entries_remaining()) <= super::RETIRED_LAYOUT_ENTRIES_PER_FRAME);
+        let _ = list.advance_layout(&mut items.items, Duration::ZERO);
+        assert!(before.saturating_sub(list.retired_entries_remaining()) <= super::LAYOUT_CLOCK_STEPS);
         assert_eq!(list.draws().len(), active_commands, "retirement leaves active draw commands intact");
         assert_eq!(list.visible_items(), active_items, "retirement leaves active visibility intact");
         assert_eq!(list.committed.instance_bytes.len(), active_bytes, "retirement leaves active instance data intact");
@@ -71,7 +71,7 @@ fn canceled_layout_retires_in_chunks() {
     assert!(steps > 1, "many staged group references require multiple retirement turns");
     assert!(list.retired.is_none(), "completed retirement releases the whole staged allocation");
     assert_eq!(group_refs(&list, group), active_refs, "retirement releases every staged group reference");
-    assert!(list.request_layout(&[index], camera, false, &items.items));
+    assert!(list.request_layout(&[index], camera, &items.items));
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn stale_layout_retires_whole_build() {
     list.pending = Some(staged);
     list.mark_layout_stale();
 
-    let progress = list.advance_layout(&mut items.items).expect("stale build is observed");
+    let progress = list.advance_layout(&mut items.items, Duration::ZERO).expect("stale build is observed");
     assert!(progress.stale);
     assert!(list.pending.is_none());
     assert!(list.retired.is_some(), "stale staged inputs remain owned by incremental retirement");
@@ -95,8 +95,8 @@ fn stale_layout_retires_whole_build() {
     let mut steps = 0;
     while list.layout_pending() {
         let before = list.retired_entries_remaining();
-        let _ = list.advance_layout(&mut items.items);
-        assert!(before.saturating_sub(list.retired_entries_remaining()) <= super::RETIRED_LAYOUT_ENTRIES_PER_FRAME);
+        let _ = list.advance_layout(&mut items.items, Duration::ZERO);
+        assert!(before.saturating_sub(list.retired_entries_remaining()) <= super::LAYOUT_CLOCK_STEPS);
         assert_eq!(list.draws().len(), active_commands, "retirement leaves active draw commands intact");
         assert_eq!(list.visible_items(), active_items, "retirement leaves active visibility intact");
         steps += 1;
@@ -116,7 +116,7 @@ fn canceled_build_keeps_committed_patches() {
     let origin = super::super::instance::scene_origin(camera.position());
     let mut items = FrameCache::default();
     let mut list = DrawList::default();
-    let mut visible = (1..=2 * super::LAYOUT_ITEMS_PER_FRAME as u128)
+    let mut visible = (1..=4_096)
         .map(|id| items.insert_item(new_item((2, id, 0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index"))
         .collect::<Vec<_>>();
     layout(&mut list, &visible, &mut items.items, camera);
@@ -133,9 +133,9 @@ fn canceled_build_keeps_committed_patches() {
 
     let entering = items.insert_item(new_item((2, 0, 0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("entering item");
     visible.insert(0, entering);
-    assert!(list.request_layout(&visible, camera, true, &items.items));
+    assert!(list.request_layout(&visible, camera, &items.items));
     for _ in 0..10_000 {
-        let _ = list.advance_layout(&mut items.items);
+        let _ = list.advance_layout(&mut items.items, Duration::ZERO);
         if list.staged_progress().is_some_and(|(phase, cursor, ..)| phase == "fill" && cursor > 501) {
             break;
         }
@@ -152,7 +152,7 @@ fn canceled_build_keeps_committed_patches() {
         if !list.layout_pending() {
             break;
         }
-        let _ = list.advance_layout(&mut items.items);
+        let _ = list.advance_layout(&mut items.items, Duration::ZERO);
     }
     assert!(!list.layout_pending(), "the canceled build retires");
     let transform = rotate(&mut items, &mut list, 0.9);
@@ -169,13 +169,13 @@ fn canceled_build_keeps_committed_patches() {
 fn plain_staging_retires_at_once() {
     let (_region_world, _view, camera, mut items, mut list, index) = active_layout();
     let staged = staged_layout(&mut list, index, camera, &items.items, 0);
-    assert!(staged_entry_count(&staged) > 4 * super::RETIRED_LAYOUT_ENTRIES_PER_FRAME);
+    assert!(staged_entry_count(&staged) > 4 * super::LAYOUT_CLOCK_STEPS);
     list.pending = Some(staged);
     list.cancel_layout();
 
-    let _ = list.advance_layout(&mut items.items);
+    let _ = list.advance_layout(&mut items.items, Duration::ZERO);
     assert!(!list.layout_pending(), "staged data without resources does not hold the next layout back");
-    assert!(list.request_layout(&[index], camera, false, &items.items));
+    assert!(list.request_layout(&[index], camera, &items.items));
 }
 
 #[test]
@@ -301,7 +301,7 @@ fn moved_faces_cull_by_their_pose() {
     let origin = super::super::instance::scene_origin(camera.position());
     let mut items = FrameCache::default();
     let mut list = DrawList::default();
-    let visible = (1..=2 * super::LAYOUT_ITEMS_PER_FRAME as u128)
+    let visible = (1..=4_096)
         .map(|id| items.insert_item(new_item((2, id, 0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index"))
         .collect::<Vec<_>>();
     let target = visible[500];
@@ -318,9 +318,9 @@ fn moved_faces_cull_by_their_pose() {
         face_command(list, &view, face).1
     };
 
-    assert!(list.request_layout(&visible, camera, true, &items.items));
+    assert!(list.request_layout(&visible, camera, &items.items));
     for _ in 0..10_000 {
-        let _ = list.advance_layout(&mut items.items);
+        let _ = list.advance_layout(&mut items.items, Duration::ZERO);
         if list.staged_progress().is_some_and(|(phase, cursor, ..)| phase == "fill" && cursor > 501) {
             break;
         }
@@ -475,10 +475,10 @@ proptest! {
         let culled = view.opaque.iter().map(|index| ranks[*index as usize]).collect::<Vec<_>>();
         prop_assert!(!culled.is_empty() && culled.is_sorted(), "culled opaque classes out of order: {culled:?}");
 
-        prop_assert!(list.request_layout(&visible, camera, false, &items.items));
+        prop_assert!(list.request_layout(&visible, camera, &items.items));
         let mut steps = 0;
         while !list.staged_progress().is_some_and(|(phase, ..)| matches!(phase, "allocate" | "fill")) {
-            let _ = list.advance_layout(&mut items.items);
+            let _ = list.advance_layout(&mut items.items, Duration::ZERO);
             steps += 1;
             prop_assert!(steps < 100, "staged layout reaches allocation");
         }
@@ -603,7 +603,7 @@ const STAGED_REFS: usize = 2_047;
 
 fn staged_layout(list: &mut DrawList, index: ItemIndex, camera: Camera, items: &ItemSlab, refs: usize) -> super::LayoutBuild {
     let input = vec![index; 2_047];
-    let mut build = super::LayoutBuild::new(Default::default(), &input, &input, camera, true, items);
+    let mut build = super::LayoutBuild::new(Default::default(), &input, camera, items);
     let group = items.get(index).expect("staged item").faces[0].group;
     for _ in 0..refs {
         assert!(list.groups.retain(group));
@@ -620,7 +620,6 @@ fn group_refs(list: &DrawList, group: u32) -> usize {
 fn staged_entry_count(build: &super::LayoutBuild) -> usize {
     let state = &build.state;
     build.uploads.len()
-        + build.previous.len()
         + build.visible.len()
         + build.mesh_pins.len()
         + build.layout_items.len()
@@ -661,7 +660,6 @@ fn staged_allocation_bytes(build: &super::LayoutBuild) -> usize {
     let state = &build.state;
     [
         set_bytes(&build.uploads),
-        vec_bytes(&build.previous),
         vec_bytes(&build.visible),
         set_bytes(&build.mesh_pins),
         vec_bytes(&build.layout_items),
@@ -786,7 +784,7 @@ fn new_face(
         slot: None,
         blended_index: None,
         layout: Default::default(),
-        retained: None,
+        committed: None,
     }
 }
 
@@ -880,10 +878,10 @@ fn instance_count(list: &DrawList) -> usize {
 
 fn layout(list: &mut DrawList, visible: &[ItemIndex], items: &mut ItemSlab, camera: Camera) -> LayoutStats {
     settle(list, items);
-    assert!(list.request_layout(visible, camera, true, items), "an idle list accepts a layout");
+    assert!(list.request_layout(visible, camera, items), "an idle list accepts a layout");
     let mut stats = None;
     for _ in 0..100_000 {
-        if let Some(progress) = list.advance_layout(items) {
+        if let Some(progress) = list.advance_layout(items, Duration::ZERO) {
             assert!(!progress.stale, "test layouts do not go stale");
             if progress.complete {
                 stats = Some(progress.stats);
@@ -902,7 +900,7 @@ fn settle(list: &mut DrawList, items: &mut ItemSlab) {
         if !list.layout_pending() {
             return;
         }
-        let _ = list.advance_layout(items);
+        let _ = list.advance_layout(items, Duration::ZERO);
     }
     panic!("pending layout work did not settle");
 }

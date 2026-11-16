@@ -21,7 +21,6 @@ use crate::{
     scene::{Camera, MeshId, Reconciler, SceneView},
 };
 
-const OBJECTS: u32 = 3_000;
 const SIZE: [u32; 2] = [1280, 720];
 const DRAW_DISTANCE: f64 = 96.0;
 const EYE_HEIGHT: f64 = 25.0;
@@ -71,6 +70,8 @@ struct Report {
     draining_frames: u32,
     required_frames: u32,
     committed_builds: Latencies,
+    cycles: Latencies,
+    work: usize,
     bytes_changes: u32,
     revision_changes: u32,
     retry_frames: u32,
@@ -109,12 +110,14 @@ impl fmt::Display for Report {
         let per_hundred = f64::from(self.commits) * 100.0 / f64::from(self.frames.max(1));
         write!(
             f,
-            "frames={} commits={} commits_per_100={per_hundred:.1} stale={:?} invalidations={:?} build_frames=({}) building={} draining={} layout_required={} phases={:?} mesh_bytes_changes={} mesh_revision_changes={} retry_frames={} longest_retry={} restart_frames={} appearance_frames={} budget_blocked_frames={} mesh_wait=({}) mesh_unresolved=({}) parity=({}) parity_within_1={:.1}% parity_unresolved=({}) parity_abandoned={} pop_in_first=({}) pop_in_reentry=({}) unresolved=({}) abandoned={} returned_during_build={} pop_outs={} missed={} extras={} mesh_switches={} removals={} examples={:?}",
+            "frames={} commits={} commits_per_100={per_hundred:.1} stale={:?} invalidations={:?} build_frames=({}) cycles=({}) work={} building={} draining={} layout_required={} phases={:?} mesh_bytes_changes={} mesh_revision_changes={} retry_frames={} longest_retry={} restart_frames={} appearance_frames={} budget_blocked_frames={} mesh_wait=({}) mesh_unresolved=({}) parity=({}) parity_within_1={:.1}% parity_unresolved=({}) parity_abandoned={} pop_in_first=({}) pop_in_reentry=({}) unresolved=({}) abandoned={} returned_during_build={} pop_outs={} missed={} extras={} mesh_switches={} removals={} examples={:?}",
             self.frames,
             self.commits,
             self.stale,
             self.invalidations,
             self.committed_builds,
+            self.cycles,
+            self.work,
             self.building_frames,
             self.draining_frames,
             self.required_frames,
@@ -221,8 +224,8 @@ fn layout(id: u32) -> (Vec3, PrimShape) {
 }
 
 impl Rig {
-    fn new(first: Camera) -> Self {
-        let (world, scene, view) = object_scene_with(OBJECTS, first, layout);
+    fn new(first: Camera, objects: u32) -> Self {
+        let (world, scene, view) = object_scene_with(objects, first, layout);
         let (device, queue) = vulkan_device();
         let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
         geometry.memory = Arc::new(Accounting::default());
@@ -256,11 +259,39 @@ impl Rig {
                 && !geometry.layout_required
                 && geometry.stats.pending_meshes == 0
                 && !geometry.stats.rebuild_pending
+                && !geometry.mesh_admission.active
             {
                 return;
             }
         }
         panic!("renderer did not settle");
+    }
+
+    fn layout_cycle(&mut self, camera: Camera) -> u32 {
+        let geometry = &mut self.geometry;
+        assert!(
+            geometry.draw_list.request_layout(&geometry.cache.visible, camera, &geometry.cache.items),
+            "a settled list accepts a layout"
+        );
+        geometry.prepared = None;
+        let mut frames = 0;
+        while self.geometry.draw_list.layout_pending() {
+            self.frame(camera);
+            frames += 1;
+            assert!(frames < SETTLE_FRAMES, "the layout cycle completes");
+        }
+        frames
+    }
+
+    fn resident_fraction(&self) -> f64 {
+        let geometry = &self.geometry;
+        let range = &geometry.cache.range;
+        let resident = range
+            .iter()
+            .filter_map(|index| geometry.cache.items.get(*index))
+            .filter(|item| geometry.meshes.contains_key(&item.mesh.id()))
+            .count();
+        resident as f64 / range.len().max(1) as f64
     }
 
     fn walk(&mut self, path: &Path) -> Report {
@@ -269,6 +300,7 @@ impl Rig {
         let mut state = self.geometry.memory.mesh_state();
         let mut retry_run = 0u32;
         let mut build_started = None;
+        let mut cycle_started = None;
         for (frame_index, camera) in (0u32..).zip(path.cameras.iter().copied()) {
             let was_building = self.geometry.draw_list.layout_building();
             self.frame(camera);
@@ -285,7 +317,16 @@ impl Rig {
             let building = geometry.draw_list.layout_building();
             if building && !was_building {
                 build_started = Some(frame_index);
+                cycle_started.get_or_insert(frame_index);
             }
+            if !geometry.draw_list.layout_pending()
+                && let Some(started) = cycle_started.take()
+            {
+                report.cycles.0.push(frame_index - started + 1);
+            }
+            report.work += geometry.stats.candidate_items_visited
+                + geometry.stats.visible_candidates_checked
+                + geometry.stats.mesh_demand_items_visited;
             if committed_now && let Some(started) = build_started.take() {
                 report.committed_builds.0.push(frame_index - started + 1);
             }
@@ -424,12 +465,16 @@ fn drawn(geometry: &GeometryRenderer, emitted: &HashSet<u32>, slots: &[u32]) -> 
     slots.iter().any(|slot| emitted.contains(slot) && written(geometry, *slot))
 }
 
-fn run(path: &Path, regime: Regime) {
+fn run(path: &Path, regime: Regime, objects: u32) {
     let first = path.cameras[0];
-    let mut rig = Rig::new(first);
+    let mut rig = Rig::new(first, objects);
     rig.settle_at(first);
+    let resident_fraction = rig.resident_fraction();
+    let mut cycle = None;
     if matches!(regime, Regime::Resident) {
         rig.walk(path);
+        rig.settle_at(first);
+        cycle = Some((rig.layout_cycle(first), rig.geometry.cache.visible.len(), rig.geometry.stats.instances));
         rig.settle_at(first);
     }
     let _pressure = matches!(regime, Regime::Pressured).then(|| {
@@ -440,36 +485,42 @@ fn run(path: &Path, regime: Regime) {
     let report = rig.walk(path);
     let (prim_meshes, prim_bytes) = rig.scene.prim_mesh_usage();
     println!(
-        "camera_path path={} regime={regime:?} mesh_bytes={} prim_meshes={prim_meshes} prim_bytes={prim_bytes} {report}",
+        "camera_path path={} objects={objects} regime={regime:?} range={} resident_fraction={resident_fraction:.3} layout_cycle={cycle:?} mesh_bytes={} prim_meshes={prim_meshes} prim_bytes={prim_bytes} {report}",
         path.name,
+        rig.geometry.cache.range.len(),
         rig.geometry.memory.mesh_state().bytes
     );
     assert_eq!(report.missed, 0, "a strictly visible face with written instance bytes was not emitted");
     assert_eq!(report.extras, 0, "an emitted command matches no committed command");
+    assert_eq!(report.pop_outs, 0, "a shown strictly visible item stopped drawing");
+    if matches!(regime, Regime::Resident) && path.name != "walk" {
+        assert_eq!(report.commits, 0, "turning a settled camera commits no layout");
+        assert_eq!(report.work, 0, "turning a settled camera revisits no range members");
+    }
 }
 
-fn run_regimes(path: &Path) {
+fn run_regimes(path: &Path, objects: u32) {
     for regime in [Regime::Resident, Regime::Streaming, Regime::Pressured] {
-        run(path, regime);
+        run(path, regime, objects);
     }
 }
 
 #[test]
 #[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --release --run-ignored only -E 'test(camera_path)' --no-capture --test-threads=1"]
 fn gpu_camera_path_yaw_sweep() {
-    run_regimes(&yaw_sweep());
+    run_regimes(&yaw_sweep(), 3_000);
 }
 
 #[test]
 #[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --release --run-ignored only -E 'test(camera_path)' --no-capture --test-threads=1"]
 fn gpu_camera_path_yaw_reversal() {
-    run_regimes(&yaw_reversal());
+    run_regimes(&yaw_reversal(), 3_000);
 }
 
 #[test]
 #[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --release --run-ignored only -E 'test(camera_path)' --no-capture --test-threads=1"]
 fn gpu_camera_path_walk() {
-    run_regimes(&walk());
+    run_regimes(&walk(), 3_000);
 }
 
 #[test]
@@ -478,7 +529,7 @@ fn gpu_layout_commits_through_mesh_memory_churn() {
     let center = DVec3::new(128.0, 128.0, EYE_HEIGHT);
     let first = camera(center, 0.0);
     let turned = camera(center, 90.0);
-    let mut rig = Rig::new(first);
+    let mut rig = Rig::new(first, 3_000);
     rig.settle_at(turned);
     rig.settle_at(first);
     let mut lease = None;
