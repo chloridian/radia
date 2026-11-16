@@ -130,11 +130,6 @@ impl MeshCache {
         cache
     }
 
-    #[cfg(test)]
-    pub(in crate::scene) fn usage(&self) -> (usize, usize) {
-        (self.ready.len(), self.bytes)
-    }
-
     pub(in crate::scene) fn request(&mut self, key: MeshKey, priority: u32) -> bool {
         self.clock = self.clock.checked_add(1).expect("mesh cache clock exhausted");
         if let Some(entry) = self.entries.get_mut(&key) {

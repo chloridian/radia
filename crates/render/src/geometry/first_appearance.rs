@@ -91,11 +91,6 @@ impl FirstAppearances {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn has_pending(&self) -> bool {
-        self.pending > 0
-    }
-
     pub(super) fn deadline(&self, key: AppearanceKey, now: Instant) -> Option<Instant> {
         self.entries.get(&key)?.deadline(now)
     }
