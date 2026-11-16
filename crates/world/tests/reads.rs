@@ -227,7 +227,7 @@ fn borrowed_reads_expose_current_state() {
 }
 
 #[test]
-fn objects_returns_live_entities() {
+fn objects_skip_removed_entities() {
     let mut world = World::new(world_limits());
     let region = world.register_region().unwrap();
 
@@ -248,7 +248,7 @@ fn objects_returns_live_entities() {
 }
 
 #[test]
-fn insert_after_cursor_is_listed() {
+fn late_insert_appears_in_changes() {
     let mut limits = world_limits();
     limits.max_entities = 4;
     limits.max_entities_per_region = 4;
@@ -494,7 +494,7 @@ fn list_pages_return_identity() {
 }
 
 #[test]
-fn detail_rejects_a_reused_entity() {
+fn detail_rejects_reused_entity() {
     let mut world = World::new(world_limits());
     let region = world.register_region().unwrap();
     let original = entity(world.observe_object(object(region, 1, 60, 1, Object, Root)).unwrap());
@@ -736,7 +736,7 @@ fn journal_eviction_requires_resync() {
 }
 
 #[test]
-fn foreign_handle_and_limit_errors() {
+fn invalid_read_requests_fail() {
     let mut first = World::new(world_limits());
     let mut second = World::new(world_limits());
     let first_region = first.register_region().unwrap();

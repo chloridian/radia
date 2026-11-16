@@ -16,7 +16,7 @@ fn animation(mode: u8, face: u8, size: [u8; 2], start: f32, length: f32, rate: f
 }
 
 #[test]
-fn parses_and_validates_wire_data() {
+fn wire_decode_validates_fields() {
     let value = animation(ON | LOOP, 3, [2, 4], 1.5, 6.0, -2.0);
     assert_eq!(value.mode(), ON | LOOP);
     assert_eq!(value.face(), 3);
@@ -54,7 +54,7 @@ fn targets_one_or_all_faces() {
 }
 
 #[test]
-fn live_animation_add_clear_patch() {
+fn live_animation_clears_only_explicitly() {
     let (mut world, region) = with_region();
     let value = animation(ON | LOOP, 3, [2, 2], 0.0, 0.0, 1.0);
     let observation = world::ObjectObservation {
