@@ -278,6 +278,11 @@ impl Reconciler {
         self.preparation.assets.set_camera(camera);
     }
 
+    #[cfg(test)]
+    pub(crate) fn prim_mesh_usage(&self) -> (usize, usize) {
+        self.preparation.meshes.mesh_usage()
+    }
+
     pub fn push_environment(&mut self, region: Region, push: EnvironmentPush) -> Result<(), EnvironmentPushError> {
         self.push_environment_at(region, push, Instant::now())
     }
