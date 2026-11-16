@@ -593,3 +593,6 @@ mod water_distance_tests;
 
 #[cfg(test)]
 mod surface_pipeline_tests;
+
+#[cfg(test)]
+mod camera_path_tests;

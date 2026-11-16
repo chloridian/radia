@@ -405,6 +405,12 @@ enum LayoutPhase {
     Commit,
 }
 
+impl LayoutPhase {
+    fn batching(self) -> bool {
+        matches!(self, Self::BatchOpaque | Self::BatchOpaqueEncode | Self::BatchBlended | Self::Commit)
+    }
+}
+
 impl LayoutBuild {
     fn new(
         layout: LayoutId,
@@ -569,6 +575,7 @@ pub(super) struct DrawList {
     blended_batches: usize,
     blended_commands: usize,
     batches_dirty: bool,
+    batches_stale: bool,
     pending: Option<LayoutBuild>,
     retired: Option<LayoutBuild>,
     layout: LayoutId,
@@ -1802,9 +1809,19 @@ impl DrawList {
     }
 
     pub(super) fn invalidate_batches(&mut self) {
+        self.batches_stale = true;
+    }
+
+    pub(super) fn flush_batch_invalidation(&mut self) -> bool {
+        let batching = self.pending.as_ref().is_some_and(|build| build.phase.batching());
+        if !self.batches_stale || batching {
+            return false;
+        }
+        self.batches_stale = false;
         self.groups.invalidate_batches();
         self.draw_batches.clear();
         self.batches_dirty = true;
+        true
     }
 
     pub(super) fn batches_dirty(&self) -> bool {

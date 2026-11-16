@@ -196,6 +196,8 @@ impl GeometryRenderer {
         }
 
         self.stats = Stats::default();
+        #[cfg(test)]
+        let fresh_build = self.draw_list.layout_building() && !self.draw_list.pending_stale();
         self.mesh_admission.visits_this_frame = 0;
         let previous_camera = self.cache.camera;
         let camera_changed = previous_camera != Some(camera) || self.cache.size != size;
@@ -237,10 +239,7 @@ impl GeometryRenderer {
         let stale_pass = update.rebuild_completed && candidate_camera != camera;
         if self.draw_list.layout_pending() && (update.immediate_visibility_change || update.layout_invalidated) {
             #[cfg(test)]
-            {
-                self.stats.layout_stale_reason =
-                    Some(if update.immediate_visibility_change { "immediate_visibility" } else { "layout_invalidated" });
-            }
+            self.note_layout_stale(if update.immediate_visibility_change { "immediate_visibility" } else { "layout_invalidated" });
             self.draw_list.mark_layout_stale();
         }
         let frame_origin = if rebuilding { self.cache.origin } else { origin };
@@ -294,10 +293,10 @@ impl GeometryRenderer {
         times.visibility += visibility_started.elapsed().saturating_sub(times.cache);
 
         let previous_mesh_state = self.cache.mesh_state;
-        let mut batches_invalidated = previous_mesh_state != self.memory.mesh_state();
-        if batches_invalidated {
+        if previous_mesh_state != self.memory.mesh_state() {
             self.draw_list.invalidate_batches();
         }
+        let mut batches_invalidated = self.draw_list.flush_batch_invalidation();
         let meshes_started = Instant::now();
         let pending_priority_changed = camera_changed && (self.mesh_admission.active || !self.pending_meshes.is_empty());
         let mesh_demands_started = Instant::now();
@@ -336,7 +335,7 @@ impl GeometryRenderer {
         self.stats.items_updated = update.items_updated;
         if self.cache.mesh_state != previous_mesh_state {
             self.draw_list.invalidate_batches();
-            batches_invalidated = true;
+            batches_invalidated |= self.draw_list.flush_batch_invalidation();
         }
         let mut appearance_deadline = None;
         let mut gated_entities = HashSet::new();
@@ -453,17 +452,9 @@ impl GeometryRenderer {
                 }
             }
         }
-        if self.draw_list.layout_pending() && (update.layout_invalidated || origin_rebased || batches_invalidated) {
+        if self.draw_list.layout_pending() && (update.layout_invalidated || origin_rebased) {
             #[cfg(test)]
-            {
-                self.stats.layout_stale_reason = Some(if update.layout_invalidated {
-                    "layout_invalidated"
-                } else if origin_rebased {
-                    "origin_rebased"
-                } else {
-                    "batches_invalidated"
-                });
-            }
+            self.note_layout_stale(if update.layout_invalidated { "layout_invalidated" } else { "origin_rebased" });
             self.draw_list.mark_layout_stale();
         }
         if layout_requested {
@@ -495,10 +486,8 @@ impl GeometryRenderer {
         }
         if let Some(progress) = layout_progress {
             #[cfg(test)]
-            {
-                if progress.stale {
-                    self.stats.layout_stale_reason = Some("layout_build");
-                }
+            if progress.stale && fresh_build {
+                self.stats.layout_stale_reason.get_or_insert("layout_build");
             }
             self.stats.layout_items_visited = progress.stats.items_visited;
             self.stats.layout_faces_visited = progress.stats.faces_visited;
@@ -708,6 +697,13 @@ impl GeometryRenderer {
         });
         times.finalize = instances_started.elapsed();
         self.record_prepare(started, times, uploaded);
+    }
+
+    #[cfg(test)]
+    fn note_layout_stale(&mut self, reason: &'static str) {
+        if self.draw_list.layout_building() && !self.draw_list.pending_stale() {
+            self.stats.layout_stale_reason.get_or_insert(reason);
+        }
     }
 
     fn advance_mesh_admission(&mut self, device: &Device, uploaded: &mut usize) -> MeshAdmissionProgress {

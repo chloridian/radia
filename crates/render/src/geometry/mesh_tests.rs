@@ -19,7 +19,7 @@ use wgpu::{
 
 use super::*;
 use crate::geometry::{
-    fixtures::{scene, scene_with_agent, scene_with_mapping, scene_with_scales, scene_with_world},
+    fixtures::{scene, scene_with_agent, scene_with_mapping, scene_with_scales, scene_with_world, vulkan_device},
     instance::{instance_base, packed_instance, scene_origin},
 };
 use crate::material::FaceParams;
@@ -477,15 +477,6 @@ fn prepared_asset(request: Request, bytes: Vec<u8>) -> assets::Status {
     let completion = store.start_decode(input).unwrap().run();
     store.complete(completion, now);
     demand.status()
-}
-
-fn vulkan_device() -> (wgpu::Device, wgpu::Queue) {
-    block_on(async {
-        let instance =
-            wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
-        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-        adapter.request_device(&DeviceDescriptor::default()).await.unwrap()
-    })
 }
 
 fn prepare_frame(device: &wgpu::Device, queue: &wgpu::Queue, geometry: &mut GeometryRenderer, view: &SceneView, camera: Camera) {
@@ -2899,6 +2890,8 @@ fn gpu_lod_keeps_fallback() {
         if geometry.cache.rebuild.is_none()
             && geometry.cache.version.as_ref() == Some(&view.version())
             && geometry.draw_list.valid()
+            && !geometry.draw_list.layout_pending()
+            && !geometry.layout_required
             && geometry.meshes.len() == 3
             && geometry.stats.pending_meshes == 0
         {
