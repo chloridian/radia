@@ -375,7 +375,7 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
     let mut request = Vec::new();
     let mut chunk = [0; 4096];
     loop {
-        let size = stream.read(&mut chunk).expect("read local HTTP request");
+        let Ok(size) = stream.read(&mut chunk) else { return request };
         if size == 0 {
             return request;
         }
