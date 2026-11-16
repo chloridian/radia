@@ -343,7 +343,7 @@ fn matching_version_reuses_folder() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn mismatched_version_restores_children_incomplete_until_fetch_reconciles() -> Result<(), Box<dyn Error>> {
+fn mismatched_version_restores_incomplete() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     seed_cache(directory.path(), 7)?;
     let mut current = fixture(8)?;
@@ -364,7 +364,7 @@ fn mismatched_version_restores_children_incomplete_until_fetch_reconciles() -> R
 }
 
 #[test]
-fn completed_fetch_wins_while_other_cached_folders_restore() -> Result<(), Box<dyn Error>> {
+fn completed_fetch_beats_restore() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     seed_two_folder_cache(directory.path())?;
     let mut current = two_folder_fixture()?;
@@ -403,7 +403,7 @@ fn completed_fetch_wins_while_other_cached_folders_restore() -> Result<(), Box<d
 }
 
 #[test]
-fn live_item_update_survives_an_interleaved_partial_restore() -> Result<(), Box<dyn Error>> {
+fn live_update_survives_partial_restore() -> Result<(), Box<dyn Error>> {
     const ITEM_COUNT: usize = 700;
     let directory = tempdir()?;
     let mut seeded = fixture(7)?;
@@ -453,7 +453,7 @@ fn live_item_update_survives_an_interleaved_partial_restore() -> Result<(), Box<
 }
 
 #[test]
-fn restore_units_are_bounded_per_turn() -> Result<(), Box<dyn Error>> {
+fn restore_units_bounded_per_turn() -> Result<(), Box<dyn Error>> {
     const FOLDER_COUNT: usize = MAX_RESTORE_UNITS_PER_TURN + 20;
     let directory = tempdir()?;
     let agent = Uuid::from_u128(801);
@@ -494,7 +494,7 @@ fn restore_units_are_bounded_per_turn() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn missing_skeleton_folders_are_preserved_incomplete_and_old_roots_are_dropped() -> Result<(), Box<dyn Error>> {
+fn skeleton_change_prunes_old_roots() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     seed_cache(directory.path(), 7)?;
     let agent = Uuid::from_u128(100);
@@ -549,7 +549,7 @@ fn missing_skeleton_folders_are_preserved_incomplete_and_old_roots_are_dropped()
 }
 
 #[test]
-fn unchanged_parent_does_not_restore_a_changed_child() -> Result<(), Box<dyn Error>> {
+fn changed_child_restores_incomplete() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     seed_nested_cache(directory.path(), 10, 20)?;
     let mut current = nested_fixture(10, 21)?;
@@ -598,7 +598,7 @@ fn unchanged_parent_does_not_restore_a_changed_child() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn unchanged_parent_and_child_restore_as_complete() -> Result<(), Box<dyn Error>> {
+fn unchanged_tree_restores_complete() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     seed_nested_cache(directory.path(), 10, 20)?;
     let mut current = nested_fixture(10, 20)?;
@@ -617,7 +617,7 @@ fn unchanged_parent_and_child_restore_as_complete() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn bootstrap_preserves_matching_cache_completeness_across_logins() -> Result<(), Box<dyn Error>> {
+fn bootstrap_keeps_completeness_across_logins() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     seed_cache(directory.path(), 7)?;
 
@@ -726,7 +726,7 @@ fn full_queue_invalidates_cached_completeness() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn equal_agent_ids_on_different_grids_use_separate_scopes() -> Result<(), Box<dyn Error>> {
+fn grids_use_separate_scopes() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     seed_cache(directory.path(), 7)?;
     let mut agni = fixture(7)?;
@@ -764,7 +764,7 @@ fn equal_agent_ids_on_different_grids_use_separate_scopes() -> Result<(), Box<dy
 }
 
 #[test]
-fn agents_share_library_scope_and_validate_each_login_skeleton() -> Result<(), Box<dyn Error>> {
+fn shared_library_validates_skeleton() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let owner = Uuid::from_u128(900);
     let mut first = library_fixture(Uuid::from_u128(701), owner, 5, "Shared library item")?;
@@ -805,7 +805,7 @@ fn agents_share_library_scope_and_validate_each_login_skeleton() -> Result<(), B
 }
 
 #[test]
-fn schema_and_corrupt_database_are_recreated() -> Result<(), Box<dyn Error>> {
+fn damaged_cache_is_recreated() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let agent = Uuid::from_u128(703);
     let path = directory.path().join("inventory.sqlite");
@@ -827,7 +827,7 @@ fn schema_and_corrupt_database_are_recreated() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn old_per_grid_cache_files_are_removed_when_idle() -> Result<(), Box<dyn Error>> {
+fn old_grid_caches_are_removed() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let old_grid = directory.path().join("inventory").join("a".repeat(64));
     std::fs::create_dir_all(&old_grid)?;
@@ -843,7 +843,7 @@ fn old_per_grid_cache_files_are_removed_when_idle() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn scopes_table_uses_grid_and_owner_without_kind() -> Result<(), Box<dyn Error>> {
+fn scopes_use_grid_and_owner() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let grid_id = "Custom.Grid-01";
     let (cache, _) = InventoryCache::open_at_root(directory.path(), grid_id, Uuid::from_u128(709), None)?;
@@ -860,7 +860,7 @@ fn scopes_table_uses_grid_and_owner_without_kind() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn cold_and_warm_restore_measurement_at_one_hundred_thousand_items() -> Result<(), Box<dyn Error>> {
+fn restore_measures_100k_items() -> Result<(), Box<dyn Error>> {
     use std::time::Instant;
 
     const ITEM_COUNT: usize = 100_000;
@@ -955,7 +955,7 @@ fn cold_and_warm_restore_measurement_at_one_hundred_thousand_items() -> Result<(
 }
 
 #[test]
-fn interrupted_batch_keeps_cached_folder_incomplete() -> Result<(), Box<dyn Error>> {
+fn interrupted_batch_keeps_incomplete() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     seed_cache(directory.path(), 7)?;
     let mut command = Command::new(std::env::current_exe()?);
@@ -984,7 +984,7 @@ fn interrupted_batch_keeps_cached_folder_incomplete() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn two_processes_write_shared_library_scope() -> Result<(), Box<dyn Error>> {
+fn two_processes_share_library_scope() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let owner = Uuid::from_u128(900);
     let first = library_fixture(Uuid::from_u128(705), owner, 5, "Shared library item")?;

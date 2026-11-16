@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bad_fields_and_non_finite_scales() {
+    fn rejects_truncated_or_nan_fields() {
         let bytes = default_wire_entry();
         assert_eq!(decode_texture_entry(&[]), Ok(None));
         for end in [15, 16, 17, 22, 23, 27, 28, 32, 33, 37, 38, 40, 41, 43, 46] {
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn bad_material_ids_clear_only_materials() {
+    fn bad_material_ids_clear_materials() {
         let bytes = default_wire_entry();
         let decoded = decode_texture_entry(&bytes).unwrap().unwrap();
         assert_eq!(decoded.face(0).unwrap().material_id, Uuid::nil());

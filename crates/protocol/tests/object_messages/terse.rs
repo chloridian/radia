@@ -72,7 +72,7 @@ fn terse_avatar_payload_constraints() {
 }
 
 #[test]
-fn terse_quantized_midpoint_decodes_as_exact_zero() {
+fn terse_midpoint_decodes_zero() {
     let mut bytes = fixture(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let local_id = 0x1020_3040_u32.to_le_bytes();
     let local_id_offset = unique_offset(&bytes, &local_id);
@@ -117,7 +117,7 @@ fn terse_ignores_unknown_data_suffix() {
 }
 
 #[test]
-fn malformed_terse_block_preserves_later_blocks() {
+fn malformed_terse_keeps_later_blocks() {
     let original = fixture(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let data_start = unique_offset(&original, &0x1020_3040_u32.to_le_bytes());
     let packed_data = &original[data_start..data_start + 44];
@@ -154,7 +154,7 @@ fn malformed_terse_block_preserves_later_blocks() {
 }
 
 #[test]
-fn missing_terse_collision_plane_preserves_later_blocks() {
+fn missing_plane_keeps_later_blocks() {
     let original = fixture(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let data_start = unique_offset(&original, &0x1020_3040_u32.to_le_bytes());
     let mut packed_data = original[data_start..data_start + 44].to_vec();

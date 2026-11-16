@@ -6,7 +6,7 @@ use super::support::{
 };
 
 #[test]
-fn all_invalid_patch_is_a_noop() {
+fn invalid_patch_is_noop() {
     let (mut world, region) = with_region();
     let id = uuid(440);
     let mut initial = object(source(region, 1), 440, 1, Object, Root);
@@ -132,7 +132,7 @@ fn partial_patch_merge_and_ordering() {
 }
 
 #[test]
-fn motion_metadata_is_stored_and_authoritative_updates_advance_the_sample() {
+fn motion_metadata_advances_sample() {
     let (mut world, region) = with_region();
     let first_source = source(region, 1);
     let mut initial = object(first_source, 720, 1, Object, Root);
@@ -165,7 +165,7 @@ fn motion_metadata_is_stored_and_authoritative_updates_advance_the_sample() {
 }
 
 #[test]
-fn motion_bounds_depend_on_update_kind() {
+fn motion_bounds_depend_on_kind() {
     let (mut world, region) = with_region();
     let mut initial = object(source(region, 1), 730, 1, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
@@ -221,7 +221,7 @@ fn motion_bounds_depend_on_update_kind() {
 }
 
 #[test]
-fn invalid_rotation_does_not_advance_pose() {
+fn invalid_rotation_keeps_pose() {
     let (mut world, region) = with_region();
     let mut initial = object(source(region, 100), 270, 1, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) });
@@ -519,7 +519,7 @@ fn untracked_updates_fill_unfenced_groups() {
 }
 
 #[test]
-fn stale_observation_fills_only_unset_groups() {
+fn stale_observation_fills_unset_groups() {
     let (mut world, region) = with_region();
 
     let mut initial = object(source(region, 100), 70, 10, Object, Root);
@@ -576,7 +576,7 @@ fn observation_patch_advances_revision() {
 }
 
 #[test]
-fn patch_respects_field_fences_not_binding() {
+fn patch_uses_field_fences() {
     let (mut world, region) = with_region();
     let mut initial = object(source(region, 100), 120, 10, Object, Root);
     initial.pose = Some(Pose { position: Some(Vec3::X), rotation: None });

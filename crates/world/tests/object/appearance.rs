@@ -328,7 +328,7 @@ fn surface_appearance_rejects_bad_faces() {
 }
 
 #[test]
-fn media_prefix_clears_and_preserves_suffix() {
+fn media_prefix_clear_keeps_suffix() {
     let (mut world, region) = with_region();
     let mut observation = object(source(region, 1), 215, 1, Object, Root);
     observation.appearance = FieldUpdate::Set(Appearance::Surface);

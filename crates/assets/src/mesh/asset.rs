@@ -865,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_lod_blocks_and_preserves_geometry() {
+    fn lod_decodes_geometry() {
         let encoded = block(&[submesh(true, false), submesh(false, true), submesh(false, false)]);
         let LodGeometry::Geometry(mesh) = decode_lod(&encoded).unwrap() else { panic!("geometry LOD") };
 
@@ -895,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn header_ranges_are_relative_to_the_serialized_header() {
+    fn block_ranges_follow_header() {
         for lod in [MeshLod::Lowest, MeshLod::Low, MeshLod::Medium, MeshLod::High] {
             let encoded = block(&[submesh(false, false)]);
             let (header_bytes, asset_length) = header_with_blocks(&[(lod, &encoded)], 0);
@@ -909,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_lod_is_distinct_from_an_empty_lod() {
+    fn missing_lod_differs_from_empty() {
         let (header_bytes, length) = header_with_blocks(&[], 0);
         assert_eq!(decode_header(&header_bytes, length).unwrap().lod(id(), MeshLod::Low), Err(AssetError::MissingLod(MeshLod::Low)));
         assert_matches!(decode_lod(&block(&[])), Ok(LodGeometry::Empty { face_count: 0 }));
@@ -926,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_position_domain_and_uvs_use_the_format_defaults() {
+    fn absent_domains_use_defaults() {
         let LodGeometry::Geometry(mesh) = decode_lod(&block(&[submesh_without_domains_or_uvs()])).unwrap() else { panic!("geometry LOD") };
 
         assert_eq!(mesh.vertices()[0].position, Vec3::new(-0.5, 0.5, -0.5));
@@ -935,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn lod_accepts_the_maximum_face_count_and_keeps_empty_slots() {
+    fn max_faces_keep_empty_slots() {
         let faces = [
             submesh(false, true),
             submesh(false, false),
@@ -986,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn lod_rejects_counts_over_face_limits() {
+    fn lod_rejects_oversized_faces() {
         let too_many_vertices = block(&[dense_submesh(MAX_MESH_VERTICES_PER_FACE + 1, 3, 1)]);
         assert_eq!(decode_lod(&too_many_vertices).err(), Some(AssetError::TooLarge));
 
@@ -995,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    fn header_rejects_unsupported_versions_and_out_of_bounds_blocks() {
+    fn header_validates_version_and_bounds() {
         let encoded = block(&[submesh(false, false)]);
         let (_, length) = header_with_blocks(&[(MeshLod::Low, &encoded)], 0);
         let unsupported = mesh_header(1000, &[(MeshLod::Low, 0, i32::try_from(encoded.len()).unwrap())]);
@@ -1007,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn truncated_and_malformed_blocks_fail_without_panicking() {
+    fn malformed_block_is_rejected() {
         let encoded = block(&[submesh(false, false)]);
         assert_eq!(decode_lod(&encoded[..encoded.len() - 1]).err(), Some(AssetError::MalformedBlock));
         let mut trailing = encoded;
@@ -1017,14 +1017,14 @@ mod tests {
     }
 
     #[test]
-    fn decompression_stops_at_the_output_limit() {
+    fn decompression_is_bounded() {
         let bytes = compressed(&vec![0; MAX_MESH_DECODED_BLOCK_BYTES + 1]);
         let mut reservation = None;
         assert_eq!(decompress_bounded(&bytes, bytes.len(), &mut reservation, &|| false), Err(AssetError::TooLarge));
     }
 
     #[test]
-    fn geometry_reservation_failure_is_budget_pressure() {
+    fn reservation_failure_is_budget_pressure() {
         let encoded = block(&[dense_submesh(20_000, 60_000, 1)]);
         let mut no_reservation = None;
         let decoded = decompress_bounded(&encoded, encoded.capacity(), &mut no_reservation, &|| false).unwrap();
@@ -1062,7 +1062,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn arbitrary_header_bytes_are_bounded_and_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..=MESH_HEADER_BYTES)) {
+        fn header_bytes_stay_bounded(bytes in prop::collection::vec(any::<u8>(), 0..=MESH_HEADER_BYTES)) {
             let result = decode_header(&bytes, MAX_MESH_ASSET_BYTES as u64);
             if let Ok(header) = result {
                 prop_assert!(header.asset_length() <= MAX_MESH_ASSET_BYTES as u64);
@@ -1077,7 +1077,7 @@ mod tests {
         }
 
         #[test]
-        fn arbitrary_block_bytes_are_bounded_and_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..=4096)) {
+        fn block_bytes_stay_bounded(bytes in prop::collection::vec(any::<u8>(), 0..=4096)) {
             let result = decode_lod(&bytes);
             if let Ok(geometry) = result {
                 match geometry {

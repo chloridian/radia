@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn optional_fixed_decodes_or_discards_a_truncated_suffix() {
+    fn optional_fixed_discards_truncation() {
         let mut complete = Reader::new(&[1, 0, 0, 0]);
         assert_eq!(complete.optional_fixed(4, |reader| reader.u32()), Ok(Some(1)));
         assert!(complete.is_empty());
@@ -412,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn quaternion_xyz_normalizes_and_canonicalizes_negative_w() {
+    fn quaternion_xyz_canonicalizes_w() {
         let input = Quat::from_xyzw(0.2, -0.3, 0.4, -0.84);
         let bytes = encode_quaternion(input).expect("encode finite nonzero rotation");
         let decoded = decode_quaternion(&bytes);
@@ -422,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn quaternion_xyz_gives_equivalent_signs_identical_bytes() {
+    fn quaternion_xyz_signs_encode_equal() {
         for input in [Quat::from_xyzw(0.2, -0.3, 0.4, 0.84), Quat::from_xyzw(-1.0, 2.0, -3.0, 0.0)] {
             let inverse = Quat::from_xyzw(-input.x, -input.y, -input.z, -input.w);
             assert_eq!(encode_quaternion(input), encode_quaternion(inverse));
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn quaternion_xyz_encodes_identity_and_normalizes_nonunit_input() {
+    fn quaternion_xyz_normalizes_nonunit() {
         assert_eq!(encode_quaternion(Quat::IDENTITY).expect("identity is valid"), [0; 12]);
         let nonunit = Quat::from_xyzw(0.0, 3.0, 0.0, 4.0);
         let decoded = decode_quaternion(&encode_quaternion(nonunit).expect("nonunit rotation is valid"));
@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn quaternion_xyz_rejects_zero_and_nonfinite_values_without_writing() {
+    fn quaternion_xyz_rejects_degenerate() {
         for invalid in [
             Quat::from_xyzw(0.0, 0.0, 0.0, 0.0),
             Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0),

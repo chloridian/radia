@@ -280,7 +280,7 @@ mod tests {
         world.terrain_page(region, None, MAX_TERRAIN_PAGE_PATCHES).unwrap().unwrap()
     }
     #[test]
-    fn unknown_coverage_and_water_remain_distinct_from_observed_zero() {
+    fn unknown_differs_from_zero() {
         let (mut world, region) = world();
         let before = page(&world, region);
         assert_eq!(before.dimensions, [256, 256]);
@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(page(&world, region).water_height, after.water_height);
     }
     #[test]
-    fn source_fences_handle_reordering_ordinals_authority_and_equal_values() {
+    fn source_fences_handle_ordering() {
         let (mut world, region) = world();
         let _ = world.observe_terrain_patch(source(region, 10), patch(0, 0, 1.0)).unwrap();
         let _ = world.observe_water_height(source(region, 10), 1.0).unwrap();
@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(world.terrain_patches, 1);
     }
     #[test]
-    fn bounded_owned_pages_and_retirement_preserve_lifetime_authority() {
+    fn page_cursors_respect_lifetime() {
         let (mut world, region) = world();
         for x in 0..10 {
             let _ = world.observe_terrain_patch(source(region, u32::from(x) + 1), patch(x, 0, f32::from(x))).unwrap();
@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(first.patches[0].heights()[0], 0.0);
     }
     #[test]
-    fn rejects_nonfinite_values_and_rolls_back_revision_exhaustion() {
+    fn nonfinite_rejected_exhaustion_rolls_back() {
         assert_eq!(TerrainPatch::new(16, 0, Box::new([0.0; TERRAIN_PATCH_SAMPLES])), Err(TerrainPatchError::UnsupportedCoordinates));
         assert_eq!(TerrainPatch::new(0, 0, Box::new([f32::NAN; TERRAIN_PATCH_SAMPLES])), Err(TerrainPatchError::NonFinite));
         let (mut world, region) = world();
@@ -376,7 +376,7 @@ mod tests {
         assert_eq!(world.terrain_patches, 1);
     }
     #[test]
-    fn null_detail_ids_resolve_to_official_defaults_and_ranges_are_validated() {
+    fn null_ids_use_default_textures() {
         let settings = TerrainSettings::new([Uuid::nil(); 4], [0.0; 4], [1.0; 4]).unwrap();
         assert_eq!(settings.detail_textures, DEFAULT_DETAIL_TEXTURES);
         assert_eq!(TerrainSettings::new([Uuid::nil(); 4], [f32::NAN; 4], [1.0; 4]), Err(TerrainSettingsError::NonFiniteStartHeight));
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(TerrainSettings::new([Uuid::nil(); 4], [0.0; 4], [f32::INFINITY; 4]), Err(TerrainSettingsError::InvalidHeightRange));
     }
     #[test]
-    fn settings_are_live_fenced_and_retired_with_the_region() {
+    fn settings_follow_region_lifetime() {
         let (mut world, region) = world();
         let first = TerrainSettings::new([Uuid::nil(); 4], [0.0; 4], [10.0; 4]).unwrap();
         let second = TerrainSettings::new([Uuid::nil(); 4], [1.0; 4], [20.0; 4]).unwrap();
@@ -405,7 +405,7 @@ mod tests {
         assert!(world.region_page(None, 8).unwrap().regions.is_empty());
     }
     #[test]
-    fn global_capacity_allows_replacement_and_retirement_releases_admission() {
+    fn global_capacity_releases_on_retirement() {
         let (mut world, first_region) = world();
         world.limits.max_regions = 257;
         let mut regions = vec![first_region];
@@ -437,7 +437,7 @@ mod tests {
     }
     proptest::proptest! {
         #[test]
-        fn reordered_patch_sequences_match_newest_observation(
+        fn reordered_patches_keep_newest(
             updates in proptest::collection::vec((0u32..200, 0u8..16, -100i16..100), 0..100)
         ) {
             let (mut world, region) = world();

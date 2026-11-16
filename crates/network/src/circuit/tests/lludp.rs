@@ -74,7 +74,7 @@ async fn skips_ping_when_ids_full() {
 }
 
 #[tokio::test]
-async fn prepared_send_commits_after_local_send() {
+async fn send_commits_after_local_send() {
     let (simulator, transport) = connected_simulator().await;
     let mut circuit = Circuit::new();
     let sent_at = Instant::now();
@@ -96,7 +96,7 @@ async fn prepared_send_commits_after_local_send() {
 }
 
 #[tokio::test]
-async fn prepared_send_removes_only_carried_acknowledgements() {
+async fn send_removes_only_carried_acks() {
     let (simulator, transport) = connected_simulator().await;
     let mut circuit = Circuit::new();
     let now = Instant::now();
@@ -117,7 +117,7 @@ async fn prepared_send_removes_only_carried_acknowledgements() {
 }
 
 #[tokio::test]
-async fn appended_ack_batches_respect_normal_datagram_limit() {
+async fn appended_acks_respect_datagram_limit() {
     let (simulator, transport) = connected_simulator().await;
     let mut circuit = Circuit::new();
     let now = Instant::now();
@@ -155,7 +155,7 @@ async fn appended_ack_batches_respect_normal_datagram_limit() {
 }
 
 #[tokio::test]
-async fn oversized_base_message_leaves_acks_for_standalone_batch() {
+async fn oversized_message_leaves_standalone_acks() {
     let (simulator, transport) = connected_simulator().await;
     let mut circuit = Circuit::new();
     let now = Instant::now();
@@ -188,7 +188,7 @@ async fn oversized_base_message_leaves_acks_for_standalone_batch() {
 }
 
 #[test]
-fn dropped_prepared_ack_keeps_circuit_state() {
+fn dropped_ack_keeps_state() {
     let mut circuit = Circuit::new();
     receive_at(&mut circuit, &reliable_packet(41), Instant::now());
     let prepared = circuit.prepare_acknowledgements().expect("prepare ACK").expect("ACK is pending");
@@ -202,7 +202,7 @@ fn dropped_prepared_ack_keeps_circuit_state() {
 }
 
 #[tokio::test]
-async fn acknowledged_packet_is_not_restored_by_late_retry_commit() {
+async fn late_retry_skips_acked_packet() {
     let (simulator, transport) = connected_simulator().await;
     let mut circuit = Circuit::new();
     let sent_at = Instant::now() - Duration::from_secs(6);
@@ -249,7 +249,7 @@ async fn refuses_inbound_message() {
 }
 
 #[test]
-fn rejects_every_typed_inbound_message_before_encoding() {
+fn rejects_typed_inbound_messages() {
     for (name, fixture) in [
         ("region_handshake.hex", vectors::REGION_HANDSHAKE),
         ("agent_movement_complete.hex", vectors::AGENT_MOVEMENT_COMPLETE),
@@ -472,7 +472,7 @@ fn pending_ack_preserves_duplicate_history() {
 }
 
 #[test]
-fn full_ack_queue_rejects_new_reliable_packet() {
+fn full_ack_queue_rejects_reliable() {
     let now = Instant::now();
     let mut circuit = Circuit::new();
     let accepted = (MAX_PENDING_ACKS - DUPLICATE_ACK_HEADROOM) as u32;
@@ -491,7 +491,7 @@ fn full_ack_queue_rejects_new_reliable_packet() {
 }
 
 #[test]
-fn prepared_receive_does_not_commit_sequence_ordering() {
+fn prepared_receive_defers_ordering() {
     let now = Instant::now();
     let mut circuit = Circuit::new();
 
@@ -592,7 +592,7 @@ fn accepts_wide_sequence() {
 }
 
 #[test]
-fn source_packet_order_tracks_u32_wrap_and_recent_reordering() {
+fn order_tracks_u32_wrap() {
     let mut circuit = Circuit::new();
     for (sequence, order) in
         [(u32::MAX - 1, u64::from(u32::MAX - 1)), (u32::MAX, u64::from(u32::MAX)), (0, 0x1_0000_0000), (1, 0x1_0000_0001)]
@@ -604,7 +604,7 @@ fn source_packet_order_tracks_u32_wrap_and_recent_reordering() {
 }
 
 #[test]
-fn source_packet_order_tracks_viewer_sequence_wrap() {
+fn order_tracks_viewer_wrap() {
     let mut circuit = Circuit::new();
     for (sequence, order) in [(0x00ff_fffe, 0x00ff_fffe), (0x00ff_ffff, 0x00ff_ffff), (0, 0x0100_0000), (1, 0x0100_0001)] {
         assert_eq!(circuit.observe_sequence(sequence), Ordered(order));
@@ -614,7 +614,7 @@ fn source_packet_order_tracks_viewer_sequence_wrap() {
 }
 
 #[test]
-fn received_duplicate_history_uses_the_viewer_sequence_wrap() {
+fn duplicate_history_uses_viewer_wrap() {
     let start = Instant::now();
     let mut circuit = Circuit::new();
     for sequence in [0x00ff_fffe, 0x00ff_ffff, 0] {
@@ -629,7 +629,7 @@ fn received_duplicate_history_uses_the_viewer_sequence_wrap() {
 }
 
 #[test]
-fn ping_anchors_reliable_object_order_across_wrap() {
+fn ping_anchors_order_across_wrap() {
     let mut circuit = Circuit::new();
     let now = Instant::now();
 
@@ -652,7 +652,7 @@ fn ping_anchors_reliable_object_order_across_wrap() {
 }
 
 #[test]
-fn sequence_extension_handles_order_window_boundaries() {
+fn order_window_boundaries() {
     let mut circuit = Circuit::new();
     let first = 50;
     let last = first + MAX_ORDERED_SEQUENCE_DISTANCE;
@@ -664,7 +664,7 @@ fn sequence_extension_handles_order_window_boundaries() {
 }
 
 #[test]
-fn old_epoch_sequence_does_not_move_anchor() {
+fn old_epoch_keeps_anchor() {
     let mut circuit = Circuit::new();
     assert_eq!(circuit.observe_sequence(10), Ordered(10));
     assert_eq!(circuit.observe_sequence(u32::MAX), Ambiguous);
@@ -672,7 +672,7 @@ fn old_epoch_sequence_does_not_move_anchor() {
 }
 
 #[test]
-fn isolated_ambiguous_sequence_preserves_ordering_anchor() {
+fn isolated_ambiguity_keeps_anchor() {
     let mut circuit = Circuit::new();
     assert_eq!(circuit.observe_sequence(10), Ordered(10));
     assert_eq!(circuit.observe_sequence(10_u32.wrapping_add(1 << 31)), Ambiguous);
@@ -681,7 +681,7 @@ fn isolated_ambiguous_sequence_preserves_ordering_anchor() {
 }
 
 #[test]
-fn excessive_forward_jump_degrades_ordering_for_the_connection() {
+fn excessive_jump_degrades_ordering() {
     let mut circuit = Circuit::new();
     assert_eq!(circuit.observe_sequence(10), Ordered(10));
     assert_eq!(circuit.observe_sequence(10 + MAX_ORDERED_SEQUENCE_DISTANCE + 1), Degraded);
@@ -852,7 +852,7 @@ fn retry_timeout_backs_off() {
 }
 
 #[tokio::test]
-async fn lost_ping_ids_expire_and_wrap() {
+async fn ping_ids_expire_and_wrap() {
     let (simulator, transport) = connected_simulator().await;
     let mut circuit = Circuit::new();
     let start = Instant::now();
@@ -874,7 +874,7 @@ async fn lost_ping_ids_expire_and_wrap() {
 }
 
 #[tokio::test]
-async fn ping_id_quarantine_expires_at_boundary() {
+async fn ping_quarantine_expires_at_boundary() {
     let (simulator, transport) = connected_simulator().await;
     let mut circuit = Circuit::new();
     let start = Instant::now();
@@ -902,7 +902,7 @@ async fn ping_id_quarantine_expires_at_boundary() {
 }
 
 #[tokio::test]
-async fn late_and_duplicate_ping_replies_do_not_change_rtt() {
+async fn stale_ping_replies_keep_rtt() {
     let (simulator, transport) = connected_simulator().await;
     let mut circuit = Circuit::new();
     let start = Instant::now();

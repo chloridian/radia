@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn retired_scope_waits_for_ack_then_releases_its_slot() {
+    fn retired_scope_releases_after_ack() {
         let ledger = CoverageLossLedger::new();
         let simulator_id = test_simulator_id(2);
         let source = CoverageSource::Lludp;
@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_capacity_exhaustion_is_a_durable_overflow_fact() {
+    fn scope_exhaustion_records_overflow() {
         let ledger = CoverageLossLedger::new();
         for id in 1..=256 {
             std::assert_matches!(

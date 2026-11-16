@@ -248,7 +248,7 @@ async fn ping_survives_backpressure() {
 }
 
 #[tokio::test]
-async fn region_arrival_object_burst_survives_slow_consumer() {
+async fn object_burst_survives_slow_consumer() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);

@@ -36,7 +36,7 @@ fn startup_accepts_movement_before_handshake() {
 }
 
 #[test]
-fn startup_ignores_movement_for_another_session() {
+fn startup_ignores_foreign_movement() {
     let agent_id = Uuid::from_u128(1);
     let session_id = Uuid::from_u128(2);
     let wrong_movement = Packet::decode(&movement_complete_packet(1, agent_id, Uuid::from_u128(3), 0x1000))
@@ -112,7 +112,7 @@ async fn cancelled_queues_release_packet_memory() {
 }
 
 #[tokio::test]
-async fn retired_capability_requests_are_waited_for() {
+async fn retired_capability_requests_awaited() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let endpoint = simulator.local_addr().expect("simulator endpoint");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind held capability");
@@ -165,7 +165,7 @@ async fn capability_client_count_is_bounded() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn full_decode_slots_do_not_block_primary_retry_timers() {
+async fn full_decode_keeps_retry_timers() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let coverage_losses = CoverageLossLedger::new();
     let mut coverage_changes = coverage_losses.subscribe();
@@ -221,7 +221,7 @@ async fn full_decode_slots_do_not_block_primary_retry_timers() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn primary_udp_activity_resets_keepalive_timeout() {
+async fn primary_activity_resets_keepalive() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
@@ -264,7 +264,7 @@ async fn primary_udp_activity_resets_keepalive_timeout() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn neighbor_circuit_fails_after_udp_inactivity() {
+async fn neighbor_fails_after_inactivity() {
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
     let endpoint = neighbor.local_addr().expect("read neighbor address");
     let simulator_id = SimulatorId::allocate().expect("allocate neighbor ID");
@@ -358,7 +358,7 @@ async fn full_queue_keeps_control_responsive() {
 }
 
 #[tokio::test]
-async fn capability_events_wait_for_simulator_connection() {
+async fn capability_events_wait_for_connection() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
     let mut connection = connect_runtime(login_session(endpoint), ResponseData::default()).await.expect("connect simulator circuit");

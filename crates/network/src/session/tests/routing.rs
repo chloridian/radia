@@ -246,7 +246,7 @@ async fn run_same_endpoint_teleport_retry_promotes_replacement() {
 }
 
 #[tokio::test]
-async fn primary_intro_precedes_early_udp_data() {
+async fn primary_intro_precedes_udp_data() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(TEST_EVENT_CAPACITY);
@@ -368,7 +368,7 @@ async fn replacing_neighbor_releases_queued_state() {
 }
 
 #[tokio::test]
-async fn preconnect_overflow_reports_coverage_without_disconnect() {
+async fn preconnect_overflow_reports_coverage() {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let primary_endpoint = primary.local_addr().expect("read primary address");
     let mut connection = connect_runtime(login_session(primary_endpoint), ResponseData::default()).await.expect("connect primary circuit");
@@ -474,7 +474,7 @@ async fn neighbor_circuits_are_independent() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn neighbor_delivers_accepted_data_before_terminal() {
+async fn neighbor_delivers_data_before_terminal() {
     let mut harness = Box::pin(connected_neighbor()).await;
 
     let mut chat = test_fixture("chat_from_simulator.hex");
@@ -501,7 +501,7 @@ async fn neighbor_delivers_accepted_data_before_terminal() {
 }
 
 #[tokio::test]
-async fn object_local_ids_are_scoped_to_simulators() {
+async fn local_ids_are_simulator_scoped() {
     let mut harness = Box::pin(connected_neighbor()).await;
 
     let mut primary_update = test_fixture("object_update.hex");
@@ -538,17 +538,17 @@ fn neighbor_targets_and_replacements() {
 }
 
 #[test]
-fn queued_target_does_not_follow_neighbor_replacement() {
+fn queued_target_ignores_replacement() {
     run_large_stack_test(run_queued_target_does_not_follow_neighbor_replacement);
 }
 
 #[test]
-fn same_endpoint_teleport_retry_promotes_replacement() {
+fn same_endpoint_retry_promotes_replacement() {
     run_large_stack_test(run_same_endpoint_teleport_retry_promotes_replacement);
 }
 
 #[tokio::test]
-async fn old_neighbor_completion_keeps_replacement_route() {
+async fn old_completion_keeps_replacement_route() {
     let mut harness = Box::pin(connected_neighbor()).await;
     let replacement = UdpSocket::bind("127.0.0.1:0").await.expect("bind replacement neighbor");
     let replacement_endpoint = replacement.local_addr().expect("replacement address");

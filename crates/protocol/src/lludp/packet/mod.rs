@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_capacity_counts_packet_and_message_buffers() {
+    fn retained_capacity_counts_buffers() {
         let mut payload = Vec::with_capacity(128);
         payload.extend_from_slice(&[0x55; 32]);
         let mut packet = Packet::new(1, Message::Unknown { id: MessageId::low(0xfff9), payload });
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_payload_is_validated_after_preflight() {
+    fn preflight_defers_typed_decode() {
         let mut truncated_message = Packet::new(1, Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 1 } }))
             .encode()
             .expect("encode CompletePingCheck");
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_reports_routes_and_bounds_retained_capacity() {
+    fn preflight_bounds_retained_capacity() {
         let typed = Packet::new(1, Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 1 } }))
             .encode()
             .expect("encode typed packet");

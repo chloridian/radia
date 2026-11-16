@@ -635,7 +635,7 @@ mod tests {
     };
 
     #[test]
-    fn evidence_retains_the_newest_packet_finish() {
+    fn evidence_keeps_newest_packet_finish() {
         let mut evidence = HandoffEvidence::default();
         evidence.record(HandoffAnnouncement::TeleportFinish(HandoffOrder::Packet(PacketOrder::Ordered(10))));
         evidence.record(HandoffAnnouncement::TeleportFinish(HandoffOrder::Packet(PacketOrder::Ordered(8))));
@@ -646,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_retains_the_newest_event_queue_finish() {
+    fn evidence_keeps_newest_queue_finish() {
         let mut evidence = HandoffEvidence::default();
         evidence.record(HandoffAnnouncement::TeleportFinish(HandoffOrder::EventQueue { incarnation: 4, batch: 7, index: 3 }));
         evidence.record(HandoffAnnouncement::TeleportFinish(HandoffOrder::EventQueue { incarnation: 4, batch: 7, index: 2 }));
@@ -665,7 +665,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handoff_targets_the_admitted_id_with_a_retiring_duplicate() {
+    async fn handoff_targets_admitted_id() {
         let root = UdpSocket::bind("127.0.0.1:0").await.expect("bind root simulator");
         let destination = UdpSocket::bind("127.0.0.1:0").await.expect("bind destination simulator");
         let session = login_session(root.local_addr().expect("root endpoint"));
@@ -741,7 +741,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handoff_capability_requests_are_waited_for_after_retirement() {
+    async fn retired_capability_requests_are_awaited() {
         let root = UdpSocket::bind("127.0.0.1:0").await.expect("bind root simulator");
         let destination = UdpSocket::bind("127.0.0.1:0").await.expect("bind destination");
         let session = login_session(root.local_addr().expect("root endpoint"));

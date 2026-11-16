@@ -245,7 +245,7 @@ fn avatar_transform_uses_accepted_scale() {
 }
 
 #[test]
-fn sit_target_does_not_change_pose() {
+fn sit_target_keeps_pose() {
     let (mut world, region) = world_with_origin(DVec3::new(100.0, 200.0, 0.0), 3);
     let seat = with_pose(
         observation(region, 1, 48, 1, Object, Root),
@@ -279,7 +279,7 @@ fn sit_target_does_not_change_pose() {
 }
 
 #[test]
-fn missing_local_pose_precedes_missing_origin() {
+fn local_pose_precedes_origin() {
     let mut world = World::new(limits(2));
     let region = world.register_region().unwrap();
     let no_pose = introduced(world.observe_object(observation(region, 1, 50, 1, Object, Root)).unwrap());
@@ -368,7 +368,7 @@ fn parent_change_requires_fresh_pose() {
 }
 
 #[test]
-fn repeated_parent_update_is_not_a_cycle() {
+fn repeated_parent_is_no_cycle() {
     let (mut world, region) = world_with_origin(DVec3::ZERO, 3);
     let parent = introduced(world.observe_object(observation(region, 1, 650, 1, Object, Root)).unwrap());
     let child = introduced(world.observe_object(observation(region, 2, 651, 2, Object, Local(local_id(1)))).unwrap());
@@ -383,7 +383,7 @@ fn repeated_parent_update_is_not_a_cycle() {
 }
 
 #[test]
-fn delayed_observation_cannot_apply_pose_from_an_old_parent_frame() {
+fn delayed_pose_rejects_old_frame() {
     let (mut world, region) = world_with_origin(DVec3::ZERO, 5);
     let first_parent = introduced(
         world.observe_object(with_pose(observation(region, 1, 640, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
@@ -500,7 +500,7 @@ fn partial_pose_replaces_detach_snapshot() {
 }
 
 #[test]
-fn removed_seat_detaches_avatar_at_last_world_pose() {
+fn removed_seat_keeps_avatar_pose() {
     let (mut world, region) = world_with_origin(DVec3::new(100.0, 0.0, 0.0), 3);
     let seat = introduced(
         world.observe_object(with_pose(observation(region, 1, 45, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY)).unwrap(),
@@ -638,7 +638,7 @@ fn attachment_change_stales_pose() {
 }
 
 #[test]
-fn same_attachment_point_keeps_pose_frame() {
+fn same_attachment_keeps_frame() {
     let (mut world, region) = world_with_origin(DVec3::ZERO, 4);
     let avatar =
         introduced(world.observe_object(with_pose(observation(region, 1, 15, 1, Avatar, Root), Vec3::ZERO, Quat::IDENTITY)).unwrap());

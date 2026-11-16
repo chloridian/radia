@@ -122,7 +122,7 @@ async fn sustained_priority_service(primary_class: TrafficClass) {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn dropping_or_cancelling_shutdown_stops_a_saturated_worker() {
+async fn shutdown_stops_saturated_worker() {
     use std::{
         future::Future,
         pin::pin,
@@ -148,7 +148,7 @@ async fn dropping_or_cancelling_shutdown_stops_a_saturated_worker() {
 }
 
 #[test]
-fn dropped_registration_is_retired_when_command_queue_is_full() {
+fn dropped_registration_retires_when_full() {
     let (commands, mut receiver) = mpsc::channel(1);
     let (completed, _) = oneshot::channel();
     assert!(commands.try_send(super::Command::Shutdown(completed)).is_ok());
@@ -182,7 +182,7 @@ fn dropped_registration_is_retired_when_command_queue_is_full() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn bucket_charges_refunds_and_caps_bursts() {
+async fn bucket_charge_refund_burst() {
     let now = Instant::now();
     let mut bucket = Bucket::new(8_000, now);
     assert!(bucket.take(MAX_BURST_BYTES as usize, now));
@@ -196,13 +196,13 @@ async fn bucket_charges_refunds_and_caps_bursts() {
 }
 
 #[test]
-fn bucket_keeps_a_packet_sized_bounded_burst_at_low_rates() {
+fn low_rate_keeps_packet_burst() {
     let bucket = Bucket::new(1, Instant::now());
     assert_eq!(bucket.capacity_bytes, MAX_BURST_BYTES);
 }
 
 #[test]
-fn reliable_retry_reduces_rate_and_quiet_period_recovers_toward_ceiling() {
+fn retry_reduces_then_recovers_rate() {
     let start = Instant::now();
     let mut bucket = Bucket::new(20_000, start);
 
@@ -371,7 +371,7 @@ async fn worker_weights_small_bursts() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn scheduler_shares_one_bucket_across_connections() {
+async fn scheduler_shares_one_bucket() {
     let bucket = Arc::new(Mutex::new(Bucket::new(8_000, Instant::now())));
     let mut connections = HashMap::new();
     let mut order = Vec::new();
@@ -420,13 +420,13 @@ async fn scheduler_shares_one_bucket_across_connections() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn primary_control_and_deadline_survive_neighbor_retries() {
+async fn primary_classes_survive_neighbor_retries() {
     sustained_priority_service(TrafficClass::Control).await;
     sustained_priority_service(TrafficClass::Deadline).await;
 }
 
 #[test]
-fn cancelled_waiter_does_not_spend_budget() {
+fn cancelled_waiter_spends_nothing() {
     let now = Instant::now();
     let bucket = Arc::new(Mutex::new(Bucket::new(8_000, now)));
     let mut connections = HashMap::from([(1, connection(ConnectionRole::Neighbor))]);
@@ -445,7 +445,7 @@ fn cancelled_waiter_does_not_spend_budget() {
 }
 
 #[test]
-fn cancelled_request_does_not_block_its_replacement() {
+fn cancelled_request_unblocks_replacement() {
     let connections = HashMap::from([(1, connection(ConnectionRole::Neighbor))]);
     let mut pending = HashMap::new();
     let (old_completed, old_receiver) = oneshot::channel();
@@ -460,7 +460,7 @@ fn cancelled_request_does_not_block_its_replacement() {
 }
 
 #[test]
-fn cancelled_send_refunds_its_budget_lease() {
+fn cancelled_send_refunds_lease() {
     let now = Instant::now();
     let bucket = Arc::new(Mutex::new(Bucket::new(8_000, now)));
     assert!(bucket.lock().unwrap().reserve(4_000, now));
@@ -471,7 +471,7 @@ fn cancelled_send_refunds_its_budget_lease() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn blocked_udp_send_refunds_credit_before_waiting_for_writability() {
+async fn blocked_send_refunds_credit() {
     let server = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator socket");
     let address = server.local_addr().expect("simulator endpoint");
     let mut blocked_socket = UdpTransport::connect(address).await.expect("connect blocked transport");
@@ -515,7 +515,7 @@ async fn blocked_udp_send_refunds_credit_before_waiting_for_writability() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn retransmission_feedback_reduces_the_session_rate() {
+async fn retransmission_reduces_session_rate() {
     let server = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator socket");
     let socket = UdpTransport::connect(server.local_addr().expect("simulator endpoint")).await.expect("connect transport");
     let budget = OutboundBudget::new(20_000);
@@ -532,7 +532,7 @@ async fn retransmission_feedback_reduces_the_session_rate() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn outstanding_leases_reserve_burst_capacity_until_send() {
+async fn leases_reserve_burst_capacity() {
     let budget = OutboundBudget::new(8_000);
     let first = budget.handle().register(1, true).await.expect("register first simulator");
     let second = budget.handle().register(2, false).await.expect("register second simulator");
@@ -565,7 +565,7 @@ async fn outstanding_leases_reserve_burst_capacity_until_send() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn worker_wakes_for_rate_recovery_before_retry_deadline() {
+async fn worker_wakes_for_rate_recovery() {
     const MAX_RATE_BYTES_PER_SECOND: u64 = 1_000;
 
     let budget = OutboundBudget::new(MAX_RATE_BYTES_PER_SECOND);
@@ -597,7 +597,7 @@ async fn worker_wakes_for_rate_recovery_before_retry_deadline() {
 }
 
 #[test]
-fn large_request_does_not_block_smaller_same_class_work() {
+fn large_request_spares_small_work() {
     let now = Instant::now();
     let bucket = Arc::new(Mutex::new(Bucket::new(8_000, now)));
     assert!(bucket.lock().unwrap().take(MAX_BURST_BYTES as usize - 1_000, now));
@@ -621,7 +621,7 @@ fn large_request_does_not_block_smaller_same_class_work() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn large_request_reserves_its_service_turn_against_continuous_small_packets() {
+async fn large_request_reserves_turn() {
     const RATE_BYTES_PER_SECOND: u64 = 8_000;
     const SMALL_PACKET_BYTES: usize = 500;
     const REFILL: Duration = Duration::from_nanos(62_500_000);
@@ -679,7 +679,7 @@ async fn large_request_reserves_its_service_turn_against_continuous_small_packet
 }
 
 #[tokio::test(start_paused = true)]
-async fn control_uses_its_scheduled_turn_while_large_fair_request_waits() {
+async fn control_runs_while_fair_waits() {
     const RATE_BYTES_PER_SECOND: u64 = 8_000;
     const CONTROL_PACKET_BYTES: usize = 500;
     const REFILL: Duration = Duration::from_nanos(62_500_000);
@@ -742,7 +742,7 @@ async fn control_uses_its_scheduled_turn_while_large_fair_request_waits() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn affordable_deadline_uses_its_turn_while_reserved_fair_waits() {
+async fn deadline_runs_while_fair_waits() {
     const RATE_BYTES_PER_SECOND: u64 = 8_000;
     const SMALL_PACKET_BYTES: usize = 500;
     const REFILL: Duration = Duration::from_nanos(62_500_000);
@@ -798,7 +798,7 @@ async fn affordable_deadline_uses_its_turn_while_reserved_fair_waits() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn cancelling_reserved_request_releases_its_service_slot() {
+async fn cancelled_reservation_releases_slot() {
     const RATE_BYTES_PER_SECOND: u64 = 8_000;
     const REFILL: Duration = Duration::from_nanos(62_500_000);
 
@@ -833,7 +833,7 @@ async fn cancelling_reserved_request_releases_its_service_slot() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn reserved_fair_send_consumes_its_service_slot_before_next_control() {
+async fn reserved_fair_precedes_next_control() {
     const RATE_BYTES_PER_SECOND: u64 = 8_000;
     const SMALL_PACKET_BYTES: usize = 500;
     const REFILL: Duration = Duration::from_millis(1_024);
@@ -902,7 +902,7 @@ async fn reserved_fair_send_consumes_its_service_slot_before_next_control() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn reserved_wait_ignores_ineligible_small_requests_but_dispatches_new_control() {
+async fn reserved_wait_dispatches_new_control() {
     const RATE_BYTES_PER_SECOND: u64 = 8_000;
     const LARGE_PACKET_BYTES: usize = MAX_BURST_BYTES as usize;
     const SMALL_PACKET_BYTES: usize = 500;

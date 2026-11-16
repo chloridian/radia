@@ -106,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn quaternion_w_uses_second_life_xyz_unpack_rule() {
+    fn quaternion_w_reconstructs_from_xyz() {
         let identity = quaternion_from_xyz(Vec3::ZERO).expect("finite XYZ components");
         assert_eq!(identity, Quat::IDENTITY);
 
@@ -118,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn message_ids_use_frequency_specific_wire_format() {
+    fn message_ids_use_frequency_encoding() {
         let cases = [
             (MessageId::high(4), vec![0x04]),
             (MessageId::medium(5), vec![0xff, 0x05]),

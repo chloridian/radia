@@ -250,7 +250,7 @@ fn folder_generations_follow_direct_changes() {
 }
 
 #[test]
-fn item_move_changes_both_folder_generations() {
+fn item_move_stamps_both_folders() {
     let owner = owner(17);
     let mut inventory = inventory(owner);
     let root = inventory.snapshot().roots().personal();
@@ -270,7 +270,7 @@ fn item_move_changes_both_folder_generations() {
 }
 
 #[test]
-fn deleted_folder_generation_is_not_reused() {
+fn deleted_generation_is_not_reused() {
     let owner = owner(18);
     let mut inventory = inventory(owner);
     let folder = category(owner, 2, Some(1), "folder");
@@ -289,7 +289,7 @@ fn deleted_folder_generation_is_not_reused() {
 }
 
 #[test]
-fn failed_and_noop_changes_keep_folder_generations() {
+fn failed_and_noop_keep_generations() {
     let owner = owner(19);
     let mut inventory = inventory(owner);
     let root = inventory.snapshot().roots().personal();
@@ -315,7 +315,7 @@ fn failed_and_noop_changes_keep_folder_generations() {
 }
 
 #[test]
-fn folder_fetch_and_version_updates_stamp_the_folder() {
+fn fetch_and_version_stamp_folder() {
     let owner = owner(20);
     let mut inventory = inventory(owner);
     let root = inventory.snapshot().roots().personal();
@@ -464,7 +464,7 @@ fn prepared_delete_rejects_live_revision() {
 }
 
 #[test]
-fn cancelled_folder_preparation_leaves_the_next_fetch_admissible() {
+fn cancelled_preparation_allows_next_fetch() {
     let owner = owner(28);
     let root = category(owner, 1, None, "root");
     let mut target = category(owner, 2, Some(1), "target");
@@ -488,7 +488,7 @@ fn cancelled_folder_preparation_leaves_the_next_fetch_admissible() {
 }
 
 #[test]
-fn folder_fetch_preserves_other_parent_items() {
+fn fetch_keeps_other_parents_items() {
     let owner = owner(26);
     let mut inventory = inventory(owner);
     let source = CategoryKey::new(owner, FolderId::new(uuid(2)));
@@ -576,7 +576,7 @@ fn fetch_replaces_categories_at_capacity() {
 }
 
 #[test]
-fn fetch_keeps_incoming_category_moved_out_of_stale_subtree() {
+fn fetch_keeps_moved_category() {
     let owner = owner(18);
     let mut inventory = inventory(owner);
     let target = CategoryKey::new(owner, FolderId::new(uuid(2)));
@@ -684,7 +684,7 @@ fn asset_type_query_spans_roots() {
 }
 
 #[test]
-fn preferred_folder_type_index_tracks_updates_removal_and_id_reuse() {
+fn folder_type_index_tracks_changes() {
     let owner = owner(15);
     let mut inventory = inventory(owner);
     let mut first = category(owner, 2, Some(1), "first");

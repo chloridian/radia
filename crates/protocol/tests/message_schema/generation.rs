@@ -29,7 +29,7 @@ fn schema_covers_messages() {
 }
 
 #[test]
-fn typed_inventory_matches_schema_and_fixtures() {
+fn typed_inventory_matches_schema() {
     assert_eq!(TYPED_MESSAGE_COVERAGE.len(), 48);
     let mut schema_conforming = 0;
     let mut semantic_overrides = 0;
@@ -90,7 +90,7 @@ fn typed_inventory_matches_schema_and_fixtures() {
 }
 
 #[test]
-fn compatibility_and_packed_overrides_remain_explicit() {
+fn override_categories_are_explicit() {
     let category = |name: &str| TYPED_MESSAGE_COVERAGE.iter().find(|coverage| coverage.name == name).map(|coverage| coverage.conformance);
     assert_eq!(category("RegionHandshake"), Some(ConformanceCategory::CompatibilityOverride));
     assert_eq!(category("LogoutReply"), Some(ConformanceCategory::CompatibilityOverride));
@@ -157,7 +157,7 @@ fn generator_emits_schema() {
 }
 
 #[test]
-fn fixed_message_ids_cover_the_fixed_frequency_range() {
+fn fixed_endpoints_use_fixed_frequency() {
     let endpoints = [("PacketAck", PACKET_ACK), ("OpenCircuit", OPEN_CIRCUIT), ("CloseCircuit", CLOSE_CIRCUIT)];
     for (name, id) in endpoints {
         assert_eq!(id.frequency, Frequency::Fixed);
@@ -166,7 +166,7 @@ fn fixed_message_ids_cover_the_fixed_frequency_range() {
 }
 
 #[test]
-fn schema_created_typed_ids_still_use_strict_typed_decode() {
+fn schema_built_ids_decode_strictly() {
     let schema = SchemaMessage::schema_by_id(COMPLETE_PING_CHECK).expect("CompletePingCheck schema");
     let message = SchemaMessage::new(schema, vec![BlockValues::single(vec![FieldValue::U8(0x5a)])]).expect("valid schema message");
     let fixture = parse_hex_fixture(vectors::COMPLETE_PING_CHECK).expect("valid fixture hex");
@@ -182,7 +182,7 @@ fn schema_created_typed_ids_still_use_strict_typed_decode() {
 }
 
 #[test]
-fn typed_preflight_covers_suffixes_and_zero_coding() {
+fn typed_edge_fixtures_round_trip() {
     for (fixture, expected_name) in [
         (vectors::REGION_HANDSHAKE_LEGACY, "RegionHandshake"),
         (vectors::REGION_HANDSHAKE_INFO4, "RegionHandshake"),
@@ -269,7 +269,7 @@ fn canonical_wire_type(kind: template::FieldKind) -> String {
 }
 
 #[test]
-fn canonical_template_layout_matches_reviewed_snapshot() {
+fn template_layout_matches_snapshot() {
     let source = include_str!("../../build/message_template.msg");
     let parsed = template::parse("build/message_template.msg", source).expect("pinned official template parses");
     let actual = canonical_layout(&parsed);

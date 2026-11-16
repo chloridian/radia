@@ -99,7 +99,7 @@ fn pending_event_queue_loss(
 }
 
 #[tokio::test]
-async fn completion_survives_cancelled_polling_and_repeated_reads() {
+async fn completion_survives_cancelled_polls() {
     for exit in [Some(EventQueueExit::StoppedWithCoverageLoss), None] {
         let (completed, completion) = oneshot::channel();
         let (role, _) = EventQueueRoleHandle::channel(true);
@@ -123,7 +123,7 @@ async fn completion_survives_cancelled_polling_and_repeated_reads() {
 }
 
 #[tokio::test]
-async fn cancelling_wait_aborts_the_worker_after_completion_is_reported() {
+async fn cancelled_wait_aborts_worker() {
     use std::{
         future::pending,
         pin::pin,
@@ -148,14 +148,14 @@ async fn cancelling_wait_aborts_the_worker_after_completion_is_reported() {
 }
 
 #[test]
-fn poll_retry_after_hint_is_bounded() {
+fn retry_after_hint_is_bounded() {
     assert_eq!(event_queue_retry_delay_with_hint(2, None), Duration::from_secs(7));
     assert_eq!(event_queue_retry_delay_with_hint(2, Some(Duration::from_secs(5))), Duration::from_secs(5));
     assert_eq!(event_queue_retry_delay_with_hint(2, Some(Duration::from_secs(90))), Duration::from_secs(30));
 }
 
 #[tokio::test]
-async fn poll_backoff_stops_when_session_closes() {
+async fn poll_backoff_stops_on_close() {
     let (events, _received) = mpsc::channel(1);
     let (_shutdown, shutdown) = watch::channel(false);
     let (session_closed, session_closed_receiver) = watch::channel(false);
@@ -185,7 +185,7 @@ async fn poll_backoff_stops_when_session_closes() {
 }
 
 #[tokio::test]
-async fn seed_backoff_stops_when_session_closes() {
+async fn seed_backoff_stops_on_close() {
     let (events, _received) = mpsc::channel(1);
     let (_shutdown, shutdown_receiver) = watch::channel(false);
     let (session_closed, session_closed_receiver) = watch::channel(false);
@@ -204,7 +204,7 @@ async fn seed_backoff_stops_when_session_closes() {
 }
 
 #[tokio::test]
-async fn poll_limit_notification_stops_when_session_closes() {
+async fn poll_limit_stops_on_close() {
     let (events, mut received) = mpsc::channel(1);
     events.try_send(EventEnvelope::new(Event::Failed("occupy event channel".into()))).expect("fill event channel");
     let (_shutdown, shutdown) = watch::channel(false);
@@ -236,7 +236,7 @@ async fn poll_limit_notification_stops_when_session_closes() {
 }
 
 #[tokio::test]
-async fn seed_limit_notification_stops_when_session_closes() {
+async fn seed_limit_stops_on_close() {
     let (events, mut received) = mpsc::channel(1);
     events.try_send(EventEnvelope::new(Event::Failed("occupy event channel".into()))).expect("fill event channel");
     let (_shutdown, shutdown_receiver) = watch::channel(false);

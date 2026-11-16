@@ -277,7 +277,7 @@ mod tests {
     use crate::capabilities::budget::{MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS, REQUEST_TIMEOUT};
 
     #[tokio::test]
-    async fn cancel_before_admission_releases_no_slot() {
+    async fn early_cancel_releases_slots() {
         let budget = CapabilityBudget::new();
         let clients = (0..4)
             .map(|_| {

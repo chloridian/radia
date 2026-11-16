@@ -993,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_only_drains_at_revision_limit() {
+    fn revision_limit_drains_recovery_only() {
         let mut limits = test_limits();
         limits.max_entities = 130;
         limits.max_entities_per_region = 130;
@@ -1136,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn generation_limit_detaches_avatar_without_pose() {
+    fn generation_limit_detaches_avatar() {
         let mut world = World::new(test_limits());
         let region = world.register_region().unwrap();
         assert!(matches!(

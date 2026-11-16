@@ -85,7 +85,7 @@ fn compressed_update_fixture() {
 }
 
 #[test]
-fn compressed_update_ignores_unknown_object_suffix() {
+fn compressed_ignores_unknown_suffix() {
     let (_, packet) = decode(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
     let Message::ObjectUpdateCompressed(update) = packet.message().clone() else {
         panic!("expected compressed full object update");
@@ -135,7 +135,7 @@ fn compressed_update_retains_unknown_flags() {
 }
 
 #[test]
-fn compressed_optional_fields_can_be_absent() {
+fn compressed_optionals_may_be_absent() {
     let (_, packet) = decode(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
     let Message::ObjectUpdateCompressed(mut update) = packet.message().clone() else {
         panic!("expected compressed full object update");

@@ -52,7 +52,7 @@ async fn close_cancels_queue() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn event_queue_ack_advances_after_batch_admission() {
+async fn ack_advances_after_admission() {
     const TWO_EVENT_RESPONSE: &str = "<llsd><map><key>id</key><integer>4</integer><key>events</key><array><map><key>message</key><string>FirstEvent</string></map><map><key>message</key><string>SecondEvent</string></map></array></map></llsd>";
     let mut harness = EventQueueHarness::new(
         |base| {
@@ -221,7 +221,7 @@ async fn redelivered_batch_is_suppressed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn lost_batch_is_redelivered_on_new_queue_incarnation() {
+async fn lost_batch_is_redelivered() {
     let server = EventQueueTestServer::start(|base| {
         let mut event_url = base.clone();
         event_url.set_path("/events");
@@ -590,7 +590,7 @@ async fn aborting_poll_records_coverage_loss() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn loss_notification_waits_for_event_channel_capacity() {
+async fn loss_waits_for_channel_capacity() {
     let server = EventQueueTestServer::start(|base| {
         let mut event_url = base.clone();
         event_url.set_path("/malformed-batch");
@@ -718,7 +718,7 @@ async fn not_found_stops_polling() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn primary_event_queue_404_keeps_active_session_connected() {
+async fn primary_404_keeps_session() {
     let (response_sender, response_receiver) = sync::mpsc::channel();
     let server = EventQueueTestServer::start(|base| {
         let mut event_url = base.clone();

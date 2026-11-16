@@ -352,7 +352,7 @@ fn encode_into_appends() {
 }
 
 #[test]
-fn encode_into_preserves_output_on_error() {
+fn failed_encode_keeps_output() {
     let packet = Packet::new(1, chat_message("x".repeat(usize::from(u16::MAX) + 1), ChatType::Normal, 0));
     let mut output = b"prefix".to_vec();
 
@@ -457,7 +457,7 @@ fn ack_trailer_round_trip() {
 }
 
 #[test]
-fn appended_ack_encoder_uses_network_byte_order() {
+fn appended_acks_are_big_endian() {
     let expected = [0x50, 0x01, 0x02, 0x03, 0x04, 0x00, 0x02, 0x07, 0x11, 0x22, 0x33, 0x44, 0xa1, 0xb2, 0xc3, 0xd4, 0x02];
     let packet = Packet::new(0x0102_0304, complete_ping(7)).with_reliable().with_appended_acks(vec![0x1122_3344, 0xa1b2_c3d4]);
 

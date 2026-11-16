@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn revision_exhaustion_preserves_patch_values_and_fences() {
+    fn patch_revision_exhaustion_preserves_state() {
         let mut world = World::new(limits(4));
         let region = world.register_region().unwrap();
         let created = world.observe_object(observation(region, 1, 270, 1)).unwrap();
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_motion_samples_reset_prediction_but_non_motion_noops_need_no_revision() {
+    fn noop_updates_need_no_revision() {
         let mut world = World::new(limits(4));
         let region = world.register_region().unwrap();
         let mut initial = observation(region, 1, 270, 1);
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_journal_marks_the_last_lost_revision() {
+    fn journal_bound_marks_lost_revision() {
         let mut world = World::new(limits(1));
         let region = world.register_region().unwrap();
         let first_revision = world.revision();
@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_change_budget_evicts_oldest_entries() {
+    fn change_budget_evicts_oldest() {
         let mut limits = limits(4);
         limits.max_journal_changes = 1;
         let mut world = World::new(limits);
@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_entry_journal_discards_unread_history() {
+    fn zero_journal_discards_history() {
         let mut limits = limits(0);
         limits.max_journal_changes = 4;
         let mut world = World::new(limits);
@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_records_kill_and_cascade_reasons() {
+    fn kill_and_cascade_reasons_recorded() {
         let mut world = World::new(limits(8));
         let region = world.register_region().unwrap();
         assert_revision(world.observe_object(observation(region, 1, 250, 1)).unwrap());
@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn parent_pose_change_invalidates_descendant_subtree() {
+    fn parent_pose_invalidates_subtree() {
         let mut world = World::new(limits(8));
         let region = world.register_region().unwrap();
         assert_revision(world.observe_object(observation(region, 1, 310, 1)).unwrap());
@@ -656,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn reclamation_publishes_one_revision_per_turn() {
+    fn reclamation_revises_once_per_turn() {
         let mut world = World::new(limits(16));
         let region = world.register_region().unwrap();
         assert_revision(world.observe_object(observation(region, 1, 350, 1)).unwrap());

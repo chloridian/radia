@@ -152,7 +152,7 @@ fn move_item_round_trips() {
 }
 
 #[test]
-fn move_folder_round_trips_as_an_outbound_message() {
+fn move_folder_round_trips() {
     let message = messages()[7].clone();
     assert!(!message.is_inbound_only());
     assert_round_trip(message);

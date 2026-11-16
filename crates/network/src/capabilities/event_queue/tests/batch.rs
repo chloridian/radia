@@ -82,7 +82,7 @@ async fn send_batch(
 }
 
 #[test]
-fn decodes_second_life_event_body_as_message_blocks() {
+fn event_body_decodes_message_blocks() {
     let body = br#"<llsd><map>
           <key>id</key><integer>9</integer>
           <key>events</key><array><map>
@@ -197,7 +197,7 @@ fn accepts_array_near_retained_limit() {
 }
 
 #[test]
-fn closed_session_or_shutdown_skips_batch_reservation() {
+fn close_or_shutdown_skips_reservation() {
     for close_session in [false, true] {
         let budget = Arc::new(Semaphore::new(MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES));
         let (shutdown, shutdown_receiver) = watch::channel(false);
@@ -245,7 +245,7 @@ async fn recorded_loss_survives_commit() {
 }
 
 #[tokio::test]
-async fn cancelled_batch_records_loss_without_prefix() {
+async fn cancelled_batch_records_loss() {
     let (events, mut received) = mpsc::channel(1);
     events.try_send(EventEnvelope::new(Event::Failed("occupy the event slot".into()))).expect("fill event channel");
     let (shutdown, shutdown_receiver) = watch::channel(false);
@@ -278,7 +278,7 @@ async fn cancelled_batch_records_loss_without_prefix() {
 }
 
 #[tokio::test]
-async fn dropping_waiting_batch_admission_records_loss() {
+async fn dropped_admission_records_loss() {
     let (events, mut received) = mpsc::channel(1);
     events.try_send(EventEnvelope::new(Event::Failed("occupy the event slot".into()))).expect("fill event channel");
     let (_shutdown, shutdown_receiver) = watch::channel(false);
@@ -307,7 +307,7 @@ async fn dropping_waiting_batch_admission_records_loss() {
 }
 
 #[tokio::test]
-async fn accepts_event_at_size_limit_as_one_batch_event() {
+async fn size_limit_event_stays_single() {
     let (events, mut received) = mpsc::channel(1);
     let (_shutdown, shutdown_receiver) = watch::channel(false);
     let (_session_closed, session_closed_receiver) = watch::channel(false);
@@ -399,7 +399,7 @@ fn event_budget_retries_after_dequeue() {
 }
 
 #[tokio::test]
-async fn receiver_close_records_loss_and_releases_batch_bytes() {
+async fn receiver_close_records_loss() {
     let (events, received) = mpsc::channel(1);
     let (_shutdown, shutdown_receiver) = watch::channel(false);
     let (_session_closed, session_closed_receiver) = watch::channel(false);

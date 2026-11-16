@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn reconstruction_multiplier_caps_at_four_x() {
+    fn reconstruction_multiplier_is_capped() {
         let score = score_candidate(candidate(5, 1, 1000, FREQUENCY_CAP, Kind::Mesh), 1000, MAX_OBSERVED_DECODE_MICROS);
 
         assert_eq!(score.value, RECENCY_SCALE * 16 * 4);

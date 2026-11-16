@@ -118,7 +118,7 @@ async fn small_packets_follow_role_weights() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn shared_pressure_services_at_configured_limit() {
+async fn shared_pressure_services_limit() {
     let simulator_count = MAX_NEIGHBOR_SIMULATORS + 1;
     let bucket = Arc::new(Mutex::new(Bucket::new(5_000, Instant::now())));
     assert!(bucket.lock().unwrap().take(MAX_BURST_BYTES as usize, Instant::now()));
