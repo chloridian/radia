@@ -1,10 +1,4 @@
-use std::{
-    collections::HashSet,
-    fmt::Write as _,
-    io,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Instant};
 
 use ::inventory::{
     Category, CategoryKey, FolderType, Inventory, InventoryDelta, InventoryLimits, InventoryOwner, MAX_FOLDER_FETCH_CHILDREN,
@@ -17,13 +11,10 @@ use futures::{
 use llsd::{Map, Value, xml};
 use network::capabilities::{CapabilityUrl, Client};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::timeout,
 };
-use url::Url;
 use utils::FolderId;
 use uuid::Uuid;
 
@@ -34,9 +25,9 @@ use super::{
 use crate::inventory::fetch::{
     FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais,
 };
+use crate::inventory::test_support::{LoopbackPeer, TEST_TIMEOUT};
 use crate::session::{FolderFetchApply, apply_inventory_fetch};
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(45);
 type SchedulerTask = (
     mpsc::Sender<ForegroundRequest>,
     mpsc::Receiver<InventoryFetchEvent>,
@@ -45,141 +36,6 @@ type SchedulerTask = (
     oneshot::Sender<()>,
     oneshot::Sender<()>,
 );
-
-struct PeerRequest {
-    method: String,
-    path: String,
-    headers: String,
-    body: Vec<u8>,
-    stream: TcpStream,
-}
-
-impl PeerRequest {
-    async fn respond(self, status: u16, body: impl AsRef<[u8]>) {
-        self.respond_with_headers(status, body, &[]).await;
-    }
-
-    async fn respond_with_headers(self, status: u16, body: impl AsRef<[u8]>, headers: &[(&str, &str)]) {
-        let body = body.as_ref();
-        let reason = match status {
-            200 => "OK",
-            403 => "Forbidden",
-            404 => "Not Found",
-            410 => "Gone",
-            503 => "Service Unavailable",
-            _ => "Response",
-        };
-        let mut response = format!("HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
-        for (name, value) in headers {
-            response.push_str(name);
-            response.push_str(": ");
-            response.push_str(value);
-            response.push_str("\r\n");
-        }
-        response.push_str("\r\n");
-        let mut stream = self.stream;
-        stream.write_all(response.as_bytes()).await.expect("write peer response headers");
-        stream.write_all(body).await.expect("write peer response body");
-    }
-
-    async fn wait_for_close(mut self) {
-        let mut byte = [0_u8; 1];
-        let result = timeout(TEST_TIMEOUT, self.stream.read(&mut byte)).await.expect("peer close timeout");
-        match result {
-            Ok(0) => {}
-            Err(error) if matches!(error.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe) => {}
-            result => panic!("expected client to close the in-flight request, received {result:?}"),
-        }
-    }
-}
-
-struct LoopbackPeer {
-    base: Url,
-    requests: mpsc::Receiver<PeerRequest>,
-    task: JoinHandle<()>,
-}
-
-impl LoopbackPeer {
-    async fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind loopback peer");
-        let address = listener.local_addr().expect("read loopback address");
-        let base = Url::parse(&format!("http://{address}")).expect("build peer URL");
-        let (sender, requests) = mpsc::channel(16);
-        let task = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                let sender = sender.clone();
-                tokio::spawn(async move {
-                    if let Ok(request) = read_request(stream).await {
-                        match sender.send(request).await {
-                            Ok(()) | Err(_) => {}
-                        }
-                    }
-                });
-            }
-        });
-        Self { base, requests, task }
-    }
-
-    fn url(&self, path: &str) -> Url {
-        self.base.join(path).expect("join peer path")
-    }
-
-    async fn next(&mut self) -> PeerRequest {
-        timeout(TEST_TIMEOUT, self.requests.recv()).await.expect("peer request timeout").expect("peer listener closed")
-    }
-
-    async fn grant(&mut self, names: &[(&str, &str)]) {
-        let request = self.next().await;
-        assert_eq!(request.method, "POST");
-        assert_eq!(request.path, "/seed");
-        let value = Value::Map(names.iter().map(|(name, path)| ((*name).to_owned(), Value::String(self.url(path).to_string()))).collect());
-        let body = xml::to_string(&value).expect("encode capability grants");
-        request.respond(200, body).await;
-    }
-}
-
-impl Drop for LoopbackPeer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-async fn read_request(mut stream: TcpStream) -> io::Result<PeerRequest> {
-    let mut bytes = Vec::new();
-    let mut chunk = [0_u8; 8192];
-    let (header_end, content_length) = loop {
-        let read = stream.read(&mut chunk).await?;
-        if read == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        bytes.extend_from_slice(&chunk[..read]);
-        if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-            let header_end = end + 4;
-            let headers = std::str::from_utf8(&bytes[..end]).map_err(io::Error::other)?;
-            let content_length = headers
-                .lines()
-                .filter_map(|line| line.split_once(':'))
-                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                .map(|(_, value)| value.trim().parse::<usize>())
-                .transpose()
-                .map_err(io::Error::other)?
-                .unwrap_or_default();
-            break (header_end, content_length);
-        }
-    };
-    while bytes.len() < header_end.saturating_add(content_length) {
-        let read = stream.read(&mut chunk).await?;
-        if read == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        bytes.extend_from_slice(&chunk[..read]);
-    }
-    let headers = std::str::from_utf8(&bytes[..header_end - 4]).map_err(io::Error::other)?.to_owned();
-    let mut line = headers.lines().next().ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?.split_whitespace();
-    let method = line.next().ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?.to_owned();
-    let path = line.next().ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?.to_owned();
-    Ok(PeerRequest { method, path, headers, body: bytes[header_end..header_end + content_length].to_vec(), stream })
-}
 
 fn key(owner: InventoryOwner, id: u128) -> CategoryKey {
     CategoryKey::new(owner, FolderId::new(Uuid::from_u128(id)))

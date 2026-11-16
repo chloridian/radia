@@ -4,6 +4,8 @@ pub(crate) mod environments;
 pub mod favorite_store;
 pub mod favorites;
 mod fetch;
+#[cfg(test)]
+mod test_support;
 
 pub(crate) use edits::{AisDelta, InventoryEditController, InventoryEditEvent, MoveExpectation};
 pub use edits::{InventoryEditHandle, InventoryEditOutcome, InventoryEditRejection};

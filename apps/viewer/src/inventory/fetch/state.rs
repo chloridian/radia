@@ -2,7 +2,7 @@ use std::collections::{HashSet, VecDeque};
 
 use ::inventory::{CategoryKey, InventorySnapshot};
 
-use super::MAX_FALLBACK_FOLDERS;
+use super::MAX_LEGACY_BATCH;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct BackgroundRequest {
@@ -49,7 +49,7 @@ pub(super) fn next_background_job(
             SourceKind::Legacy => {
                 let mut folders = vec![request.folder];
                 let mut next_index = index;
-                while folders.len() < MAX_FALLBACK_FOLDERS {
+                while folders.len() < MAX_LEGACY_BATCH {
                     let Some(next) = background.get(next_index).copied() else { break };
                     if next.folder.owner() != request.folder.owner() {
                         break;

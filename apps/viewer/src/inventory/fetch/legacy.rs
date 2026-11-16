@@ -5,7 +5,7 @@ use protocol::inventory::{self, DecodeError, RequestedFolder};
 use uuid::Uuid;
 
 use super::{
-    FolderFetch, FolderFetchProvenance, InventoryFetchError, MAX_FALLBACK_FOLDERS, MAX_FETCH_RESPONSE_BYTES, RequestFailure,
+    FolderFetch, FolderFetchProvenance, InventoryFetchError, MAX_FETCH_RESPONSE_BYTES, MAX_LEGACY_BATCH, RequestFailure,
     classify_request_error,
     decode::{to_category, to_item},
 };
@@ -15,7 +15,7 @@ pub(super) async fn fetch_batch(
     capability: &CapabilityUrl,
     folders: &[CategoryKey],
 ) -> Result<Vec<FolderFetch>, RequestFailure> {
-    if folders.is_empty() || folders.len() > MAX_FALLBACK_FOLDERS {
+    if folders.is_empty() || folders.len() > MAX_LEGACY_BATCH {
         return Err(RequestFailure::Failed);
     }
     let requested =
@@ -39,7 +39,7 @@ pub(crate) async fn fetch_items(
     item_ids: &[Uuid],
 ) -> Result<Vec<Item>, InventoryFetchError> {
     let mut items = Vec::with_capacity(item_ids.len());
-    for batch in item_ids.chunks(MAX_FALLBACK_FOLDERS) {
+    for batch in item_ids.chunks(MAX_LEGACY_BATCH) {
         let response = client
             .post_bytes_with_response_limit(capability, &item_request(batch), MAX_FETCH_RESPONSE_BYTES)
             .await
