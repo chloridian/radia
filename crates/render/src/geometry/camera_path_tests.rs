@@ -78,6 +78,8 @@ struct Report {
     restart_frames: u32,
     appearance_frames: u32,
     budget_blocked_frames: u32,
+    mesh_wait: Latencies,
+    mesh_unresolved: Latencies,
     first_entry: Latencies,
     reentry: Latencies,
     unresolved: Latencies,
@@ -93,7 +95,7 @@ impl fmt::Display for Report {
         let per_hundred = f64::from(self.commits) * 100.0 / f64::from(self.frames.max(1));
         write!(
             f,
-            "frames={} commits={} commits_per_100={per_hundred:.1} stale={:?} invalidations={:?} build_frames=({}) building={} draining={} layout_required={} phases={:?} mesh_bytes_changes={} mesh_revision_changes={} retry_frames={} longest_retry={} restart_frames={} appearance_frames={} budget_blocked_frames={} pop_in_first=({}) pop_in_reentry=({}) unresolved=({}) abandoned={} returned_during_build={} pop_outs={} margin_pop_outs={} examples={:?}",
+            "frames={} commits={} commits_per_100={per_hundred:.1} stale={:?} invalidations={:?} build_frames=({}) building={} draining={} layout_required={} phases={:?} mesh_bytes_changes={} mesh_revision_changes={} retry_frames={} longest_retry={} restart_frames={} appearance_frames={} budget_blocked_frames={} mesh_wait=({}) mesh_unresolved=({}) pop_in_first=({}) pop_in_reentry=({}) unresolved=({}) abandoned={} returned_during_build={} pop_outs={} margin_pop_outs={} examples={:?}",
             self.frames,
             self.commits,
             self.stale,
@@ -110,6 +112,8 @@ impl fmt::Display for Report {
             self.restart_frames,
             self.appearance_frames,
             self.budget_blocked_frames,
+            self.mesh_wait,
+            self.mesh_unresolved,
             self.first_entry,
             self.reentry,
             self.unresolved,
@@ -126,6 +130,7 @@ impl fmt::Display for Report {
 struct Track {
     shown: bool,
     ever_shown: bool,
+    entered: Option<u32>,
     waiting_since: Option<u32>,
     slots: Vec<u32>,
     hidden_during: Option<u32>,
@@ -310,20 +315,31 @@ impl Rig {
                         if track.ever_shown { report.reentry.0.push(latency) } else { report.first_entry.0.push(latency) }
                     }
                     track.ever_shown = true;
+                    track.entered = None;
                     track.hidden_during = None;
-                } else if strict && resident {
-                    if track.waiting_since.is_none() && track.hidden_during.is_some() && track.hidden_during == build_started {
-                        report.returned_during_build += 1;
+                } else if strict {
+                    let entered = *track.entered.get_or_insert(frame_index);
+                    if resident && track.waiting_since.is_none() {
+                        if track.hidden_during.is_some() && track.hidden_during == build_started {
+                            report.returned_during_build += 1;
+                        }
+                        report.mesh_wait.0.push(frame_index - entered);
+                        track.waiting_since = Some(frame_index);
                     }
-                    track.waiting_since.get_or_insert(frame_index);
-                } else if !strict && track.waiting_since.take().is_some() {
-                    report.abandoned += 1;
+                } else {
+                    track.entered = None;
+                    if track.waiting_since.take().is_some() {
+                        report.abandoned += 1;
+                    }
                 }
                 track.shown = shown;
             }
         }
         let frames = report.frames;
         report.unresolved.0.extend(tracks.values().filter_map(|track| track.waiting_since.map(|since| frames - since)));
+        report.mesh_unresolved.0.extend(
+            tracks.values().filter(|track| track.waiting_since.is_none()).filter_map(|track| track.entered.map(|entered| frames - entered)),
+        );
         report
     }
 }
