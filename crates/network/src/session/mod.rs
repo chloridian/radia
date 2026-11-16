@@ -38,10 +38,7 @@ use crate::circuit::{ConnectionError, SimulatorConnection, SimulatorConnectionOp
 use crate::{
     LoginCredentials,
     circuit::lludp::Delivery,
-    circuit::{
-        HandoffTarget, LOGOUT_TIMEOUT, MAX_PRECONNECT_EVENTS, PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorRequest,
-        SimulatorTaskOutcome,
-    },
+    circuit::{HandoffTarget, PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome},
     coverage::{
         CoverageLoss, CoverageLossLedger, CoverageLossRecord, CoverageSnapshot, CoverageSource, CoverageWatermark,
         record_event_envelope_loss,
@@ -49,18 +46,19 @@ use crate::{
     error::Error,
     event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, SimulatorId},
 };
+
 #[cfg(test)]
-use neighbors::{neighbor_completion_event, neighbor_event_queue_failure};
+use neighbors::neighbor_completion_event;
 #[cfg(test)]
-use routing::{EventQueueOutcome, PreconnectEvents, PreconnectOutcome, queue_simulator_event, queue_until_connected};
+use routing::{EventQueueOutcome, queue_simulator_event};
 #[cfg(test)]
 use runtime::{APPLICATION_EVENT_PRESSURE_GRACE_PERIOD, HANDOFF_COMMAND_RETRY_INTERVAL};
 use runtime::{RuntimeAction, SessionDispatcher};
 #[cfg(test)]
 use simulators::retry_pending_handoff_commands;
 use simulators::{
-    ConnectionQueueFailure, ConnectionTaskResult, HandoffCommand, NEIGHBOR_COMMAND_CAPACITY, NeighborEventQueueJoin, PrimaryRoute,
-    RunState, RuntimeInputs, SessionRuntime, SessionRuntimeOptions, SessionState, SimulatorCapabilitySession, SimulatorConnectionState,
+    ConnectionQueueFailure, ConnectionTaskResult, EventQueueLifecycle, HandoffCommand, NEIGHBOR_COMMAND_CAPACITY, RunState, RuntimeInputs,
+    SessionRuntime, SessionRuntimeOptions, SessionState, SimulatorCapabilitySession, SimulatorConnectionLifecycle, SimulatorRecord,
     is_current_simulator, queue_connection_message, queue_primary_message, remove_simulator_capability, track_capability_requests,
 };
 use startup::SessionStartup;

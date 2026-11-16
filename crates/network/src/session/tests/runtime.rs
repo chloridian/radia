@@ -1,4 +1,4 @@
-use std::{collections::HashMap, future::pending, net::SocketAddr, num::NonZeroU64, time::Duration};
+use std::{future::pending, net::SocketAddr, num::NonZeroU64, time::Duration};
 
 use llsd::{Map, Value};
 use protocol::{
@@ -22,18 +22,16 @@ use uuid::Uuid;
 use crate::fixtures::test_simulator_id;
 
 use super::{
-    FinishOrder, HANDOFF_COMMAND_RETRY_INTERVAL, HandoffAnnouncement, HandoffDecision, HandoffOrder, HandoffTarget,
-    NEIGHBOR_COMMAND_CAPACITY, PromotionSetup, RunState, SimulatorCommand, SimulatorConnectionState, SimulatorMemoryBudget,
-    SimulatorTaskOutcome, arbitrate_handoff, connect_runtime, decode_crossed_region, decode_event_teleport_finish, decode_teleport_finish,
-    handoff_cancellation, neighbor_event_queue_failure, neighbor_event_queue_task_failure, remove_failed_neighbor,
-    retry_pending_handoff_commands, same_handoff_destination, teleport_failure_matches,
+    EventQueueLifecycle, FinishOrder, HANDOFF_COMMAND_RETRY_INTERVAL, HandoffAnnouncement, HandoffDecision, HandoffOrder, HandoffTarget,
+    NEIGHBOR_COMMAND_CAPACITY, PromotionSetup, RunState, SimulatorCommand, SimulatorTaskOutcome, arbitrate_handoff, connect_runtime,
+    decode_crossed_region, decode_event_teleport_finish, decode_teleport_finish, handoff_cancellation, login_session,
+    retry_pending_handoff_commands, same_handoff_destination, teleport_failure_matches, test_simulator_record,
 };
+use crate::capabilities::{EventQueueExit, EventQueueRoleHandle};
 use crate::session::handoff::{HandoffEvidence, HandoffState, PendingPromotion, matches_handoff_cancellation, matches_pending_promotion};
 use crate::{
     AgentSession, Grid,
-    capabilities::EventQueueExit,
     event::{
-        Event,
         PacketOrder::{Ambiguous, Degraded, Ordered},
         SimulatorId,
     },
@@ -214,24 +212,12 @@ async fn full_handoff_queue_recovers() {
     let target = SimulatorId::allocate().expect("allocate neighbor simulator ID");
     let endpoint = "127.0.0.1:13001".parse::<SocketAddr>().expect("neighbor endpoint");
     let mut run_state = RunState::new();
-    let abort = run_state.neighbors.spawn(pending::<(SimulatorId, Option<u64>, SocketAddr, SimulatorTaskOutcome)>());
+    let abort = run_state.connections.spawn(pending::<(SimulatorId, Option<u64>, SocketAddr, SimulatorTaskOutcome)>());
     let (commands, mut command_receiver) = mpsc::channel(NEIGHBOR_COMMAND_CAPACITY);
     for _ in 0..NEIGHBOR_COMMAND_CAPACITY {
         assert!(commands.try_send(SimulatorCommand::CancelHandoff).is_ok());
     }
-    run_state.neighbor_connections.insert(
-        0x1234,
-        SimulatorConnectionState {
-            simulator_id: target,
-            endpoint,
-            abort,
-            commands,
-            logout: mpsc::channel(1).0,
-            pending_handoff_command: None,
-            primary_state: None,
-            packet_memory: SimulatorMemoryBudget::new().for_neighbor(),
-        },
-    );
+    connection.state.simulators.insert(target, test_simulator_record(endpoint, Some(0x1234), abort, commands));
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
     let (application_events, _application_event_receiver) = mpsc::channel(8);
     let (neighbor_events, _neighbor_event_receiver) = mpsc::channel(8);
@@ -254,25 +240,25 @@ async fn full_handoff_queue_recovers() {
     .expect("full connection queue must not stall runtime")
     .expect("queue saturation is recoverable");
 
-    assert!(accepted, "a full queue should defer handoff preparation instead of losing it");
-    assert_eq!(setup.state.neighbor_connections.get(&0x1234).expect("neighbor remains tracked").commands.capacity(), 0);
-    assert!(setup.state.neighbor_connections.get(&0x1234).expect("neighbor remains tracked").pending_handoff_command.is_some());
+    assert!(accepted.is_some(), "a full queue should defer handoff preparation instead of losing it");
+    assert_eq!(connection.state.simulators.get(&target).expect("neighbor remains tracked").commands.capacity(), 0);
+    assert!(connection.state.simulators.get(&target).expect("neighbor remains tracked").pending_handoff_command.is_some());
 
     let mut retry = time::interval(HANDOFF_COMMAND_RETRY_INTERVAL);
     retry.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-    retry_pending_handoff_commands(&mut retry, &mut setup.state.neighbor_connections).await;
-    assert!(setup.state.neighbor_connections.get(&0x1234).expect("neighbor remains tracked").pending_handoff_command.is_some());
+    retry_pending_handoff_commands(&mut retry, &mut connection.state.simulators).await;
+    assert!(connection.state.simulators.get(&target).expect("neighbor remains tracked").pending_handoff_command.is_some());
 
     command_receiver.recv().await.expect("drain one queued command");
     let before_retry = HANDOFF_COMMAND_RETRY_INTERVAL - Duration::from_millis(1);
     assert!(
-        timeout(before_retry, retry_pending_handoff_commands(&mut retry, &mut setup.state.neighbor_connections)).await.is_err(),
+        timeout(before_retry, retry_pending_handoff_commands(&mut retry, &mut connection.state.simulators)).await.is_err(),
         "deferred handoff should remain pending until its retry tick"
     );
-    assert!(setup.state.neighbor_connections.get(&0x1234).expect("neighbor remains tracked").pending_handoff_command.is_some());
+    assert!(connection.state.simulators.get(&target).expect("neighbor remains tracked").pending_handoff_command.is_some());
     time::advance(Duration::from_millis(1)).await;
-    retry_pending_handoff_commands(&mut retry, &mut setup.state.neighbor_connections).await;
-    assert!(setup.state.neighbor_connections.get(&0x1234).expect("neighbor remains tracked").pending_handoff_command.is_none());
+    retry_pending_handoff_commands(&mut retry, &mut connection.state.simulators).await;
+    assert!(connection.state.simulators.get(&target).expect("neighbor remains tracked").pending_handoff_command.is_none());
     let mut prepare_sent = false;
     while let Ok(command) = command_receiver.try_recv() {
         if matches!(command, SimulatorCommand::PrepareHandoff(_)) {
@@ -280,7 +266,7 @@ async fn full_handoff_queue_recovers() {
         }
     }
     assert!(prepare_sent, "the deferred handoff command should enter the queue when capacity returns");
-    setup.state.neighbors.shutdown().await;
+    run_state.connections.shutdown().await;
 }
 
 #[test]
@@ -444,183 +430,58 @@ fn teleport_cancel_and_crossing_seed_are_redacted() {
 }
 
 #[tokio::test]
-async fn event_queue_panic_reaches_simulator() {
-    let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
-    let primary_id = SimulatorId::allocate().expect("allocate primary ID");
-    let source = "127.0.0.1:9000".parse::<SocketAddr>().expect("parse endpoint");
-    let mut neighbors = JoinSet::<()>::new();
-    let abort = neighbors.spawn(pending::<()>());
-    let (commands, _) = mpsc::channel::<SimulatorCommand>(1);
-    let connections = HashMap::from([(
-        1,
-        SimulatorConnectionState {
-            simulator_id,
-            endpoint: source,
-            abort,
-            commands,
-            logout: mpsc::channel(1).0,
-            pending_handoff_command: None,
-            primary_state: None,
-            packet_memory: SimulatorMemoryBudget::new().for_neighbor(),
-        },
-    )]);
-
-    let mut event_queues = JoinSet::<(SimulatorId, SocketAddr, EventQueueExit)>::new();
+async fn event_queue_panic_is_attributed_to_its_simulator_record() {
+    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
+    let mut connection = connect_runtime(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default())
+        .await
+        .expect("connect primary circuit");
+    let simulator_id = connection.state.primary_id;
+    let endpoint = simulator.local_addr().expect("simulator address");
+    let mut event_queues = JoinSet::new();
     let task = event_queues.spawn(async { panic!("injected EventQueue worker panic") });
-    let mut owners = HashMap::from([(task.id(), (simulator_id, source))]);
-    let Some(Err(error)) = event_queues.join_next().await else {
+    let (role, _) = EventQueueRoleHandle::channel(true);
+    connection.state.primary_mut().capabilities.as_mut().expect("primary capability session").event_queue =
+        EventQueueLifecycle::Running { role, task };
+
+    let Some(Err(error)) = event_queues.join_next_with_id().await else {
         panic!("injected worker should fail");
     };
     assert!(error.is_panic());
+    let (owner, source, exit) = connection
+        .state
+        .finish_event_queue_task(error.id(), EventQueueExit::TaskFailed)
+        .expect("failed task should resolve through its simulator record");
 
-    std::assert_matches!(
-        neighbor_event_queue_task_failure(&error, &mut owners, primary_id, &connections),
-        Some(Event::CapabilityError { simulator_id: failed_id, source: failed_source, .. })
-            if failed_id == simulator_id && failed_source == source
+    assert_eq!(owner, simulator_id);
+    assert_eq!(source, endpoint);
+    assert_eq!(exit, EventQueueExit::TaskFailed);
+    assert_eq!(
+        connection.state.primary().capabilities.as_ref().expect("primary capability session").event_queue.exit(),
+        Some(EventQueueExit::TaskFailed)
     );
-    assert!(owners.is_empty());
-    neighbors.abort_all();
 }
 
 #[tokio::test]
-async fn stale_event_queue_completion_is_ignored() {
-    let stale_id = SimulatorId::allocate().expect("allocate stale simulator ID");
-    let current_id = SimulatorId::allocate().expect("allocate replacement simulator ID");
-    let primary_id = SimulatorId::allocate().expect("allocate primary ID");
-    let source = "127.0.0.1:9001".parse::<SocketAddr>().expect("parse endpoint");
-    let mut neighbors = JoinSet::<()>::new();
-    let (commands, _) = mpsc::channel::<SimulatorCommand>(1);
-    let mut connections = HashMap::from([(
-        1,
-        SimulatorConnectionState {
-            simulator_id: stale_id,
-            endpoint: source,
-            abort: neighbors.spawn(pending::<()>()),
-            commands,
-            logout: mpsc::channel(1).0,
-            pending_handoff_command: None,
-            primary_state: None,
-            packet_memory: SimulatorMemoryBudget::new().for_neighbor(),
-        },
-    )]);
+async fn stale_event_queue_completion_leaves_replacement_running() {
+    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
+    let mut connection = connect_runtime(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default())
+        .await
+        .expect("connect primary circuit");
+    let mut event_queues = JoinSet::new();
+    let _stale_task = event_queues.spawn(async { panic!("injected stale EventQueue worker panic") });
+    let current_task = event_queues.spawn(pending::<()>());
+    let current_task_id = current_task.id();
+    let (role, _) = EventQueueRoleHandle::channel(true);
+    connection.state.primary_mut().capabilities.as_mut().expect("primary capability session").event_queue =
+        EventQueueLifecycle::Running { role, task: current_task };
 
-    let mut event_queues = JoinSet::<(SimulatorId, SocketAddr, EventQueueExit)>::new();
-    let task = event_queues.spawn(async { panic!("injected stale EventQueue worker panic") });
-    let mut owners = HashMap::from([(task.id(), (stale_id, source))]);
-    let Some(Err(error)) = event_queues.join_next().await else {
-        panic!("injected worker should fail");
+    let Some(Err(error)) = event_queues.join_next_with_id().await else {
+        panic!("stale worker should fail");
     };
     assert!(error.is_panic());
-
-    let (commands, _) = mpsc::channel::<SimulatorCommand>(1);
-    let replacement = SimulatorConnectionState {
-        simulator_id: current_id,
-        endpoint: source,
-        abort: neighbors.spawn(pending::<()>()),
-        commands,
-        logout: mpsc::channel(1).0,
-        pending_handoff_command: None,
-        primary_state: None,
-        packet_memory: SimulatorMemoryBudget::new().for_neighbor(),
-    };
-    if let Some(stale) = connections.insert(1, replacement) {
-        stale.abort.abort();
-    }
-
-    assert!(neighbor_event_queue_task_failure(&error, &mut owners, primary_id, &connections).is_none());
-    assert!(neighbor_event_queue_failure(stale_id, source, EventQueueExit::TaskFailed, primary_id, &connections).is_none());
-    assert!(owners.is_empty());
-    neighbors.abort_all();
-}
-
-#[tokio::test]
-async fn neighbor_panic_removes_only_its_generation() {
-    let failed_id = SimulatorId::allocate().expect("allocate failed simulator ID");
-    let other_id = SimulatorId::allocate().expect("allocate other simulator ID");
-    let failed_endpoint = "127.0.0.1:9002".parse::<SocketAddr>().expect("parse failed endpoint");
-    let other_endpoint = "127.0.0.1:9003".parse::<SocketAddr>().expect("parse other endpoint");
-    let mut tasks = JoinSet::<()>::new();
-    let failed_task = tasks.spawn(async { panic!("injected neighbor worker panic") });
-    let other_task = tasks.spawn(pending::<()>());
-    let (failed_commands, _) = mpsc::channel::<SimulatorCommand>(1);
-    let (other_commands, _) = mpsc::channel::<SimulatorCommand>(1);
-    let mut connections = HashMap::from([
-        (
-            1,
-            SimulatorConnectionState {
-                simulator_id: failed_id,
-                endpoint: failed_endpoint,
-                abort: failed_task,
-                commands: failed_commands,
-                logout: mpsc::channel(1).0,
-                pending_handoff_command: None,
-                primary_state: None,
-                packet_memory: SimulatorMemoryBudget::new().for_neighbor(),
-            },
-        ),
-        (
-            2,
-            SimulatorConnectionState {
-                simulator_id: other_id,
-                endpoint: other_endpoint,
-                abort: other_task,
-                commands: other_commands,
-                logout: mpsc::channel(1).0,
-                pending_handoff_command: None,
-                primary_state: None,
-                packet_memory: SimulatorMemoryBudget::new().for_neighbor(),
-            },
-        ),
-    ]);
-
-    let Some(Err(error)) = tasks.join_next().await else {
-        panic!("injected neighbor worker should panic");
-    };
-    assert!(error.is_panic());
-    assert_eq!(remove_failed_neighbor(&error, &mut connections), Some((1, failed_id, failed_endpoint)));
-    assert!(!connections.contains_key(&1));
-    assert!(connections.get(&2).is_some_and(|connection| connection.simulator_id == other_id));
-
-    let stale_id = SimulatorId::allocate().expect("allocate stale simulator ID");
-    let replacement_id = SimulatorId::allocate().expect("allocate replacement simulator ID");
-    let stale_endpoint = "127.0.0.1:9004".parse::<SocketAddr>().expect("parse stale endpoint");
-    let stale_task = tasks.spawn(async { panic!("injected late neighbor worker panic") });
-    let (commands, _) = mpsc::channel::<SimulatorCommand>(1);
-    connections.insert(
-        3,
-        SimulatorConnectionState {
-            simulator_id: stale_id,
-            endpoint: stale_endpoint,
-            abort: stale_task,
-            commands,
-            logout: mpsc::channel(1).0,
-            pending_handoff_command: None,
-            primary_state: None,
-            packet_memory: SimulatorMemoryBudget::new().for_neighbor(),
-        },
-    );
-    let current_task = tasks.spawn(pending::<()>());
-    let (commands, _) = mpsc::channel::<SimulatorCommand>(1);
-    connections.insert(
-        3,
-        SimulatorConnectionState {
-            simulator_id: replacement_id,
-            endpoint: stale_endpoint,
-            abort: current_task,
-            commands,
-            logout: mpsc::channel(1).0,
-            pending_handoff_command: None,
-            primary_state: None,
-            packet_memory: SimulatorMemoryBudget::new().for_neighbor(),
-        },
-    );
-
-    let Some(Err(error)) = tasks.join_next().await else {
-        panic!("injected stale worker should panic");
-    };
-    assert!(error.is_panic());
-    assert_eq!(remove_failed_neighbor(&error, &mut connections), None);
-    assert!(connections.get(&3).is_some_and(|connection| connection.simulator_id == replacement_id));
-    assert_eq!(connections.len(), 2);
-    tasks.abort_all();
+    assert!(connection.state.finish_event_queue_task(error.id(), EventQueueExit::TaskFailed).is_none());
+    let event_queue = &connection.state.primary().capabilities.as_ref().expect("primary capability session").event_queue;
+    assert!(event_queue.is_running());
+    assert_eq!(event_queue.task_id(), Some(current_task_id));
+    event_queues.abort_all();
 }

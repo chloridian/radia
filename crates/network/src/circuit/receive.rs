@@ -262,8 +262,8 @@ impl ConnectionTask {
         let dispatch_message = super::connection_message_has_application_event(
             message,
             connection_role,
-            self.connection.handoff.as_ref(),
-            self.connection.movement_requested,
+            self.connection.handoff.target(),
+            self.connection.handoff.movement_sent(),
         );
         let application_credit = if dispatch_message {
             let Some(permit) = self.packet_memory.application_events().try_acquire() else {
@@ -423,7 +423,7 @@ impl ConnectionTask {
                 active_queue_class(self.pending_send.as_ref()),
             )?;
         }
-        if self.phase.has_region_handshake() && self.connection.region_handshake_reply_sent && self.connection.handoff.is_some() {
+        if self.phase.has_region_handshake() && self.connection.region_handshake_reply_sent && self.connection.handoff.target().is_some() {
             self.connection.queue_handoff_movement(&mut self.outbound, self.pending_send.as_ref())?;
         }
         Ok(None)
@@ -566,8 +566,8 @@ impl ConnectionTask {
                         movement.agent_data.agent_id == self.connection.session.agent_id
                             && movement.agent_data.session_id == self.connection.session.session_id
                     }
-                    ConnectionRole::Neighbor => self.connection.handoff.as_ref().is_some_and(|handoff| {
-                        self.connection.movement_requested
+                    ConnectionRole::Neighbor => self.connection.handoff.target().is_some_and(|handoff| {
+                        self.connection.handoff.movement_sent()
                             && movement.agent_data.agent_id == handoff.agent_id
                             && movement.agent_data.session_id == handoff.session_id
                             && movement.data.region_handle == handoff.region_handle
@@ -614,6 +614,7 @@ impl ConnectionTask {
                     && reply.agent_data.session_id == self.connection.session.session_id =>
             {
                 dispatch_message = false;
+                self.phase.complete_logout_receipt(super::LogoutReceipt::Received);
                 self.phase.begin_draining();
             }
             Message::LogoutReply(_) | Message::PacketAck(_) => dispatch_message = false,

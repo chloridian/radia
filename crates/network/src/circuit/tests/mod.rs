@@ -50,7 +50,7 @@ pub(in crate::circuit) use crate::circuit::admission::SimulatorMemoryBudget;
 pub(in crate::circuit) use crate::circuit::admission::{
     MAX_CONCURRENT_PACKET_DECODES, MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES,
 };
-pub(in crate::circuit) use crate::circuit::{HandoffCancellation, HandoffGeneration, HandoffTarget};
+pub(in crate::circuit) use crate::circuit::{HandoffCancellation, HandoffGeneration, HandoffTarget, LogoutCommand, LogoutReceipt};
 pub(in crate::circuit) use crate::fixtures::{
     circuit::{NEW_RELIABLE_ACK_CAPACITY, SimulatorMemoryBudgetTestExt, pacer_rate, with_sequence},
     session::{HandoffEvidence, HandoffState, PendingPromotion, handoff_cancellation},
@@ -237,7 +237,7 @@ pub(in crate::circuit) async fn run_budget_retry(role: ConnectionRole) {
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
     let (_commands, commands) = mpsc::channel(1);
-    let (_logout, logout) = mpsc::channel::<oneshot::Sender<Result<(), Error>>>(1);
+    let (_logout, logout) = mpsc::channel::<LogoutCommand>(1);
     let task: JoinHandle<Result<(), ConnectionError>> =
         spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory));
 

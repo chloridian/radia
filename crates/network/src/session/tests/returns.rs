@@ -250,7 +250,8 @@ async fn run_stale_cancel() {
         }
     }
     harness.disconnect.send_replace(true);
-    receive_message(&harness.neighbor, |message| matches!(message, Message::LogoutRequest(_))).await;
+    let logout = receive_message(&harness.neighbor, |message| matches!(message, Message::LogoutRequest(_))).await;
+    send_logout_reply(&harness.neighbor, harness.neighbor_peer, &logout, 74).await;
     assert!(timeout(WAIT, harness.client).await.expect("shutdown finishes").expect("runtime task").is_ok());
     assert_eq!(server.finish().len(), 3);
 }
@@ -329,6 +330,7 @@ async fn run_disconnect_logs_out_promoted_primary() {
         .expect("shutdown should send LogoutRequest to the promoted primary");
     assert!(logout.is_reliable());
     std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+    send_logout_reply(&harness.neighbor, harness.neighbor_peer, &logout, 45).await;
     timeout(WAIT, async {
         loop {
             match next_raw_event(&mut harness.events).await {

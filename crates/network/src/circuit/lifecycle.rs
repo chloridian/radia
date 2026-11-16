@@ -4,7 +4,7 @@ use tokio::{sync::oneshot, time::Instant};
 
 use crate::error::Error;
 
-use super::{ConnectionError, LOGOUT_TIMEOUT};
+use super::{ConnectionError, LOGOUT_REPLY_TIMEOUT, LOGOUT_TIMEOUT, LogoutCommand, LogoutReceipt};
 
 pub(super) enum Phase {
     Connecting { region_handshake_seen: bool },
@@ -21,8 +21,9 @@ pub(super) enum ConnectionStage {
 
 pub(super) enum LogoutState {
     NotRequested,
-    AwaitingLocalSend(Vec<oneshot::Sender<Result<(), Error>>>),
-    Complete,
+    AwaitingLocalSend { completions: Vec<oneshot::Sender<Result<(), Error>>>, receipts: Vec<oneshot::Sender<LogoutReceipt>> },
+    AwaitingReply(Vec<oneshot::Sender<LogoutReceipt>>),
+    Complete(LogoutReceipt),
 }
 
 pub(super) enum LogoutAction {
@@ -149,24 +150,36 @@ impl Phase {
     }
 
     pub(super) fn logout_requested(&self) -> bool {
-        matches!(self.logout_state(), Some(LogoutState::AwaitingLocalSend(_) | LogoutState::Complete))
+        matches!(
+            self.logout_state(),
+            Some(LogoutState::AwaitingLocalSend { .. } | LogoutState::AwaitingReply(_) | LogoutState::Complete(_))
+        )
     }
 
-    pub(super) fn request_logout(&mut self, completed: oneshot::Sender<Result<(), Error>>) -> LogoutAction {
+    pub(super) fn request_logout(&mut self, command: LogoutCommand) -> LogoutAction {
         if !self.is_closing() {
             self.close(None, false);
         }
         match self {
             Self::Closing { logout, .. } | Self::Draining { logout, .. } => match logout {
                 LogoutState::NotRequested => {
-                    *logout = LogoutState::AwaitingLocalSend(Vec::new());
-                    LogoutAction::Queue(completed)
+                    *logout = LogoutState::AwaitingLocalSend { completions: Vec::new(), receipts: vec![command.receipt] };
+                    LogoutAction::Queue(command.sent)
                 }
-                LogoutState::AwaitingLocalSend(waiters) => {
-                    waiters.push(completed);
+                LogoutState::AwaitingLocalSend { completions, receipts } => {
+                    completions.push(command.sent);
+                    receipts.push(command.receipt);
                     LogoutAction::Waiting
                 }
-                LogoutState::Complete => LogoutAction::Complete(completed),
+                LogoutState::AwaitingReply(receipts) => {
+                    receipts.push(command.receipt);
+                    LogoutAction::Complete(command.sent)
+                }
+                LogoutState::Complete(receipt) => {
+                    complete_sender(command.sent, Ok(()));
+                    complete_receipt(command.receipt, *receipt);
+                    LogoutAction::Waiting
+                }
             },
             Self::Connecting { .. } | Self::Established { .. } => unreachable!("logout closes the connection"),
         }
@@ -174,12 +187,71 @@ impl Phase {
 
     pub(super) fn complete_logout(&mut self, error: Option<ConnectionError>) {
         let Some(logout) = self.logout_state_mut() else { return };
-        let LogoutState::AwaitingLocalSend(waiters) = mem::replace(logout, LogoutState::Complete) else { return };
-        for waiter in waiters {
-            let result = error.as_ref().map_or(Ok(()), |error| Err(error.to_network_error()));
-            if let Err(error) = waiter.send(result) {
-                drop(error);
+        let state = mem::replace(logout, LogoutState::NotRequested);
+        let LogoutState::AwaitingLocalSend { completions, receipts } = state else {
+            *logout = state;
+            return;
+        };
+        if let Some(error) = error {
+            *logout = LogoutState::Complete(LogoutReceipt::ConnectionEnded);
+            for receipt in receipts {
+                complete_receipt(receipt, LogoutReceipt::ConnectionEnded);
             }
+            for completion in completions {
+                complete_sender(completion, Err(error.to_network_error()));
+            }
+        } else {
+            *logout = LogoutState::AwaitingReply(receipts);
+            self.set_deadline(Instant::now() + LOGOUT_REPLY_TIMEOUT);
+            for completion in completions {
+                complete_sender(completion, Ok(()));
+            }
+        }
+    }
+
+    pub(super) fn complete_logout_receipt(&mut self, receipt: LogoutReceipt) {
+        let Some(logout) = self.logout_state_mut() else { return };
+        let state = mem::replace(logout, LogoutState::NotRequested);
+        if let LogoutState::AwaitingReply(receipts) = state {
+            *logout = LogoutState::Complete(receipt);
+            for sender in receipts {
+                complete_receipt(sender, receipt);
+            }
+        } else {
+            *logout = state;
+        }
+    }
+
+    pub(super) fn expire_logout(&mut self) {
+        match self.logout_state() {
+            Some(LogoutState::AwaitingLocalSend { .. }) => self.complete_logout(Some(ConnectionError::SendAgeExpired { logout: true })),
+            Some(LogoutState::AwaitingReply(_)) => self.complete_logout_receipt(LogoutReceipt::Deadline),
+            Some(LogoutState::NotRequested | LogoutState::Complete(_)) | None => {}
+        }
+    }
+
+    pub(super) fn connection_ended(&mut self) {
+        let Some(logout) = self.logout_state_mut() else { return };
+        let state = mem::replace(logout, LogoutState::NotRequested);
+        let receipts = match state {
+            LogoutState::AwaitingLocalSend { receipts, .. } | LogoutState::AwaitingReply(receipts) => {
+                *logout = LogoutState::Complete(LogoutReceipt::ConnectionEnded);
+                receipts
+            }
+            state @ (LogoutState::NotRequested | LogoutState::Complete(_)) => {
+                *logout = state;
+                return;
+            }
+        };
+        for sender in receipts {
+            complete_receipt(sender, LogoutReceipt::ConnectionEnded);
+        }
+    }
+
+    fn set_deadline(&mut self, deadline: Instant) {
+        match self {
+            Self::Closing { deadline: current, .. } | Self::Draining { deadline: current, .. } => *current = deadline,
+            Self::Connecting { .. } | Self::Established { .. } => {}
         }
     }
 
@@ -204,4 +276,14 @@ impl Phase {
             Self::Connecting { .. } | Self::Established { .. } => None,
         }
     }
+}
+
+fn complete_sender(sender: oneshot::Sender<Result<(), Error>>, result: Result<(), Error>) {
+    if let Err(result) = sender.send(result) {
+        drop(result);
+    }
+}
+
+fn complete_receipt(sender: oneshot::Sender<LogoutReceipt>, receipt: LogoutReceipt) {
+    if sender.send(receipt).is_err() {}
 }

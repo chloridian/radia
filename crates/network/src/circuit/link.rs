@@ -17,10 +17,23 @@ pub(crate) const MAX_NEIGHBOR_CONNECTION_TASKS: usize = MAX_NEIGHBOR_SIMULATORS 
 pub(crate) const MAX_SIMULATOR_CONNECTIONS: usize = MAX_NEIGHBOR_CONNECTION_TASKS + 1;
 pub(crate) const ACK_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const LOGOUT_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const LOGOUT_REPLY_TIMEOUT: Duration = Duration::from_secs(6);
 pub(crate) const MAX_PENDING_SIMULATOR_EVENTS: usize = 1024;
 pub(crate) const MAX_QUEUED_SIMULATOR_EVENTS: usize = MAX_PENDING_SIMULATOR_EVENTS;
 pub(crate) const MAX_CONNECTION_PRECONNECT_EVENTS: usize = 16;
 pub(crate) const MAX_PRECONNECT_EVENTS: usize = 1024;
+
+pub(crate) struct LogoutCommand {
+    pub(crate) sent: oneshot::Sender<Result<(), Error>>,
+    pub(crate) receipt: oneshot::Sender<LogoutReceipt>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LogoutReceipt {
+    Received,
+    Deadline,
+    ConnectionEnded,
+}
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct HandoffTarget {

@@ -1,14 +1,16 @@
 use std::{
     error::Error,
     fmt,
-    sync::{Arc, mpsc},
+    future::Future,
+    ops::{Deref, DerefMut},
+    sync::{Arc, mpsc, mpsc::TryRecvError},
     time::{Duration, Instant},
 };
 
 use egui::{Context, DragValue, Slider, ViewportId};
-use futures::executor::block_on;
 use render::scene;
-use render::{CompressionQuality, FrameInput, Overlay, Renderer, Retirement, TextureCompletion};
+use render::{CompressionQuality, FrameInput, Overlay, Renderer, RendererInit, Retirement, TextureCompletion};
+use tokio::{runtime::Handle, task::JoinHandle};
 use tracing::Instrument;
 #[cfg(target_os = "linux")]
 use winit::platform::startup_notify::{EventLoopExtStartupNotify, WindowAttributesExtStartupNotify, reset_activation_token_env};
@@ -43,6 +45,7 @@ fn display_refresh_interval(window: &Window) -> Duration {
 pub(crate) enum SceneWindowError {
     WindowCreation(winit::error::OsError),
     Renderer(render::Error),
+    RendererInitializationStopped,
     RecoveryExhausted,
 }
 
@@ -51,6 +54,7 @@ impl fmt::Display for SceneWindowError {
         match self {
             Self::WindowCreation(error) => fmt::Display::fmt(error, f),
             Self::Renderer(error) => fmt::Display::fmt(error, f),
+            Self::RendererInitializationStopped => f.write_str("Scene renderer initialization stopped unexpectedly."),
             Self::RecoveryExhausted => f.write_str("The scene GPU could not recover after three attempts."),
         }
     }
@@ -61,7 +65,7 @@ impl Error for SceneWindowError {
         match self {
             Self::WindowCreation(error) => Some(error),
             Self::Renderer(error) => Some(error),
-            Self::RecoveryExhausted => None,
+            Self::RendererInitializationStopped | Self::RecoveryExhausted => None,
         }
     }
 }
@@ -78,14 +82,313 @@ struct DebugUiFrame {
     recreate_renderer: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RendererToken {
+    generation: u64,
+    attempt: u64,
+}
+
+type InitializationMessage<T, E> = (RendererToken, Result<T, E>);
+
+struct PendingInitialization<T, E> {
+    receiver: mpsc::Receiver<InitializationMessage<T, E>>,
+    task: JoinHandle<()>,
+}
+
+impl<T, E> Drop for PendingInitialization<T, E> {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+struct WakeOnDrop<R, F: FnOnce()> {
+    resource: Option<R>,
+    wake: Option<F>,
+}
+
+impl<R, F: FnOnce()> Drop for WakeOnDrop<R, F> {
+    fn drop(&mut self) {
+        drop(self.resource.take());
+        if let Some(wake) = self.wake.take() {
+            wake();
+        }
+    }
+}
+
+fn spawn_initialization<T, E, F, W>(runtime: &Handle, token: RendererToken, initialize: F, wake: W) -> PendingInitialization<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+    F: Future<Output = Result<T, E>> + Send + 'static,
+    W: FnOnce() + Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let wake = WakeOnDrop { resource: Some(sender), wake: Some(wake) };
+    let task = runtime.spawn(async move {
+        let result = initialize.await;
+        if let Err(completion) =
+            wake.resource.as_ref().expect("completion sender remains owned until task completion").send((token, result))
+        {
+            drop(completion.0);
+        }
+        drop(wake);
+    });
+    PendingInitialization { receiver, task }
+}
+
+fn poll_initialization<T, E>(pending: &PendingInitialization<T, E>) -> Result<Option<InitializationMessage<T, E>>, SceneWindowError> {
+    match pending.receiver.try_recv() {
+        Ok(completion) => Ok(Some(completion)),
+        Err(TryRecvError::Empty) => Ok(None),
+        Err(TryRecvError::Disconnected) => Err(SceneWindowError::RendererInitializationStopped),
+    }
+}
+
+enum RendererState<P, R> {
+    Initializing { token: RendererToken, pending: P },
+    Ready(R),
+    Recovering { pending: Option<(RendererToken, P)> },
+    Failed,
+}
+
+#[derive(Debug)]
+enum InitializationOutcome<R, E> {
+    InitialReady,
+    RecoveryReady,
+    InitialFailed(E),
+    RecoveryFailed(E),
+    Stale(Result<R, E>),
+}
+
+struct RendererLifecycle<P, R> {
+    generation: u64,
+    next_attempt: u64,
+    state: RendererState<P, R>,
+}
+
+impl<P, R> RendererLifecycle<P, R> {
+    fn initializing(generation: u64, pending: P) -> Self {
+        let token = RendererToken { generation, attempt: 0 };
+        Self { generation, next_attempt: 1, state: RendererState::Initializing { token, pending } }
+    }
+
+    fn is_initializing(&self) -> bool {
+        matches!(&self.state, RendererState::Initializing { .. })
+    }
+
+    fn is_ready(&self) -> bool {
+        matches!(&self.state, RendererState::Ready(_))
+    }
+
+    fn is_failed(&self) -> bool {
+        matches!(&self.state, RendererState::Failed)
+    }
+
+    fn pending_token(&self) -> Option<RendererToken> {
+        match &self.state {
+            RendererState::Initializing { token, .. } => Some(*token),
+            RendererState::Recovering { pending: Some((token, _)) } => Some(*token),
+            RendererState::Ready(_) | RendererState::Recovering { pending: None } | RendererState::Failed => None,
+        }
+    }
+
+    fn pending_mut(&mut self) -> Option<&mut P> {
+        match &mut self.state {
+            RendererState::Initializing { pending, .. } => Some(pending),
+            RendererState::Recovering { pending: Some((_, pending)) } => Some(pending),
+            RendererState::Ready(_) | RendererState::Recovering { pending: None } | RendererState::Failed => None,
+        }
+    }
+
+    fn ready(&self) -> Option<&R> {
+        match &self.state {
+            RendererState::Ready(renderer) => Some(renderer),
+            RendererState::Initializing { .. } | RendererState::Recovering { .. } | RendererState::Failed => None,
+        }
+    }
+
+    fn ready_mut(&mut self) -> Option<&mut R> {
+        match &mut self.state {
+            RendererState::Ready(renderer) => Some(renderer),
+            RendererState::Initializing { .. } | RendererState::Recovering { .. } | RendererState::Failed => None,
+        }
+    }
+
+    fn recovery_token(&self) -> Option<RendererToken> {
+        if matches!(&self.state, RendererState::Recovering { pending: None }) && self.next_attempt.checked_add(1).is_some() {
+            Some(RendererToken { generation: self.generation, attempt: self.next_attempt })
+        } else {
+            None
+        }
+    }
+
+    fn start_recovery(&mut self, token: RendererToken, pending: P) -> bool {
+        if self.recovery_token() != Some(token) {
+            return false;
+        }
+        let Some(next_attempt) = self.next_attempt.checked_add(1) else {
+            return false;
+        };
+        self.next_attempt = next_attempt;
+        self.state = RendererState::Recovering { pending: Some((token, pending)) };
+        true
+    }
+
+    fn retire_ready(&mut self) -> Option<R> {
+        let state = std::mem::replace(&mut self.state, RendererState::Failed);
+        match state {
+            RendererState::Ready(renderer) => {
+                self.state = RendererState::Recovering { pending: None };
+                Some(renderer)
+            }
+            state => {
+                self.state = state;
+                None
+            }
+        }
+    }
+
+    fn complete<E>(&mut self, token: RendererToken, result: Result<R, E>) -> InitializationOutcome<R, E> {
+        let state = std::mem::replace(&mut self.state, RendererState::Failed);
+        match state {
+            RendererState::Initializing { token: expected, pending } => {
+                drop(pending);
+                if expected != token || token.generation != self.generation {
+                    return InitializationOutcome::Stale(result);
+                }
+                match result {
+                    Ok(renderer) => {
+                        self.state = RendererState::Ready(renderer);
+                        InitializationOutcome::InitialReady
+                    }
+                    Err(error) => InitializationOutcome::InitialFailed(error),
+                }
+            }
+            RendererState::Recovering { pending: Some((expected, pending)) } => {
+                drop(pending);
+                if expected != token || token.generation != self.generation {
+                    self.state = RendererState::Recovering { pending: None };
+                    return InitializationOutcome::Stale(result);
+                }
+                match result {
+                    Ok(renderer) => {
+                        self.state = RendererState::Ready(renderer);
+                        InitializationOutcome::RecoveryReady
+                    }
+                    Err(error) => {
+                        self.state = RendererState::Recovering { pending: None };
+                        InitializationOutcome::RecoveryFailed(error)
+                    }
+                }
+            }
+            RendererState::Ready(renderer) => {
+                self.state = RendererState::Ready(renderer);
+                InitializationOutcome::Stale(result)
+            }
+            RendererState::Recovering { pending: None } => {
+                self.state = RendererState::Recovering { pending: None };
+                InitializationOutcome::Stale(result)
+            }
+            RendererState::Failed => InitializationOutcome::Stale(result),
+        }
+    }
+
+    fn close(&mut self) -> (Option<R>, Option<P>) {
+        let state = std::mem::replace(&mut self.state, RendererState::Failed);
+        match state {
+            RendererState::Ready(renderer) => (Some(renderer), None),
+            RendererState::Initializing { pending, .. } => (None, Some(pending)),
+            RendererState::Recovering { pending } => (None, pending.map(|(_, pending)| pending)),
+            RendererState::Failed => (None, None),
+        }
+    }
+}
+
+type SceneRendererPending = PendingInitialization<UnpublishedRenderer, SceneWindowError>;
+type SceneRendererLifecycle = RendererLifecycle<SceneRendererPending, UnpublishedRenderer>;
+
+fn retire_unpublished_renderer(renderer: Renderer, runtime: Handle) {
+    let retirement = renderer.retire();
+    drop(runtime.spawn_blocking(move || {
+        if let Err(error) = retirement.wait() {
+            tracing::warn!(%error, "stale scene GPU initialization did not retire");
+        }
+    }));
+}
+
+struct UnpublishedRenderer {
+    renderer: Option<Renderer>,
+    runtime: Handle,
+}
+
+impl UnpublishedRenderer {
+    fn retire(mut self) -> Retirement {
+        match self.renderer.take() {
+            Some(renderer) => renderer.retire(),
+            None => unreachable!(),
+        }
+    }
+}
+
+impl Deref for UnpublishedRenderer {
+    type Target = Renderer;
+
+    fn deref(&self) -> &Self::Target {
+        match &self.renderer {
+            Some(renderer) => renderer,
+            None => unreachable!(),
+        }
+    }
+}
+
+impl DerefMut for UnpublishedRenderer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match &mut self.renderer {
+            Some(renderer) => renderer,
+            None => unreachable!(),
+        }
+    }
+}
+
+impl Drop for UnpublishedRenderer {
+    fn drop(&mut self) {
+        if let Some(renderer) = self.renderer.take() {
+            retire_unpublished_renderer(renderer, self.runtime.clone());
+        }
+    }
+}
+
+fn start_renderer_initialization(
+    init: RendererInit,
+    runtime: &Handle,
+    token: RendererToken,
+    wake: Arc<SharedWindowState>,
+) -> SceneRendererPending {
+    let cleanup_runtime = runtime.clone();
+    spawn_initialization(
+        runtime,
+        token,
+        async move {
+            init.finish()
+                .await
+                .map(|renderer| UnpublishedRenderer { renderer: Some(renderer), runtime: cleanup_runtime })
+                .map_err(SceneWindowError::Renderer)
+        },
+        move || {
+            wake.wake();
+        },
+    )
+}
+
 pub(super) struct SceneWindow {
     wake: Arc<SharedWindowState>,
     dirty: bool,
-    retired: Option<Retirement>,
+    retired: Vec<Retirement>,
     texture_sender: mpsc::SyncSender<TextureCompletion>,
     texture_receiver: mpsc::Receiver<TextureCompletion>,
     feed: Option<SceneFeed>,
-    renderer: Option<Renderer>,
+    renderer: SceneRendererLifecycle,
+    runtime: Handle,
     texture_soft_cap: u32,
     egui: Context,
     platform: egui_winit::State,
@@ -124,6 +427,7 @@ impl SceneWindow {
         generation: u64,
         activate: bool,
         wake: Arc<SharedWindowState>,
+        runtime: Handle,
     ) -> Result<Self, SceneWindowError> {
         let attributes = Window::default_attributes()
             .with_title("Radia")
@@ -149,25 +453,25 @@ impl SceneWindow {
         let (egui, platform) = debug_ui(&window);
         let dpi = window.scale_factor();
         let size = window.inner_size();
-        let renderer = block_on(Renderer::new(Arc::clone(&window), size.width, size.height)).map_err(SceneWindowError::Renderer)?;
-        let info = renderer.adapter_info();
-        tracing::info!(backend = ?info.backend, gpu = %info.name, driver = %info.driver, driver_info = %info.driver_info, "scene GPU initialized");
+        let init = RendererInit::new(Arc::clone(&window), size.width, size.height).map_err(SceneWindowError::Renderer)?;
+        let token = RendererToken { generation, attempt: 0 };
+        let pending = start_renderer_initialization(init, &runtime, token, Arc::clone(&wake));
         if !window.has_focus() {
             window.request_user_attention(Some(UserAttentionType::Informational));
         }
         let now = Instant::now();
         let frame_interval = display_refresh_interval(&window);
-        let texture_soft_cap = renderer.texture_soft_cap_mib();
         let (texture_sender, texture_receiver) = mpsc::sync_channel(2);
         Ok(Self {
             wake,
             dirty: true,
-            retired: None,
+            retired: Vec::new(),
             texture_sender,
             texture_receiver,
             feed: None,
-            renderer: Some(renderer),
-            texture_soft_cap,
+            renderer: RendererLifecycle::initializing(generation, pending),
+            runtime,
+            texture_soft_cap: 0,
             egui,
             platform,
             next_ui: None,
@@ -312,7 +616,7 @@ impl SceneWindow {
     }
 
     pub(super) fn resize(&mut self, width: u32, height: u32) {
-        if let Some(renderer) = &mut self.renderer {
+        if let Some(renderer) = self.renderer.ready_mut() {
             renderer.resize(width, height);
         }
     }
@@ -339,12 +643,17 @@ impl SceneWindow {
         Ok(())
     }
 
-    pub(super) fn take_retirements(&mut self) -> [Option<Retirement>; 2] {
-        [self.renderer.take().map(Renderer::retire), self.retired.take()]
+    pub(super) fn take_retirements(&mut self) -> Vec<Retirement> {
+        let (renderer, pending) = self.renderer.close();
+        if let Some(renderer) = renderer {
+            self.retired.push(renderer.retire());
+        }
+        drop(pending);
+        std::mem::take(&mut self.retired)
     }
 
-    pub(super) fn take_retired(&mut self) -> Option<Retirement> {
-        self.retired.take()
+    pub(super) fn take_retired(&mut self) -> Vec<Retirement> {
+        std::mem::take(&mut self.retired)
     }
 
     fn release_drag(&mut self, restore: bool) {
@@ -374,7 +683,7 @@ impl SceneWindow {
         }
 
         let point = {
-            let (Some(renderer), Some(observation)) = (&self.renderer, self.last_camera) else {
+            let (Some(renderer), Some(observation)) = (self.renderer.ready(), self.last_camera) else {
                 return;
             };
             let size = self.window.inner_size();
@@ -528,8 +837,14 @@ impl SceneWindow {
     }
 
     fn ensure_renderer(&mut self, now: Instant) -> Result<bool, SceneWindowError> {
-        if self.renderer.is_some() {
+        if self.renderer.is_ready() {
             return Ok(true);
+        }
+        if self.renderer.is_initializing() || self.renderer.pending_token().is_some() {
+            return Ok(false);
+        }
+        if self.renderer.is_failed() {
+            return Err(SceneWindowError::RendererInitializationStopped);
         }
         match self.recovery.begin_attempt(now) {
             RecoveryAttempt::Start => {}
@@ -540,27 +855,83 @@ impl SceneWindow {
             }
             RecoveryAttempt::Exhausted => return Err(SceneWindowError::RecoveryExhausted),
         }
+        let Some(token) = self.renderer.recovery_token() else {
+            return Err(SceneWindowError::RecoveryExhausted);
+        };
         let size = self.window.inner_size();
-        match block_on(Renderer::new(Arc::clone(&self.window), size.width, size.height)) {
-            Ok(renderer) => {
-                (self.texture_sender, self.texture_receiver) = mpsc::sync_channel(2);
-                let info = renderer.adapter_info();
-                tracing::info!(backend = ?info.backend, gpu = %info.name, driver = %info.driver, driver_info = %info.driver_info, "scene GPU recovered");
-                (self.egui, self.platform) = debug_ui(&self.window);
-                self.renderer = Some(renderer);
-                self.recoveries += 1;
-                Ok(true)
-            }
+        let init = match RendererInit::new(Arc::clone(&self.window), size.width, size.height) {
+            Ok(init) => init,
             Err(error) => {
                 tracing::warn!(%error, attempt = self.recovery.attempts, "scene GPU recovery failed");
                 self.schedule_recovery(now);
-                Ok(false)
+                return Ok(false);
+            }
+        };
+        let pending = start_renderer_initialization(init, &self.runtime, token, Arc::clone(&self.wake));
+        if !self.renderer.start_recovery(token, pending) {
+            return Err(SceneWindowError::RendererInitializationStopped);
+        }
+        Ok(false)
+    }
+
+    fn finish_renderer_initialization(&mut self, now: Instant) -> Result<(), SceneWindowError> {
+        if self.renderer.pending_token().is_none() {
+            return Ok(());
+        }
+        let completion = {
+            let Some(pending) = self.renderer.pending_mut() else {
+                return Ok(());
+            };
+            let Some(completion) = poll_initialization(pending)? else {
+                return Ok(());
+            };
+            completion
+        };
+        let initial = self.renderer.is_initializing();
+        match self.renderer.complete(completion.0, completion.1) {
+            InitializationOutcome::InitialReady => self.renderer_initialized(false)?,
+            InitializationOutcome::RecoveryReady => self.renderer_initialized(true)?,
+            InitializationOutcome::InitialFailed(error) => return Err(error),
+            InitializationOutcome::RecoveryFailed(error) => {
+                tracing::warn!(%error, attempt = self.recovery.attempts, "scene GPU recovery failed");
+                self.schedule_recovery(now);
+            }
+            InitializationOutcome::Stale(result) => {
+                if let Ok(renderer) = result {
+                    self.retired.push(renderer.retire());
+                }
+                tracing::warn!("discarded stale scene GPU initialization completion");
+                if initial {
+                    return Err(SceneWindowError::RendererInitializationStopped);
+                }
+                self.schedule_recovery(now);
             }
         }
+        Ok(())
+    }
+
+    fn renderer_initialized(&mut self, recovered: bool) -> Result<(), SceneWindowError> {
+        let size = self.window.inner_size();
+        let Some(renderer) = self.renderer.ready_mut() else {
+            return Err(SceneWindowError::RendererInitializationStopped);
+        };
+        renderer.resize(size.width, size.height);
+        let info = renderer.adapter_info();
+        self.texture_soft_cap = renderer.texture_soft_cap_mib();
+        if recovered {
+            tracing::info!(backend = ?info.backend, gpu = %info.name, driver = %info.driver, driver_info = %info.driver_info, "scene GPU recovered");
+            (self.texture_sender, self.texture_receiver) = mpsc::sync_channel(2);
+            (self.egui, self.platform) = debug_ui(&self.window);
+            self.recoveries += 1;
+        } else {
+            tracing::info!(backend = ?info.backend, gpu = %info.name, driver = %info.driver, driver_info = %info.driver_info, "scene GPU initialized");
+        }
+        self.dirty = true;
+        Ok(())
     }
 
     fn complete_texture_jobs(&mut self) {
-        if let Some(renderer) = &mut self.renderer {
+        if let Some(renderer) = self.renderer.ready_mut() {
             while let Ok(completion) = self.texture_receiver.try_recv() {
                 renderer.complete_texture(completion);
             }
@@ -568,7 +939,7 @@ impl SceneWindow {
     }
 
     fn draw_debug_ui(&mut self, now: Instant) -> DebugUiFrame {
-        let renderer = self.renderer.as_ref().expect("renderer ensured before debug UI");
+        let renderer = self.renderer.ready().expect("renderer ensured before debug UI");
         let stats = renderer.stats();
         let gpu_timings = renderer.gpu_timings();
         let gpu_timing_supported = renderer.gpu_timing_supported();
@@ -748,7 +1119,7 @@ impl SceneWindow {
             water_scroll: feed.water_scroll(),
         });
         let result = {
-            let renderer = self.renderer.as_mut().expect("renderer ensured before frame submission");
+            let renderer = self.renderer.ready_mut().expect("renderer ensured before frame submission");
             renderer.set_texture_soft_cap(self.texture_soft_cap);
             renderer.draw(ui.overlay, scene, avatar_pose, frame_input, || self.window.pre_present_notify())
         };
@@ -808,7 +1179,7 @@ impl SceneWindow {
 
     fn dispatch_texture_jobs(&mut self) {
         if let Some(feed) = &self.feed {
-            let Some(renderer) = &mut self.renderer else {
+            let Some(renderer) = self.renderer.ready_mut() else {
                 return;
             };
             while let Some(job) = renderer.next_texture_job() {
@@ -835,23 +1206,24 @@ impl SceneWindow {
         }
     }
 
-    pub(super) fn poll_renderer(&mut self, now: Instant) -> bool {
-        let Some(renderer) = &mut self.renderer else {
+    pub(super) fn poll_renderer(&mut self, now: Instant) -> Result<bool, SceneWindowError> {
+        self.finish_renderer_initialization(now)?;
+        let Some(renderer) = self.renderer.ready_mut() else {
             self.animation_redraw_at = None;
-            return false;
+            return Ok(false);
         };
         match renderer.poll() {
             Ok(progress) => {
                 self.animation_redraw_at = progress.redraw_at;
                 self.dirty |= progress.redraw;
-                progress.pending
+                Ok(progress.pending)
             }
             Err(error) => {
                 self.animation_redraw_at = None;
                 tracing::warn!(%error, "scene GPU failed; scheduling recovery");
                 self.retire_renderer();
                 self.schedule_recovery(now);
-                true
+                Ok(true)
             }
         }
     }
@@ -914,8 +1286,8 @@ impl SceneWindow {
     }
 
     fn retire_renderer(&mut self) {
-        if let Some(renderer) = self.renderer.take() {
-            self.retired = Some(renderer.retire());
+        if let Some(renderer) = self.renderer.retire_ready() {
+            self.retired.push(renderer.retire());
         }
     }
 }
@@ -986,11 +1358,249 @@ fn debug_ui(window: &Window) -> (Context, egui_winit::State) {
 mod tests {
     use std::{
         error::Error,
+        future::Future,
+        pin::Pin,
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicUsize, Ordering},
+            mpsc as sync_mpsc,
+        },
+        task::{Context, Poll},
         time::{Duration, Instant},
     };
 
+    use tokio::{runtime::Handle, sync::oneshot};
+    use winit::{
+        event::ElementState,
+        keyboard::{Key, NamedKey},
+    };
+
+    use crate::{
+        agent_movement::HeldControls,
+        camera::{CameraMode, handle_keyboard_input},
+    };
+
     use super::deadline_passed;
-    use super::{PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, SceneWindowError};
+    use super::{
+        InitializationOutcome, PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, RendererLifecycle, RendererToken, SceneWindowError,
+        poll_initialization, spawn_initialization,
+    };
+
+    struct TestPending;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct TestRenderer(u8);
+
+    #[test]
+    fn initialization_completion_sets_ready() {
+        let mut lifecycle = RendererLifecycle::initializing(9, TestPending);
+        let token = lifecycle.pending_token().expect("initialization has a completion token");
+
+        assert!(lifecycle.is_initializing());
+        std::assert_matches!(lifecycle.complete(token, Ok::<_, &str>(TestRenderer(3))), InitializationOutcome::InitialReady);
+        assert!(lifecycle.is_ready());
+        assert_eq!(lifecycle.ready(), Some(&TestRenderer(3)));
+    }
+
+    #[test]
+    fn stale_generation_never_publishes() {
+        let mut lifecycle = RendererLifecycle::initializing(9, TestPending);
+        let token = lifecycle.pending_token().expect("initialization has a completion token");
+        let stale = RendererToken { generation: 8, attempt: token.attempt };
+
+        std::assert_matches!(lifecycle.complete(stale, Ok::<_, &str>(TestRenderer(3))), InitializationOutcome::Stale(Ok(TestRenderer(3))));
+        assert!(lifecycle.is_failed());
+        assert_eq!(lifecycle.ready(), None);
+    }
+
+    #[test]
+    fn recovery_failure_allows_retry() {
+        let mut lifecycle = RendererLifecycle::initializing(9, TestPending);
+        let token = lifecycle.pending_token().expect("initialization has a completion token");
+        std::assert_matches!(lifecycle.complete(token, Ok::<_, &str>(TestRenderer(3))), InitializationOutcome::InitialReady);
+        assert_eq!(lifecycle.retire_ready().expect("ready renderer can be retired"), TestRenderer(3));
+        let retry = lifecycle.recovery_token().expect("retirement starts recovery state");
+        assert!(lifecycle.start_recovery(retry, TestPending));
+
+        std::assert_matches!(
+            lifecycle.complete(retry, Err("adapter unavailable")),
+            InitializationOutcome::RecoveryFailed("adapter unavailable")
+        );
+        assert!(!lifecycle.is_initializing());
+        assert!(!lifecycle.is_ready());
+        assert!(!lifecycle.is_failed());
+        assert_eq!(lifecycle.pending_token(), None);
+        assert!(lifecycle.recovery_token().is_some());
+    }
+
+    struct DropSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                sender.send(()).expect("drop signal receiver remains alive");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn input_and_close_progress_during_initialization() {
+        let (_gate_sender, gate_receiver) = oneshot::channel();
+        let (started_sender, started_receiver) = oneshot::channel();
+        let (dropped_sender, dropped_receiver) = oneshot::channel();
+        let initialize = async move {
+            let _signal = DropSignal(Some(dropped_sender));
+            started_sender.send(()).map_err(|_| "start receiver closed")?;
+            gate_receiver.await.map_err(|_| "gate closed")?;
+            Ok::<_, &'static str>(())
+        };
+        let token = RendererToken { generation: 11, attempt: 0 };
+        let pending = spawn_initialization(&Handle::current(), token, initialize, || {});
+        let mut lifecycle = RendererLifecycle::<_, ()>::initializing(11, pending);
+        started_receiver.await.expect("initialization reaches the completion gate");
+        assert!(lifecycle.is_initializing());
+        std::assert_matches!(poll_initialization(lifecycle.pending_mut().expect("initialization remains pending")), Ok(None));
+
+        let mut controls = HeldControls::default();
+        let mut camera_mode = CameraMode::Follow;
+        assert_eq!(
+            handle_keyboard_input(&mut controls, &mut camera_mode, &Key::Named(NamedKey::ArrowUp), ElementState::Pressed, false, false),
+            Some(true)
+        );
+        assert!(lifecycle.is_initializing());
+
+        let (_, pending) = lifecycle.close();
+        drop(pending);
+        dropped_receiver.await.expect("close cancels and drops the gated initialization");
+        assert!(lifecycle.is_failed());
+    }
+
+    async fn panics() -> Result<(), &'static str> {
+        panic!("renderer initialization panicked");
+    }
+
+    #[tokio::test]
+    async fn panic_wakes_typed_initialization_failure() {
+        let (wake_sender, wake_receiver) = oneshot::channel();
+        let token = RendererToken { generation: 12, attempt: 0 };
+        let pending = spawn_initialization(&Handle::current(), token, panics(), move || {
+            wake_sender.send(()).expect("wake receiver remains alive");
+        });
+        let mut lifecycle = RendererLifecycle::<_, ()>::initializing(12, pending);
+
+        wake_receiver.await.expect("task termination wakes the event loop");
+        std::assert_matches!(
+            poll_initialization(lifecycle.pending_mut().expect("renderer initialization is pending")),
+            Err(SceneWindowError::RendererInitializationStopped)
+        );
+    }
+
+    #[derive(Debug)]
+    struct RetirementProbe(Arc<AtomicUsize>);
+
+    impl Drop for RetirementProbe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[tokio::test]
+    async fn close_retires_queued_completion_once() {
+        let (gate_sender, gate_receiver) = oneshot::channel();
+        let (started_sender, started_receiver) = oneshot::channel();
+        let (wake_sender, wake_receiver) = oneshot::channel();
+        let retirements = Arc::new(AtomicUsize::new(0));
+        let init_retirements = Arc::clone(&retirements);
+        let initialize = async move {
+            started_sender.send(()).map_err(|_| "start receiver closed")?;
+            gate_receiver.await.map_err(|_| "gate closed")?;
+            Ok::<_, &'static str>(RetirementProbe(init_retirements))
+        };
+        let token = RendererToken { generation: 13, attempt: 0 };
+        let pending = spawn_initialization(&Handle::current(), token, initialize, move || {
+            wake_sender.send(()).expect("wake receiver remains alive");
+        });
+        started_receiver.await.expect("initialization reaches the completion gate");
+
+        gate_sender.send(()).expect("initialization gate remains open");
+        wake_receiver.await.expect("completed initialization wakes the event loop");
+        drop(pending);
+
+        assert_eq!(retirements.load(Ordering::Acquire), 1);
+    }
+
+    struct CompleteAfterClose {
+        started: Option<sync_mpsc::SyncSender<()>>,
+        barrier: Arc<Barrier>,
+        retirements: Arc<AtomicUsize>,
+    }
+
+    impl Future for CompleteAfterClose {
+        type Output = Result<RetirementProbe, &'static str>;
+
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+            let this = self.get_mut();
+            let Some(started) = this.started.take() else {
+                panic!("initialization future polled after completion");
+            };
+            started.send(()).expect("start receiver remains alive");
+            this.barrier.wait();
+            Poll::Ready(Ok(RetirementProbe(Arc::clone(&this.retirements))))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_retires_send_racing_receiver_drop_once() {
+        let barrier = Arc::new(Barrier::new(2));
+        let init_barrier = Arc::clone(&barrier);
+        let retirements = Arc::new(AtomicUsize::new(0));
+        let init_retirements = Arc::clone(&retirements);
+        let (started_sender, started_receiver) = sync_mpsc::sync_channel(1);
+        let (wake_sender, wake_receiver) = oneshot::channel();
+        let initialize = CompleteAfterClose { started: Some(started_sender), barrier: init_barrier, retirements: init_retirements };
+        let token = RendererToken { generation: 14, attempt: 0 };
+        let pending = spawn_initialization(&Handle::current(), token, initialize, move || {
+            wake_sender.send(()).expect("wake receiver remains alive");
+        });
+
+        started_receiver.recv().expect("initializer is synchronously completing");
+        drop(pending);
+        barrier.wait();
+        wake_receiver.await.expect("terminal send wakes the event loop");
+
+        assert_eq!(retirements.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn late_completion_stays_out_of_replacement() {
+        let (gate_sender, gate_receiver) = oneshot::channel();
+        let (started_sender, started_receiver) = oneshot::channel();
+        let (wake_sender, wake_receiver) = oneshot::channel();
+        let retirements = Arc::new(AtomicUsize::new(0));
+        let init_retirements = Arc::clone(&retirements);
+        let initialize = async move {
+            started_sender.send(()).map_err(|_| "start receiver closed")?;
+            gate_receiver.await.map_err(|_| "gate closed")?;
+            Ok::<_, &'static str>(RetirementProbe(init_retirements))
+        };
+        let token = RendererToken { generation: 15, attempt: 0 };
+        let pending = spawn_initialization(&Handle::current(), token, initialize, move || {
+            wake_sender.send(()).expect("wake receiver remains alive");
+        });
+        let mut previous = RendererLifecycle::<_, RetirementProbe>::initializing(15, pending);
+        started_receiver.await.expect("initialization reaches the completion gate");
+
+        gate_sender.send(()).expect("initialization gate remains open");
+        wake_receiver.await.expect("completed initialization wakes the event loop");
+        let completion = poll_initialization(previous.pending_mut().expect("old generation remains pending"))
+            .expect("worker completed")
+            .expect("completion is available");
+        let mut current = RendererLifecycle::<TestPending, RetirementProbe>::initializing(16, TestPending);
+
+        std::assert_matches!(current.complete(completion.0, completion.1), InitializationOutcome::Stale(Ok(_)));
+        assert!(current.ready().is_none());
+        assert_eq!(retirements.load(Ordering::Acquire), 1);
+    }
 
     #[test]
     fn presentation_resets_recovery_limit() {
