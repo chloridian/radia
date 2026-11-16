@@ -23,8 +23,8 @@ pub use material::{
 };
 pub use store::{
     AdmissionError, CacheReadCompletion, CacheReadJob, DecodeInput, DecodeJob, Demand, Failure, FetchFailure, FetchJob, FetchResponse,
-    Kind, LoadCompletion, LoadJob, MAX_ASSET_ROUTES, MAX_NON_MESH_FETCHES, MAX_TEXTURE_DECODES, Priority, Request, Resource, Route, Status,
-    Store,
+    Kind, LoadCompletion, LoadJob, MAX_ASSET_ROUTES, MAX_NON_MESH_FETCHES, MAX_RETRY_AFTER, MAX_TEXTURE_DECODES, Priority, Request,
+    Resource, Route, Status, Store,
 };
 pub use texture::{
     ColorSpace, Image, ImageInfo, MAX_SOURCE_EDGE, MAX_TEXTURE_EDGE, PixelAlpha, PixelFormat, TextureDecodeJob, TextureEvents,

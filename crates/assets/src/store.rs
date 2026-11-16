@@ -31,6 +31,7 @@ const MAX_LEGACY_MATERIAL_FETCHES: usize = 50;
 const FETCH_LIMITS: [usize; 3] = [MAX_MESH_FETCHES, MAX_LEGACY_MATERIAL_FETCHES, MAX_NON_MESH_FETCHES];
 const DEMAND_DEADLINE: Duration = Duration::from_secs(60);
 const NEGATIVE_TTL: Duration = Duration::from_secs(30);
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
 const CACHE_PRESSURE_RETRY: Duration = Duration::from_secs(1);
 const MAX_ATTEMPTS: u8 = 3;
 const DIRTY_QUEUE_CAPACITY: usize = 4096;
@@ -480,9 +481,14 @@ impl RouteState {
     ) {
         let attempts = self.attempts();
         remove_failure_deadlines(deadlines, key, route, self);
+        let expires = now
+            + match failure {
+                Failure::Transient { retry_after } => retry_after.clamp(NEGATIVE_TTL, MAX_RETRY_AFTER),
+                _ => NEGATIVE_TTL,
+            };
         self.eligibility = match retry_at {
-            Some(retry_at) => RouteEligibility::RetryAt { attempts, failure, retry_at, expires: now + NEGATIVE_TTL },
-            None => RouteEligibility::Failed { attempts, failure, expires: now + NEGATIVE_TTL },
+            Some(retry_at) => RouteEligibility::RetryAt { attempts, failure, retry_at, expires },
+            None => RouteEligibility::Failed { attempts, failure, expires },
         };
         self.publish_status(Status::Failed { failure, retry_at }.retaining(ready));
     }
