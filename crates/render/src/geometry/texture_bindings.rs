@@ -55,14 +55,29 @@ impl GeometryRenderer {
         self.visible_texture_requests.clear();
         let epoch = self.epoch;
         {
-            let (draw_list, requested, visible, visible_requests, textures) = (
+            let (draw_list, main_view, requested, visible, visible_requests, textures) = (
                 &self.draw_list,
+                &self.main_view,
                 &mut self.requested_textures,
                 &mut self.visible_textures,
                 &mut self.visible_texture_requests,
                 &mut self.textures,
             );
-            for handle in draw_list.texture_demands().iter().flat_map(|demand| demand.images.iter()) {
+            let emitted_textures = main_view.batches().iter().map(|batch| batch.key.textures).collect::<HashSet<_>>();
+            let emitted_regions = main_view.batches().iter().filter_map(|batch| batch.key.terrain).collect::<HashSet<_>>();
+            let demands = draw_list
+                .texture_demands()
+                .iter()
+                .flat_map(|demand| {
+                    let emitted = emitted_textures.contains(&demand.key);
+                    demand.images.iter().map(move |handle| (handle, emitted))
+                })
+                .chain(draw_list.terrain_demands().iter().flat_map(|demand| {
+                    let emitted = emitted_regions.contains(&demand.region);
+                    demand.textures.iter().flatten().map(move |handle| (handle, emitted))
+                }));
+            let (shown, hidden): (Vec<_>, Vec<_>) = demands.partition(|(_, emitted)| *emitted);
+            for (handle, _) in shown {
                 if visible.insert(handle.id()) {
                     visible_requests.push(handle.clone());
                 }
@@ -70,14 +85,9 @@ impl GeometryRenderer {
                     textures.request(handle, epoch, Priority::Visible);
                 }
             }
-            for demand in draw_list.terrain_demands() {
-                for handle in demand.textures.iter().flatten() {
-                    if visible.insert(handle.id()) {
-                        visible_requests.push(handle.clone());
-                    }
-                    if requested.insert(handle.id()) {
-                        textures.request(handle, epoch, Priority::Visible);
-                    }
+            for (handle, _) in hidden {
+                if requested.insert(handle.id()) {
+                    textures.request(handle, epoch, Priority::Background);
                 }
             }
         }

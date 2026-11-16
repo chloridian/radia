@@ -310,6 +310,9 @@ pub(crate) struct GeometryRenderer {
     motion_redraw: bool,
     layout_required: bool,
     replacement_retry_pending: bool,
+    appearance_recheck: Option<Instant>,
+    appearance_waiting: bool,
+    mesh_omitted_faces: usize,
     epoch: u64,
     prepared: Option<FramePreparation>,
     applied_agent: Option<Uuid>,
@@ -392,6 +395,9 @@ impl GeometryRenderer {
             motion_redraw: false,
             layout_required: false,
             replacement_retry_pending: false,
+            appearance_recheck: None,
+            appearance_waiting: false,
+            mesh_omitted_faces: 0,
             epoch: 0,
             prepared: None,
             applied_agent: None,
@@ -437,18 +443,18 @@ impl GeometryRenderer {
         self.future_placements.clear();
         self.layout_required = false;
         self.replacement_retry_pending = false;
+        self.appearance_recheck = None;
+        self.appearance_waiting = false;
+        self.mesh_omitted_faces = 0;
         if let Some(agent_id) = self.applied_agent.take() {
             self.restore_agent_pose(agent_id);
         }
         self.prepared = None;
         self.region_water_origin = None;
         self.cache.camera = None;
-        self.cache.candidates.clear();
-        self.cache.next_candidates.clear();
-        self.cache.preparation_candidates.clear();
-        self.cache.next_preparation_candidates.clear();
-        self.cache.preparation_replacements.clear();
-        self.cache.next_preparation_replacements.clear();
+        self.cache.range.clear();
+        self.cache.range_camera = None;
+        self.cache.nonresident_demands = false;
         self.cache.visible.clear();
         self.cache.next_visible.clear();
         self.cache.clear_mesh_demands();

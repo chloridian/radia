@@ -14,11 +14,12 @@ use crate::{
     FrameInput,
     environment::Evaluated,
     geometry::{
-        cache::{CacheUpdate, MeshDemandOrder, item_is_live},
-        draw_list::MAX_FACE_INSTANCES,
+        cache::{CacheUpdate, MeshDemandOrder, item_is_live, range_moved},
+        draw_list::{LAYOUT_TIME_PER_FRAME, MAX_FACE_INSTANCES},
         first_appearance::{current_item_key, decide_item, item_key},
         instance::{instance_base, parameter_part, scene_origin},
-        items::{CachedFace, ItemIndex},
+        items::{CachedFace, CachedItem, ItemIndex},
+        visibility::WorldSphere,
     },
     material::FaceParams,
     pipeline::{TexturePair, blend_keys},
@@ -73,12 +74,6 @@ fn next_mesh_demand(order: &BTreeSet<MeshDemandOrder>, after: Option<MeshDemandO
         Some(after) => order.range((Excluded(after), Unbounded)).next().copied(),
         None => order.first().copied(),
     }
-}
-
-#[derive(Default)]
-struct MeshAdmissionProgress {
-    visible_ready_changed: bool,
-    ready_mesh_changed: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -234,7 +229,7 @@ impl GeometryRenderer {
         let candidate_camera = self.note_rebuild_camera(camera).or(noted_camera).unwrap_or(camera);
         times.cache = cache_started.elapsed();
         let rebuilding = update.rebuild_pending;
-        let stale_pass = update.rebuild_completed && candidate_camera != camera;
+        let stale_pass = update.rebuild_completed && range_moved(candidate_camera, camera);
         if self.draw_list.layout_pending() && (update.immediate_visibility_change || update.layout_invalidated) {
             #[cfg(test)]
             self.note_layout_stale(if update.immediate_visibility_change { "immediate_visibility" } else { "layout_invalidated" });
@@ -258,35 +253,37 @@ impl GeometryRenderer {
         update.pose_items.sort_unstable();
         update.pose_items.dedup();
         let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, self.active_origin);
-        let mut candidate_items = update.visibility_items.clone();
-        candidate_items.extend(update.pose_items.iter().copied());
-        candidate_items.sort_unstable();
-        candidate_items.dedup();
+        let frustum = Frustum::from_clip_matrix(projection);
+        let mut range_items = update.visibility_items.clone();
+        range_items.extend(update.pose_items.iter().copied());
+        range_items.sort_unstable();
+        range_items.dedup();
         let candidates_started = Instant::now();
         let mut mesh_demand_missing = update.mesh_demand_missing;
-        let (mut candidates_changed, replacement_visibility_changed, preparation_changed) =
-            if rebuilding || update.rebuild_completed && !stale_pass {
-                let candidate_projection = crate::pipeline::projection(candidate_camera, size);
-                let (candidates, replacements, preparation, missing) =
-                    self.update_candidates(view, candidate_camera, candidate_projection, size, &candidate_items, true);
-                mesh_demand_missing |= missing;
-                (candidates, replacements, preparation)
-            } else if update.full_visibility || camera_changed || stale_pass {
-                mesh_demand_missing = true;
-                self.rebuild_candidates(view, camera, projection, size)
-            } else if !candidate_items.is_empty() {
-                let (candidates, replacements, preparation, missing) =
-                    self.update_candidates(view, camera, projection, size, &candidate_items, false);
-                mesh_demand_missing |= missing;
-                (candidates, replacements, preparation)
-            } else {
-                (false, false, false)
-            };
+        let full_range = update.full_visibility || stale_pass || self.cache.range_camera.is_none_or(|anchor| range_moved(anchor, camera));
+        let mut range_changed = if rebuilding || update.rebuild_completed && !stale_pass {
+            if self.cache.range_camera.is_none_or(|anchor| range_moved(anchor, candidate_camera)) {
+                self.cache.range_camera = Some(candidate_camera);
+            }
+            let candidate_frustum = Frustum::from_clip_matrix(crate::pipeline::projection(candidate_camera, size));
+            let (changed, missing) = self.update_range(view, &range_items, Some((candidate_camera, &candidate_frustum)));
+            mesh_demand_missing |= missing;
+            changed
+        } else if full_range {
+            mesh_demand_missing = true;
+            self.rebuild_range(view, camera)
+        } else if !range_items.is_empty() {
+            let (changed, missing) = self.update_range(view, &range_items, None);
+            mesh_demand_missing |= missing;
+            changed
+        } else {
+            false
+        };
         if rebuilding && let Some(rebuild) = self.cache.rebuild.as_mut() {
-            rebuild.visibility_changed |= candidates_changed || replacement_visibility_changed || preparation_changed;
+            rebuild.visibility_changed |= range_changed;
             rebuild.mesh_demand_missing |= mesh_demand_missing;
         }
-        candidates_changed |= update.rebuild_visibility_changed;
+        range_changed |= update.rebuild_visibility_changed;
         times.candidates += candidates_started.elapsed();
         times.visibility += visibility_started.elapsed().saturating_sub(times.cache);
 
@@ -295,13 +292,13 @@ impl GeometryRenderer {
             self.draw_list.invalidate_batches();
         }
         let meshes_started = Instant::now();
-        let pending_priority_changed = camera_changed && (self.mesh_admission.active || !self.pending_meshes.is_empty());
+        let demand_reclassified = camera_changed && self.cache.nonresident_demands;
         let mesh_demands_started = Instant::now();
         let candidate_mesh_missing = if !rebuilding
             && (!update.rebuild_completed || stale_pass)
-            && (mesh_demand_missing || update.mesh_dirty || pending_priority_changed)
+            && (mesh_demand_missing || update.mesh_dirty || demand_reclassified)
         {
-            self.rebuild_visible_meshes(view, camera)
+            self.rebuild_visible_meshes(view, camera, &frustum)
         } else {
             false
         };
@@ -311,9 +308,8 @@ impl GeometryRenderer {
             && (self.mesh_admission.active || self.mesh_admission.restart_pending);
         let mesh_admission_requested = candidate_mesh_missing
             || mesh_demand_missing
-            || replacement_visibility_changed
             || update.mesh_dirty
-            || pending_priority_changed
+            || demand_reclassified
             || mesh_revision_changed
             || self.mesh_admission.active
             || self.mesh_admission.restart_pending
@@ -321,13 +317,12 @@ impl GeometryRenderer {
             || self.cache.mesh_state != self.memory.mesh_state()
             || mesh_follow_up;
         let mut uploaded = 0;
-        let mut mesh_progress = false;
         let mesh_uploads_started = Instant::now();
         if mesh_admission_requested {
-            let progress = self.advance_mesh_admission(device, &mut uploaded);
-            mesh_progress = progress.visible_ready_changed || progress.ready_mesh_changed;
+            self.advance_mesh_admission(device, &mut uploaded);
             self.cache.mesh_state = self.memory.mesh_state();
         }
+        let residency_changed = uploaded > 0 || self.stats.gpu_mesh_retirements > 0;
         times.mesh_uploads = mesh_uploads_started.elapsed();
         self.stats.items_updated = update.items_updated;
         if self.cache.mesh_state != previous_mesh_state {
@@ -335,13 +330,12 @@ impl GeometryRenderer {
         }
         let mut appearance_deadline = None;
         let mut gated_entities = HashSet::new();
-        let mut appearance_candidates = false;
         let appearances_started = Instant::now();
         let replacement_indices = if rebuilding { Vec::new() } else { self.cache.replacements.iter().copied().collect::<Vec<_>>() };
         let mut promotions = Vec::new();
         for index in replacement_indices {
             self.stats.appearance_candidates_checked += 1;
-            let relevant = self.cache.replacement_visible.contains(&index);
+            let relevant = self.cache.contains(&self.cache.range, index);
             let Some(replacement) = self.cache.items.get(index).and_then(|item| item.replacement.as_ref()) else { continue };
             let candidate = &replacement.item;
             let raw_key = item_key(candidate);
@@ -355,7 +349,6 @@ impl GeometryRenderer {
             }
             let geometry_ready = self.meshes.contains_key(&candidate.mesh.id());
             let decision = decide_item(&mut self.first_appearances, view, &self.textures, candidate, geometry_ready, started);
-            appearance_candidates |= decision.key.is_some();
             if decision.waiting {
                 if let Some(key) = decision.key {
                     gated_entities.insert(key.entity);
@@ -366,37 +359,48 @@ impl GeometryRenderer {
                 promotions.push(index);
             }
         }
-        let replacement_promoted = if self.draw_list.layout_pending() {
+        if self.draw_list.layout_pending() {
             self.replacement_retry_pending |= !promotions.is_empty();
-            false
+            promotions.clear();
         } else {
             self.replacement_retry_pending = false;
-            self.promote_replacements(promotions, &mut update)
-        };
-        if replacement_promoted {
-            let (promoted_candidates, _, _) = self.rebuild_candidates(view, camera, projection, size);
-            candidates_changed |= promoted_candidates;
-            self.rebuild_visible_meshes(view, camera);
-            self.pending_meshes.retain(|mesh| self.cache.mesh_order_by_id.contains_key(mesh));
-            appearance_candidates = true;
         }
-        appearance_candidates |= !rebuilding && self.first_appearances.has_pending();
+        let replacement_promoted = self.promote_replacements(&promotions, &mut update);
+        if replacement_promoted {
+            let (promoted_range, _) = self.update_range(view, &promotions, None);
+            range_changed |= promoted_range;
+            self.rebuild_visible_meshes(view, camera, &frustum);
+            self.pending_meshes.retain(|mesh| self.cache.mesh_order_by_id.contains_key(mesh));
+        }
         times.appearances = appearances_started.elapsed();
-        let rebuild_visible = candidates_changed || mesh_progress || appearance_candidates || replacement_promoted;
+        let appearance_due = self.appearance_recheck.is_some_and(|recheck| recheck <= started);
+        let rebuild_visible = range_changed
+            || residency_changed
+            || replacement_promoted
+            || !update.visibility_items.is_empty()
+            || (!rebuilding && appearance_due);
         if rebuild_visible {
             self.cache.next_visible.clear();
-            for id in &self.cache.candidates {
+            self.appearance_recheck = None;
+            self.appearance_waiting = false;
+            self.mesh_omitted_faces = 0;
+            for id in &self.cache.range {
                 self.stats.visible_candidates_checked += 1;
                 let Some(item) = self.cache.items.get(*id) else { continue };
                 if !item_is_live(view, item) {
                     continue;
                 }
                 let mesh_ready = self.meshes.contains_key(&item.mesh.id());
+                if !mesh_ready && self.mesh_budget_blocked.contains(&item.mesh.id()) {
+                    self.mesh_omitted_faces = self.mesh_omitted_faces.saturating_add(item.faces.len());
+                }
                 let decision = decide_item(&mut self.first_appearances, view, &self.textures, item, mesh_ready, started);
                 if decision.waiting {
                     if let Some(key) = decision.key {
                         gated_entities.insert(key.entity);
                     }
+                    self.appearance_waiting = true;
+                    self.appearance_recheck = min_deadline(self.appearance_recheck, decision.deadline);
                     appearance_deadline = min_deadline(appearance_deadline, decision.deadline);
                 }
                 if mesh_ready && decision.eligible && !item.faces.is_empty() {
@@ -406,20 +410,13 @@ impl GeometryRenderer {
         }
         times.meshes = meshes_started.elapsed();
         let visible_changed = rebuild_visible && self.cache.visible != self.cache.next_visible;
-        let visible = if visible_changed { &self.cache.next_visible } else { &self.cache.visible };
         let agent_id = agent_pose.map(AgentPose::agent_id);
         self.motion_redraw = update.rebuild_completed && !self.moving_entities.is_empty();
         if !rebuilding && !update.rebuild_completed {
             for entity in &self.motion_entities {
                 let Some(index) = self.cache.objects.get(entity) else { continue };
                 let Some(item) = self.cache.items.get(*index) else { continue };
-                let item_id = item.id;
-                let visible_item = visible
-                    .binary_search_by(|index| {
-                        self.cache.items.get(*index).map_or(std::cmp::Ordering::Less, |candidate| candidate.id.cmp(&item_id))
-                    })
-                    .is_ok();
-                if !visible_item {
+                if !viewed(item, camera, &frustum) {
                     continue;
                 }
                 self.stats.motion_redraw_items_checked += 1;
@@ -455,8 +452,7 @@ impl GeometryRenderer {
         }
         if layout_requested {
             let visible = if visible_changed { &self.cache.next_visible } else { &self.cache.visible };
-            self.layout_required =
-                !self.draw_list.request_layout(visible, camera, visible_changed || self.layout_required, &self.cache.items);
+            self.layout_required = !self.draw_list.request_layout(visible, camera, &self.cache.items);
         }
 
         let draw_list_started = Instant::now();
@@ -474,7 +470,7 @@ impl GeometryRenderer {
                 }
             }
         }
-        let layout_progress = self.draw_list.advance_layout(&mut self.cache.items);
+        let layout_progress = self.draw_list.advance_layout(&mut self.cache.items, LAYOUT_TIME_PER_FRAME);
         let layout_committed = layout_progress.as_ref().is_some_and(|progress| progress.complete);
         if layout_committed {
             self.active_origin = frame_origin;
@@ -509,13 +505,8 @@ impl GeometryRenderer {
         let layout_time = draw_list_started.elapsed();
         times.layout = layout_time;
 
-        let requests_started = Instant::now();
-        let gated_entities = gated_entities.into_iter().collect::<Vec<_>>();
-        self.request_frame_textures(view, &update.background, &gated_entities);
-        times.requests = requests_started.elapsed();
-
         let draw_updates_started = Instant::now();
-        self.prepare_face_patches(&update, visible_changed, animation_now);
+        self.prepare_face_patches(&update, camera, &frustum, animation_now);
         self.stats.faces_patched =
             self.draw_list.patch(&self.cache.items, &self.cache.patch_faces, &update.pose_items, self.active_origin, frame_origin);
         let draw_upload_started = Instant::now();
@@ -532,7 +523,6 @@ impl GeometryRenderer {
         let draw_updates_time = draw_updates_started.elapsed();
         let draw_batches_started = Instant::now();
         if camera_changed || self.draw_list.cull_dirty() {
-            let frustum = Frustum::from_clip_matrix(projection);
             let culled =
                 self.draw_list.cull(&self.cache.items, camera, &frustum, &self.meshes, self.indirect_first_instance, &mut self.main_view);
             self.stats.draw_batch_commands_built = culled.commands;
@@ -546,13 +536,18 @@ impl GeometryRenderer {
         let draw_batches_time = draw_batches_started.elapsed();
         times.draw_batches = draw_batches_time;
         times.draw_list = layout_time + draw_updates_time + draw_batches_time;
+        let requests_started = Instant::now();
+        let gated_entities = gated_entities.into_iter().collect::<Vec<_>>();
+        self.request_frame_textures(view, &update.background, &gated_entities);
+        times.requests = requests_started.elapsed();
         let texture_started = Instant::now();
         let residency_before_upload = self.textures.geometry_state();
         if !same {
             self.textures.upload(device, encoder, self.epoch);
         }
-        if !gated_entities.is_empty() && self.textures.geometry_state() != residency_before_upload {
+        if (self.appearance_waiting || !gated_entities.is_empty()) && self.textures.geometry_state() != residency_before_upload {
             appearance_deadline = Some(started);
+            self.appearance_recheck = Some(started);
         }
         let texture_changes = self.textures.take_changed_ids();
         let binding_started = Instant::now();
@@ -563,16 +558,18 @@ impl GeometryRenderer {
         if visible_changed {
             std::mem::swap(&mut self.cache.visible, &mut self.cache.next_visible);
         }
-        let shown_keys = self
-            .cache
-            .visible
-            .iter()
-            .filter_map(|index| self.cache.items.get(*index))
-            .filter(|item| item.faces.iter().any(|face| face.slot.is_some()))
-            .filter_map(|item| current_item_key(view, item))
-            .collect::<Vec<_>>();
-        for key in shown_keys {
-            self.first_appearances.mark_shown(key);
+        if layout_committed {
+            let shown_keys = self
+                .draw_list
+                .committed_items()
+                .iter()
+                .filter_map(|index| self.cache.items.get(*index))
+                .filter(|item| item.faces.iter().any(|face| self.draw_list.committed_slot(face).is_some()))
+                .filter_map(|item| current_item_key(view, item))
+                .collect::<Vec<_>>();
+            for key in shown_keys {
+                self.first_appearances.mark_shown(key);
+            }
         }
         self.cache.next_visible.clear();
         if !rebuilding {
@@ -586,7 +583,6 @@ impl GeometryRenderer {
         let pairs = environment_pairs(view, &self.textures, frame_input.environment);
         self.update_region_water_bounds(visible_changed);
         self.update_environment_uniforms(device, camera, projection, size, frame_input, pairs);
-        self.cache.next_candidates.clear();
         let animation_deadline = (!rebuilding)
             .then(|| {
                 self.cache
@@ -594,23 +590,14 @@ impl GeometryRenderer {
                     .iter()
                     .filter_map(|index| {
                         let item = self.cache.items.get(*index)?;
-                        let visible = self.cache.visible.binary_search_by(|visible| {
-                            self.cache.items.get(*visible).map_or(std::cmp::Ordering::Less, |visible| visible.id.cmp(&item.id))
-                        });
-                        visible.ok().and(item.animation_deadline)
+                        viewed(item, camera, &frustum).then_some(item.animation_deadline).flatten()
                     })
                     .min()
             })
             .flatten();
-        let redraw_deadline = min_deadline(animation_deadline, appearance_deadline);
+        let redraw_deadline = min_deadline(animation_deadline, min_deadline(appearance_deadline, self.appearance_recheck));
         let instances_started = Instant::now();
-        let mesh_omitted_faces = if rebuilding || self.mesh_budget_blocked.is_empty() {
-            0
-        } else {
-            self.cache.candidates.iter().filter_map(|index| self.cache.items.get(*index)).fold(0usize, |count, item| {
-                if self.mesh_budget_blocked.contains(&item.mesh.id()) { count.saturating_add(item.faces.len()) } else { count }
-            })
-        };
+        let mesh_omitted_faces = if rebuilding || self.mesh_budget_blocked.is_empty() { 0 } else { self.mesh_omitted_faces };
         self.stats.mesh_budget_blocked = self.mesh_budget_blocked.len();
         self.stats.omitted_faces = self.omitted_faces.saturating_add(mesh_omitted_faces);
         self.stats.omission_reason = match (self.omitted_faces > 0, mesh_omitted_faces > 0) {
@@ -679,7 +666,7 @@ impl GeometryRenderer {
         }
     }
 
-    fn advance_mesh_admission(&mut self, device: &Device, uploaded: &mut usize) -> MeshAdmissionProgress {
+    fn advance_mesh_admission(&mut self, device: &Device, uploaded: &mut usize) {
         let revision = self.cache.mesh_demand_revision;
         if !self.mesh_admission.active || self.mesh_admission.restart_pending {
             self.mesh_admission.begin(revision);
@@ -702,7 +689,6 @@ impl GeometryRenderer {
         }
         self.mesh_admission.visits_this_frame = 0;
         let mut budget = MESH_DEMANDS_PER_FRAME;
-        let mut progress = MeshAdmissionProgress::default();
         while budget > 0 {
             if !self.mesh_admission.visible_ready {
                 let after = self.mesh_admission.visible_after;
@@ -726,7 +712,6 @@ impl GeometryRenderer {
                     self.mesh_admission.preparation_pass_revision = Some(revision);
                     self.mesh_admission.preparation_blocked = false;
                     self.mesh_admission.preparation_retry = false;
-                    progress.visible_ready_changed = true;
                     continue;
                 };
                 self.mesh_admission.visible_after = Some(demand);
@@ -737,7 +722,6 @@ impl GeometryRenderer {
                     continue;
                 }
                 let outcome = self.admit_mesh_demand(device, demand, true, uploaded);
-                progress.ready_mesh_changed |= self.cache.admission_protected.contains(&demand.mesh);
                 self.mesh_admission.visible_blocked |= !matches!(outcome, MeshUpload::Ready);
                 self.mesh_admission.visible_retry |= matches!(outcome, MeshUpload::Deferred);
                 self.mesh_admission.capacity_blocked |= matches!(outcome, MeshUpload::CapacityBlocked);
@@ -778,7 +762,6 @@ impl GeometryRenderer {
             self.mesh_admission.retry_after_layout |= matches!(outcome, MeshUpload::CapacityBlocked) && self.draw_list.layout_pending();
         }
         self.mesh_admission.revision = revision;
-        progress
     }
 
     fn admit_mesh_demand(&mut self, device: &Device, demand: MeshDemandOrder, allow_eviction: bool, uploaded: &mut usize) -> MeshUpload {
@@ -1038,8 +1021,7 @@ impl GeometryRenderer {
         }
     }
 
-    fn prepare_face_patches(&mut self, update: &CacheUpdate, visible_changed: bool, now: Instant) {
-        let visible = if visible_changed { &self.cache.next_visible } else { &self.cache.visible };
+    fn prepare_face_patches(&mut self, update: &CacheUpdate, camera: Camera, frustum: &Frustum, now: Instant) {
         let items = &mut self.cache.items;
         let patch_items = &mut self.cache.patch_items;
         patch_items.clear();
@@ -1047,10 +1029,7 @@ impl GeometryRenderer {
         patch_items.extend(update.parameter_items.iter().copied());
         for id in self.cache.animated_items.iter().copied() {
             let Some(item) = items.get(id) else { continue };
-            let visible_item = visible
-                .binary_search_by(|index| items.get(*index).map_or(std::cmp::Ordering::Less, |visible| visible.id.cmp(&item.id)))
-                .is_ok();
-            if visible_item && item.animation_deadline.is_some_and(|deadline| deadline <= now) {
+            if viewed(item, camera, frustum) && item.animation_deadline.is_some_and(|deadline| deadline <= now) {
                 patch_items.push(id);
             }
         }
@@ -1186,6 +1165,11 @@ fn current_params(source: Option<&Object>, shading: ShadingMode, face: &CachedFa
         ShadingMode::RegionWater | ShadingMode::Surface => {}
     }
     params
+}
+
+fn viewed(item: &CachedItem, camera: Camera, frustum: &Frustum) -> bool {
+    WorldSphere::new(item.position, item.rotation, item.scale, item.info.bounds, camera)
+        .is_some_and(|sphere| sphere.visible(item.shading, camera, frustum))
 }
 
 fn min_deadline(left: Option<Instant>, right: Option<Instant>) -> Option<Instant> {

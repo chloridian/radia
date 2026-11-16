@@ -34,10 +34,9 @@ const CELL_SIZE: f64 = 16.0;
 const MAX_PATCH_RANGES: usize = 32;
 const MAX_LAYOUT_UPLOAD_RANGES: usize = 256;
 const MAX_PATCH_GAP_SLOTS: u32 = 4;
-const LAYOUT_ITEMS_PER_FRAME: usize = 1_024;
-const RETIRED_LAYOUT_ENTRIES_PER_FRAME: usize = 256;
+const LAYOUT_CLOCK_STEPS: usize = 64;
 const LAYOUT_BYTES_PER_FRAME: usize = 8 * 1024 * 1024;
-const LAYOUT_TIME_PER_FRAME: Duration = Duration::from_millis(1);
+pub(super) const LAYOUT_TIME_PER_FRAME: Duration = Duration::from_millis(1);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct LayoutId(u64);
@@ -458,7 +457,6 @@ struct LayoutBuild {
     layout: LayoutId,
     state: LayoutState,
     uploads: HashSet<u32>,
-    previous: Vec<ItemIndex>,
     visible: Vec<ItemIndex>,
     mesh_pins: HashSet<MeshId>,
     layout_items: Vec<ItemIndex>,
@@ -491,7 +489,6 @@ struct LayoutBuild {
 
 #[derive(Clone, Copy)]
 enum LayoutPhase {
-    RetirePrevious,
     CountVisible,
     ClearInitialCounts,
     Priority,
@@ -507,24 +504,16 @@ enum LayoutPhase {
 }
 
 impl LayoutBuild {
-    fn new(
-        layout: LayoutId,
-        previous: &[ItemIndex],
-        visible: &[ItemIndex],
-        camera: Camera,
-        retire_previous: bool,
-        items: &ItemSlab,
-    ) -> Self {
+    fn new(layout: LayoutId, visible: &[ItemIndex], camera: Camera, items: &ItemSlab) -> Self {
         Self {
             layout,
             state: LayoutState::default(),
             uploads: HashSet::new(),
-            previous: if retire_previous { previous.to_vec() } else { Vec::new() },
             visible: visible.to_vec(),
             mesh_pins: visible.iter().filter_map(|index| items.get(*index).map(|item| item.mesh.id())).collect(),
             layout_items: Vec::new(),
             selected_items: HashSet::new(),
-            phase: if retire_previous { LayoutPhase::RetirePrevious } else { LayoutPhase::CountVisible },
+            phase: LayoutPhase::CountVisible,
             camera,
             item_cursor: 0,
             face_cursor: 0,
@@ -573,7 +562,10 @@ impl LayoutBuild {
 
     fn retired(&self) -> bool {
         let state = &self.state;
-        state.draw_group_refs.is_empty() && state.active_textures.is_empty() && state.active_terrain.is_empty()
+        state.draw_group_refs.is_empty()
+            && state.active_textures.is_empty()
+            && state.active_terrain.is_empty()
+            && state.layout_items.is_empty()
     }
 }
 
@@ -634,7 +626,7 @@ pub(super) struct DrawList {
 }
 
 impl DrawList {
-    pub(super) fn request_layout(&mut self, visible: &[ItemIndex], camera: Camera, retire_previous: bool, items: &ItemSlab) -> bool {
+    pub(super) fn request_layout(&mut self, visible: &[ItemIndex], camera: Camera, items: &ItemSlab) -> bool {
         if self.pending.is_some() {
             return false;
         }
@@ -642,7 +634,7 @@ impl DrawList {
             return false;
         }
         let layout = self.next_layout();
-        self.pending = Some(LayoutBuild::new(layout, &self.committed.layout_items, visible, camera, retire_previous, items));
+        self.pending = Some(LayoutBuild::new(layout, visible, camera, items));
         true
     }
 
@@ -651,7 +643,6 @@ impl DrawList {
         self.last_layout
     }
 
-    #[cfg(test)]
     pub(super) fn committed_slot(&self, face: &CachedFace) -> Option<u32> {
         self.committed_address(face).map(|address| address.slot)
     }
@@ -660,7 +651,7 @@ impl DrawList {
         if face.layout == self.layout {
             return face.slot.map(|slot| FaceSlot { layout: face.layout, slot, blended_index: face.blended_index });
         }
-        face.retained.filter(|retained| retained.layout == self.layout)
+        face.committed.filter(|committed| committed.layout == self.layout)
     }
 
     pub(super) fn pins_mesh(&self, mesh: MeshId) -> bool {
@@ -673,7 +664,6 @@ impl DrawList {
         self.committed.mesh_references.contains(&mesh)
     }
 
-    #[cfg(test)]
     pub(super) fn committed_items(&self) -> &[ItemIndex] {
         &self.committed.layout_items
     }
@@ -687,7 +677,6 @@ impl DrawList {
     pub(super) fn staged_progress(&self) -> Option<(&'static str, usize, usize, usize, usize, usize, usize)> {
         let build = self.pending.as_ref()?;
         let phase = match build.phase {
-            LayoutPhase::RetirePrevious => "retire_previous",
             LayoutPhase::CountVisible => "count_visible",
             LayoutPhase::ClearInitialCounts => "clear_initial_counts",
             LayoutPhase::Priority => "priority",
@@ -738,7 +727,7 @@ impl DrawList {
     pub(super) fn retired_entries_remaining(&self) -> usize {
         let Some(build) = self.retired.as_ref() else { return 0 };
         let state = &build.state;
-        state.draw_group_refs.len() + state.active_textures.len() + state.active_terrain.len()
+        state.draw_group_refs.len() + state.active_textures.len() + state.active_terrain.len() + state.layout_items.len()
     }
 
     pub(super) fn layout_building(&self) -> bool {
@@ -751,8 +740,9 @@ impl DrawList {
         }
     }
 
-    pub(super) fn advance_layout(&mut self, items: &mut ItemSlab) -> Option<LayoutProgress> {
-        self.retire_layout_step();
+    pub(super) fn advance_layout(&mut self, items: &mut ItemSlab, budget: Duration) -> Option<LayoutProgress> {
+        let started = Instant::now();
+        self.retire_layout_step(items, started, budget);
         if self.retired.is_some() {
             return None;
         }
@@ -761,50 +751,17 @@ impl DrawList {
             self.retired = Some(build);
             return Some(LayoutProgress { stats: LayoutStats::default(), complete: false, stale: true, commit_ms: 0.0 });
         }
-        let started = Instant::now();
-        let mut item_work = 0usize;
+        let mut steps = 0usize;
         let mut byte_work = 0usize;
         let mut items_visited = 0usize;
         let mut faces_visited = 0usize;
         let mut commit_ms = 0.0;
-        while item_work < LAYOUT_ITEMS_PER_FRAME && byte_work < LAYOUT_BYTES_PER_FRAME && started.elapsed() < LAYOUT_TIME_PER_FRAME {
+        while byte_work < LAYOUT_BYTES_PER_FRAME {
+            steps += 1;
+            if steps.is_multiple_of(LAYOUT_CLOCK_STEPS) && started.elapsed() >= budget {
+                break;
+            }
             match build.phase {
-                LayoutPhase::RetirePrevious => {
-                    if build.item_cursor >= build.previous.len() {
-                        build.phase = LayoutPhase::CountVisible;
-                        build.item_cursor = 0;
-                        build.face_cursor = 0;
-                        continue;
-                    }
-                    let index = build.previous[build.item_cursor];
-                    if build.face_cursor == 0 {
-                        items_visited += 1;
-                        build.items_visited += 1;
-                    }
-                    if contains_item(&build.visible, items, index) {
-                        build.item_cursor += 1;
-                        item_work += 1;
-                        continue;
-                    }
-                    let Some(item) = items.get_mut(index) else {
-                        build.item_cursor += 1;
-                        item_work += 1;
-                        continue;
-                    };
-                    if build.face_cursor >= item.faces.len() {
-                        build.item_cursor += 1;
-                        build.face_cursor = 0;
-                        item_work += 1;
-                        continue;
-                    }
-                    if let Some(face) = item.faces.get_mut(build.face_cursor) {
-                        self.hide_face(face);
-                        faces_visited += 1;
-                        build.faces_visited += 1;
-                        byte_work += std::mem::size_of::<CachedFace>();
-                    }
-                    build.face_cursor += 1;
-                }
                 LayoutPhase::CountVisible | LayoutPhase::CountSelected => {
                     let count_visible = matches!(build.phase, LayoutPhase::CountVisible);
                     let input_len = if count_visible { build.visible.len() } else { build.layout_items.len() };
@@ -826,11 +783,9 @@ impl DrawList {
                     let Some(item) = items.get(index) else {
                         build.item_cells.push(u32::MAX);
                         build.item_cursor += 1;
-                        item_work += 1;
                         continue;
                     };
                     if build.face_cursor == 0 {
-                        item_work += 1;
                         items_visited += 1;
                         build.items_visited += 1;
                         let cell = build.cell(item.position);
@@ -864,7 +819,6 @@ impl DrawList {
                     build.state.cells.clear();
                     build.phase = LayoutPhase::Priority;
                     build.item_cursor = 0;
-                    item_work += 1;
                 }
                 LayoutPhase::Priority => {
                     if build.item_cursor >= build.visible.len() {
@@ -874,7 +828,6 @@ impl DrawList {
                     }
                     let index = build.visible[build.item_cursor];
                     build.item_cursor += 1;
-                    item_work += 1;
                     items_visited += 1;
                     build.items_visited += 1;
                     let Some(item) = items.get(index) else { continue };
@@ -888,7 +841,6 @@ impl DrawList {
                         build.face_cursor = 0;
                         continue;
                     };
-                    item_work += 1;
                     items_visited += 1;
                     build.items_visited += 1;
                     if candidate.faces <= build.remaining {
@@ -911,7 +863,6 @@ impl DrawList {
                     if build.selected_items.contains(&index) {
                         build.item_cursor += 1;
                         build.face_cursor = 0;
-                        item_work += 1;
                         items_visited += 1;
                         build.items_visited += 1;
                         continue;
@@ -922,13 +873,11 @@ impl DrawList {
                     }
                     let Some(item) = items.get_mut(index) else {
                         build.item_cursor += 1;
-                        item_work += 1;
                         continue;
                     };
                     if build.face_cursor >= item.faces.len() {
                         build.item_cursor += 1;
                         build.face_cursor = 0;
-                        item_work += 1;
                         continue;
                     }
                     if let Some(face) = item.faces.get_mut(build.face_cursor) {
@@ -983,7 +932,6 @@ impl DrawList {
                         }
                     }
                     build.command_cursor += 1;
-                    item_work += 1;
                 }
                 LayoutPhase::Allocate => {
                     let target = build.opaque_count.saturating_mul(INSTANCE_BYTES);
@@ -1018,11 +966,9 @@ impl DrawList {
                         build.item_cursor += 1;
                         build.face_cursor = 0;
                         build.item_has_slot = false;
-                        item_work += 1;
                         continue;
                     };
                     if build.face_cursor == 0 {
-                        item_work += 1;
                         items_visited += 1;
                         build.items_visited += 1;
                         build.item_has_slot = false;
@@ -1083,7 +1029,6 @@ impl DrawList {
                         build.phase = LayoutPhase::Commit;
                         continue;
                     };
-                    item_work += 1;
                     let Some(item) = items.get_mut(blended.item) else {
                         build.stale = true;
                         continue;
@@ -1177,16 +1122,24 @@ impl DrawList {
         }
     }
 
-    fn retire_layout_step(&mut self) {
+    fn retire_layout_step(&mut self, items: &mut ItemSlab, started: Instant, budget: Duration) {
         let Some(build) = self.retired.as_mut() else { return };
-        let mut budget = RETIRED_LAYOUT_ENTRIES_PER_FRAME;
-        while budget > 0 && !build.retired() {
+        let mut steps = 0usize;
+        while !build.retired() {
+            steps += 1;
+            if steps.is_multiple_of(LAYOUT_CLOCK_STEPS) && started.elapsed() >= budget {
+                break;
+            }
             if let Some(group) = build.state.draw_group_refs.pop() {
                 self.groups.release(group);
-                budget -= 1;
-            } else {
-                retire_vec(&mut build.state.active_textures, &mut budget);
-                retire_vec(&mut build.state.active_terrain, &mut budget);
+            } else if build.state.active_textures.pop().is_some() || build.state.active_terrain.pop().is_some() {
+                continue;
+            } else if let Some(item) = build.state.layout_items.pop().and_then(|index| items.get_mut(index)) {
+                for face in item.faces.iter_mut().filter(|face| face.layout != self.layout) {
+                    face.slot = None;
+                    face.blended_index = None;
+                    face.committed = None;
+                }
             }
         }
         if self.retired.as_ref().is_some_and(LayoutBuild::retired) {
@@ -1554,7 +1507,7 @@ impl DrawList {
         let committed = self.committed_address(face);
         face.slot = None;
         face.blended_index = None;
-        face.retained = None;
+        face.committed = None;
         let Some(FaceSlot { slot, .. }) = committed else { return false };
         let start = slot as usize * INSTANCE_BYTES;
         if let Some(instance) = self.committed.instance_bytes.get_mut(start..start + INSTANCE_BYTES) {
@@ -1644,16 +1597,10 @@ impl DrawList {
     }
 }
 
-fn retire_vec<T>(values: &mut Vec<T>, budget: &mut usize) {
-    while *budget > 0 && values.pop().is_some() {
-        *budget -= 1;
-    }
-}
-
 fn assign_slot(face: &mut CachedFace, layout: LayoutId, committed: LayoutId, slot: Option<u32>, blended_index: Option<usize>) {
     if face.layout != layout {
         if face.layout == committed {
-            face.retained = face.slot.map(|slot| FaceSlot { layout: committed, slot, blended_index: face.blended_index });
+            face.committed = face.slot.map(|slot| FaceSlot { layout: committed, slot, blended_index: face.blended_index });
         }
         face.layout = layout;
     }
@@ -1688,11 +1635,6 @@ fn write_layout_instance(
         dirty_slots.push(slot);
     }
     true
-}
-
-fn contains_item(visible: &[ItemIndex], items: &ItemSlab, index: ItemIndex) -> bool {
-    let Some(id) = items.get(index).map(|item| item.id) else { return false };
-    visible.binary_search_by(|visible| items.get(*visible).map_or(std::cmp::Ordering::Less, |item| item.id.cmp(&id))).is_ok()
 }
 
 fn blend_distance(position: DVec3, rotation: Quat, scale: Vec3, center: Vec3, camera: Camera) -> f64 {

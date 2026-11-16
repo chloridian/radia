@@ -958,7 +958,7 @@ fn bench_camera_culling_rotation(
         assert_eq!(stats.pending_meshes, 0, "warm rotation must use resident meshes");
         assert_eq!(stats.pending_textures, 0, "warm rotation must use resident textures");
         assert_eq!(stats.omitted_faces, 0);
-        assert_eq!(stats.layouts, 0, "small in-place rotation must preserve candidate membership");
+        assert_eq!(stats.layouts, 0, "small in-place rotation must preserve range membership");
         assert_eq!(stats.instances, initial.instances, "small in-place rotation must preserve drawn items");
         assert_eq!(stats.draw_calls, initial.draw_calls);
         assert_eq!(stats.draw_commands, initial.draw_commands);
@@ -983,7 +983,7 @@ fn bench_camera_culling_rotation(
                 assert_eq!(latest.pending_meshes, 0, "warm rotation must use resident meshes");
                 assert_eq!(latest.pending_textures, 0, "warm rotation must use resident textures");
                 assert_eq!(latest.omitted_faces, 0);
-                assert_eq!(latest.layouts, 0, "small in-place rotation must preserve candidate membership");
+                assert_eq!(latest.layouts, 0, "small in-place rotation must preserve range membership");
                 assert_eq!(latest.instances, initial.instances, "small in-place rotation must preserve drawn items");
                 assert_eq!(latest.draw_calls, initial.draw_calls);
                 assert_eq!(latest.draw_commands, initial.draw_commands);
@@ -1024,12 +1024,14 @@ fn bench_camera_culling_edge_sweep(
         assert_eq!(stats.omitted_faces, 0);
     }
     assert!(!second.rebuild_pending, "edge sweep layout must settle within {SETTLE_FRAMES} frames");
-    assert_ne!(first.instances, second.instances, "edge sweep must change visible item count");
-    assert!(settle_layouts > 0, "edge sweep must rebuild the visible draw layout");
-    eprintln!("{name}: edge sweep instances={}->{} settled after {settle_frames} frames", first.instances, second.instances);
+    assert_ne!(first.draw_commands, second.draw_commands, "edge sweep must change the emitted commands");
+    assert_eq!(settle_layouts, 0, "turning in place must keep range membership");
+    eprintln!(
+        "{name}: edge sweep commands={}->{} instances={} settled after {settle_frames} frames",
+        first.draw_commands, second.draw_commands, second.instances
+    );
 
     let mut generation = 0usize;
-    let mut layouts = 0usize;
     let mut latest = second;
     let mut cull = DurationDistribution::default();
     group.bench_function(name, |b| {
@@ -1044,12 +1046,11 @@ fn bench_camera_culling_edge_sweep(
                 assert_eq!(latest.pending_meshes, 0, "warm edge sweep must use resident meshes");
                 assert_eq!(latest.pending_textures, 0, "warm edge sweep must use resident textures");
                 assert_eq!(latest.omitted_faces, 0);
-                layouts += latest.layouts;
+                assert_eq!(latest.layouts, 0, "the alternating sweep must keep range membership");
             }
             elapsed
         });
     });
-    eprintln!("{name}: alternating sweep committed {layouts} layouts");
     report(name, latest);
     eprintln!("{name}: cull {}", cull.report());
 }

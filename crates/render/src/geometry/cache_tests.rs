@@ -8,6 +8,7 @@ use crate::geometry::{
     ShadingMode,
     instance::instance_base,
     items::{CachedItem, CachedReplacement, mesh_info},
+    visibility::RANGE_MARGIN,
 };
 use crate::scene::{Camera, SharedMesh};
 
@@ -36,13 +37,9 @@ fn item_order_tracks_lifecycle() {
 
     cache.items.get_mut(high_index).expect("high item").replacement = Some(Box::new(CachedReplacement { item: item(high, &mesh, region) }));
     cache.replacements.insert(high_index);
-    cache.replacement_visible.insert(high_index);
-    cache.next_replacement_visible.insert(high_index);
     assert_eq!(cache.promote_replacement(high_index).expect("promoted item").id, high);
     assert!(cache.items.get(high_index).is_some_and(|item| item.replacement.is_none()));
     assert!(!cache.replacements.contains(&high_index));
-    assert!(!cache.replacement_visible.contains(&high_index));
-    assert!(!cache.next_replacement_visible.contains(&high_index));
     assert_eq!(ordered_ids(&mut cache), vec![earlier, low, high]);
 
     cache.clear_items();
@@ -67,8 +64,9 @@ fn camera_recovery_progresses() {
         let index = cache.insert_item(cached).expect("cached object index");
         cache.objects.insert(summary.entity, index);
     }
-    let camera =
-        |turn: u32| Camera::new(DVec3::new(0.0, 0.0, f64::from(turn) * 0.01), Vec3::X, 1.0, [128, 128]).expect("moving fixture camera");
+    let camera = |turn: u32| {
+        Camera::new(DVec3::new(0.0, 0.0, f64::from(turn) * RANGE_MARGIN), Vec3::X, 1.0, [128, 128]).expect("moving fixture camera")
+    };
     let mut rebuild = CacheRebuild::new(&view, cache.slot_count(), false);
     rebuild.object_change_page_complete = true;
     rebuild.added_object_page_complete = true;
