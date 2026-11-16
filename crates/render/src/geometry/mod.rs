@@ -31,7 +31,7 @@ use wgpu::{
 use world::{Entity, WorldTransform};
 
 use self::cache::FrameCache;
-use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
+use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES, ViewDraws};
 use self::first_appearance::FirstAppearances;
 use self::items::ItemIndex;
 use self::mesh::GpuMesh;
@@ -292,6 +292,7 @@ pub(crate) struct GeometryRenderer {
     cache: FrameCache,
     active_origin: DVec3,
     draw_list: DrawList,
+    main_view: ViewDraws,
     layout_pose_items: HashSet<(ItemIndex, Entity)>,
     recovery_publication_pending: bool,
     first_appearances: FirstAppearances,
@@ -373,6 +374,7 @@ impl GeometryRenderer {
             cache: FrameCache::default(),
             active_origin: DVec3::ZERO,
             draw_list: DrawList::default(),
+            main_view: ViewDraws::default(),
             layout_pose_items: HashSet::new(),
             recovery_publication_pending: false,
             first_appearances: FirstAppearances::default(),
@@ -463,6 +465,7 @@ impl GeometryRenderer {
             }
         }
         self.draw_list.clear();
+        self.main_view.clear();
         self.visible_textures.clear();
         self.visible_texture_requests.clear();
         self.stats.instances = 0;
@@ -505,7 +508,7 @@ impl GeometryRenderer {
         let mut textures = None;
         let mut terrain = None;
         let mut buffers = None;
-        for draw in self.draw_list.draw_batches() {
+        for draw in self.main_view.batches() {
             if pipeline != Some(draw.key.pipeline) {
                 self.pipelines.bind_pipeline(pass, draw.key.pipeline);
                 pipeline = Some(draw.key.pipeline);
@@ -537,7 +540,7 @@ impl GeometryRenderer {
                 pass.multi_draw_indexed_indirect(&self.indirect, draw.offset, draw.count);
             } else {
                 for command in 0..draw.count {
-                    let Some(first_instance) = self.draw_list.first_instance(draw.offset, command) else { continue };
+                    let Some(first_instance) = self.main_view.first_instance(draw.offset, command) else { continue };
                     let start = u64::from(first_instance) * FACE_INDEX_BYTES as u64;
                     pass.set_vertex_buffer(face_slot, self.face_indices.slice(start..));
                     pass.draw_indexed_indirect(&self.indirect, draw.offset + u64::from(command) * INDIRECT_DRAW_BYTES as u64);

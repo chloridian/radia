@@ -1,9 +1,11 @@
 mod frustum;
 mod intersection;
 pub mod motion;
+mod sphere;
 
 pub use self::frustum::Frustum;
 pub use self::intersection::{ray_intersects_bounds, ray_triangle_intersection};
+pub use self::sphere::Sphere;
 pub use glam::{
     Affine2, Affine3, DMat2, DMat3, DMat4, DQuat, DVec2, DVec3, DVec4, EulerRot, FloatExt, Mat2, Mat3, Mat4, Quat, Vec2, Vec3, Vec4,
     camera, dcamera,

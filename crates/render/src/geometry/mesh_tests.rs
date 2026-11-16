@@ -64,8 +64,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
         let grouped_calls = if separate_pages { 2 } else { 1 };
         let expected_calls = if geometry.indirect_first_instance { grouped_calls } else { geometry.stats.draw_commands };
         assert_eq!(geometry.stats.draw_calls, expected_calls, "draw submissions match the available indirect features");
-        geometry.draw_list.build_draw_batches(&geometry.meshes, geometry.indirect_first_instance);
-        assert_eq!(geometry.draw_list.draw_batches().len(), grouped_calls, "rebuilding retained indirect groups keeps submissions");
+        assert_eq!(geometry.main_view.batches().len(), grouped_calls, "culled commands share one submission per page");
     }
     let mut objects: Vec<_> = view.objects().collect();
     objects.sort_by_key(|object| object.detail().summary.id);
@@ -501,6 +500,10 @@ fn committed_world_position(geometry: &GeometryRenderer, slot: u32) -> Option<DV
     Some(DVec3::new(axis(0)?, axis(1)?, axis(2)?) + geometry.active_origin)
 }
 
+fn hidden_slot(geometry: &GeometryRenderer, slot: u32) -> bool {
+    geometry.draw_list.instance_transform(slot).is_some_and(|bytes| bytes.iter().all(|byte| *byte == 0))
+}
+
 fn assert_committed_positions(geometry: &GeometryRenderer, turn: u32) {
     const LAGGING: f64 = 16.0;
     const EXACT: f64 = 1e-3;
@@ -521,7 +524,7 @@ fn assert_committed_positions(geometry: &GeometryRenderer, turn: u32) {
         for index in geometry.draw_list.committed_items() {
             let Some(item) = geometry.cache.items.get(*index) else { continue };
             for slot in item.faces.iter().filter_map(|face| geometry.draw_list.committed_slot(face)) {
-                if geometry.draw_list.hides_range(slot, 1) {
+                if hidden_slot(geometry, slot) {
                     continue;
                 }
                 let Some(world) = committed_world_position(geometry, slot) else {
@@ -546,7 +549,7 @@ fn assert_committed_positions(geometry: &GeometryRenderer, turn: u32) {
     }
     let mut slot = 0;
     while let Some(world) = committed_world_position(geometry, slot) {
-        if !geometry.draw_list.hides_range(slot, 1) {
+        if !hidden_slot(geometry, slot) {
             let [x, y, z] = cell(world);
             let near = (-1..=1)
                 .flat_map(|dx| (-1..=1).flat_map(move |dy| (-1..=1).map(move |dz| [x + dx, y + dy, z + dz])))
@@ -878,7 +881,7 @@ fn gpu_retired_page_yields_visible() {
     geometry.prepare(&device, &mut encoder, &view, None, retired_camera, [128, 128], None);
     assert_eq!(geometry.stats.instances, 1);
     assert_eq!(geometry.meshes.len(), 1);
-    assert!(!geometry.draw_list.draw_batches().is_empty());
+    assert!(!geometry.main_view.batches().is_empty());
 
     let retired_id = *geometry.meshes.keys().next().expect("initial visible mesh");
     let retired_object = view
@@ -1086,7 +1089,6 @@ fn gpu_removed_pending_reconciles_snapshot() {
     prepare_frame(&device, &queue, &mut geometry, &view, camera);
     assert!(!geometry.cache.visible.contains(&target_index), "the removed object leaves visibility immediately");
     assert_eq!(geometry.stats.instances, 0, "the removed object is no longer drawn during bounded cleanup");
-    assert!(geometry.draw_list.draw_batches().is_empty(), "hidden instance slots have no executable draw batches");
 
     prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     assert!(!geometry.cache.objects.contains_key(&entity));
@@ -1489,7 +1491,7 @@ fn gpu_camera_recovery_progresses() {
             && geometry.draw_list.committed_items().contains(&index)
             && !slots.is_empty()
             && slots.iter().all(|slot| {
-                !geometry.draw_list.hides_range(*slot, 1)
+                !hidden_slot(geometry, *slot)
                     && geometry
                         .draw_list
                         .draws()
@@ -1814,7 +1816,7 @@ fn gpu_blended_sort_keeps_origin() {
         assert_committed_positions(&geometry, turn);
         if geometry.cache.origin.x == 0.0 && geometry.draw_list.layout_pending() {
             pending_after_rebase += 1;
-            pending_orders.insert(geometry.draw_list.blended_order());
+            pending_orders.insert(geometry.main_view.blended_order());
         }
     }
     assert!(pending_orders.len() >= 2, "blended draw order follows the camera while the layout is pending: {}", pending_orders.len());
@@ -2202,8 +2204,6 @@ fn gpu_retirement_filters_history_draws() {
     assert_eq!(view.object_count(), 0, "the authoritative scene projection filters the retired region");
     assert!(geometry.cache.visible.is_empty(), "retired region content is removed from visibility immediately");
     assert_eq!(geometry.stats.instances, 0);
-    assert_eq!(geometry.stats.draw_commands, 0, "retired commands leave the prepared indirect list immediately");
-    assert!(geometry.draw_list.draw_batches().is_empty(), "retired slots are omitted while layout cleanup continues");
     let size = [128, 128];
     let depth = geometry.depth(&device, size).expect("retirement depth target");
     let pixels = render_pixels(&device, &queue, size, &depth, |pass| geometry.draw(pass));
@@ -2218,12 +2218,90 @@ fn gpu_retirement_filters_history_draws() {
         differences.len(),
         differences.first(),
         geometry.void_water.active,
-        geometry.draw_list.draw_batches().len()
+        geometry.main_view.batches().len()
     );
     prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     assert!(geometry.cache.rebuild.is_none(), "filtered object pages allow retirement recovery to finish");
     assert_eq!(geometry.cache.version.as_ref(), Some(&view.version()));
     assert!(geometry.cache.objects.is_empty(), "retired object cache entries are removed");
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --release --run-ignored only -E 'test(gpu_hidden_faces_draw_nothing)'"]
+fn gpu_hidden_faces_draw_nothing() {
+    let mut world = world::World::new(world::WorldLimits {
+        max_regions: 1,
+        max_entities: 4,
+        max_entities_per_region: 4,
+        max_tombstones_per_region: 1,
+        max_tombstones: 1,
+        max_tombstone_bytes_per_region: world::WorldLimits::tombstone_bytes_for_count(1),
+        max_tombstone_bytes: world::WorldLimits::tombstone_bytes_for_count(1),
+        max_journal_entries: 16,
+        max_journal_changes: 64,
+        max_region_name_bytes: 64,
+        max_recovery_targets: 4,
+    });
+    let region = world.register_region().expect("region registers");
+    let _ = world.patch_region(region, world::RegionInfo { origin: Some(DVec3::ZERO), ..Default::default() }).expect("origin applies");
+    let textures = std::array::from_fn(|index| Uuid::from_u128(98_510 + index as u128));
+    let settings = world::TerrainSettings::new(textures, [0.0; 4], [2.0; 4]).expect("terrain settings");
+    let _ = world.observe_terrain_settings(UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0), settings).expect("settings apply");
+    let patch = world::TerrainPatch::new(15, 15, Box::new([30.0; world::TERRAIN_PATCH_SAMPLES])).expect("terrain patch");
+    let _ = world.observe_terrain_patch(UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0), patch).expect("patch applies");
+    assert_matches!(
+        world.observe_water_height(UpdateSource::new(region, 3, OrderEvidence::Ordered(3), 0), 20.0).expect("water applies").outcome,
+        world::RegionOutcome::Patched { .. }
+    );
+    for (id, position, alpha) in [(1, Vec3::new(246.0, 244.0, 32.0), 255), (2, Vec3::new(244.0, 246.0, 32.0), 128)] {
+        let mut object = ObjectObservation::new(
+            UpdateSource::new(region, id, OrderEvidence::Ordered(u64::from(id)), 0),
+            Uuid::from_u128(u128::from(id)),
+            std::num::NonZeroU32::new(id).expect("fixture local ID"),
+            Kind::Object,
+            ParentUpdate::Root,
+        );
+        object.pose = Some(Pose { position: Some(position), rotation: Some(math::Quat::IDENTITY) });
+        object.scale = Some(Vec3::splat(2.0));
+        object.shape = FieldUpdate::Set(Shape::Prim(world::PrimShape::default()));
+        object.appearance = FieldUpdate::Set(Appearance::Surface);
+        object.surface_appearance = Some(
+            SurfaceAppearance::new(world::FaceAppearance { color: [200, 40, 40, alpha], ..Default::default() }, Vec::new())
+                .expect("fixture appearance"),
+        );
+        let _ = world.observe_object(object).expect("object applies");
+    }
+    let camera = Camera::new(DVec3::new(232.0, 232.0, 40.0), Vec3::new(1.0, 1.0, -0.6), 1.2, [128, 128]).expect("fixture camera");
+    let (mut scene, mut view) = Reconciler::new(crate::scene::Budget::default());
+    scene.set_camera(camera);
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let (device, queue) = vulkan_device();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    prepare_until_current(&device, &queue, &mut geometry, &view, camera);
+    let pipelines = geometry.draw_list.draws().iter().map(|draw| draw.pipeline).collect::<std::collections::HashSet<_>>();
+    for pipeline in [Pipeline::Surface, Pipeline::Blend, Pipeline::Terrain, Pipeline::RegionWater] {
+        assert!(pipelines.contains(&pipeline), "the fixture draws a {pipeline:?} face: {pipelines:?}");
+    }
+    let size = [128, 128];
+    let depth = geometry.depth(&device, size).expect("depth target");
+    let background = |geometry: &GeometryRenderer| {
+        render_pixels(&device, &queue, size, &depth, |pass| {
+            geometry.sky.draw(pass);
+            geometry.void_water.draw(pass);
+        })
+    };
+    let shown = render_pixels(&device, &queue, size, &depth, |pass| geometry.draw(pass));
+    assert_ne!(shown, background(&geometry), "the fixture faces cover pixels before hiding");
+
+    let GeometryRenderer { cache, draw_list, .. } = &mut geometry;
+    for (_, item) in cache.items.iter_mut() {
+        draw_list.hide_item(item);
+    }
+    let _ = geometry.draw_list.upload_patch(&queue, &geometry.instances);
+    let hidden = render_pixels(&device, &queue, size, &depth, |pass| geometry.draw(pass));
+    let background = background(&geometry);
+    let differences = hidden.iter().zip(&background).filter(|(hidden, background)| hidden != background).count();
+    assert_eq!(differences, 0, "zero instances draw no pixels on any pipeline");
 }
 
 #[test]
@@ -4231,7 +4309,7 @@ fn region_load_progresses_under_churn() {
             geometry.layout_required,
             geometry.stats.layout_stale_reason,
             geometry.stats.layout_invalidation_reason,
-            geometry.draw_list.batches_dirty(),
+            geometry.draw_list.cull_dirty(),
             geometry.draw_list.valid(),
             geometry.active_origin,
             geometry.cache.origin,
@@ -4414,14 +4492,14 @@ fn gpu_blended_rotation_uploads_instances() {
     };
     let before = read_instances(&geometry.instances);
     assert_eq!(before, expected_instances(&geometry), "the initial upload matches active transforms and materials");
-    let order_before = geometry.draw_list.blended_order();
+    let order_before = geometry.main_view.blended_order();
     prepare_frame(&device, &queue, &mut geometry, &view, camera(26.0));
     assert_eq!(geometry.stats.instances, instances);
     assert_eq!(geometry.stats.layouts, 0);
     assert_eq!(geometry.stats.blended_sorts, 1);
     let expected = expected_instances(&geometry);
     let actual = read_instances(&geometry.instances);
-    assert_ne!(geometry.draw_list.blended_order(), order_before, "the camera change reorders the blended draw commands");
+    assert_ne!(geometry.main_view.blended_order(), order_before, "the camera change reorders the blended draw commands");
     assert_eq!(expected, before, "camera sorting leaves blended instance slots unchanged");
     assert_eq!(actual, expected, "the GPU instance buffer keeps its transforms and materials");
     assert_eq!(geometry.stats.draw_instance_write_calls, 0, "sorting writes no instance data");
@@ -4506,8 +4584,8 @@ fn warmed_rotation_preserves_triangles(indirect: bool) {
     let page = Arc::as_ptr(geometry.meshes[&ids[0]].allocation.buffers()) as usize;
     assert!(ids.iter().all(|id| Arc::as_ptr(geometry.meshes[id].allocation.buffers()) as usize == page));
     let memory = geometry.memory.mesh_state();
-    assert_eq!(geometry.draw_list.draw_batches().len(), 1, "the warm meshes use one shared opaque page batch");
-    assert_eq!(geometry.draw_list.draw_batches()[0].count, 3);
+    assert_eq!(geometry.main_view.batches().len(), 1, "the warm meshes use one shared opaque page batch");
+    assert_eq!(geometry.main_view.batches()[0].count, 3);
     assert_eq!(geometry.stats.draw_commands, 3);
     assert_eq!(geometry.stats.draw_calls, if indirect { 1 } else { 3 });
     assert_visible_assets_match_source(&device, &queue, &geometry, &view, load_camera, &depth, &all_visible, "fully warm scene");
@@ -4544,8 +4622,8 @@ fn warmed_rotation_preserves_triangles(indirect: bool) {
         assert!(geometry.needs_frame(Instant::now()), "a pending bounded layout requests its next useful frame");
     }
     assert!(away_committed, "camera visibility commits over bounded turns: {away_turns:?}");
-    assert_eq!(geometry.draw_list.draw_batches().len(), 1);
-    assert_eq!(geometry.draw_list.draw_batches()[0].count, 2, "the opaque page batch drops the hidden command");
+    assert_eq!(geometry.main_view.batches().len(), 1);
+    assert_eq!(geometry.main_view.batches()[0].count, 2, "the opaque page batch drops the hidden command");
     assert_eq!(geometry.stats.draw_commands, 2);
     assert_eq!(geometry.stats.draw_calls, if indirect { 1 } else { 2 });
     assert_eq!(geometry.stats.uploaded_bytes, 0);
@@ -4594,8 +4672,8 @@ fn warmed_rotation_preserves_triangles(indirect: bool) {
         assert!(geometry.needs_frame(Instant::now()), "a pending bounded layout requests its next useful frame");
     }
     assert!(back_committed, "camera visibility reentry commits over bounded turns: {back_turns:?}");
-    assert_eq!(geometry.draw_list.draw_batches().len(), 1);
-    assert_eq!(geometry.draw_list.draw_batches()[0].count, 3, "the reentered command returns to the page batch");
+    assert_eq!(geometry.main_view.batches().len(), 1);
+    assert_eq!(geometry.main_view.batches()[0].count, 3, "the reentered command returns to the page batch");
     assert_eq!(geometry.stats.draw_commands, 3);
     assert_eq!(geometry.stats.draw_calls, if indirect { 1 } else { 3 });
     assert_eq!(geometry.stats.uploaded_bytes, 0);

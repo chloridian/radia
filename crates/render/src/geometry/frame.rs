@@ -5,7 +5,7 @@ use std::{
 };
 
 use assets::Priority;
-use math::{DVec3, Mat4};
+use math::{DVec3, Frustum, Mat4};
 use uuid::Uuid;
 use wgpu::{CommandEncoder, Device};
 use world::{Kind, WorldPose};
@@ -201,7 +201,6 @@ impl GeometryRenderer {
         self.mesh_admission.visits_this_frame = 0;
         let previous_camera = self.cache.camera;
         let camera_changed = previous_camera != Some(camera) || self.cache.size != size;
-        let camera_position_changed = previous_camera.is_none_or(|previous| previous.position() != camera.position());
         let origin = scene_origin(camera.position());
         if !self.draw_list.valid() {
             self.active_origin = origin;
@@ -296,7 +295,6 @@ impl GeometryRenderer {
         if previous_mesh_state != self.memory.mesh_state() {
             self.draw_list.invalidate_batches();
         }
-        let mut batches_invalidated = self.draw_list.flush_batch_invalidation();
         let meshes_started = Instant::now();
         let pending_priority_changed = camera_changed && (self.mesh_admission.active || !self.pending_meshes.is_empty());
         let mesh_demands_started = Instant::now();
@@ -335,7 +333,6 @@ impl GeometryRenderer {
         self.stats.items_updated = update.items_updated;
         if self.cache.mesh_state != previous_mesh_state {
             self.draw_list.invalidate_batches();
-            batches_invalidated |= self.draw_list.flush_batch_invalidation();
         }
         let mut appearance_deadline = None;
         let mut gated_entities = HashSet::new();
@@ -478,7 +475,7 @@ impl GeometryRenderer {
                 }
             }
         }
-        let layout_progress = self.draw_list.advance_layout(&mut self.cache.items, &self.meshes, self.indirect_first_instance);
+        let layout_progress = self.draw_list.advance_layout(&mut self.cache.items);
         let layout_committed = layout_progress.as_ref().is_some_and(|progress| progress.complete);
         if layout_committed {
             self.active_origin = frame_origin;
@@ -496,7 +493,6 @@ impl GeometryRenderer {
             if progress.complete {
                 self.stats.layouts = 1;
                 self.omitted_faces = progress.stats.omitted_faces;
-                self.stats.blended_sorts += usize::from(progress.stats.blended);
             }
         }
         if layout_committed {
@@ -521,21 +517,8 @@ impl GeometryRenderer {
 
         let draw_updates_started = Instant::now();
         self.prepare_face_patches(&update, visible_changed, animation_now);
-        let patch_stats =
-            self.draw_list.patch(&self.cache.items, &self.cache.patch_faces, &update.pose_items, camera, self.active_origin, frame_origin);
-        self.stats.faces_patched = patch_stats.faces_patched;
-        let blended_sorted = if layout_committed && patch_stats.blended_sorted {
-            self.draw_list.reorder_blended(&self.cache.items);
-            true
-        } else if !layout_committed && camera_position_changed && self.draw_list.has_blended() {
-            self.draw_list.sort_blended(&self.cache.items, camera)
-        } else if patch_stats.blended_sorted {
-            self.draw_list.reorder_blended(&self.cache.items);
-            true
-        } else {
-            false
-        };
-        self.stats.blended_sorts += usize::from(blended_sorted);
+        self.stats.faces_patched =
+            self.draw_list.patch(&self.cache.items, &self.cache.patch_faces, &update.pose_items, self.active_origin, frame_origin);
         let draw_upload_started = Instant::now();
         if layout_committed {
             let uploaded = self.draw_list.upload_layout(&self.queue, &self.instances);
@@ -548,22 +531,16 @@ impl GeometryRenderer {
         }
         times.draw_upload = draw_upload_started.elapsed();
         let draw_updates_time = draw_updates_started.elapsed();
-        let draw_commands_changed = layout_committed || blended_sorted || batches_invalidated || self.draw_list.batches_dirty();
         let draw_batches_started = Instant::now();
-        let blended_commands_only = blended_sorted && !layout_committed && !batches_invalidated && !self.draw_list.batches_dirty();
-        let mut command_upload_start = 0;
-        if layout_committed && !blended_sorted {
-            self.stats.draw_batch_commands_built = self.draw_list.draws().len();
-        } else if blended_commands_only {
-            command_upload_start = self.draw_list.rebuild_blended_batches(&self.meshes, self.indirect_first_instance);
-            self.stats.draw_batch_commands_built = self.draw_list.draws().len();
-        } else if draw_commands_changed {
-            self.stats.draw_batch_commands_built = self.draw_list.build_draw_batches(&self.meshes, self.indirect_first_instance);
-        }
-        if draw_commands_changed {
-            let bytes = self.draw_list.indirect_bytes().get(command_upload_start..).unwrap_or_default();
-            if !bytes.is_empty() {
-                self.queue.write_buffer(&self.indirect, command_upload_start as u64, bytes);
+        if camera_changed || self.draw_list.cull_dirty() {
+            let frustum = Frustum::from_clip_matrix(projection);
+            let culled =
+                self.draw_list.cull(&self.cache.items, camera, &frustum, &self.meshes, self.indirect_first_instance, &mut self.main_view);
+            self.stats.draw_batch_commands_built = culled.commands;
+            self.stats.blended_sorts += usize::from(culled.blended_sorted);
+            let bytes = self.main_view.indirect_bytes();
+            if culled.changed && !bytes.is_empty() {
+                self.queue.write_buffer(&self.indirect, 0, bytes);
                 self.stats.draw_command_bytes_uploaded = bytes.len();
             }
         }
@@ -646,10 +623,9 @@ impl GeometryRenderer {
             (false, false) => None,
         };
         self.stats.instances = self.draw_list.visible_items();
-        let draw_submissions =
-            if self.indirect_first_instance { self.draw_list.draw_batches().len() } else { self.draw_list.command_count() };
+        let draw_submissions = if self.indirect_first_instance { self.main_view.batches().len() } else { self.main_view.command_count() };
         self.stats.draw_calls = draw_submissions + usize::from(self.void_water.active);
-        self.stats.draw_commands = self.draw_list.command_count() + usize::from(self.void_water.active);
+        self.stats.draw_commands = self.main_view.command_count() + usize::from(self.void_water.active);
         self.stats.pending_meshes = self.pending_meshes.len();
         self.stats.pending_textures = self.pending_textures.len();
         if self.recovery_publication_pending

@@ -6,13 +6,13 @@ use std::{
 };
 
 use assets::{Budget, Content, LoadJob, Priority, Request, Resource, Sampler, Status, Store};
-use math::{DVec3, Quat, Vec3};
+use math::{DVec3, Frustum, Mat4, Quat, Vec3};
 use proptest::{prelude::*, test_runner::RngSeed};
 use utils::AssetId;
 use uuid::Uuid;
 use world::Region;
 
-use super::{DrawKey, DrawList, MAX_FACE_INSTANCES};
+use super::{DrawKey, DrawList, LayoutStats, MAX_FACE_INSTANCES, ViewDraws};
 use crate::{
     geometry::{
         ShadingMode,
@@ -23,7 +23,7 @@ use crate::{
         texture_bindings::MaterialImages,
     },
     material::FaceParams,
-    pipeline::Pipeline,
+    pipeline::{INSTANCE_BYTES, Pipeline},
     scene::{Camera, SharedMesh},
     texture::TextureKey,
 };
@@ -38,7 +38,7 @@ fn canceled_layout_retires_in_chunks() {
     let active_refs = group_refs(&list, group);
     let active_commands = list.draws().len();
     let active_items = list.visible_items();
-    let active_bytes = list.instance_bytes.len();
+    let active_bytes = list.committed.instance_bytes.len();
     let staged = staged_layout(&mut list, index, camera, &items.items, STAGED_REFS);
     assert_eq!(group_refs(&list, group), active_refs + STAGED_REFS);
     list.pending = Some(staged);
@@ -60,11 +60,11 @@ fn canceled_layout_retires_in_chunks() {
     let mut steps = 0;
     while list.layout_pending() {
         let before = list.retired_entries_remaining();
-        let _ = list.advance_layout(&mut items.items, &HashMap::new(), false);
+        let _ = list.advance_layout(&mut items.items);
         assert!(before.saturating_sub(list.retired_entries_remaining()) <= super::RETIRED_LAYOUT_ENTRIES_PER_FRAME);
         assert_eq!(list.draws().len(), active_commands, "retirement leaves active draw commands intact");
         assert_eq!(list.visible_items(), active_items, "retirement leaves active visibility intact");
-        assert_eq!(list.instance_bytes.len(), active_bytes, "retirement leaves active instance data intact");
+        assert_eq!(list.committed.instance_bytes.len(), active_bytes, "retirement leaves active instance data intact");
         steps += 1;
         assert!(steps < 100, "staged group references are released in bounded turns");
     }
@@ -85,7 +85,7 @@ fn stale_layout_retires_whole_build() {
     list.pending = Some(staged);
     list.mark_layout_stale();
 
-    let progress = list.advance_layout(&mut items.items, &HashMap::new(), false).expect("stale build is observed");
+    let progress = list.advance_layout(&mut items.items).expect("stale build is observed");
     assert!(progress.stale);
     assert!(list.pending.is_none());
     assert!(list.retired.is_some(), "stale staged inputs remain owned by incremental retirement");
@@ -95,7 +95,7 @@ fn stale_layout_retires_whole_build() {
     let mut steps = 0;
     while list.layout_pending() {
         let before = list.retired_entries_remaining();
-        let _ = list.advance_layout(&mut items.items, &HashMap::new(), false);
+        let _ = list.advance_layout(&mut items.items);
         assert!(before.saturating_sub(list.retired_entries_remaining()) <= super::RETIRED_LAYOUT_ENTRIES_PER_FRAME);
         assert_eq!(list.draws().len(), active_commands, "retirement leaves active draw commands intact");
         assert_eq!(list.visible_items(), active_items, "retirement leaves active visibility intact");
@@ -119,7 +119,7 @@ fn canceled_build_keeps_committed_patches() {
     let mut visible = (1..=2 * super::LAYOUT_ITEMS_PER_FRAME as u128)
         .map(|id| items.insert_item(new_item((2, id, 0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index"))
         .collect::<Vec<_>>();
-    list.layout(&[], &visible, &mut items.items, camera);
+    layout(&mut list, &visible, &mut items.items, camera);
     let target = visible[500];
     let target_slot = |items: &FrameCache| items.items.get(target).expect("target item").faces[0].slot.expect("target face slot");
     let committed = target_slot(&items);
@@ -127,7 +127,7 @@ fn canceled_build_keeps_committed_patches() {
         let item = items.items.get_mut(target).expect("target item");
         item.rotation = Quat::from_rotation_z(angle);
         item.transform = instance_base(item.position, item.rotation, item.scale, false, origin);
-        list.patch(&items.items, &[(target, 0)], &[target], camera, origin, origin);
+        list.patch(&items.items, &[(target, 0)], &[target], origin, origin);
         items.items.get(target).expect("target item").transform
     };
 
@@ -135,7 +135,7 @@ fn canceled_build_keeps_committed_patches() {
     visible.insert(0, entering);
     assert!(list.request_layout(&visible, camera, true, &items.items));
     for _ in 0..10_000 {
-        let _ = list.advance_layout(&mut items.items, &HashMap::new(), false);
+        let _ = list.advance_layout(&mut items.items);
         if list.staged_progress().is_some_and(|(phase, cursor, ..)| phase == "fill" && cursor > 501) {
             break;
         }
@@ -152,13 +152,13 @@ fn canceled_build_keeps_committed_patches() {
         if !list.layout_pending() {
             break;
         }
-        let _ = list.advance_layout(&mut items.items, &HashMap::new(), false);
+        let _ = list.advance_layout(&mut items.items);
     }
     assert!(!list.layout_pending(), "the canceled build retires");
     let transform = rotate(&mut items, &mut list, 0.9);
     assert_eq!(list.instance_transform(committed), Some(&transform[..]), "retirement keeps committed poses patched");
 
-    list.layout(&[], &visible, &mut items.items, camera);
+    layout(&mut list, &visible, &mut items.items, camera);
     let next = target_slot(&items);
     assert_ne!(next, committed, "the next generation moves the target face");
     let transform = rotate(&mut items, &mut list, 1.2);
@@ -173,7 +173,7 @@ fn plain_staging_retires_at_once() {
     list.pending = Some(staged);
     list.cancel_layout();
 
-    let _ = list.advance_layout(&mut items.items, &HashMap::new(), false);
+    let _ = list.advance_layout(&mut items.items);
     assert!(!list.layout_pending(), "staged data without resources does not hold the next layout back");
     assert!(list.request_layout(&[index], camera, false, &items.items));
 }
@@ -196,29 +196,6 @@ fn draw_changes_match_fresh_layout() {
 }
 
 #[test]
-fn blended_patch_skips_sort() {
-    let (_region_world, region) = crate::test_support::registered_region();
-    let (_scene, view, _) = super::super::fixtures::scene(255);
-    let object = view.objects().next().expect("fixture object");
-    let (_, mesh) = object.mesh().expect("fixture mesh");
-    let mesh = mesh.clone();
-    let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
-    let camera = camera(0.0);
-    let origin = super::super::instance::scene_origin(camera.position());
-    let id = item_id(0);
-    let mut items = FrameCache::default();
-    let mut list = DrawList::default();
-    let index = items.insert_item(new_item(id, 3, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index");
-    list.layout(&[], &[index], &mut items.items, camera);
-    if let Some(face) = items.get_by_id_mut(id).and_then(|item| item.faces.first_mut()) {
-        face.parameter_bytes[0] ^= 1;
-    }
-    let stats = list.patch(&items.items, &[(index, 0)], &[], camera, origin, origin);
-    assert_eq!(stats.faces_patched, 1);
-    assert!(!stats.blended_sorted);
-}
-
-#[test]
 fn hiding_slot_preserves_others() {
     let (_region_world, region) = crate::test_support::registered_region();
     let (_scene, view, _) = super::super::fixtures::scene(255);
@@ -232,16 +209,19 @@ fn hiding_slot_preserves_others() {
     let mut list = DrawList::default();
     let first = items.insert_item(new_item(item_id(0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("first item index");
     let second = items.insert_item(new_item(item_id(1), 1, 0.0, origin, &mesh, region, &textures, &mut list)).expect("second item index");
-    list.layout(&[], &[first, second], &mut items.items, camera);
+    layout(&mut list, &[first, second], &mut items.items, camera);
+    let commands = list.draws().len();
     let hidden_slot = items.items.get(first).and_then(|item| item.faces.first()).and_then(|face| face.slot).expect("first draw slot");
     let survivor_slot = items.items.get(second).and_then(|item| item.faces.first()).and_then(|face| face.slot).expect("second draw slot");
+    let survivor_bytes = instance_bytes(&list, survivor_slot);
 
     let hidden = items.items.get_mut(first).and_then(|item| item.faces.first_mut()).expect("first face");
     assert!(list.hide_face(hidden));
 
-    assert!(list.batches_dirty());
-    assert!(list.hides_range(hidden_slot, 1));
-    assert!(!list.hides_range(survivor_slot, 1));
+    assert!(instance_bytes(&list, hidden_slot).iter().all(|byte| *byte == 0), "a hidden face draws a zero instance");
+    assert_eq!(instance_bytes(&list, survivor_slot), survivor_bytes);
+    assert_eq!(list.draws().len(), commands, "hiding keeps committed commands until the next layout");
+    assert!(list.committed.dirty_slots.contains(&hidden_slot));
 }
 
 #[test]
@@ -276,15 +256,15 @@ fn overflow_omits_until_in_budget() {
     }
 
     let visible = indices.clone();
-    let stats = list.layout(&[], &visible, &mut items.items, camera);
+    let stats = layout(&mut list, &visible, &mut items.items, camera);
     let omitted = items.items.get(indices[1]).expect("omitted item");
     let emitted = list.draws().iter().map(|draw| draw.count as usize).sum::<usize>();
     let retained_slots: HashSet<_> =
         items.items.get(indices[0]).expect("retained item").faces.iter().filter_map(|face| face.slot).collect();
 
     assert_eq!(stats.omitted_faces, faces_per_item);
-    assert!(list.instance_count <= MAX_FACE_INSTANCES);
-    assert_eq!(emitted, list.instance_count);
+    assert!(instance_count(&list) <= MAX_FACE_INSTANCES);
+    assert_eq!(emitted, instance_count(&list));
     assert_eq!(retained_slots.len(), faces_per_item);
     assert!(retained_slots.iter().all(|slot| usize::try_from(*slot).is_ok_and(|slot| slot < MAX_FACE_INSTANCES)));
     assert!(omitted.faces.iter().all(|face| face.slot.is_none()), "omitted items cannot own instance slots");
@@ -293,7 +273,7 @@ fn overflow_omits_until_in_budget() {
     let retained_faces = MAX_FACE_INSTANCES - faces_per_item - 1;
     let removed = items.items.get_mut(indices[1]).expect("second item").faces.split_off(retained_faces);
     list.release_faces(&removed);
-    let stats = list.layout(&visible, &visible, &mut items.items, camera);
+    let stats = layout(&mut list, &visible, &mut items.items, camera);
     let emitted = list.draws().iter().map(|draw| draw.count as usize).sum::<usize>();
     let slots: HashSet<_> = indices
         .iter()
@@ -302,13 +282,134 @@ fn overflow_omits_until_in_budget() {
         .collect();
 
     assert_eq!(stats.omitted_faces, 0);
-    assert_eq!(list.instance_count, faces_per_item + retained_faces);
-    assert_eq!(emitted, list.instance_count);
-    assert_eq!(slots.len(), list.instance_count);
+    assert_eq!(instance_count(&list), faces_per_item + retained_faces);
+    assert_eq!(emitted, instance_count(&list));
+    assert_eq!(slots.len(), instance_count(&list));
     assert!(slots.iter().all(|slot| usize::try_from(*slot).is_ok_and(|slot| slot < MAX_FACE_INSTANCES)));
-    assert!(list.instance_count < MAX_FACE_INSTANCES);
+    assert!(instance_count(&list) < MAX_FACE_INSTANCES);
     assert!(indices.iter().all(|index| items.items.get(*index).is_some_and(|item| item.faces.iter().all(|face| face.slot.is_some()))));
     assert!(list.draws().iter().any(|draw| draw.pipeline == Pipeline::Blend), "restored items return to draw commands");
+}
+
+#[test]
+fn moved_faces_cull_by_their_pose() {
+    let (_region_world, region) = crate::test_support::registered_region();
+    let (_scene, view, _) = super::super::fixtures::scene(255);
+    let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
+    let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
+    let camera = camera(0.0);
+    let origin = super::super::instance::scene_origin(camera.position());
+    let mut items = FrameCache::default();
+    let mut list = DrawList::default();
+    let visible = (1..=2 * super::LAYOUT_ITEMS_PER_FRAME as u128)
+        .map(|id| items.insert_item(new_item((2, id, 0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index"))
+        .collect::<Vec<_>>();
+    let target = visible[500];
+    let move_target = |items: &mut FrameCache, list: &mut DrawList, position: DVec3| {
+        let item = items.items.get_mut(target).expect("target item");
+        item.position = position;
+        item.transform = instance_base(item.position, item.rotation, item.scale, false, origin);
+        list.patch(&items.items, &[(target, 0)], &[target], origin, origin);
+    };
+    let target_emitted = |items: &FrameCache, list: &DrawList, camera: Camera| {
+        let mut view = ViewDraws::default();
+        list.select(&items.items, camera, &Frustum::from_clip_matrix(crate::pipeline::projection(camera, [128, 128])), &mut view);
+        let face = &items.items.get(target).expect("target item").faces[0];
+        face_command(list, &view, face).1
+    };
+
+    assert!(list.request_layout(&visible, camera, true, &items.items));
+    for _ in 0..10_000 {
+        let _ = list.advance_layout(&mut items.items);
+        if list.staged_progress().is_some_and(|(phase, cursor, ..)| phase == "fill" && cursor > 501) {
+            break;
+        }
+    }
+    assert_matches!(list.staged_progress(), Some(("fill", cursor, ..)) if cursor > 501, "the build staged the target face");
+    move_target(&mut items, &mut list, DVec3::new(-150.0, 0.0, 0.0));
+    settle(&mut list, &mut items.items);
+    let behind = Camera::new(DVec3::new(-100.0, 0.0, 0.0), Vec3::NEG_X, 1.0, [128, 128]).expect("test camera");
+    assert!(target_emitted(&items, &list, behind), "a pose patched into a staged build moves its command bounds");
+
+    move_target(&mut items, &mut list, DVec3::new(0.0, 0.0, 150.0));
+    assert!(list.cull_dirty(), "a committed pose patch requests a cull");
+    let above = Camera::new(DVec3::new(0.0, 0.0, 100.0), Vec3::Z, 1.0, [128, 128]).expect("test camera");
+    assert!(target_emitted(&items, &list, above), "a pose patched into the committed list moves its command bounds");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        rng_seed: RngSeed::Fixed(0x51c3_77e0_9b2d_4f18),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn culling_matches_face_visibility(
+        placements in prop::collection::vec((-100.0f64..100.0, -100.0f64..100.0, -12.0f64..12.0, 0.25f32..12.0, 0u8..6), 1..160),
+        eye in (-50.0f64..50.0, -50.0f64..50.0, -8.0f64..8.0),
+        yaw in 0.0f64..std::f64::consts::TAU,
+        pitch in -0.6f64..0.6,
+        draw_distance in 32.0f64..160.0,
+    ) {
+        assert_cull_matches_faces(&placements, DVec3::new(eye.0, eye.1, eye.2), yaw, pitch, draw_distance);
+    }
+}
+
+fn assert_cull_matches_faces(placements: &[(f64, f64, f64, f32, u8)], eye: DVec3, yaw: f64, pitch: f64, draw_distance: f64) {
+    let (_region_world, region) = crate::test_support::registered_region();
+    let (_scene, view, _) = super::super::fixtures::scene(255);
+    let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
+    let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
+    let direction = DVec3::new(yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin()).as_vec3();
+    let viewport = [128, 96];
+    let camera =
+        Camera::new(eye, direction, 1.0, viewport).and_then(|camera| camera.with_quality(draw_distance, 1.0)).expect("test camera");
+    let origin = super::super::instance::scene_origin(camera.position());
+    let mut items = FrameCache::default();
+    let mut list = DrawList::default();
+    let mut visible = Vec::new();
+    for (id, (x, y, z, scale, style)) in placements.iter().enumerate() {
+        let mut item = new_item((2, id as u128, 0), *style, 0.0, origin, &mesh, region, &textures, &mut list);
+        item.position = DVec3::new(*x, *y, *z);
+        item.scale = Vec3::splat(*scale);
+        item.transform = instance_base(item.position, item.rotation, item.scale, false, origin);
+        visible.push(items.insert_item(item).expect("test item index"));
+    }
+    visible.sort_unstable_by_key(|index| items.items.get(*index).map(|item| item.id));
+    layout(&mut list, &visible, &mut items.items, camera);
+
+    let frustum = Frustum::from_clip_matrix(crate::pipeline::projection(camera, viewport));
+    let mut view = ViewDraws::default();
+    list.select(&items.items, camera, &frustum, &mut view);
+    for index in &visible {
+        let item = items.items.get(*index).expect("visible item");
+        let expected = super::super::visibility::WorldSphere::new(item.position, item.rotation, item.scale, item.info.bounds, camera)
+            .is_some_and(|sphere| sphere.visible(item.shading, camera, &frustum));
+        for face in &item.faces {
+            let (count, emitted) = face_command(&list, &view, face);
+            if count == 1 {
+                assert_eq!(emitted, expected, "a single-instance command is emitted exactly when its face is visible");
+            } else if expected {
+                assert!(emitted, "an instanced command is emitted when any of its faces is visible");
+            }
+        }
+    }
+}
+
+fn face_command(list: &DrawList, view: &ViewDraws, face: &CachedFace) -> (u32, bool) {
+    let state = &list.committed;
+    let address = list.committed_address(face).expect("face has a committed slot");
+    match address.blended_index {
+        Some(record) => {
+            let draw = &state.draws[state.opaque_draws + record];
+            (draw.count, view.blended.contains(&(record as u32)))
+        }
+        None => {
+            let index = state.opaque().partition_point(|draw| draw.first + draw.count <= address.slot);
+            (state.draws[index].count, view.opaque.contains(&(index as u32)))
+        }
+    }
 }
 
 proptest! {
@@ -363,16 +464,21 @@ proptest! {
             if key.blended() { 2 } else { u8::from(key.fullbright()) }
         };
 
-        list.layout(&[], &visible, &mut items.items, camera);
+        layout(&mut list, &visible, &mut items.items, camera);
         let ranks = list.draws().iter().map(|draw| rank(&list, draw.group)).collect::<Vec<_>>();
         prop_assert!(ranks.is_sorted(), "draw classes out of order: {ranks:?}");
-        prop_assert_eq!(ranks.iter().filter(|rank| **rank < 2).count(), list.opaque_draws);
+        prop_assert_eq!(ranks.iter().filter(|rank| **rank < 2).count(), list.committed.opaque_draws);
         prop_assert_eq!(ranks.contains(&1), has_fullbright);
+
+        let mut view = ViewDraws::default();
+        list.select(&items.items, camera, &Frustum::from_clip_matrix(crate::pipeline::projection(camera, [128, 128])), &mut view);
+        let culled = view.opaque.iter().map(|index| ranks[*index as usize]).collect::<Vec<_>>();
+        prop_assert!(!culled.is_empty() && culled.is_sorted(), "culled opaque classes out of order: {culled:?}");
 
         prop_assert!(list.request_layout(&visible, camera, false, &items.items));
         let mut steps = 0;
         while !list.staged_progress().is_some_and(|(phase, ..)| matches!(phase, "allocate" | "fill")) {
-            let _ = list.advance_layout(&mut items.items, &HashMap::new(), false);
+            let _ = list.advance_layout(&mut items.items);
             steps += 1;
             prop_assert!(steps < 100, "staged layout reaches allocation");
         }
@@ -397,25 +503,22 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
     let mut items = FrameCache::default();
     let mut list = DrawList::default();
     let mut visible = visible_items(&items.items, camera_x);
-    list.layout(&[], &visible, &mut items.items, current_camera);
+    layout(&mut list, &visible, &mut items.items, current_camera);
     assert_matches_fresh(&list, &items.items, &visible, current_camera);
     let mut camera_x = camera_x;
     let mut origin = origin;
 
     for (kind, item_index, style, delta_x, delta_y) in operations {
         let id = item_id(*item_index);
-        let current_camera = camera(camera_x);
         let previous_visible = visible.clone();
-        let mut camera_changed = false;
-        let mut layout = false;
-        let mut blended_patch = false;
+        let mut relayout = false;
         match kind % 6 {
             0 => {
                 if items.index(id).is_none() {
                     items
                         .insert_item(new_item(id, *style, camera_x, origin, &mesh, region, &textures, &mut list))
                         .expect("test item index");
-                    layout = true;
+                    relayout = true;
                 }
             }
             1 => {
@@ -423,14 +526,14 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
                     && let Some((item, _)) = items.remove_item(index)
                 {
                     list.release_faces(&item.faces);
-                    layout = true;
+                    relayout = true;
                 }
             }
             2 => {
                 if let Some(item) = items.get_by_id_mut(id) {
                     list.release_faces(&item.faces);
                     item.faces = vec![new_face(id, *style, &item.mesh, item.info.centers[0], item.scale, &textures, &mut list)];
-                    layout = true;
+                    relayout = true;
                 }
             }
             3 => {
@@ -445,42 +548,35 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
                 };
                 if changed {
                     let index = items.index(id).expect("updated test item");
-                    let stats = list.patch(&items.items, &[(index, 0)], &[index], current_camera, origin, origin);
-                    blended_patch = stats.blended_sorted;
+                    list.patch(&items.items, &[(index, 0)], &[index], origin, origin);
                 }
             }
             4 => {
                 camera_x += f64::from(*delta_x);
-                camera_changed = true;
                 let next_origin = super::super::instance::scene_origin(camera(camera_x).position());
                 if next_origin != origin {
                     origin = next_origin;
                     for (_, item) in items.items.iter_mut() {
                         item.transform = instance_base(item.position, item.rotation, item.scale, item.invert_normals, origin);
                     }
-                    layout = true;
+                    relayout = true;
                 }
             }
             _ => {
                 camera_x = (camera_x / 256.0).floor() * 256.0 + 256.0;
-                camera_changed = true;
                 origin = super::super::instance::scene_origin(camera(camera_x).position());
                 for (_, item) in items.items.iter_mut() {
                     item.transform = instance_base(item.position, item.rotation, item.scale, item.invert_normals, origin);
                 }
-                layout = true;
+                relayout = true;
             }
         }
 
         let camera = camera(camera_x);
         let next_visible = visible_items(&items.items, camera_x);
-        layout |= previous_visible != next_visible;
-        if layout {
-            list.layout(&previous_visible, &next_visible, &mut items.items, camera);
-        } else if camera_changed && list.has_blended() {
-            list.sort_blended(&items.items, camera);
-        } else if blended_patch {
-            list.reorder_blended(&items.items);
+        relayout |= previous_visible != next_visible;
+        if relayout {
+            layout(&mut list, &next_visible, &mut items.items, camera);
         }
         visible = next_visible;
         assert_matches_fresh(&list, &items.items, &visible, camera);
@@ -499,7 +595,7 @@ fn active_layout() -> (world::World, crate::scene::SceneView, Camera, FrameCache
     let mut items = FrameCache::default();
     let mut list = DrawList::default();
     let index = items.insert_item(new_item(item_id(0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index");
-    list.layout(&[], &[index], &mut items.items, camera);
+    layout(&mut list, &[index], &mut items.items, camera);
     (_region_world, view, camera, items, list, index)
 }
 
@@ -514,7 +610,6 @@ fn staged_layout(list: &mut DrawList, index: ItemIndex, camera: Camera, items: &
         build.state.draw_group_refs.push(group);
     }
     build.state.instance_bytes.resize(3 * 1024 * 1024, 0);
-    build.state.indirect_bytes.resize(2 * 1024 * 1024, 0);
     build
 }
 
@@ -524,34 +619,30 @@ fn group_refs(list: &DrawList, group: u32) -> usize {
 
 fn staged_entry_count(build: &super::LayoutBuild) -> usize {
     let state = &build.state;
-    build.previous.len()
+    build.uploads.len()
+        + build.previous.len()
         + build.visible.len()
         + build.mesh_pins.len()
         + build.layout_items.len()
         + build.selected_items.len()
-        + build.batch_seen.len()
-        + build.group_limits.len()
+        + build.commands.len()
+        + build.command_keys.len()
+        + build.cells.len()
+        + build.item_cells.len()
         + build.priority.len()
         + build.blended.len()
         + state.draws.len()
+        + state.cells.len()
         + state.mesh_references.len()
-        + state.active_groups.len()
         + state.active_textures.len()
         + state.active_terrain.len()
         + state.texture_seen.len()
         + state.terrain_seen.len()
-        + state.group_counts.len()
-        + state.group_offsets.len()
-        + state.group_cursors.len()
         + state.layout_items.len()
-        + state.priority_items.len()
         + state.draw_group_refs.len()
         + state.draw_group_seen.len()
         + state.blended.len()
         + state.dirty_slots.len()
-        + state.batch_order.len()
-        + state.draw_batches.len()
-        + state.first_instances.len()
 }
 
 fn staged_allocation_bytes(build: &super::LayoutBuild) -> usize {
@@ -563,38 +654,37 @@ fn staged_allocation_bytes(build: &super::LayoutBuild) -> usize {
         values.capacity().saturating_mul(std::mem::size_of::<T>())
     }
 
+    fn map_bytes<K, V>(values: &HashMap<K, V>) -> usize {
+        values.capacity().saturating_mul(std::mem::size_of::<(K, V)>())
+    }
+
     let state = &build.state;
     [
+        set_bytes(&build.uploads),
         vec_bytes(&build.previous),
         vec_bytes(&build.visible),
         set_bytes(&build.mesh_pins),
         vec_bytes(&build.layout_items),
         set_bytes(&build.selected_items),
-        set_bytes(&build.batch_seen),
-        vec_bytes(&build.group_limits),
+        map_bytes(&build.commands),
+        vec_bytes(&build.command_keys),
+        map_bytes(&build.cells),
+        vec_bytes(&build.item_cells),
         build.priority.capacity().saturating_mul(std::mem::size_of::<super::PriorityItem>()),
-        build.blended.capacity().saturating_mul(std::mem::size_of::<super::BlendedFace>()),
+        vec_bytes(&build.blended),
         vec_bytes(&state.draws),
+        vec_bytes(&state.cells),
         set_bytes(&state.mesh_references),
         vec_bytes(&state.instance_bytes),
-        vec_bytes(&state.active_groups),
         vec_bytes(&state.active_textures),
         vec_bytes(&state.active_terrain),
         set_bytes(&state.texture_seen),
         set_bytes(&state.terrain_seen),
-        vec_bytes(&state.group_counts),
-        vec_bytes(&state.group_offsets),
-        vec_bytes(&state.group_cursors),
         vec_bytes(&state.layout_items),
-        vec_bytes(&state.priority_items),
         vec_bytes(&state.draw_group_refs),
         set_bytes(&state.draw_group_seen),
         vec_bytes(&state.blended),
         vec_bytes(&state.dirty_slots),
-        vec_bytes(&state.batch_order),
-        vec_bytes(&state.draw_batches),
-        vec_bytes(&state.indirect_bytes),
-        vec_bytes(&state.first_instances),
     ]
     .into_iter()
     .fold(0usize, usize::saturating_add)
@@ -702,38 +792,60 @@ fn new_face(
 
 fn assert_matches_fresh(list: &DrawList, items: &ItemSlab, visible: &[ItemIndex], camera: Camera) {
     let expected = fresh_output(list, items, visible, camera);
+    let state = &list.committed;
     let mut opaque = OpaqueOutput::new();
-    let mut blended = BlendedOutput::new();
+    let mut blended = HashMap::<(DrawKey, Vec<u8>), usize>::new();
     let mut slots = HashSet::new();
-    for (index, draw) in list.draws.iter().enumerate() {
-        let key = DrawKey {
-            mesh: draw.mesh,
-            start: draw.indices.start,
-            end: draw.indices.end,
-            pipeline: draw.pipeline,
-            textures: draw.textures,
-            terrain: draw.terrain,
-        };
+    for (index, draw) in state.draws.iter().enumerate() {
+        let key = draw_key(draw);
         for slot in draw.first..draw.first.saturating_add(draw.count) {
             assert!(slots.insert(slot), "each draw command covers a unique instance slot");
             let bytes = instance_bytes(list, slot);
-            if index < list.opaque_draws {
+            if index < state.opaque_draws {
                 *opaque.entry((key, bytes)).or_default() += 1;
             } else {
-                blended.push((key, bytes));
+                *blended.entry((key, bytes)).or_default() += 1;
             }
         }
     }
     let expected_slots =
         items.iter().filter(|(index, _)| contains_item(visible, items, *index)).map(|(_, item)| item.faces.len()).sum::<usize>();
     assert_eq!(slots.len(), expected_slots, "every visible face has one draw slot");
-    assert_eq!(list.instance_count, expected_slots, "instance output contains only visible face bytes");
+    assert_eq!(instance_count(list), expected_slots, "instance output contains only visible face bytes");
     assert!(opaque == expected.0, "opaque draw key and packed byte multiset differs from a fresh layout");
-    assert!(blended == expected.1, "blended draw keys or back-to-front packed byte order differs from a fresh layout");
+    let mut expected_blended = HashMap::<(DrawKey, Vec<u8>), usize>::new();
+    for entry in &expected.1 {
+        *expected_blended.entry(entry.clone()).or_default() += 1;
+    }
+    assert!(blended == expected_blended, "blended draw key and packed byte multiset differs from a fresh layout");
+
+    let mut view = ViewDraws::default();
+    list.select(items, camera, &Frustum::from_clip_matrix(Mat4::ZERO), &mut view);
+    assert_eq!(view.opaque.len(), state.opaque_draws, "every opaque command has bounds");
+    let order = view
+        .blended
+        .iter()
+        .map(|record| {
+            let draw = &state.draws[state.opaque_draws + *record as usize];
+            (draw_key(draw), instance_bytes(list, draw.first))
+        })
+        .collect::<BlendedOutput>();
+    assert!(order == expected.1, "blended draws are not emitted back to front");
     for (index, item) in items.iter() {
         for face in &item.faces {
             assert_eq!(face.slot.is_some(), contains_item(visible, items, index), "hidden items cannot retain instance slots");
         }
+    }
+}
+
+fn draw_key(draw: &super::DrawCommand) -> DrawKey {
+    DrawKey {
+        mesh: draw.mesh,
+        start: draw.indices.start,
+        end: draw.indices.end,
+        pipeline: draw.pipeline,
+        textures: draw.textures,
+        terrain: draw.terrain,
     }
 }
 
@@ -758,9 +870,41 @@ fn fresh_output(list: &DrawList, items: &ItemSlab, visible: &[ItemIndex], camera
 }
 
 fn instance_bytes(list: &DrawList, slot: u32) -> Vec<u8> {
-    let start = slot as usize * crate::pipeline::INSTANCE_BYTES;
-    let end = start + crate::pipeline::INSTANCE_BYTES;
-    list.instance_bytes.get(start..end).expect("draw slot has packed instance bytes").to_vec()
+    let start = slot as usize * INSTANCE_BYTES;
+    list.committed.instance_bytes.get(start..start + INSTANCE_BYTES).expect("draw slot has packed instance bytes").to_vec()
+}
+
+fn instance_count(list: &DrawList) -> usize {
+    list.committed.instance_bytes.len() / INSTANCE_BYTES
+}
+
+fn layout(list: &mut DrawList, visible: &[ItemIndex], items: &mut ItemSlab, camera: Camera) -> LayoutStats {
+    settle(list, items);
+    assert!(list.request_layout(visible, camera, true, items), "an idle list accepts a layout");
+    let mut stats = None;
+    for _ in 0..100_000 {
+        if let Some(progress) = list.advance_layout(items) {
+            assert!(!progress.stale, "test layouts do not go stale");
+            if progress.complete {
+                stats = Some(progress.stats);
+            }
+        }
+        if stats.is_some() && !list.layout_pending() {
+            break;
+        }
+    }
+    assert!(!list.layout_pending(), "the layout commits and retires");
+    stats.expect("the layout commits")
+}
+
+fn settle(list: &mut DrawList, items: &mut ItemSlab) {
+    for _ in 0..100_000 {
+        if !list.layout_pending() {
+            return;
+        }
+        let _ = list.advance_layout(items);
+    }
+    panic!("pending layout work did not settle");
 }
 
 fn instance_from_parts(

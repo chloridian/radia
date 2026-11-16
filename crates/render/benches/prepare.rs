@@ -971,6 +971,7 @@ fn bench_camera_culling_rotation(
 
     let mut generation = 0usize;
     let mut latest = fixture.prepare.stats();
+    let mut cull = DurationDistribution::default();
     group.bench_function(name, |b| {
         b.iter_custom(|iters| {
             let mut elapsed = Duration::ZERO;
@@ -978,6 +979,7 @@ fn bench_camera_culling_rotation(
                 generation = generation.wrapping_add(1);
                 elapsed += fixture.sample(device, queue, cameras[generation % cameras.len()]);
                 latest = fixture.prepare.stats();
+                cull.record(duration_ms(latest.prepare_draw_batches_ms));
                 assert_eq!(latest.pending_meshes, 0, "warm rotation must use resident meshes");
                 assert_eq!(latest.pending_textures, 0, "warm rotation must use resident textures");
                 assert_eq!(latest.omitted_faces, 0);
@@ -990,6 +992,7 @@ fn bench_camera_culling_rotation(
         });
     });
     report(name, latest);
+    eprintln!("{name}: cull {}", cull.report());
 }
 
 fn bench_camera_culling_edge_sweep(
@@ -1028,6 +1031,7 @@ fn bench_camera_culling_edge_sweep(
     let mut generation = 0usize;
     let mut layouts = 0usize;
     let mut latest = second;
+    let mut cull = DurationDistribution::default();
     group.bench_function(name, |b| {
         b.iter_custom(|iters| {
             let mut elapsed = Duration::ZERO;
@@ -1036,6 +1040,7 @@ fn bench_camera_culling_edge_sweep(
                 generation = generation.wrapping_add(1);
                 elapsed += fixture.sample(device, queue, cameras[camera_index]);
                 latest = fixture.prepare.stats();
+                cull.record(duration_ms(latest.prepare_draw_batches_ms));
                 assert_eq!(latest.pending_meshes, 0, "warm edge sweep must use resident meshes");
                 assert_eq!(latest.pending_textures, 0, "warm edge sweep must use resident textures");
                 assert_eq!(latest.omitted_faces, 0);
@@ -1046,6 +1051,7 @@ fn bench_camera_culling_edge_sweep(
     });
     eprintln!("{name}: alternating sweep committed {layouts} layouts");
     report(name, latest);
+    eprintln!("{name}: cull {}", cull.report());
 }
 
 fn bench_pose(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
