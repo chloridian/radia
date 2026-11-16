@@ -107,9 +107,10 @@ pub(super) fn decoded_cached_batch(region: Region, update: &ObjectUpdateCached, 
 }
 
 pub(super) async fn resolve(cache: &mut ObjectCacheSession, update: &ObjectUpdateCached, sequence: u32) -> ObjectBatch {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let mut world = region_world();
+    let region = world.region_for(SIMULATOR).expect("cached simulator has a registered region");
     let batch = decoded_cached_batch(region, update, sequence);
-    cache.resolve_cached(SIMULATOR, region, sequence, OrderEvidence::Ordered(u64::from(sequence)), |_| None, update, batch).await.0
+    cache.resolve_cached(SIMULATOR, region, sequence, OrderEvidence::Ordered(u64::from(sequence)), &mut world, update, batch).await.0
 }
 
 pub(super) async fn flush(cache: &mut ObjectCacheSession) {
@@ -220,7 +221,7 @@ pub(super) async fn measure_full_update_intake(cache: &mut ObjectCacheSession, m
         let sequence = u32::try_from(index + 1).expect("synthetic packet sequence fits u32");
         let order = OrderEvidence::Ordered(u64::from(sequence));
         let batch = decode_object_message(region, sequence, order, &message).expect("full update decodes into World operations");
-        let summary = world.apply_object_batch_cooperatively(SIMULATOR, batch, |_, _, _| {}).await;
+        let summary = world.apply_object_batch_cooperatively(SIMULATOR, batch, |_, _| {}).await;
         assert!(summary.is_some(), "synthetic update applies to the registered region");
         cache.record_update(SIMULATOR, message);
     }

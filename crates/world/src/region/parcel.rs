@@ -347,6 +347,28 @@ impl ParcelState {
         self.current.as_ref().map_or(0, |current| current.properties.retained_bytes()) + self.overlay.retained_bytes()
     }
 
+    pub(crate) fn reclaim_one(&mut self) -> bool {
+        if self.current.take().is_some() || self.overlay.complete.take().is_some() {
+            true
+        } else if self.overlay.staging.take().is_some() {
+            self.overlay.present = 0;
+            self.overlay.staging_fences = [None; PARCEL_OVERLAY_PARTS];
+            true
+        } else if self.last_agent_sequence.take().is_some()
+            || self.tracked_agent_fence.take().is_some()
+            || self.event_queue_fence.take().is_some()
+            || self.region_low_fence.take().is_some()
+            || self.region_extended_fence.take().is_some()
+        {
+            true
+        } else if self.region_flags != RegionFlags::default() {
+            self.region_flags = RegionFlags::default();
+            true
+        } else {
+            false
+        }
+    }
+
     fn property_fence(&self, authority: UpdateAuthority) -> Option<FieldStamp> {
         match authority {
             UpdateAuthority::Tracked => self.tracked_agent_fence,
@@ -1053,6 +1075,11 @@ mod tests {
         );
         assert_eq!(world.check_invariants(), Ok(()));
         let _ = world.retire_region(second).unwrap();
+        assert!(world.parcel_bytes > 0);
+        while world.has_pending_removals() {
+            let progress = world.reclaim_removals(crate::MAX_REMOVAL_WORK_PER_TURN);
+            assert!(progress.work_units <= crate::MAX_REMOVAL_WORK_PER_TURN);
+        }
         assert_eq!(world.parcel_bytes, 0);
         assert_eq!(world.check_invariants(), Ok(()));
     }

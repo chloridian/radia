@@ -16,6 +16,7 @@ impl Reconciler {
         } else {
             dirty.removed.len()
                 + dirty.retired.len()
+                + dirty.invalidated.len()
                 + dirty.regions.len()
                 + dirty.environments.len()
                 + dirty.objects.len()
@@ -41,6 +42,7 @@ impl Reconciler {
         } else {
             changes.extend(dirty.removed.into_iter().map(Change::Remove));
             changes.extend(dirty.retired.into_iter().map(Change::Retire));
+            changes.extend(dirty.invalidated.into_iter().map(|(entity, fence)| Change::InvalidateSubtree(entity, fence)));
             changes.extend(
                 dirty
                     .environments

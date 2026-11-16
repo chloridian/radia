@@ -7,7 +7,7 @@ pub use object::{Geometry, HiddenReason, Object, Placement};
 pub use view::{ApplyError, SceneView, ViewVersion};
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -17,7 +17,7 @@ use std::{
 
 use assets::TextureHandle;
 use utils::AssetId;
-use world::{Entity, Region, RegionSummary, TerrainPatch, TerrainPatchId, WorldRevision};
+use world::{Entity, Region, RegionSummary, RemovalFence, TerrainPatch, TerrainPatchId, WorldRevision};
 
 use crate::scene::region_environment::RegionEnvironment;
 use crate::scene::{
@@ -112,6 +112,7 @@ pub(in crate::scene) enum Change {
     Mesh(MeshChange),
     Material(MaterialChange),
     Remove(Entity),
+    InvalidateSubtree(Entity, RemovalFence),
     Region(RegionData),
     Environment(Region, Option<RegionEnvironment>),
     EnvironmentTexture(AssetId, Option<TextureHandle>),
@@ -142,9 +143,48 @@ impl Batch {
 }
 
 #[derive(Default)]
+pub(in crate::scene) struct RetiredRegions {
+    intervals: BTreeMap<u64, u64>,
+}
+
+impl RetiredRegions {
+    pub(in crate::scene) fn is_empty(&self) -> bool {
+        self.intervals.is_empty()
+    }
+
+    fn contains(&self, region: Region) -> bool {
+        self.intervals.range(..=region.get()).next_back().is_some_and(|(_, end)| region.get() <= *end)
+    }
+
+    fn insert(&mut self, region: Region) {
+        let generation = region.get();
+        let mut start = generation;
+        let mut end = generation;
+        if let Some((&previous_start, &previous_end)) = self.intervals.range(..=generation).next_back() {
+            if previous_end >= generation {
+                return;
+            }
+            if previous_end.checked_add(1) == Some(generation) {
+                start = previous_start;
+                self.intervals.remove(&previous_start);
+            }
+        }
+        if let Some((&next_start, &next_end)) = self.intervals.range(generation..).next()
+            && next_start <= end.saturating_add(1)
+        {
+            end = next_end;
+            self.intervals.remove(&next_start);
+        }
+        self.intervals.insert(start, end);
+    }
+}
+
+#[derive(Default)]
 pub(in crate::scene) struct Mirror {
     pub(in crate::scene) viewer_environment: Option<ViewerEnvironment>,
     pub(in crate::scene) objects: HashMap<Entity, Object>,
+    pub(in crate::scene) invalidations: HashMap<Entity, RemovalFence>,
+    pub(in crate::scene) retired_regions: RetiredRegions,
     pub(in crate::scene) regions: BTreeMap<Region, RegionData>,
     pub(in crate::scene) environments: BTreeMap<Region, RegionEnvironment>,
     pub(in crate::scene) environment_textures: BTreeMap<AssetId, TextureHandle>,
@@ -154,6 +194,96 @@ pub(in crate::scene) struct Mirror {
 }
 
 impl Mirror {
+    pub(in crate::scene) fn is_retired(&self, region: Region) -> bool {
+        self.retired_regions.contains(region)
+    }
+
+    pub(in crate::scene) fn object_visible(&self, entity: Entity) -> bool {
+        if self.invalidations.is_empty() && self.retired_regions.is_empty() {
+            return self.objects.contains_key(&entity);
+        }
+        self.visibility(entity, &mut HashMap::new()).visible
+    }
+
+    pub(in crate::scene) fn visibility(&self, entity: Entity, cache: &mut HashMap<Entity, SceneVisibility>) -> SceneVisibility {
+        if let Some(known) = cache.get(&entity) {
+            return *known;
+        }
+        let mut path = Vec::new();
+        let mut visited = HashSet::new();
+        let mut current = entity;
+        let mut visibility = loop {
+            if let Some(known) = cache.get(&current).copied() {
+                break known;
+            }
+            if !visited.insert(current) {
+                let invalid = SceneVisibility { visible: false, cause: None };
+                cache.insert(current, invalid);
+                break invalid;
+            }
+            let object = self.objects.get(&current);
+            if let Some(object) = object
+                && self.retired_regions.contains(object.detail().summary.address.region())
+            {
+                let region = object.detail().summary.address.region();
+                let retired = SceneVisibility { visible: false, cause: Some(SceneCause::Retired(region)) };
+                cache.insert(current, retired);
+                break retired;
+            }
+            if let Some(fence) = self.invalidations.get(&current).copied() {
+                let cause = if self.retired_regions.contains(fence.region()) {
+                    SceneCause::Retired(fence.region())
+                } else {
+                    SceneCause::Fence(fence)
+                };
+                let invalid = SceneVisibility { visible: false, cause: Some(cause) };
+                cache.insert(current, invalid);
+                break invalid;
+            }
+            let Some(object) = object else {
+                let missing = SceneVisibility { visible: true, cause: None };
+                cache.insert(current, missing);
+                break missing;
+            };
+            match object.detail().summary.parent {
+                world::Parent::Resolved(parent) => {
+                    path.push(current);
+                    current = parent;
+                }
+                world::Parent::Root | world::Parent::Pending { .. } | world::Parent::Unknown => {
+                    let root = SceneVisibility { visible: true, cause: None };
+                    cache.insert(current, root);
+                    break root;
+                }
+            }
+        };
+        for child in path.into_iter().rev() {
+            let Some(child_object) = self.objects.get(&child) else {
+                visibility = SceneVisibility { visible: false, cause: None };
+                cache.insert(child, visibility);
+                continue;
+            };
+            let child_detail = child_object.detail();
+            let child_region = child_detail.summary.address.region();
+            let cascades = visibility.cause.is_some_and(|cause| match cause {
+                SceneCause::Retired(region) => child_region == region,
+                SceneCause::Fence(fence) => {
+                    child_detail.summary.kind != world::Kind::Avatar
+                        && fence.region() == child_region
+                        && (fence.order(), fence.block_ordinal())
+                            > (child_detail.summary.binding_fence.order(), child_detail.summary.binding_fence.block_ordinal())
+                }
+            });
+            visibility = if !visibility.visible && (visibility.cause.is_none() || cascades) {
+                SceneVisibility { visible: false, cause: visibility.cause }
+            } else {
+                SceneVisibility { visible: true, cause: None }
+            };
+            cache.insert(child, visibility);
+        }
+        cache.get(&entity).copied().unwrap_or(visibility)
+    }
+
     pub(in crate::scene) fn apply_mesh(&mut self, change: &MeshChange) {
         match change {
             MeshChange::Set(entity, key, state) => {
@@ -189,6 +319,9 @@ impl Mirror {
         match change {
             Change::ViewerEnvironment(environment) => self.viewer_environment = environment,
             Change::Object(mut object) => {
+                if self.retired_regions.contains(object.detail().summary.address.region()) {
+                    return;
+                }
                 if let Some(old) = self.objects.get(&object.detail().summary.entity) {
                     object.inherit_animation_timing(old, now);
                     object.update_motion_from(old, now);
@@ -228,11 +361,16 @@ impl Mirror {
             }
             Change::Remove(entity) => {
                 self.objects.remove(&entity);
+                self.invalidations.remove(&entity);
+            }
+            Change::InvalidateSubtree(entity, fence) => {
+                self.invalidations.insert(entity, fence);
             }
             Change::Region(region) => {
                 self.regions.insert(region.summary().region, region);
             }
             Change::Retire(region) => {
+                self.retired_regions.insert(region);
                 self.regions.remove(&region);
                 self.environments.remove(&region);
                 self.water.remove(&region);
@@ -268,5 +406,41 @@ impl Mirror {
                 self.surfaces.remove(&(region, kind));
             }
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::scene) struct SceneVisibility {
+    visible: bool,
+    cause: Option<SceneCause>,
+}
+
+#[derive(Clone, Copy)]
+enum SceneCause {
+    Fence(RemovalFence),
+    Retired(Region),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RetiredRegions;
+
+    #[test]
+    fn retired_region_ranges_merge_without_hiding_active_generations() {
+        let (_, regions) = crate::test_support::registered_regions(4);
+        let [first, second, third, fourth] = regions.as_slice() else { panic!("four regions are registered") };
+        let mut retired = RetiredRegions::default();
+
+        retired.insert(*first);
+        retired.insert(*third);
+        assert!(retired.contains(*first));
+        assert!(!retired.contains(*second));
+        assert!(retired.contains(*third));
+        assert!(!retired.contains(*fourth));
+
+        retired.insert(*second);
+        retired.insert(*fourth);
+        retired.insert(*second);
+        assert!(regions.iter().all(|region| retired.contains(*region)));
     }
 }

@@ -123,6 +123,10 @@ impl Terrain {
     pub(crate) fn settings(&self) -> Option<TerrainSettings> {
         self.settings.map(|(settings, _)| settings)
     }
+
+    pub(crate) fn reclaim_one(&mut self) -> bool {
+        if self.patches.pop_first().is_some() || self.water.take().is_some() { true } else { self.settings.take().is_some() }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -345,6 +349,11 @@ mod tests {
         assert_eq!(stale_world.terrain_page(stale_region, first.next, 8), Err(WorldReadError::StaleSession));
         assert_eq!(world.terrain_page(region, None, 9), Err(WorldReadError::InvalidLimit));
         let _ = world.retire_region(region).unwrap();
+        assert_eq!(world.terrain_patches, 10);
+        while world.has_pending_removals() {
+            let progress = world.reclaim_removals(crate::MAX_REMOVAL_WORK_PER_TURN);
+            assert!(progress.work_units <= crate::MAX_REMOVAL_WORK_PER_TURN);
+        }
         assert_eq!(world.terrain_patches, 0);
         assert_eq!(world.terrain_page(region, first.next, 8), Ok(None));
         assert_eq!(world.observe_terrain_patch(source(region, 100), patch(0, 0, 9.0)), Err(ApplyError::RegionRetired));
@@ -418,6 +427,11 @@ mod tests {
         let _ = world.observe_terrain_patch(source(first_region, 2), patch(0, 0, 2.0)).unwrap();
         assert_eq!(page(&world, first_region).patches[0].heights()[0], 2.0);
         let _ = world.retire_region(first_region).unwrap();
+        assert_eq!(world.observe_terrain_patch(target_source, patch(0, 0, 1.0)), Err(ApplyError::TerrainBudgetExhausted));
+        while world.has_pending_removals() {
+            let progress = world.reclaim_removals(crate::MAX_REMOVAL_WORK_PER_TURN);
+            assert!(progress.work_units <= crate::MAX_REMOVAL_WORK_PER_TURN);
+        }
         let _ = world.observe_terrain_patch(target_source, patch(0, 0, 1.0)).unwrap();
         assert_eq!(world.terrain_patches, MAX_TERRAIN_PATCHES - 255);
     }

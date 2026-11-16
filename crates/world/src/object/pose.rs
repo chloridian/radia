@@ -15,7 +15,7 @@ impl World {
 
         loop {
             let Some(object) = self.store.object_record(current) else { return Ok(CoordinateFrame::Unknown) };
-            match object.state.parent {
+            match self.logical_parent_for(current, object.state.parent) {
                 Parent::Unknown => return Ok(CoordinateFrame::Unknown),
                 Parent::Pending { address, expected_uuid } => return Ok(CoordinateFrame::PendingParent { address, expected_uuid }),
                 Parent::Root => {
@@ -44,7 +44,7 @@ impl World {
     }
 
     pub(crate) fn resolve_pose(&self, entity: Entity) -> Result<PoseState, PoseError> {
-        let state = self.resolve_pose_without_provisional(entity)?;
+        let state = self.resolve_pose_without_provisional(entity, None)?;
         if let PoseState::Unresolved(reason) = state
             && let Some(object) = self.store.object_record(entity)
             && object.state.parent == Parent::Root
@@ -55,7 +55,11 @@ impl World {
         Ok(state)
     }
 
-    fn resolve_pose_without_provisional(&self, entity: Entity) -> Result<PoseState, PoseError> {
+    pub(crate) fn resolve_pose_before_parent_removal(&self, entity: Entity, removed_parent: Entity) -> Result<PoseState, PoseError> {
+        self.resolve_pose_without_provisional(entity, Some(removed_parent))
+    }
+
+    fn resolve_pose_without_provisional(&self, entity: Entity, removed_parent: Option<Entity>) -> Result<PoseState, PoseError> {
         let mut current = entity;
         let mut edges = 0;
         let mut accumulated = None;
@@ -95,7 +99,11 @@ impl World {
                 });
             }
 
-            match object.state.parent {
+            let parent = removed_parent.map_or_else(
+                || self.logical_parent_for(current, object.state.parent),
+                |removed_parent| self.logical_parent_for_removal(current, object.state.parent, removed_parent),
+            );
+            match parent {
                 Parent::Unknown => {
                     record_unresolved(&mut unresolved, UnresolvedReason::PoseNotValidForCurrentFrame);
                     break;

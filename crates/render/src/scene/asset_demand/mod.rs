@@ -237,6 +237,10 @@ impl AssetDemand {
         }
     }
 
+    pub(in crate::scene) fn invalidate_all(&mut self) {
+        self.rescan = true;
+    }
+
     pub(in crate::scene) fn invalidate_region(&mut self, region: Region) {
         self.dirty_terrain.insert(region);
     }
@@ -577,10 +581,15 @@ impl AssetDemand {
                 continue;
             };
             processed += 1;
-            if let Some(object) = mirror.objects.get(&entity)
-                && let Some(change) = self.resolve_object_materials(camera, object)
-            {
-                changes.push(change);
+            if let Some(object) = mirror.objects.get(&entity) {
+                if !mirror.object_visible(entity) {
+                    self.remove(entity);
+                    if object.materials().is_some() || object.mesh().is_some() {
+                        changes.push(MaterialChange { source: object.clone(), materials: None, mesh: MeshPublication::Clear });
+                    }
+                } else if let Some(change) = self.resolve_object_materials(camera, object) {
+                    changes.push(change);
+                }
             }
         }
         changes

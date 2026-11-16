@@ -151,6 +151,13 @@ impl Environments {
             EnvironmentScope::Parcel(_) => &self.parcel,
         }
     }
+
+    pub(crate) fn reclaim_one(&mut self) -> bool {
+        if self.region.take().is_some() || self.parcel.take().is_some() {
+            return true;
+        }
+        self.selected_parcel.take().is_some() || self.parcel_fence.take().is_some()
+    }
 }
 
 impl World {

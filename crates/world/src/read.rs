@@ -7,6 +7,8 @@ use std::{
 
 use uuid::Uuid;
 
+use crate::removal::{VisibilityCache, VisibilityCursor, VisibilityLookupCache, VisibilityStep};
+use crate::update::Stamp;
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, LinearMotion, ObjectMedia, PbrMaterialAssignments, SitTarget, SurfaceAppearance,
     TextureAnimation, Transform,
@@ -18,20 +20,23 @@ use crate::{
 use crate::{Object, World, WorldChange, WorldId};
 
 pub const MAX_OBJECT_PAGE_ITEMS: usize = 256;
+pub const MAX_OBJECT_PAGE_WORK_ITEMS: usize = 256;
+pub const MAX_OBJECT_LOOKUP_WORK_ITEMS: usize = 256;
 pub const MAX_REGION_PAGE_ITEMS: usize = 64;
 pub const MAX_REGION_PAGE_BYTES: usize = 1024 * 1024;
 pub const MAX_WORLD_CHANGE_PAGE_ITEMS: usize = 256;
 pub const MAX_OBJECT_DETAIL_BYTES: usize = 64 * 1024;
 pub const MAX_OBJECT_MEDIA_READ_BYTES: usize = 256 * 1024;
 pub const MAX_OBJECT_DETAIL_BATCH_ITEMS: usize = 8;
+pub const MAX_OBJECT_DETAIL_WORK_ITEMS: usize = 256;
 pub const MAX_OBJECT_DETAIL_BATCH_BYTES: usize = MAX_OBJECT_DETAIL_BATCH_ITEMS * MAX_OBJECT_DETAIL_BYTES
-    + size_of::<ObjectDetailBatch>()
-    + MAX_OBJECT_DETAIL_BATCH_ITEMS * size_of::<ObjectDetailResult>();
+    + MAX_OBJECT_DETAIL_BATCH_ITEMS * size_of::<ObjectDetailResult>()
+    + size_of::<ObjectDetailBatchPage>();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorldReadBarrier {
     pub revision: WorldRevision,
-    pub object_count: usize,
+    pub object_count_upper_bound: usize,
     pub region_count: usize,
     pub changes: WorldChangeCursor,
 }
@@ -40,11 +45,34 @@ pub struct WorldReadBarrier {
 pub struct ObjectSummary {
     pub entity: Entity,
     pub id: Uuid,
+    pub binding_fence: ObjectBindingFence,
     pub kind: Kind,
     pub address: LocalAddress,
     pub parent: Parent,
     pub local_transform: Transform,
     pub pose: Result<PoseState, PoseError>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObjectBindingFence {
+    order: u64,
+    block_ordinal: u32,
+}
+
+impl ObjectBindingFence {
+    pub const fn order(self) -> u64 {
+        self.order
+    }
+
+    pub const fn block_ordinal(self) -> u32 {
+        self.block_ordinal
+    }
+}
+
+impl From<Stamp> for ObjectBindingFence {
+    fn from(stamp: Stamp) -> Self {
+        Self { order: stamp.order, block_ordinal: stamp.block_ordinal }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,13 +87,16 @@ pub struct ObjectListItem {
 pub struct ObjectListPage {
     pub hydration_revision: WorldRevision,
     pub objects: Vec<ObjectListItem>,
+    pub work_units: usize,
     pub next: Option<ObjectPageCursor>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectPageCursor {
     world: WorldId,
-    after: Uuid,
+    revision: WorldRevision,
+    after: Option<Uuid>,
+    walk: Option<VisibilityCursor>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -139,6 +170,28 @@ pub enum ObjectDetailResult {
 pub struct ObjectDetailBatch {
     pub hydration_revision: WorldRevision,
     pub details: Vec<ObjectDetailResult>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObjectDetailCursor {
+    world: WorldId,
+    entity: Entity,
+    revision: WorldRevision,
+    walk: Option<VisibilityCursor>,
+}
+
+impl ObjectDetailCursor {
+    pub const fn entity(self) -> Entity {
+        self.entity
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjectDetailBatchPage {
+    pub batch: ObjectDetailBatch,
+    pub work_units: usize,
+    pub next: Option<ObjectDetailCursor>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,18 +250,131 @@ impl Display for WorldReadError {
 
 impl Error for WorldReadError {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObjectLookupTarget {
+    Id(Uuid),
+    Address(LocalAddress),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObjectLookupCursor {
+    world: WorldId,
+    revision: WorldRevision,
+    target: ObjectLookupTarget,
+    entity: Entity,
+    id: Uuid,
+    walk: VisibilityCursor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObjectLookupProgress {
+    Visible { entity: Entity, work_units: usize },
+    Hidden { work_units: usize },
+    Pending { cursor: ObjectLookupCursor, work_units: usize },
+}
+
 impl World {
+    pub fn lookup_entity(&mut self, id: Uuid, cursor: Option<ObjectLookupCursor>) -> ObjectLookupProgress {
+        self.lookup_object(ObjectLookupTarget::Id(id), cursor, MAX_OBJECT_LOOKUP_WORK_ITEMS)
+    }
+
+    pub fn lookup_entity_at(&mut self, address: LocalAddress, cursor: Option<ObjectLookupCursor>) -> ObjectLookupProgress {
+        self.lookup_object(ObjectLookupTarget::Address(address), cursor, MAX_OBJECT_LOOKUP_WORK_ITEMS)
+    }
+
+    pub fn lookup_entity_with_budget(&mut self, id: Uuid, cursor: Option<ObjectLookupCursor>, work_limit: usize) -> ObjectLookupProgress {
+        self.lookup_object(ObjectLookupTarget::Id(id), cursor, work_limit)
+    }
+
+    pub fn lookup_entity_at_with_budget(
+        &mut self,
+        address: LocalAddress,
+        cursor: Option<ObjectLookupCursor>,
+        work_limit: usize,
+    ) -> ObjectLookupProgress {
+        self.lookup_object(ObjectLookupTarget::Address(address), cursor, work_limit)
+    }
+
+    fn lookup_object(&mut self, target: ObjectLookupTarget, cursor: Option<ObjectLookupCursor>, work_limit: usize) -> ObjectLookupProgress {
+        let revision = self.revision();
+        let current = self.lookup_target(target);
+        let Some(entity) = current else { return ObjectLookupProgress::Hidden { work_units: 0 } };
+        let Some(record) = self.store.object_record(entity) else { return ObjectLookupProgress::Hidden { work_units: 0 } };
+        let resumed = cursor.filter(|cursor| {
+            cursor.world == self.id
+                && cursor.revision == revision
+                && cursor.target == target
+                && cursor.entity == entity
+                && cursor.id == record.id
+        });
+        if let Some(visibility) = self.lookup_visibility.get(entity, revision) {
+            return if visibility.visible {
+                ObjectLookupProgress::Visible { entity, work_units: 0 }
+            } else {
+                ObjectLookupProgress::Hidden { work_units: 0 }
+            };
+        }
+        let mut walk = resumed.map_or_else(|| self.begin_visibility(entity, record.id), |cursor| cursor.walk);
+        let mut visibility = VisibilityCache::default();
+        let mut work_units = 0;
+        for _ in 0..work_limit.min(MAX_OBJECT_LOOKUP_WORK_ITEMS) {
+            work_units += 1;
+            match self.advance_visibility_with_lookup_cache(&mut walk, &mut visibility, &self.lookup_visibility) {
+                VisibilityStep::Pending => {}
+                VisibilityStep::Complete(result) => {
+                    self.lookup_visibility.insert(entity, revision, result);
+                    return if result.visible {
+                        ObjectLookupProgress::Visible { entity, work_units }
+                    } else {
+                        ObjectLookupProgress::Hidden { work_units }
+                    };
+                }
+            }
+        }
+        ObjectLookupProgress::Pending {
+            cursor: ObjectLookupCursor { world: self.id, revision, target, entity, id: record.id, walk },
+            work_units,
+        }
+    }
+
+    fn lookup_target(&self, target: ObjectLookupTarget) -> Option<Entity> {
+        match target {
+            ObjectLookupTarget::Id(id) => self.store.entity(id),
+            ObjectLookupTarget::Address(address) => self.store.entity_at(address),
+        }
+    }
+
     pub fn read_barrier(&self) -> WorldReadBarrier {
         let revision = self.revision();
         WorldReadBarrier {
             revision,
-            object_count: self.object_count(),
+            object_count_upper_bound: self.visible_entity_upper_bound(),
             region_count: self.regions.len(),
             changes: WorldChangeCursor { world: self.id, through_revision: revision, next_change: None },
         }
     }
 
     pub fn object_list_page(&self, cursor: Option<ObjectPageCursor>, limit: usize) -> Result<ObjectListPage, WorldReadError> {
+        self.object_list_page_inner(cursor, limit, None)
+    }
+
+    pub fn object_list_page_with_cache(
+        &mut self,
+        cursor: Option<ObjectPageCursor>,
+        limit: usize,
+    ) -> Result<ObjectListPage, WorldReadError> {
+        let mut visibility_lookup = std::mem::take(&mut self.lookup_visibility);
+        let page = self.object_list_page_inner(cursor, limit, Some(&mut visibility_lookup));
+        self.lookup_visibility = visibility_lookup;
+        page
+    }
+
+    fn object_list_page_inner(
+        &self,
+        cursor: Option<ObjectPageCursor>,
+        limit: usize,
+        mut visibility_lookup: Option<&mut VisibilityLookupCache>,
+    ) -> Result<ObjectListPage, WorldReadError> {
         if limit == 0 || limit > MAX_OBJECT_PAGE_ITEMS {
             return Err(WorldReadError::InvalidLimit);
         }
@@ -216,19 +382,55 @@ impl World {
             return Err(WorldReadError::StaleSession);
         }
 
-        let lower = cursor.map_or(Unbounded, |cursor| Excluded(cursor.after));
-        let mut ids = self.store.ids().range((lower, Unbounded));
-        let objects = ids
-            .by_ref()
-            .take(limit)
-            .map(|id| {
-                let entity = self.entity(*id).expect("object ordering index contains only live object IDs");
-                let record = self.store.object_record(entity).expect("UUID index contains only live entities");
-                ObjectListItem { entity, id: record.id, kind: record.kind, address: record.state.binding.address }
-            })
-            .collect::<Vec<_>>();
-        let next = ids.next().map(|_| ObjectPageCursor { world: self.id, after: objects.last().expect("nonzero page limit").id });
-        Ok(ObjectListPage { hydration_revision: self.revision(), objects, next })
+        let revision = self.revision();
+        let mut after = cursor.and_then(|cursor| cursor.after);
+        let mut walk = cursor.filter(|cursor| cursor.revision == revision).and_then(|cursor| cursor.walk);
+        let mut visibility = VisibilityCache::default();
+        let mut objects = Vec::with_capacity(limit);
+        let mut work = 0;
+        while objects.len() < limit && work < MAX_OBJECT_PAGE_WORK_ITEMS {
+            if walk.is_none() {
+                let lower = after.map_or(Unbounded, Excluded);
+                let Some(id) = self.store.ids().range((lower, Unbounded)).next().copied() else { break };
+                let Some(entity) = self.store.entity(id) else {
+                    after = Some(id);
+                    work += 1;
+                    continue;
+                };
+                walk = Some(self.begin_visibility(entity, id));
+            }
+
+            let mut cursor = walk.expect("visibility walk was just initialized");
+            work += 1;
+            let step = if let Some(lookup) = visibility_lookup.as_deref() {
+                self.advance_visibility_with_lookup_cache(&mut cursor, &mut visibility, lookup)
+            } else {
+                self.advance_visibility(&mut cursor, &mut visibility)
+            };
+            match step {
+                VisibilityStep::Pending => walk = Some(cursor),
+                VisibilityStep::Complete(result) => {
+                    after = Some(cursor.id());
+                    walk = None;
+                    if let Some(lookup) = visibility_lookup.as_deref_mut() {
+                        lookup.insert(cursor.entity(), revision, result);
+                    }
+                    if result.visible {
+                        let record = self.store.object_record(cursor.entity()).expect("visible identity has a stored record");
+                        objects.push(ObjectListItem {
+                            entity: cursor.entity(),
+                            id: record.id,
+                            kind: record.kind,
+                            address: record.state.binding.address,
+                        });
+                    }
+                }
+            }
+        }
+        let lower = after.map_or(Unbounded, Excluded);
+        let has_more = walk.is_some() || self.store.ids().range((lower, Unbounded)).next().is_some();
+        let next = has_more.then_some(ObjectPageCursor { world: self.id, revision, after, walk });
+        Ok(ObjectListPage { hydration_revision: revision, objects, work_units: work, next })
     }
 
     pub fn region_page(&self, cursor: Option<RegionPageCursor>, limit: usize) -> Result<RegionPage, WorldReadError> {
@@ -291,7 +493,93 @@ impl World {
             details.push(detail);
         }
 
-        Ok(ObjectDetailBatch { hydration_revision, details })
+        Ok(ObjectDetailBatch { hydration_revision, details, has_more: false })
+    }
+
+    pub fn object_detail_batch_page(
+        &self,
+        entities: &[Entity],
+        cursor: Option<ObjectDetailCursor>,
+    ) -> Result<ObjectDetailBatchPage, WorldReadError> {
+        if entities.is_empty() || entities.len() > MAX_OBJECT_DETAIL_BATCH_ITEMS {
+            return Err(WorldReadError::InvalidLimit);
+        }
+        if entities.iter().any(|entity| entity.1 != self.id) {
+            return Err(WorldReadError::StaleSession);
+        }
+        if cursor.is_some_and(|cursor| cursor.world != self.id) {
+            return Err(WorldReadError::StaleSession);
+        }
+        let hydration_revision = self.revision();
+        let start = match cursor {
+            Some(cursor) => entities.iter().position(|entity| *entity == cursor.entity).ok_or(WorldReadError::InvalidCursor)?,
+            None => 0,
+        };
+        let mut visibility = VisibilityCache::default();
+        let mut details = Vec::with_capacity(entities.len());
+        let mut work = 0;
+        let mut next = None;
+        for (index, entity) in entities.iter().copied().enumerate().skip(start) {
+            if work == MAX_OBJECT_DETAIL_WORK_ITEMS {
+                next = Some(ObjectDetailCursor { world: self.id, entity, revision: hydration_revision, walk: None });
+                break;
+            }
+            let Some(record) = self.store.object_record(entity).filter(|_| self.store.is_current_entity(entity)) else {
+                work += 1;
+                details.push(ObjectDetailResult::Gone(entity));
+                continue;
+            };
+            let mut walk = if index == start {
+                cursor.filter(|cursor| cursor.revision == hydration_revision).and_then(|cursor| cursor.walk)
+            } else {
+                None
+            };
+            walk.get_or_insert_with(|| self.begin_visibility(entity, record.id));
+            let mut completed = None;
+            while work < MAX_OBJECT_DETAIL_WORK_ITEMS {
+                work += 1;
+                let current = walk.as_mut().expect("detail visibility walk was initialized");
+                match self.advance_visibility(current, &mut visibility) {
+                    VisibilityStep::Pending => {}
+                    VisibilityStep::Complete(result) => {
+                        completed = Some(result.visible);
+                        break;
+                    }
+                }
+            }
+            if let Some(visible) = completed {
+                let detail = if visible {
+                    let parent_id = match record.state.parent {
+                        Parent::Resolved(parent) => self.store.object_record(parent).map(|parent| parent.id),
+                        Parent::Unknown | Parent::Root | Parent::Pending { .. } => None,
+                    };
+                    match self.object_detail_from_object(Object::new(entity, record, self), hydration_revision, parent_id) {
+                        Ok(detail) => ObjectDetailResult::Found(detail),
+                        Err(WorldReadError::StaleIdentity) => ObjectDetailResult::Gone(entity),
+                        Err(WorldReadError::TooLarge) => ObjectDetailResult::TooLarge(entity),
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    ObjectDetailResult::Gone(entity)
+                };
+                details.push(detail);
+            } else {
+                next = Some(ObjectDetailCursor { world: self.id, entity, revision: hydration_revision, walk });
+                break;
+            }
+            if work == MAX_OBJECT_DETAIL_WORK_ITEMS
+                && let Some(next_entity) = entities.get(index + 1).copied()
+            {
+                next = Some(ObjectDetailCursor { world: self.id, entity: next_entity, revision: hydration_revision, walk: None });
+                break;
+            }
+        }
+
+        Ok(ObjectDetailBatchPage {
+            batch: ObjectDetailBatch { hydration_revision, details, has_more: next.is_some() },
+            work_units: work,
+            next,
+        })
     }
 
     pub fn object_media(&self, entity: Entity) -> Result<ObjectMediaRead, WorldReadError> {
@@ -313,6 +601,20 @@ impl World {
             return Err(WorldReadError::StaleSession);
         }
         let object = self.object(entity).ok_or(WorldReadError::StaleIdentity)?;
+        let parent_id = match object.parent() {
+            Parent::Resolved(parent) => self.object(parent).map(|parent| parent.id()),
+            Parent::Unknown | Parent::Root | Parent::Pending { .. } => None,
+        };
+        self.object_detail_from_object(object, hydration_revision, parent_id)
+    }
+
+    fn object_detail_from_object(
+        &self,
+        object: Object<'_>,
+        hydration_revision: WorldRevision,
+        parent_id: Option<Uuid>,
+    ) -> Result<ObjectDetail, WorldReadError> {
+        let entity = object.entity();
         let world_transform = object.world_transform();
         let pose = match world_transform {
             Ok(WorldTransformState::Resolved(transform)) => Ok(PoseState::Resolved(transform.pose)),
@@ -324,15 +626,12 @@ impl World {
         let summary = ObjectSummary {
             entity,
             id: object.id(),
+            binding_fence: object.record().state.binding.fence().into(),
             kind: object.kind(),
             address: object.address(),
             parent: object.parent(),
             local_transform: object.transform(),
             pose,
-        };
-        let parent_id = match summary.parent {
-            Parent::Resolved(parent) => self.object(parent).map(|object| object.id()),
-            Parent::Unknown | Parent::Root | Parent::Pending { .. } => None,
         };
         if object_detail_bytes(&object) > MAX_OBJECT_DETAIL_BYTES {
             return Err(WorldReadError::TooLarge);
