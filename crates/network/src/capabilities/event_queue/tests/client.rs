@@ -27,10 +27,12 @@ async fn close_stops_client() {
 async fn close_cancels_queue() {
     let mut server = ConcurrentCapabilityTestServer::start(MAX_CONCURRENT_CAPABILITY_REQUESTS);
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let capability = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
     let mut requests = (0..=MAX_CONCURRENT_CAPABILITY_REQUESTS)
         .map(|_| {
             let client = client.clone();
-            spawn(async move { client.request_capabilities(&["TestCapability"]).await })
+            let capability = capability.clone();
+            spawn(async move { client.post(&capability, "probe").await })
         })
         .collect::<Vec<_>>();
 

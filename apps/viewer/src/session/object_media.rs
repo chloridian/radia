@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     future::Future,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -7,10 +7,7 @@ use std::{
 
 use futures::{FutureExt, channel::mpsc, pin_mut, sink::SinkExt, stream::StreamExt};
 use llsd::{Map, Value};
-use network::{
-    SimulatorId,
-    capabilities::{CapabilityUrl, Client},
-};
+use network::{SimulatorId, capabilities::Client};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tracing::Instrument;
@@ -22,7 +19,6 @@ use world::{
 
 const REQUEST_QUEUE_CAPACITY: usize = 64;
 const RESULT_QUEUE_CAPACITY: usize = 16;
-const CAPABILITY_CACHE_CAPACITY: usize = 32;
 const RESPONSE_LIMIT_BYTES: usize = 256 * 1024;
 const MAX_FETCH_ATTEMPTS: u8 = 3;
 const RETRY_DELAY: Duration = Duration::from_millis(250);
@@ -218,8 +214,6 @@ async fn run<F>(
 ) where
     F: Future<Output = ()> + Clone + Send + 'static,
 {
-    let mut capabilities = HashMap::<SimulatorId, CapabilityUrl>::new();
-    let mut cache_order = VecDeque::new();
     loop {
         let cancelled = cancellation.clone().fuse();
         let request = requests.next().fuse();
@@ -235,7 +229,7 @@ async fn run<F>(
         }
 
         let outcome = {
-            let fetch = fetch_with_retries(&request, &mut capabilities, &mut cache_order).fuse();
+            let fetch = fetch_with_retries(&request).fuse();
             pin_mut!(fetch);
             loop {
                 let cancelled = cancellation.clone().fuse();
@@ -284,23 +278,15 @@ fn finish_request(retirement: &Mutex<RetirementState>, simulator_id: SimulatorId
     retirement.lock().unwrap_or_else(PoisonError::into_inner).finish(simulator_id);
 }
 
-async fn fetch_with_retries(
-    request: &FetchRequest,
-    capabilities: &mut HashMap<SimulatorId, CapabilityUrl>,
-    cache_order: &mut VecDeque<SimulatorId>,
-) -> Result<ObjectMediaUpdate, FetchError> {
+async fn fetch_with_retries(request: &FetchRequest) -> Result<ObjectMediaUpdate, FetchError> {
     let mut last_error = None;
     for attempt in 0..MAX_FETCH_ATTEMPTS {
-        match fetch(request, capabilities, cache_order).await {
+        match fetch(request).await {
             Ok(update) if update.version() >= request.target.version => return Ok(update),
             Ok(update) => {
                 last_error = Some(FetchError::StaleVersion { requested: request.target.version, received: update.version() });
             }
             Err(error) => {
-                if error == FetchError::Transport {
-                    capabilities.remove(&request.target.simulator_id);
-                    cache_order.retain(|simulator_id| *simulator_id != request.target.simulator_id);
-                }
                 if matches!(error, FetchError::Malformed | FetchError::ObjectMismatch | FetchError::Invalid(_)) {
                     return Err(error);
                 }
@@ -314,26 +300,9 @@ async fn fetch_with_retries(
     Err(last_error.expect("ObjectMedia fetch attempts are non-empty"))
 }
 
-async fn fetch(
-    request: &FetchRequest,
-    capabilities: &mut HashMap<SimulatorId, CapabilityUrl>,
-    cache_order: &mut VecDeque<SimulatorId>,
-) -> Result<ObjectMediaUpdate, FetchError> {
-    let simulator_id = request.target.simulator_id;
-    let capability = if let Some(capability) = capabilities.get(&simulator_id) {
-        capability.clone()
-    } else {
-        let mut grants = request.client.request_capabilities(&["ObjectMedia"]).await.map_err(|_| FetchError::Capability)?;
-        let capability = grants.remove("ObjectMedia").ok_or(FetchError::Capability)?;
-        if capabilities.len() >= CAPABILITY_CACHE_CAPACITY
-            && let Some(oldest) = cache_order.pop_front()
-        {
-            capabilities.remove(&oldest);
-        }
-        cache_order.push_back(simulator_id);
-        capabilities.insert(simulator_id, capability.clone());
-        capability
-    };
+async fn fetch(request: &FetchRequest) -> Result<ObjectMediaUpdate, FetchError> {
+    let mut grants = request.client.request_capabilities(&["ObjectMedia"]).await.map_err(|_| FetchError::Capability)?;
+    let capability = grants.remove("ObjectMedia").ok_or(FetchError::Capability)?;
 
     let mut payload = Map::new();
     payload.insert("verb".into(), Value::String("GET".into()));

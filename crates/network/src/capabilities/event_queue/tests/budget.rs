@@ -538,10 +538,12 @@ async fn primary_slot_follows_role() {
 async fn cancel_frees_slot() {
     let mut server = ConcurrentCapabilityTestServer::start(MAX_CONCURRENT_CAPABILITY_REQUESTS + 1);
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let capability = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
     let mut requests = (0..MAX_CONCURRENT_CAPABILITY_REQUESTS)
         .map(|_| {
             let client = client.clone();
-            spawn(async move { client.request_capabilities(&["TestCapability"]).await })
+            let capability = capability.clone();
+            spawn(async move { client.post(&capability, "probe").await })
         })
         .collect::<Vec<_>>();
 
@@ -550,7 +552,7 @@ async fn cancel_frees_slot() {
     }
 
     let client = client.clone();
-    requests.push(spawn(async move { client.request_capabilities(&["TestCapability"]).await }));
+    requests.push(spawn(async move { client.post(&capability, "probe").await }));
     let cancelled = requests.remove(0);
     cancelled.abort();
     assert!(cancelled.await.expect_err("aborted request task").is_cancelled());

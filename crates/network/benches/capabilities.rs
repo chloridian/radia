@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use criterion::{Criterion, Throughput};
+use criterion::{BatchSize, Criterion, Throughput};
 use llsd::Value;
 use network::capabilities::{CapabilityUrl, Client};
 use reqwest::Url;
@@ -124,14 +124,18 @@ fn bench_seed_discovery(c: &mut Criterion) {
     .expect("start local seed capability server");
     let runtime = Builder::new_current_thread().enable_all().build().expect("build Tokio runtime");
     let seed = Url::parse(&format!("http://{}/seed", server.address)).expect("parse local seed URL");
-    let client = runtime.block_on(async { Client::new(seed).expect("create capability client") });
-    let warmup = runtime.block_on(client.request_capabilities(REQUESTED_CAPABILITIES)).expect("warm up capability discovery");
+    let new_client = || runtime.block_on(async { Client::new(seed.clone()).expect("create capability client") });
+    let warmup = runtime.block_on(new_client().request_capabilities(REQUESTED_CAPABILITIES)).expect("warm up capability discovery");
     assert_eq!(warmup.len(), REQUESTED_CAPABILITIES.len());
 
     let mut group = c.benchmark_group("network/capability_discovery");
     group.throughput(Throughput::Elements(1));
     group.bench_function("three_capabilities", |b| {
-        b.iter(|| black_box(runtime.block_on(client.request_capabilities(REQUESTED_CAPABILITIES)).expect("discover capabilities")));
+        b.iter_batched(
+            new_client,
+            |client| black_box(runtime.block_on(client.request_capabilities(REQUESTED_CAPABILITIES)).expect("discover capabilities")),
+            BatchSize::PerIteration,
+        );
     });
     group.finish();
 }
