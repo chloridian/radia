@@ -257,7 +257,9 @@ proptest::proptest! {
                         appearance: FieldUpdate::Set(Appearance::Surface),
                         ..ObjectObservation::new(source, uuid(1_000 + u128::from(identity)), local_id, Object, Root)
                     };
-                    let _ = world.observe_object(observation).expect("apply valid observation");
+                    if let Err(error) = world.observe_object(observation) {
+                        proptest::prop_assert_eq!(error, crate::ApplyError::RemovalCapacityExhausted);
+                    }
                 }
                 2 => {
                     let _ = world.remove_object(source, local_id).expect("apply valid removal");
