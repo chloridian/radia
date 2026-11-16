@@ -157,7 +157,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn camera_tick_is_selected_when_ready() {
+    async fn ready_camera_tick_selected() {
         let mut camera_tick = tokio::time::interval(Duration::from_millis(100));
         camera_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let world = SessionWorld::new(viewer_world_limits());

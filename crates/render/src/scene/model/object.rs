@@ -252,7 +252,7 @@ mod tests {
     use world::WorldTransformState;
 
     #[test]
-    fn placeholder_avatar_uses_world_pose_and_default_agent_dimensions() {
+    fn placeholder_avatar_pose_and_size() {
         let pose = WorldPose { position: DVec3::new(10.0, 20.0, 30.0), rotation: Quat::from_rotation_z(0.5) };
         let transform = placeholder_avatar_transform(WorldTransformState::MissingScale(pose)).expect("placeholder transform");
         assert_eq!(transform, WorldTransform { pose, scale: math::Vec3::new(0.6, 0.45, 1.9) });

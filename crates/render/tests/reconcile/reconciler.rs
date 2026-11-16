@@ -516,7 +516,7 @@ fn abandoned_read_recovers() {
 }
 
 #[test]
-fn empty_object_pages_resume_after_revision() {
+fn empty_pages_resume_after_revision() {
     let mut world = world_with_capacity(1024);
     let retired = world_region(&world, 0);
     for id in 1..=512 {

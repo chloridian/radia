@@ -814,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn session_end_reveals_deferred_credential_warning() {
+    fn session_end_reveals_warning() {
         let warning = credential_error("credential save failed");
         let mut status = LoginStatus::default();
         status.show_credential_warning(Some(warning.clone()), false);

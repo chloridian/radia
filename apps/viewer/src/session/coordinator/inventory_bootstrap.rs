@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn max_login_skeleton_does_not_block_intake() {
+    async fn max_skeleton_does_not_block() {
         let root = uuid(1);
         let folders = (1..=protocol::login::MAX_LOGIN_INVENTORY_FOLDERS)
             .map(|id| {
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn pending_build_result_can_finish_after_session_shutdown() {
+    async fn build_finishes_after_shutdown() {
         let login_data = ResponseData::default();
         let (started_sender, started_receiver) = oneshot::channel();
         let (release_sender, release_receiver) = mpsc::channel();
@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn worker_preserves_login_and_model_error_types() {
+    async fn worker_keeps_error_types() {
         let invalid_login = ResponseData::from_fields(BTreeMap::from([("inventory-root".into(), Value::String("invalid".into()))]));
         let login_result =
             super::spawn_inventory_build(&Handle::current(), uuid(10), invalid_login).await.expect("login worker should complete");
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_personal_and_library_with_distinct_owners() {
+    fn builds_with_distinct_owners() {
         let bootstrap = LoginInventoryBootstrap {
             personal_root: Some(uuid(1)),
             personal_skeleton: InventorySkeleton {
@@ -378,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_duplicate_orphan_and_cyclic_entries() {
+    fn counts_rejected_entries() {
         let bootstrap = LoginInventoryBootstrap {
             personal_root: Some(uuid(1)),
             personal_skeleton: InventorySkeleton {

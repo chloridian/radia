@@ -279,7 +279,7 @@ fn source_precedence_overrides() {
 }
 
 #[test]
-fn local_sky_overrides_experience_and_shared_sources() {
+fn local_sky_beats_other_sources() {
     let region = environment(GREEN_SKY);
     let parcel = environment(YELLOW_SKY);
     let experience = environment(RED_SKY);
@@ -347,7 +347,7 @@ fn haze_provenance_precedence() {
 }
 
 #[test]
-fn haze_blending_uses_each_field_provenance() {
+fn haze_blends_by_provenance() {
     let day = environment(MIXED_HAZE_CYCLE);
     let result = evaluated(&day, 3_600.0, 0.0, Schedule { day_offset: 0.0, ..Schedule::default() });
     close(result.sky.haze.density, 0.55);
@@ -355,7 +355,7 @@ fn haze_blending_uses_each_field_provenance() {
 }
 
 #[test]
-fn cloud_shadow_matches_missing_texture_blend() {
+fn cloud_shadow_matches_missing_blend() {
     let day = environment(CLOUD_SHADOW_CYCLE);
     let result = evaluated(&day, 3_600.0, 0.0, Schedule { day_offset: 0.0, ..Schedule::default() });
     close(result.sky.clouds.shadow, 0.3);

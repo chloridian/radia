@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn active_cycle_textures_are_requested_before_background_descriptions() {
+    fn active_textures_precede_background() {
         let (_region_world, region) = crate::test_support::registered_region();
         let mut manager = EnvironmentTextures::new();
         let active = BTreeMap::from([(asset(1), region), (asset(2), region)]);
@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn nil_bloom_and_water_request_defaults() {
+    fn nil_textures_request_defaults() {
         let sky = EnvironmentDescription::decode(
             b"{'type':'sky','sun_id':u00000000-0000-0000-0000-000000000000,'moon_id':u00000000-0000-0000-0000-000000000000,'cloud_id':u00000000-0000-0000-0000-000000000000,'bloom_id':u00000000-0000-0000-0000-000000000000,'rainbow_id':u00000000-0000-0000-0000-000000000000,'halo_id':u00000000-0000-0000-0000-000000000000}",
         )
@@ -450,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_textures_stay_resident_until_capacity_is_needed() {
+    fn stale_textures_evict_on_capacity() {
         let (_region_world, region) = crate::test_support::registered_region();
         let mut manager = EnvironmentTextures::new();
         let first = BTreeMap::from([(asset(1), region)]);

@@ -773,7 +773,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_adapter_builds_texture_pbr_and_legacy_requests() {
+    async fn adapter_builds_kind_requests() {
         let peer = Peer::new(4, |index, request, base| {
             let header = String::from_utf8_lossy(request);
             match index {
@@ -817,7 +817,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mesh_header_uses_a_bounded_mesh_id_range_and_accepts_a_full_fallback() {
+    async fn header_range_accepts_full_fallback() {
         let asset = b"full mesh representation".to_vec();
         let response_asset = asset.clone();
         let peer = Peer::new_with_headers(2, move |index, request, base| match index {
@@ -846,7 +846,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_mesh_header_full_response_retries_with_full_reservation() {
+    async fn oversized_header_retries_full() {
         let asset = test_support::mesh::asset_with_seeded_lod_vertices(&[(0, 30_000)], 1, 0x89ab_cdef);
         assert!(asset.len() > assets::mesh::MAX_MESH_HEADER_BYTES);
         let range_asset = asset.clone();
@@ -897,7 +897,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_oversized_mesh_responses_use_each_reserved_limit() {
+    async fn concurrent_headers_use_reserved_limits() {
         let body = vec![0; assets::mesh::MAX_MESH_HEADER_BYTES + 1];
         let peer = Peer::new_parallel(std::time::Duration::ZERO, move |request, base| {
             if String::from_utf8_lossy(request).starts_with("POST /seed") {
@@ -942,7 +942,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_partial_mesh_response_fails_at_the_range_limit() {
+    async fn oversized_partial_exceeds_range_limit() {
         let id = resource(Kind::Mesh).id;
         let block = mesh_fixture_lod_request(id);
         let asset_length = block.asset_length();
@@ -969,7 +969,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_mesh_demands_fetch_and_decode_header_then_lod() {
+    async fn demand_fetches_header_then_lod() {
         let (asset, _compressed_empty_lod, header_size) = mesh_fixture_asset();
         assert!(header_size > assets::mesh::MESH_HEADER_BYTES);
         let asset_length = asset.len();
@@ -1130,7 +1130,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mesh_lod_rejects_inconsistent_content_range() {
+    async fn lod_rejects_inconsistent_content_range() {
         let id = resource(Kind::Mesh).id;
         let block = mesh_fixture_lod_request(id);
         let range = block.range();
@@ -1171,7 +1171,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mesh_blocks_are_served_by_a_new_second_session_cache() {
+    async fn new_session_serves_cached_mesh() {
         let directory = tempdir().unwrap();
         let (asset, _block, header_size) = mesh_fixture_asset();
         assert!(header_size > assets::mesh::MESH_HEADER_BYTES);
@@ -1286,7 +1286,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mesh_lod_range_is_cancelled_when_its_final_demand_drops() {
+    async fn last_demand_drop_cancels_lod() {
         let id = resource(Kind::Mesh).id;
         let block = mesh_fixture_lod_request(id);
         let range = block.range();
@@ -1335,7 +1335,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn viewer_asset_redirect_decodes_library_environment() {
+    async fn redirect_decodes_library_environment() {
         let settings = include_bytes!("../../../crates/assets/tests/fixtures/settings/Midday.dat").to_vec();
         let peer = Peer::new_with_headers(3, move |index, request, base| {
             let headers = String::from_utf8_lossy(request);
@@ -1384,7 +1384,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_second_session_decodes_a_seen_texture_without_http() {
+    async fn new_session_decodes_cached_texture() {
         let directory = tempdir().unwrap();
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
         let first_peer = Peer::new(2, |index, _, base| if index == 0 { (200, grants(base)) } else { (200, RGBA_J2C.to_vec()) });
@@ -1459,7 +1459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_semantically_corrupt_texture_is_refetched_and_replaced() {
+    async fn corrupt_texture_is_refetched() {
         let directory = tempdir().unwrap();
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
         cache.put_complete(assets::Request::new(resource(Kind::Texture)), b"bad".to_vec()).unwrap();
@@ -1503,7 +1503,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_failures_and_partial_full_responses_are_not_cached() {
+    async fn failed_responses_are_not_cached() {
         for (response_status, body) in [(503, Vec::new()), (206, RGBA_J2C.to_vec()), (418, Vec::new())] {
             let directory = tempdir().unwrap();
             let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
@@ -1629,7 +1629,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn known_sky_settings_use_viewer_asset_and_decode_through_store() {
+    async fn sky_settings_decode_through_store() {
         use assets::{Content, EnvironmentSettings, Status};
 
         let asset = AssetId::new(Uuid::from_u128(0xc46226b40e435a569708d27ca1df3292));

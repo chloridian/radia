@@ -693,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn no_op_totals_trigger_recreates_database() {
+    fn noop_trigger_recreates_database() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let path = directory.path().join("objects.sqlite");
         let (db, _) = open_at(&path).expect("create current cache schema");
@@ -730,7 +730,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn global_totals_track_payload_updates_and_deletions() {
+    async fn totals_track_updates_and_deletes() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let mut cache = open_cache(directory.path().join("objects.sqlite"));
         let full = fixture_message(vectors::OBJECT_UPDATE);

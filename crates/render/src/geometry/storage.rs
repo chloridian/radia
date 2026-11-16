@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn terrain_page_budget_includes_composition_stream() {
+    fn terrain_budget_counts_composition() {
         let (surface_vertices, surface_indices, surface_composition) = page_bytes(289, 1536, false).unwrap();
         let (terrain_vertices, terrain_indices, terrain_composition) = page_bytes(289, 1536, true).unwrap();
         assert_eq!(surface_composition, 0);

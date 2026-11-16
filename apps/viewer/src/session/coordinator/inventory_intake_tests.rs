@@ -178,7 +178,7 @@ fn inventory_with_two_folders(agent: Uuid) -> (Inventory, InventoryOwner, [Categ
 }
 
 #[test]
-fn udp_and_event_queue_bulk_updates_reach_the_session_inventory() {
+fn bulk_updates_reach_inventory() {
     let agent = uuid(1);
     let owner = InventoryOwner::new(agent);
     let root = category(owner, 10, None, 4, Some(0));
@@ -238,7 +238,7 @@ fn invalid_chain_keeps_valid_sibling() {
 }
 
 #[test]
-fn save_asset_updates_loaded_items_for_udp_and_event_queue() {
+fn save_asset_updates_loaded_items() {
     let agent = uuid(1);
     let owner = InventoryOwner::new(agent);
     let root = category(owner, 10, None, 4, Some(0));
@@ -268,7 +268,7 @@ fn save_asset_updates_loaded_items_for_udp_and_event_queue() {
 }
 
 #[test]
-fn messages_for_another_agent_are_ignored_for_udp_and_event_queue() {
+fn foreign_agent_messages_ignored() {
     let agent = uuid(1);
     let other_agent = uuid(2);
     let owner = InventoryOwner::new(agent);
@@ -289,7 +289,7 @@ fn messages_for_another_agent_are_ignored_for_udp_and_event_queue() {
 }
 
 #[test]
-fn bootstrap_event_validation_rejects_malformed_and_foreign_events() {
+fn event_validation_rejects_bad_events() {
     let agent = uuid(1);
     let foreign_agent = uuid(2);
     let valid = save_asset_event_body(agent, uuid(10), uuid(11));
@@ -349,7 +349,7 @@ proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config { cases: 24, ..proptest::test_runner::Config::default() })]
 
     #[test]
-    fn interleaved_fetch_udp_event_queue_and_delta_updates_preserve_inventory(operations in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..32)) {
+    fn interleaved_sources_preserve_inventory(operations in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..32)) {
         let agent = uuid(1);
         let (mut inventory, owner, folders) = inventory_with_two_folders(agent);
         for (index, operation) in operations.into_iter().enumerate() {

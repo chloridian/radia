@@ -15,7 +15,7 @@ A test earns its place by catching a plausible failure of a contract (observable
 ## Workflow
 
 1. **Inspect.** Read the behavior, callers, existing tests, and fixtures. Done when you can list what must hold and which of it is already covered.
-2. **Name the failure** each new case catches, in one line. A case with no such line is cut. Merge into an existing test when contract and setup match and a failure still diagnoses clearly.
+2. **Name the failure** each new case catches, in one line. A case with no such line is cut. Merge into an existing test when contract and setup match and a failure still diagnoses clearly. When no failure survives this step, the change gets no new test; the report says why, and that completes the work.
 3. **Pick the faithful boundary.** Unit for local invariants, integration for public contracts, doctest for public examples, proptest for broad invariants. UI flows drive real actions through the existing app test context and assert the resulting state.
 4. **Write it.** Minimal setup. Expected values come from an independent oracle (see Oracles and fixtures).
 5. **Challenge it.** Ask of every kept test whether it can pass with the product wrong or fail after a behavior-preserving refactor. Use mutation testing when inspection cannot answer that confidently, following Coverage and mutation. Revert any manual mutation.
@@ -23,7 +23,7 @@ A test earns its place by catching a plausible failure of a contract (observable
 
 ## Selecting cases
 
-Rank by impact and likelihood: data loss, compatibility, security, state transitions, concurrency, parsing, cleanup, reported regressions. A few strong cases beat many weak ones.
+Rank by impact and likelihood: data loss, compatibility, security, state transitions, concurrency, parsing, cleanup, reported regressions. A few strong cases beat many weak ones. Every kept case is upkeep: each refactor of the code under test edits it, so a case must catch something that review and live use would miss.
 
 | Contract       | High-value case                                                | Low-value                             |
 | -------------- | -------------------------------------------------------------- | ------------------------------------- |

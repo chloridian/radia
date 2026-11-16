@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn hand_derived_boundaries_and_corner_ranges_match_the_composition_scale() {
+    fn boundaries_match_composition_scale() {
         let starts = [10.0, 20.0, 30.0, 40.0];
         let ranges = [40.0, 80.0, 120.0, 160.0];
         let settings = settings([Uuid::nil(); 4], starts, ranges);
@@ -345,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn neighbor_edge_coordinates_match_for_matching_settings() {
+    fn neighbor_edges_match_settings() {
         let west = settings([Uuid::from_u128(1); 4], [10.0, 20.0, 30.0, 40.0], [40.0, 80.0, 120.0, 160.0]);
         let east = settings([Uuid::from_u128(2); 4], [20.0, 22.0, 40.0, 42.0], [80.0, 81.0, 160.0, 161.0]);
         let west_coordinate = composition_coordinate(&west, 256.0, 64.0, 34.5, 256.0, 64.0);
@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn official_noise_fixture_at_nonzero_region_coordinates() {
+    fn official_noise_nonzero_region() {
         let settings = settings([Uuid::nil(); 4], [10.0, 20.0, 30.0, 40.0], [40.0, 80.0, 120.0, 160.0]);
         let coordinate = composition_coordinate(&settings, 128.0, 128.0, 50.0, 2048.0, 4096.0);
         assert!((coordinate - 0.960_022).abs() < 1.0e-6, "composition coordinate {coordinate}");
@@ -463,21 +463,21 @@ mod tests {
     }
 
     #[test]
-    fn patch_edge_normals_use_neighbor_heights() {
+    fn patch_normals_use_neighbors() {
         let seam = 9.0 * 16.0;
         let height = |x: f64, _y: f64| (x - seam).max(0.0);
         assert_edge_normals_match(terrain(8, 0.0, height), terrain(9, 0.0, height), seam);
     }
 
     #[test]
-    fn region_edge_normals_stitch_neighbor_heights() {
+    fn region_normals_stitch_neighbors() {
         let seam = 256.0;
         let height = |x: f64, _y: f64| (x - seam).max(0.0);
         assert_edge_normals_match(terrain(15, 0.0, height), terrain(0, 256.0, height), seam);
     }
 
     #[test]
-    fn small_heightfield_normal_matches_classic_diagonal_formula() {
+    fn small_normal_matches_classic_formula() {
         let heights = [
             [0.0, 2.0, 4.0, 6.0, 8.0],
             [1.0, 3.0, 5.0, 7.0, 9.0],

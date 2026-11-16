@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn inverse_view_projection_returns_world_space_water_ray() {
+    fn inverse_projection_yields_world_ray() {
         let direction = Vec3::new(1.0, 0.25, -1.0).normalize();
         let camera = Camera::new(DVec3::new(128.0, 64.0, 60.0), direction, 1.0, [1280, 720]).unwrap();
         let inverse = projection(camera, [1280, 720]).inverse();

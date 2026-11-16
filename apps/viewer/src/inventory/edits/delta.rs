@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn ais_delta_keeps_nested_parent_order_and_combines_removal_metadata() {
+    fn delta_orders_parents_merges_removals() {
         let owner = InventoryOwner::new(Uuid::from_u128(1));
         let root = key(owner, 2);
         let folder = key(owner, 3);
@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_confirmation_changes_only_the_current_record_name() {
+    fn rename_changes_only_name() {
         let owner = InventoryOwner::new(Uuid::from_u128(11));
         let root = key(owner, 12);
         let first = key(owner, 13);
@@ -520,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_edit_confirmation_reloads_its_folder() {
+    fn stale_confirmation_reloads_folder() {
         let owner = InventoryOwner::new(Uuid::from_u128(21));
         let root = key(owner, 22);
         let item_key = ItemKey::new(owner, ItemId::new(Uuid::from_u128(23)));

@@ -599,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn higher_priority_displaces_lower_ready_mesh() {
+    fn priority_displaces_lower_mesh() {
         let mut meshes = MeshCache::new(Budget::default());
         let background = key(Detail::Lowest);
         let foreground = key(Detail::High);
@@ -625,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn unscanned_ready_priority_survives_new_generation() {
+    fn ready_priority_survives_generation() {
         let resident = key(Detail::High);
         let cache_bytes = ENTRY_BYTES + retained_bytes(&tessellate(resident.shape, resident.detail, &AtomicBool::new(false)).unwrap());
         let mut meshes = MeshCache::new_with_cache_bytes(Budget::default(), cache_bytes);
@@ -640,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn releasing_failed_entry_returns_entry_charge() {
+    fn failed_release_returns_charge() {
         let failed = MeshKey { shape: PrimShape { profile_curve: 15, ..PrimShape::default() }, detail: Detail::High };
         let mut meshes = MeshCache::new(Budget::default());
         assert!(meshes.request(failed, 0));
@@ -656,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_keeps_many_unique_meshes_resident_within_memory_budget() {
+    fn many_meshes_fit_budget() {
         let budget = Budget::default();
         let mut meshes = MeshCache::new(budget.clone());
         let keys: Vec<_> = (0..128)

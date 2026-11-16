@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn media_requests_cover_full_and_compressed() {
+fn media_requests_cover_full_compressed() {
     let (_region_world, region) = crate::test_helpers::registered_region();
     let marker = "x-mv:12/00000000-0000-0000-0000-000000000001";
     let id = Uuid::from_u128(0x1234);

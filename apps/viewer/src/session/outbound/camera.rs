@@ -408,7 +408,7 @@ mod tests {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[tokio::test]
-    async fn loopback_simulator_receives_action_flags_camera_fields_and_focus_stop() {
+    async fn simulator_receives_actions_and_stop() {
         let receiver = TokioUdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
         let sender = UdpSocket::bind("127.0.0.1:0").expect("bind loopback viewer");
         let destination = receiver.local_addr().expect("simulator address");
@@ -520,7 +520,7 @@ mod tests {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
-    fn redundant_wake_does_not_send_a_duplicate_agent_update() {
+    fn redundant_wake_sends_nothing() {
         let simulator = simulator_id();
         let (agent_id, session_id) = (Uuid::from_u128(1), Uuid::from_u128(2));
         let camera = view(DVec3::ZERO, Vec3::X);
@@ -552,7 +552,7 @@ mod tests {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[tokio::test(start_paused = true)]
-    async fn visible_region_origin_wakes_live_camera_and_forwards_held_key() {
+    async fn origin_wakes_camera_and_key() {
         let receiver = TokioUdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
         let sender = UdpSocket::bind("127.0.0.1:0").expect("bind loopback viewer");
         let destination = receiver.local_addr().expect("simulator address");
@@ -680,7 +680,7 @@ mod tests {
         assert_eq!(sent.len(), 4);
     }
     #[tokio::test(start_paused = true)]
-    async fn controls_send_on_change_and_keepalive_after_one_second() {
+    async fn controls_send_on_change_keepalive() {
         let simulator = simulator_id();
         let mut uplink = CameraUplink::new();
         let camera = view(DVec3::ZERO, Vec3::X);
@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn disconnected_uplink_suspends_keepalive_until_reconnect() {
+    async fn disconnect_suspends_keepalive() {
         let simulator = simulator_id();
         let destination = Some((simulator, Uuid::nil(), Uuid::nil()));
         let camera = view(DVec3::ZERO, Vec3::X);
@@ -801,7 +801,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn camera_change_waits_for_eight_millisecond_limit() {
+    async fn camera_change_waits_for_limit() {
         let simulator = simulator_id();
         let mut uplink = CameraUplink::new();
         let movement = crate::agent_movement::MovementObservation {
@@ -933,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn camera_direction_uses_official_axis_threshold() {
+    fn direction_change_uses_threshold() {
         let first = view(DVec3::ZERO, Vec3::X);
         let below_threshold = view(DVec3::ZERO, Vec3::new(1.0, 0.0015, 0.0));
         let above_threshold = view(DVec3::ZERO, Vec3::new(1.0, 0.002, 0.0));

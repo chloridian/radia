@@ -195,7 +195,7 @@ fn metadata(name: &str, ids: &[Uuid]) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn every_edit_path_uses_confirmation_from_its_loopback_peer() {
+async fn edits_apply_confirmed_responses() {
     let mut http = LoopbackPeer::start().await;
     let udp = UdpSocket::bind("127.0.0.1:0").await.expect("bind UDP move peer");
     let udp_address = udp.local_addr().expect("read UDP peer address");
@@ -307,7 +307,7 @@ async fn every_edit_path_uses_confirmation_from_its_loopback_peer() {
 }
 
 #[tokio::test]
-async fn ais_failures_and_gone_refresh_do_not_apply_unconfirmed_changes() {
+async fn ais_failures_apply_nothing() {
     let mut http = LoopbackPeer::start().await;
     let (inventory, owner, _root, _folder, _second, trash, protected, item, _, _) = inventory_fixture();
     let (mut controller, _model) = start_controller(
@@ -369,7 +369,7 @@ impl MoveTransport for NoopMoveTransport {
 }
 
 #[tokio::test]
-async fn missing_ais_capability_uses_legacy_category_creation() {
+async fn missing_ais_uses_legacy_create() {
     let mut http = LoopbackPeer::start().await;
     let (mut inventory, owner, root, ..) = inventory_fixture();
     let (mut controller, model) = start_controller(
@@ -405,7 +405,7 @@ async fn missing_ais_capability_uses_legacy_category_creation() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn move_confirmation_timeout_invalidates_both_folders_for_refetch() {
+async fn move_timeout_refetches_both_folders() {
     let http = LoopbackPeer::start().await;
     let udp = UdpSocket::bind("127.0.0.1:0").await.expect("bind UDP move peer");
     let address = udp.local_addr().expect("read UDP peer address");
@@ -444,7 +444,7 @@ async fn move_confirmation_timeout_invalidates_both_folders_for_refetch() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn ais_timeout_refreshes_a_committed_rename() {
+async fn ais_timeout_refreshes_rename() {
     let mut http = LoopbackPeer::start().await;
     let (mut inventory, owner, _root, folder, _, _, _, item_key, _, _) = inventory_fixture();
     let (mut server_inventory, _, _, _, _, _, _, _, _, _) = inventory_fixture();

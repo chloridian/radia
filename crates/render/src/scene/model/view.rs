@@ -631,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn status_change_requests_reconciliation_without_full_rebuild() {
+    fn status_change_skips_full_rebuild() {
         let (_scene, mut view) = Reconciler::new(crate::scene::Budget::default());
         let version = view.version();
         view.status = Status::Ready;
@@ -764,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_object_pages_coalesce_updates_past_history_overflow() {
+    fn pages_coalesce_past_overflow() {
         let mut world = world::World::new(world::WorldLimits {
             max_regions: 1,
             max_entities: 4,
@@ -867,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn terrain_height_interpolates_across_patch_seam() {
+    fn patch_seam_interpolates_height() {
         let (_region_world, region) = crate::test_support::registered_region();
         let view = terrain_view(&[(region, DVec3::ZERO)], &[(region, 0, 0, 0.0), (region, 1, 0, 16.0)]);
 
@@ -875,7 +875,7 @@ mod tests {
     }
 
     #[test]
-    fn terrain_height_interpolates_across_region_seam() {
+    fn region_seam_interpolates_height() {
         let (_region_world, regions) = crate::test_support::registered_regions(2);
         let [west, east] = regions.as_slice() else { unreachable!() };
         let (west, east) = (*west, *east);
@@ -885,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn unloaded_region_neighbor_clamps_to_mesh_edge() {
+    fn unloaded_neighbor_clamps_edge() {
         let (_region_world, region) = crate::test_support::registered_region();
         let view = terrain_view(&[(region, DVec3::ZERO)], &[(region, 15, 0, 4.0)]);
 

@@ -719,7 +719,7 @@ mod tests {
     use super::*;
     use crate::session::object_cache::test_support::*;
     #[tokio::test]
-    async fn unavailable_cache_still_advertises_support_and_empty_state() {
+    async fn unavailable_cache_advertises_support() {
         let mut cache = ObjectCacheSession::new(Grid::Agni);
         assert!(cache.handle_event(ObjectCacheEvent::OpenFailed("test failure".into())).is_none());
         cache.set_region_identity(SIMULATOR, &region_handshake(CACHE_ID));
@@ -730,7 +730,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timed_out_region_load_returns_empty_handshake_flags() {
+    async fn timeout_returns_empty_flags() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let mut cache = open_cache(directory.path().join("objects.sqlite"));
         let scope = cache.identities.get(&SIMULATOR).expect("simulator has a cache scope").clone();
@@ -746,7 +746,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terse_update_during_region_load_stays_missing() {
+    async fn terse_during_load_stays_missing() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let mut cache = open_cache(directory.path().join("objects.sqlite"));
         let mut full = fixture_message(vectors::OBJECT_UPDATE);

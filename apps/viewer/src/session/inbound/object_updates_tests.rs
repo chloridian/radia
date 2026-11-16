@@ -25,7 +25,7 @@ fn fixture_mapping_preserves_packet_order() {
 }
 
 #[test]
-fn motion_updates_preserve_physics_and_time_dilation_fields() {
+fn motion_preserves_physics_fields() {
     let (_region_world, region) = crate::test_helpers::registered_region();
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let Message::ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
@@ -79,7 +79,7 @@ fn motion_updates_preserve_physics_and_time_dilation_fields() {
 }
 
 #[test]
-fn malformed_terse_block_does_not_discard_later_object() {
+fn bad_terse_keeps_later_object() {
     let (_region_world, region) = crate::test_helpers::registered_region();
     let fixture = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let Message::ImprovedTerseObjectUpdate(update) = fixture.message() else { panic!("expected terse fixture") };
@@ -100,7 +100,7 @@ fn malformed_terse_block_does_not_discard_later_object() {
 }
 
 #[test]
-fn invalid_blocks_keep_their_packet_position() {
+fn invalid_blocks_keep_position() {
     let (_region_world, region) = crate::test_helpers::registered_region();
     let mut message = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut message else { panic!("expected full object fixture") };
@@ -121,7 +121,7 @@ fn non_object_messages_are_ignored() {
 }
 
 #[test]
-fn empty_snapshot_is_an_explicit_clear() {
+fn empty_snapshot_clears() {
     let (_region_world, region) = crate::test_helpers::registered_region();
     let message = message(0x4175, br"{'id':i7,'te':[],'od':[]}");
     let batch = decode_object_message(region, 5, OrderEvidence::Ordered(5), &message).expect("override batch");
