@@ -150,6 +150,7 @@ impl GeometryRenderer {
         }
         let key = FramePreparationKey { version: view.geometry_version(), camera, agent_pose, size };
         let current_version = view.version();
+        let geometry_textures_before = self.textures.geometry_state();
         let same = self.prepared.as_ref().is_some_and(|prepared| prepared.key == key)
             && self.cache.version.as_ref().is_some_and(|version| version == &current_version);
         if same {
@@ -541,11 +542,10 @@ impl GeometryRenderer {
         self.request_frame_textures(view, &update.background, &gated_entities);
         times.requests = requests_started.elapsed();
         let texture_started = Instant::now();
-        let residency_before_upload = self.textures.geometry_state();
         if !same {
             self.textures.upload(device, encoder, self.epoch);
         }
-        if (self.appearance_waiting || !gated_entities.is_empty()) && self.textures.geometry_state() != residency_before_upload {
+        if (self.appearance_waiting || !gated_entities.is_empty()) && self.textures.geometry_state() != geometry_textures_before {
             appearance_deadline = Some(started);
             self.appearance_recheck = Some(started);
         }
