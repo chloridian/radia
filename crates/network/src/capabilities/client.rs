@@ -150,7 +150,6 @@ impl Client {
         }
     }
 
-    #[tracing::instrument(name = "capabilities.discover", level = "debug", skip_all, fields(capability_count = names.len()))]
     async fn discover_missing(&self, names: &[&str]) -> Result<HashMap<String, CapabilityUrl>, Error> {
         let deadline = RequestDeadline::new(self.request_timeout);
         let names = names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
@@ -170,6 +169,7 @@ impl Client {
         .await
     }
 
+    #[tracing::instrument(name = "capabilities.discover", level = "debug", skip_all, fields(capability_count = names.len()))]
     async fn discover(&self, deadline: RequestDeadline, names: Vec<String>) -> Result<HashMap<String, CapabilityUrl>, Error> {
         let seed = self.seed.as_ref().clone();
         let request_names = names.clone();
