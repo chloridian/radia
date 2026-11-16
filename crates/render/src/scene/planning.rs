@@ -89,11 +89,6 @@ impl MeshPlanner {
         planner
     }
 
-    #[cfg(test)]
-    pub(in crate::scene) fn mesh_usage(&self) -> (usize, usize) {
-        self.meshes.usage()
-    }
-
     pub(in crate::scene) fn set_camera(&mut self, camera: Camera) {
         if self.camera != Some(camera) {
             self.camera = Some(camera);

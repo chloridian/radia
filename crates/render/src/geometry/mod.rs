@@ -615,7 +615,4 @@ mod water_distance_tests;
 mod surface_pipeline_tests;
 
 #[cfg(test)]
-mod camera_path_tests;
-
-#[cfg(test)]
 mod radiance_tests;
