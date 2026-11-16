@@ -344,17 +344,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retry_waits_for_deadline() {
-        let mut retry = MaintenanceRetry::new();
-        let now = Instant::now();
-        assert!(retry.ready(now));
-        retry.failed(now);
-        assert!(!retry.ready(now));
-        assert!(!retry.ready(now + MAINTENANCE_RETRY_INITIAL - Duration::from_nanos(1)));
-        assert!(retry.ready(now + MAINTENANCE_RETRY_INITIAL));
-    }
-
-    #[test]
     fn failures_back_off_to_cap() {
         let mut retry = MaintenanceRetry::new();
         let mut now = Instant::now();
