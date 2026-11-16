@@ -32,7 +32,6 @@ use world::{Entity, WorldTransform};
 use self::cache::FrameCache;
 use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
 use self::first_appearance::FirstAppearances;
-use self::items::ItemIndex;
 use self::mesh::GpuMesh;
 use self::storage::Storage;
 use crate::scene::{AgentPose, Camera, MAX_REGIONS, MeshId, ViewVersion};
@@ -61,6 +60,23 @@ pub struct Stats {
     pub mesh_peak: usize,
     pub depth_bytes: usize,
     pub prepare_ms: f64,
+    pub prepare_cache_ms: f64,
+    pub prepare_visibility_ms: f64,
+    pub prepare_motion_ms: f64,
+    pub prepare_candidates_ms: f64,
+    pub prepare_requests_ms: f64,
+    pub prepare_textures_ms: f64,
+    pub prepare_texture_bindings_ms: f64,
+    pub prepare_meshes_ms: f64,
+    pub prepare_mesh_demands_ms: f64,
+    pub prepare_mesh_uploads_ms: f64,
+    pub prepare_appearances_ms: f64,
+    pub prepare_draw_list_ms: f64,
+    pub prepare_layout_ms: f64,
+    pub prepare_layout_commit_ms: f64,
+    pub prepare_draw_upload_ms: f64,
+    pub prepare_draw_batches_ms: f64,
+    pub prepare_finalize_ms: f64,
     pub texture_bytes: usize,
     pub texture_count: usize,
     pub texture_failure: Option<assets::Failure>,
@@ -76,6 +92,34 @@ pub struct Stats {
     pub blended_sorts: usize,
     pub animated_faces_visited: usize,
     pub animated_faces_changed: usize,
+    pub rebuild_objects: usize,
+    pub rebuild_surfaces: usize,
+    pub rebuild_sweep_slots: usize,
+    pub rebuild_cleanup_entries: usize,
+    pub rebuild_mesh_info_bytes: usize,
+    pub rebuild_mesh_info_entries: usize,
+    pub rebuild_mesh_info_centers_dropped: usize,
+    pub item_order_items: usize,
+    pub candidate_items_visited: usize,
+    pub mesh_demand_items_visited: usize,
+    pub mesh_demand_order_updates: usize,
+    pub mesh_upload_attempts: usize,
+    pub mesh_upload_attempt_bytes: usize,
+    pub appearance_candidates_checked: usize,
+    pub visible_candidates_checked: usize,
+    pub motion_cache_items_scanned: usize,
+    pub motion_entities_evaluated: usize,
+    pub motion_redraw_items_checked: usize,
+    pub layout_items_visited: usize,
+    pub layout_faces_visited: usize,
+    pub draw_instance_bytes_uploaded: usize,
+    pub draw_instance_write_calls: usize,
+    pub draw_command_bytes_uploaded: usize,
+    pub draw_batch_commands_built: usize,
+    pub texture_binding_entries: usize,
+    pub gpu_mesh_retirements: usize,
+    pub gpu_mesh_retired_bytes: usize,
+    pub rebuild_pending: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,11 +243,22 @@ impl FramePreparation {
 
 #[derive(Default)]
 struct PrepareTimes {
+    cache: Duration,
     visibility: Duration,
+    motion: Duration,
+    candidates: Duration,
     requests: Duration,
     textures: Duration,
+    texture_bindings: Duration,
     meshes: Duration,
+    mesh_demands: Duration,
+    mesh_uploads: Duration,
+    appearances: Duration,
     draw_list: Duration,
+    layout: Duration,
+    draw_upload: Duration,
+    draw_batches: Duration,
+    finalize: Duration,
 }
 
 pub(crate) struct GeometryRenderer {
@@ -229,6 +284,7 @@ pub(crate) struct GeometryRenderer {
     cache: FrameCache,
     draw_list: DrawList,
     first_appearances: FirstAppearances,
+    mesh_admission: frame::MeshAdmission,
     pending_meshes: HashSet<MeshId>,
     pending_textures: HashSet<TextureId>,
     draw_report: Option<Instant>,
@@ -236,10 +292,11 @@ pub(crate) struct GeometryRenderer {
     mesh_budget_blocked: HashSet<MeshId>,
     placements: HashMap<Entity, WorldTransform>,
     future_placements: HashMap<Entity, WorldTransform>,
-    motion_indices: Vec<ItemIndex>,
+    moving_entities: HashSet<Entity>,
     motion_entities: Vec<Entity>,
     regions: Vec<RegionBounds>,
     motion_redraw: bool,
+    layout_required: bool,
     epoch: u64,
     prepared: Option<FramePreparation>,
     applied_agent: Option<Uuid>,
@@ -296,6 +353,7 @@ impl GeometryRenderer {
             cache: FrameCache::default(),
             draw_list: DrawList::default(),
             first_appearances: FirstAppearances::default(),
+            mesh_admission: frame::MeshAdmission::default(),
             pending_meshes: HashSet::new(),
             pending_textures: HashSet::new(),
             draw_report: None,
@@ -303,10 +361,11 @@ impl GeometryRenderer {
             mesh_budget_blocked: HashSet::new(),
             placements: HashMap::new(),
             future_placements: HashMap::new(),
-            motion_indices: Vec::new(),
+            moving_entities: HashSet::new(),
             motion_entities: Vec::new(),
             regions: Vec::new(),
             motion_redraw: false,
+            layout_required: false,
             epoch: 0,
             prepared: None,
             applied_agent: None,
@@ -347,6 +406,10 @@ impl GeometryRenderer {
 
     pub(crate) fn skip(&mut self) {
         self.motion_redraw = false;
+        self.motion_entities.clear();
+        self.placements.clear();
+        self.future_placements.clear();
+        self.layout_required = false;
         if let Some(agent_id) = self.applied_agent.take() {
             self.restore_agent_pose(agent_id);
         }
@@ -360,12 +423,7 @@ impl GeometryRenderer {
         self.cache.next_preparation_replacements.clear();
         self.cache.visible.clear();
         self.cache.next_visible.clear();
-        self.cache.mesh_ids.clear();
-        self.cache.preparation_mesh_ids.clear();
-        self.cache.mesh_set.clear();
-        self.cache.mesh_representatives.clear();
-        self.cache.mesh_compositions.clear();
-        self.cache.mesh_priorities.clear();
+        self.cache.clear_mesh_demands();
         self.cache.mesh_ready.clear();
         self.pending_meshes.clear();
         for (_, item) in self.cache.items.iter_mut() {

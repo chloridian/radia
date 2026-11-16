@@ -5,8 +5,8 @@ use world::{
 
 use super::{
     Arc, Change, Entity, Instant, Lease, MAX_OBJECT_PAGE_ITEMS, MAX_OBJECTS, MAX_PATCHES, MAX_PENDING, MAX_REGIONS, MAX_RETAINED_BYTES,
-    Object, PATCH_BYTES, Patch, READ_BYTES, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, RecoveryReason, Region,
-    RegionData, RegionSummary, SurfaceKind, Weak, WorldReadError, size_of,
+    Object, PATCH_BYTES, PageState, Patch, READ_BYTES, ReadFailure, ReadIdentity, ReadJob, ReadQuery, ReadReply, ReadState, ReconcileStep,
+    Reconciler, RecoveryReason, Region, RegionData, RegionSummary, SurfaceKind, Weak, WorldReadError, size_of,
 };
 use crate::scene::region_environment::RegionEnvironmentResolver;
 
@@ -17,25 +17,30 @@ impl Reconciler {
             self.begin_recovery(RecoveryReason::Capacity, now);
             return ReconcileStep::Continue;
         };
+        let identity = ReadIdentity { epoch: self.world.epoch, request: self.world.next_read };
+        self.world.next_read = identity.request.checked_add(1).expect("Scene read identity space exhausted");
         let life = Arc::new(());
         if let ReadQuery::Terrain(region, _) = &query {
             self.preparation.surfaces.hydrating(*region, true);
         }
-        self.world.reading = Some(Arc::downgrade(&life));
+        self.world.read = ReadState::InFlight { identity, life: Arc::downgrade(&life), world_changed: false };
         self.world.reads_since_changes =
             if matches!(query, ReadQuery::Changes(_) | ReadQuery::Barrier) { 0 } else { self.world.reads_since_changes.saturating_add(1) };
-        ReconcileStep::Read(ReadJob { session: self.session.clone(), epoch: self.world.epoch, query, lease, life })
+        ReconcileStep::Read(ReadJob { session: self.session.clone(), identity, query, lease, life })
     }
 
     pub fn complete_read(&mut self, mut job: ReadJob, reply: Result<ReadReply, ReadFailure>, now: Instant) {
-        if !self.session.is_active()
-            || !job.session.is_active()
-            || job.epoch != self.world.epoch
-            || !self.world.reading.as_ref().is_some_and(|reading| Weak::ptr_eq(reading, &Arc::downgrade(&job.life)))
-        {
+        let current = matches!(
+            &self.world.read,
+            ReadState::InFlight { identity, life, .. }
+                if identity == &job.identity && Weak::ptr_eq(life, &Arc::downgrade(&job.life))
+        );
+        if !self.session.is_active() || !job.session.is_active() || job.identity.epoch != self.world.epoch || !current {
             return;
         }
-        self.world.reading = None;
+        let world_changed =
+            matches!(&self.world.read, ReadState::InFlight { world_changed: true, .. }) && matches!(&job.query, ReadQuery::Changes(_));
+        self.world.read = ReadState::Idle;
         let reply = match reply {
             Ok(reply) => reply,
             Err(ReadFailure::Closed | ReadFailure::World(WorldReadError::StaleSession)) => {
@@ -58,6 +63,8 @@ impl Reconciler {
         let result = self.apply_read_reply(&job.query, reply, &mut job.lease);
         if let Err(reason) = result {
             self.begin_recovery(reason, now);
+        } else if world_changed {
+            self.world.changes.notify();
         }
     }
 
@@ -67,15 +74,14 @@ impl Reconciler {
                 if barrier.region_count > MAX_REGIONS {
                     return Err(RecoveryReason::Capacity);
                 }
-                self.world.cursor = Some(barrier.changes);
+                self.world.changes.after_barrier(barrier.changes);
                 self.world.barrier = Some(barrier);
             }
             (ReadQuery::Objects(_), ReadReply::Objects(page)) if page.objects.len() <= MAX_OBJECT_PAGE_ITEMS => {
                 for item in page.objects {
                     self.invalidate(item.entity);
                 }
-                self.world.objects = page.next;
-                self.world.enumerate_objects = page.next.is_some();
+                self.world.objects.advance(page.next);
             }
             (ReadQuery::Regions(_), ReadReply::Regions(page)) if page.regions.len() <= MAX_REGION_PAGE_ITEMS => {
                 for summary in page.regions {
@@ -119,8 +125,7 @@ impl Reconciler {
                         self.world.terrain.insert(region);
                     }
                 }
-                self.world.regions = page.next;
-                self.world.refresh_regions = page.next.is_some();
+                self.world.regions.advance(page.next);
             }
             (ReadQuery::Details(entities), ReadReply::Details(batch))
                 if batch.details.len() <= entities.len() && batch.has_more == (batch.details.len() < entities.len()) =>
@@ -184,9 +189,8 @@ impl Reconciler {
                 for record in page.records {
                     self.apply_world_change(record.change)?;
                 }
-                self.world.cursor = Some(page.cursor);
+                self.world.changes.advance(page.cursor, page.has_more);
                 self.world.revision = Some(page.completed_revision);
-                self.world.needs_changes = page.has_more;
                 self.publication.publish = !partial;
             }
             (ReadQuery::Environment(region), ReadReply::Environment(source)) => {
@@ -250,12 +254,12 @@ impl Reconciler {
                         }
                         self.publication.dirty.water.insert(*region);
                     }
-                    self.world.terrain_cursor = page.next.map(|cursor| (*region, Some(cursor)));
+                    self.world.terrain_page = Some((*region, page.next.map_or(PageState::Complete, PageState::Paging)));
                     self.preparation.surfaces.hydrating(*region, page.next.is_some());
                 }
                 None => {
                     self.retire(*region);
-                    self.world.terrain_cursor = None;
+                    self.world.terrain_page = None;
                 }
                 _ => return Err(RecoveryReason::InvalidReply),
             },
@@ -295,11 +299,11 @@ impl Reconciler {
                 self.expand(entity);
             }
             WorldChange::RegionRegistered(region) => {
-                self.world.refresh_regions = true;
+                self.world.regions.refresh();
                 self.world.terrain.insert(region);
             }
             WorldChange::RegionUpdated(_) => {
-                self.world.refresh_regions = true;
+                self.world.regions.refresh();
             }
             WorldChange::EnvironmentUpdated(region) => {
                 self.world.environments.insert(region);
@@ -383,6 +387,9 @@ impl Reconciler {
         self.preparation.surfaces.retire(region);
         self.preparation.surfaces.regions(&self.state.mirror);
         self.world.terrain.remove(&region);
+        if self.world.terrain_page.is_some_and(|(active, _)| active == region) {
+            self.world.terrain_page = None;
+        }
         self.state.mirror.apply(Change::Retire(region));
         self.preparation.meshes.invalidate();
         self.preparation.assets.invalidate_all();

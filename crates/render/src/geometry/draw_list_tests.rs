@@ -29,6 +29,83 @@ type OpaqueOutput = HashMap<(DrawKey, Vec<u8>), usize>;
 type BlendedOutput = Vec<(DrawKey, Vec<u8>)>;
 
 #[test]
+fn canceled_layout_retires_in_bounded_chunks() {
+    let (_region_world, view, camera, mut items, mut list, index) = active_layout();
+    let active_commands = list.draws().len();
+    let active_items = list.visible_items();
+    let active_bytes = list.instance_bytes.len();
+    let staged = staged_layout(index, camera, view.membership_sequence(), &items.items);
+    list.pending = Some(staged);
+    let initial_entries = list.pending.as_ref().map(staged_entry_count).expect("pending staged build");
+    let initial_allocation = list.pending.as_ref().map(staged_allocation_bytes).expect("pending staged build");
+    list.cancel_layout();
+
+    assert!(list.layout_pending());
+    assert!(list.pending.is_none());
+    assert_eq!(staged_entry_count(list.retired.as_ref().expect("full staged build is retained")), initial_entries);
+    for _ in 0..8 {
+        assert!(!list.request_layout(&[index], camera, view.membership_sequence(), false, &items.items));
+        list.cancel_layout();
+        assert!(list.pending.is_none());
+        assert!(list.retired.is_some(), "repeated requests cannot add retired builds");
+        assert_eq!(staged_allocation_bytes(list.retired.as_ref().expect("single retired build")), initial_allocation);
+    }
+
+    let mut steps = 0;
+    while list.layout_pending() {
+        let before_entries = list.retired.as_ref().map(staged_entry_count).unwrap_or_default();
+        let before_bytes = list.retired.as_ref().map(staged_payload_bytes).unwrap_or_default();
+        let _ = list.advance_layout(&view, &mut items.items, &HashMap::new(), false);
+        let after_entries = list.retired.as_ref().map(staged_entry_count).unwrap_or_default();
+        let after_bytes = list.retired.as_ref().map(staged_payload_bytes).unwrap_or_default();
+        let after_allocation = list.retired.as_ref().map(staged_allocation_bytes).unwrap_or_default();
+        assert!(before_entries.saturating_sub(after_entries) <= super::RETIRED_LAYOUT_ENTRIES_PER_FRAME);
+        assert!(before_bytes.saturating_sub(after_bytes) <= super::RETIRED_LAYOUT_BYTES_PER_FRAME);
+        assert!(after_allocation <= initial_allocation, "retirement cannot retain more than the single staged allocation");
+        assert_eq!(list.draws().len(), active_commands, "retirement leaves active draw commands intact");
+        assert_eq!(list.visible_items(), active_items, "retirement leaves active visibility intact");
+        assert_eq!(list.instance_bytes.len(), active_bytes, "retirement leaves active instance data intact");
+        steps += 1;
+        assert!(steps < 100, "staged allocation is reclaimed in bounded turns");
+    }
+    assert!(steps > 1, "large staged data requires multiple retirement turns");
+    assert!(list.retired.is_none(), "completed retirement releases the whole staged allocation");
+    assert!(list.request_layout(&[index], camera, view.membership_sequence(), false, &items.items));
+}
+
+#[test]
+fn stale_layout_retires_the_whole_build() {
+    let (_region_world, view, camera, mut items, mut list, index) = active_layout();
+    let active_commands = list.draws().len();
+    let active_items = list.visible_items();
+    list.pending = Some(staged_layout(index, camera, view.membership_sequence().wrapping_add(1), &items.items));
+
+    let progress = list.advance_layout(&view, &mut items.items, &HashMap::new(), false).expect("stale build is observed");
+    assert!(progress.stale);
+    assert!(list.pending.is_none());
+    assert!(list.retired.is_some(), "stale staged inputs remain owned by incremental retirement");
+    assert_eq!(list.draws().len(), active_commands, "stale build cannot replace active commands");
+    assert_eq!(list.visible_items(), active_items, "stale build cannot replace active visibility");
+    let before = staged_entry_count(list.retired.as_ref().expect("retired staged build"));
+    assert!(before > 0, "stale input vectors remain owned until retirement");
+    let mut steps = 0;
+    while list.layout_pending() {
+        let before_entries = list.retired.as_ref().map(staged_entry_count).unwrap_or_default();
+        let before_bytes = list.retired.as_ref().map(staged_payload_bytes).unwrap_or_default();
+        let _ = list.advance_layout(&view, &mut items.items, &HashMap::new(), false);
+        let after_entries = list.retired.as_ref().map(staged_entry_count).unwrap_or_default();
+        let after_bytes = list.retired.as_ref().map(staged_payload_bytes).unwrap_or_default();
+        assert!(before_entries.saturating_sub(after_entries) <= super::RETIRED_LAYOUT_ENTRIES_PER_FRAME);
+        assert!(before_bytes.saturating_sub(after_bytes) <= super::RETIRED_LAYOUT_BYTES_PER_FRAME);
+        assert_eq!(list.draws().len(), active_commands, "retirement leaves active draw commands intact");
+        assert_eq!(list.visible_items(), active_items, "retirement leaves active visibility intact");
+        steps += 1;
+        assert!(steps < 100, "stale staged data is reclaimed in bounded turns");
+    }
+    assert!(list.retired.is_none(), "stale allocations are eventually reclaimed");
+}
+
+#[test]
 fn stateful_draw_changes_match_fresh_layouts() {
     let operations = vec![
         (0, 0, 0, 0, 0),
@@ -66,6 +143,32 @@ fn blended_parameter_patch_does_not_sort() {
     let stats = list.patch(&mut items.items, &[(index, 0)], &[], camera);
     assert_eq!(stats.faces_patched, 1);
     assert!(!stats.blended_sorted);
+}
+
+#[test]
+fn hiding_one_draw_slot_preserves_other_slots() {
+    let (_region_world, region) = crate::test_support::registered_region();
+    let (_scene, view, _) = super::super::fixtures::scene(255);
+    let object = view.objects().next().expect("fixture object");
+    let (_, mesh) = object.mesh().expect("fixture mesh");
+    let mesh = mesh.clone();
+    let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
+    let camera = camera(0.0);
+    let origin = super::super::instance::scene_origin(camera.position());
+    let mut items = FrameCache::default();
+    let mut list = DrawList::default();
+    let first = items.insert_item(new_item(item_id(0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("first item index");
+    let second = items.insert_item(new_item(item_id(1), 1, 0.0, origin, &mesh, region, &textures, &mut list)).expect("second item index");
+    list.layout(&[], &[first, second], &mut items.items, camera);
+    let hidden_slot = items.items.get(first).and_then(|item| item.faces.first()).and_then(|face| face.slot).expect("first draw slot");
+    let survivor_slot = items.items.get(second).and_then(|item| item.faces.first()).and_then(|face| face.slot).expect("second draw slot");
+
+    let hidden = items.items.get_mut(first).and_then(|item| item.faces.first_mut()).expect("first face");
+    assert!(list.hide_face(hidden));
+
+    assert!(list.batches_dirty());
+    assert!(list.hides_range(hidden_slot, 1));
+    assert!(!list.hides_range(survivor_slot, 1));
 }
 
 #[test]
@@ -199,7 +302,7 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
             }
             1 => {
                 if let Some(index) = items.index(id)
-                    && let Some(item) = items.remove_item(index)
+                    && let Some((item, _)) = items.remove_item(index)
                 {
                     list.release_faces(&item.faces);
                     layout = true;
@@ -264,6 +367,112 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
         visible = next_visible;
         assert_matches_fresh(&list, &items.items, &visible, camera);
     }
+}
+
+fn active_layout() -> (world::World, crate::scene::SceneView, Camera, FrameCache, DrawList, ItemIndex) {
+    let (_region_world, region) = crate::test_support::registered_region();
+    let (_scene, view, _) = super::super::fixtures::scene(255);
+    let object = view.objects().next().expect("fixture object");
+    let (_, mesh) = object.mesh().expect("fixture mesh");
+    let mesh = mesh.clone();
+    let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
+    let camera = camera(0.0);
+    let origin = super::super::instance::scene_origin(camera.position());
+    let mut items = FrameCache::default();
+    let mut list = DrawList::default();
+    let index = items.insert_item(new_item(item_id(0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index");
+    list.layout(&[], &[index], &mut items.items, camera);
+    (_region_world, view, camera, items, list, index)
+}
+
+fn staged_layout(index: ItemIndex, camera: Camera, membership_sequence: u64, items: &ItemSlab) -> super::LayoutBuild {
+    let input = vec![index; 2_047];
+    let mut build = super::LayoutBuild::new(&input, &input, camera, membership_sequence, true, items);
+    build.state.instance_bytes.resize(3 * super::RETIRED_LAYOUT_BYTES_PER_FRAME, 0);
+    build.state.indirect_bytes.resize(2 * super::RETIRED_LAYOUT_BYTES_PER_FRAME, 0);
+    build
+}
+
+fn staged_entry_count(build: &super::LayoutBuild) -> usize {
+    let state = &build.state;
+    build.previous.len()
+        + build.visible.len()
+        + build.mesh_pins.len()
+        + build.layout_items.len()
+        + build.selected_items.len()
+        + build.batch_seen.len()
+        + build.group_limits.len()
+        + build.priority.len()
+        + build.blended.len()
+        + state.draws.len()
+        + state.mesh_references.len()
+        + state.active_groups.len()
+        + state.active_textures.len()
+        + state.active_terrain.len()
+        + state.texture_seen.len()
+        + state.terrain_seen.len()
+        + state.group_counts.len()
+        + state.group_offsets.len()
+        + state.group_cursors.len()
+        + state.layout_items.len()
+        + state.priority_items.len()
+        + state.draw_group_refs.len()
+        + state.draw_group_seen.len()
+        + state.blended.len()
+        + state.dirty_slots.len()
+        + state.batch_order.len()
+        + state.draw_batches.len()
+        + state.first_instances.len()
+}
+
+fn staged_payload_bytes(build: &super::LayoutBuild) -> usize {
+    build.state.instance_bytes.len() + build.state.indirect_bytes.len()
+}
+
+fn staged_allocation_bytes(build: &super::LayoutBuild) -> usize {
+    fn vec_bytes<T>(values: &Vec<T>) -> usize {
+        values.capacity().saturating_mul(std::mem::size_of::<T>())
+    }
+
+    fn set_bytes<T>(values: &HashSet<T>) -> usize {
+        values.capacity().saturating_mul(std::mem::size_of::<T>())
+    }
+
+    let state = &build.state;
+    [
+        vec_bytes(&build.previous),
+        vec_bytes(&build.visible),
+        set_bytes(&build.mesh_pins),
+        vec_bytes(&build.layout_items),
+        set_bytes(&build.selected_items),
+        set_bytes(&build.batch_seen),
+        vec_bytes(&build.group_limits),
+        build.priority.capacity().saturating_mul(std::mem::size_of::<super::PriorityItem>()),
+        build.blended.capacity().saturating_mul(std::mem::size_of::<super::BlendedFace>()),
+        vec_bytes(&state.draws),
+        set_bytes(&state.mesh_references),
+        vec_bytes(&state.instance_bytes),
+        vec_bytes(&state.active_groups),
+        vec_bytes(&state.active_textures),
+        vec_bytes(&state.active_terrain),
+        set_bytes(&state.texture_seen),
+        set_bytes(&state.terrain_seen),
+        vec_bytes(&state.group_counts),
+        vec_bytes(&state.group_offsets),
+        vec_bytes(&state.group_cursors),
+        vec_bytes(&state.layout_items),
+        vec_bytes(&state.priority_items),
+        vec_bytes(&state.draw_group_refs),
+        set_bytes(&state.draw_group_seen),
+        vec_bytes(&state.blended),
+        vec_bytes(&state.dirty_slots),
+        vec_bytes(&state.batch_order),
+        vec_bytes(&state.draw_batches),
+        vec_bytes(&state.indirect_bytes),
+        vec_bytes(&state.first_instances),
+    ]
+    .into_iter()
+    .fold(0usize, usize::saturating_add)
 }
 
 fn new_item(
