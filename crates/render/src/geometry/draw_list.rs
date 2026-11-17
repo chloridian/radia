@@ -643,6 +643,7 @@ impl DrawList {
         self.last_layout
     }
 
+    #[cfg(test)]
     pub(super) fn committed_slot(&self, face: &CachedFace) -> Option<u32> {
         self.committed_address(face).map(|address| address.slot)
     }
@@ -664,6 +665,7 @@ impl DrawList {
         self.committed.mesh_references.contains(&mesh)
     }
 
+    #[cfg(test)]
     pub(super) fn committed_items(&self) -> &[ItemIndex] {
         &self.committed.layout_items
     }

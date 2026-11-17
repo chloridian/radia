@@ -1,6 +1,5 @@
 mod cache;
 mod draw_list;
-mod first_appearance;
 mod frame;
 mod instance;
 mod items;
@@ -32,7 +31,6 @@ use world::{Entity, WorldTransform};
 
 use self::cache::FrameCache;
 use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES, ViewDraws};
-use self::first_appearance::FirstAppearances;
 use self::items::ItemIndex;
 use self::mesh::GpuMesh;
 use self::storage::Storage;
@@ -295,7 +293,6 @@ pub(crate) struct GeometryRenderer {
     main_view: ViewDraws,
     layout_pose_items: HashSet<(ItemIndex, Entity)>,
     recovery_publication_pending: bool,
-    first_appearances: FirstAppearances,
     mesh_admission: frame::MeshAdmission,
     pending_meshes: HashSet<MeshId>,
     pending_textures: HashSet<TextureId>,
@@ -310,8 +307,6 @@ pub(crate) struct GeometryRenderer {
     motion_redraw: bool,
     layout_required: bool,
     replacement_retry_pending: bool,
-    appearance_recheck: Option<Instant>,
-    appearance_waiting: bool,
     mesh_omitted_faces: usize,
     epoch: u64,
     prepared: Option<FramePreparation>,
@@ -380,7 +375,6 @@ impl GeometryRenderer {
             main_view: ViewDraws::default(),
             layout_pose_items: HashSet::new(),
             recovery_publication_pending: false,
-            first_appearances: FirstAppearances::default(),
             mesh_admission: frame::MeshAdmission::default(),
             pending_meshes: HashSet::new(),
             pending_textures: HashSet::new(),
@@ -395,8 +389,6 @@ impl GeometryRenderer {
             motion_redraw: false,
             layout_required: false,
             replacement_retry_pending: false,
-            appearance_recheck: None,
-            appearance_waiting: false,
             mesh_omitted_faces: 0,
             epoch: 0,
             prepared: None,
@@ -443,8 +435,6 @@ impl GeometryRenderer {
         self.future_placements.clear();
         self.layout_required = false;
         self.replacement_retry_pending = false;
-        self.appearance_recheck = None;
-        self.appearance_waiting = false;
         self.mesh_omitted_faces = 0;
         if let Some(agent_id) = self.applied_agent.take() {
             self.restore_agent_pose(agent_id);
