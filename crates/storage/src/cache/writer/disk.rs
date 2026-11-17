@@ -1,10 +1,30 @@
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use tempfile::NamedTempFile;
+use utils::Summary;
 
 use crate::cache::{Key, NamespaceTable, StorageError};
 
 pub(super) const DATA_TEMP_PREFIX: &str = ".data-tmp-";
+pub(super) const CLEANUP_FAILURE_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+pub(super) struct CleanupFailures {
+    failed: u64,
+    last_error: Option<io::Error>,
+}
+
+impl CleanupFailures {
+    pub(super) fn report(self) {
+        if let Some(last_error) = self.last_error {
+            tracing::warn!(failed = self.failed, %last_error, "cache data cleanup failed");
+        }
+    }
+}
 
 pub(super) fn fail_temporary(temp: NamedTempFile, error: io::Error) -> StorageError {
     if error.kind() == io::ErrorKind::Interrupted {
@@ -16,14 +36,14 @@ pub(super) fn fail_temporary(temp: NamedTempFile, error: io::Error) -> StorageEr
     StorageError::Io(error)
 }
 
-pub(super) fn delete_data(root: &Path, namespaces: &NamespaceTable, key: &Key) {
+pub(super) fn delete_data(root: &Path, namespaces: &NamespaceTable, key: &Key, failures: &mut Summary<CleanupFailures>) {
     let Some(path) = namespaces.path(root, *key) else {
         return;
     };
     match fs::remove_file(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => tracing::warn!(error = %error, "cache data file cleanup failed"),
+        Err(error) => record_cleanup_failure(failures, error),
     }
     let mut directory = path.parent();
     while let Some(current) = directory {
@@ -34,10 +54,20 @@ pub(super) fn delete_data(root: &Path, namespaces: &NamespaceTable, key: &Key) {
             Ok(()) => directory = current.parent(),
             Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty) => break,
             Err(error) => {
-                tracing::warn!(error = %error, "cache data directory cleanup failed");
+                record_cleanup_failure(failures, error);
                 break;
             }
         }
+    }
+}
+
+fn record_cleanup_failure(failures: &mut Summary<CleanupFailures>, error: io::Error) {
+    let due = failures.record(Instant::now(), |failures| {
+        failures.failed = failures.failed.saturating_add(1);
+        failures.last_error = Some(error);
+    });
+    if let Some(due) = due {
+        due.report();
     }
 }
 
