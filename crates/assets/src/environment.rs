@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{array, collections::BTreeMap, sync::Arc};
 
 use llsd::{Limits, Map, Value, notation};
 use utils::AssetId;
@@ -456,7 +456,7 @@ fn day_cycle(map: &Map) -> Result<DayCycle, Failure> {
         return Err(Failure::TooLarge);
     }
     let water = track(tracks.first(), &waters)?;
-    let mut skies_out = std::array::from_fn(|_| Vec::new());
+    let mut skies_out = array::from_fn(|_| Vec::new());
     for (index, result) in skies_out.iter_mut().enumerate() {
         *result = track(tracks.get(index + 1), &skies)?;
     }

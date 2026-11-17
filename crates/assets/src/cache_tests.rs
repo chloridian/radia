@@ -1,12 +1,11 @@
-use std::sync::Arc;
+use std::{assert_matches, fs, sync::Arc};
 
 use tempfile::tempdir;
+use utils::AssetId;
 use uuid::Uuid;
 
 use super::*;
-use crate::Resource;
-use crate::budget::Blob;
-use utils::AssetId;
+use crate::{Resource, budget::Blob};
 
 fn resource(id: u128, kind: Kind) -> Resource {
     Resource { id: AssetId::new(Uuid::from_u128(id)), kind }
@@ -31,8 +30,8 @@ fn texture_uses_sharded_path() {
     cache.put_complete(Request::new(resource), bytes.clone()).expect("store raw payload");
 
     let path = directory.path().join("assets/textures/ab/abcdef01-2345-6789-abcd-ef0123456789.j2c");
-    assert_eq!(std::fs::read(&path).expect("read texture file"), bytes);
-    std::assert_matches!(cache.lookup(Request::new(resource)), AssetLookup::Hit(CacheValue { bytes: cached, .. }) if cached == bytes);
+    assert_eq!(fs::read(&path).expect("read texture file"), bytes);
+    assert_matches!(cache.lookup(Request::new(resource)), AssetLookup::Hit(CacheValue { bytes: cached, .. }) if cached == bytes);
     assert_eq!(cache.stats().bytes_read, u64::try_from(bytes.len()).expect("payload length"));
     assert_eq!(cache.stats().bytes_written, u64::try_from(bytes.len()).expect("payload length"));
     cache.shutdown().expect("close cache");
@@ -43,14 +42,14 @@ fn texture_uses_sharded_path() {
 #[test]
 fn open_sweeps_old_cache_files() {
     let directory = tempdir().expect("cache directory");
-    std::fs::write(directory.path().join("snapshot"), b"old snapshot").expect("write old snapshot");
-    std::fs::write(directory.path().join("journal"), b"old journal").expect("write old journal");
+    fs::write(directory.path().join("snapshot"), b"old snapshot").expect("write old snapshot");
+    fs::write(directory.path().join("journal"), b"old journal").expect("write old journal");
     let old_data = directory.path().join("data/old.bin");
-    std::fs::create_dir_all(old_data.parent().expect("old data directory")).expect("create old data directory");
-    std::fs::write(&old_data, b"old flat payload").expect("write old flat payload");
+    fs::create_dir_all(old_data.parent().expect("old data directory")).expect("create old data directory");
+    fs::write(&old_data, b"old flat payload").expect("write old flat payload");
     let old_asset = directory.path().join("assets/textures/ab/abcdef01-2345-6789-abcd-ef0123456789.j2c");
-    std::fs::create_dir_all(old_asset.parent().expect("old asset shard")).expect("create old asset shard");
-    std::fs::write(&old_asset, b"old sharded payload").expect("write old sharded payload");
+    fs::create_dir_all(old_asset.parent().expect("old asset shard")).expect("create old asset shard");
+    fs::write(&old_asset, b"old sharded payload").expect("write old sharded payload");
 
     let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
     assert!(!directory.path().join("snapshot").exists());
@@ -79,17 +78,17 @@ fn llsd_kinds_use_distinct_paths() {
     cache.put_complete(Request::new(texture), b"texture payload".to_vec()).expect("store texture");
 
     let name = "abcdef01-2345-6789-abcd-ef0123456789";
-    assert_eq!(std::fs::read(directory.path().join(format!("assets/materials/pbr/ab/{name}.llsd"))).expect("read PBR file"), b"pbr llsd");
+    assert_eq!(fs::read(directory.path().join(format!("assets/materials/pbr/ab/{name}.llsd"))).expect("read PBR file"), b"pbr llsd");
     assert_eq!(
-        std::fs::read(directory.path().join(format!("assets/materials/legacy/ab/{name}.llsd"))).expect("read legacy file"),
+        fs::read(directory.path().join(format!("assets/materials/legacy/ab/{name}.llsd"))).expect("read legacy file"),
         b"legacy llsd"
     );
     assert_eq!(
-        std::fs::read(directory.path().join(format!("assets/environments/ab/{name}.llsd"))).expect("read environment file"),
+        fs::read(directory.path().join(format!("assets/environments/ab/{name}.llsd"))).expect("read environment file"),
         b"environment llsd"
     );
     assert_eq!(
-        std::fs::read(directory.path().join(format!("assets/meshes/header/ab/{name}.llmesh"))).expect("read mesh header file"),
+        fs::read(directory.path().join(format!("assets/meshes/header/ab/{name}.llmesh"))).expect("read mesh header file"),
         mesh_bytes
     );
     assert!(!directory.path().join("assets/animations").exists());
@@ -108,10 +107,10 @@ fn whole_mesh_namespace_removed() {
     let shard = uuid.get(..2).expect("UUID shard");
     let old_path = directory.path().join(format!("assets/meshes/{shard}/{uuid}.llmesh"));
     let old_cache =
-        storage::Cache::open(directory.path().join("assets"), storage::DEFAULT_SIZE_LIMIT, &[storage::Namespace::new("meshes", "llmesh")])
+        storage::Cache::open(directory.path().join("assets"), storage::DEFAULT_SIZE_LIMIT, &[Namespace::new("meshes", "llmesh")])
             .expect("open previous mesh namespace");
     old_cache
-        .put(storage::Key::new(storage::NamespaceId::new(0), *id.uuid().as_bytes()), b"whole mesh".to_vec())
+        .put(storage::Key::new(NamespaceId::new(0), *id.uuid().as_bytes()), b"whole mesh".to_vec())
         .expect("write previous mesh entry");
     old_cache.shutdown().expect("close previous cache");
     assert!(old_path.exists());
@@ -129,17 +128,17 @@ fn eviction_follows_asset_policy() {
     let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
     let expensive_mesh = resource(60, Kind::Mesh);
     let cheap_texture = resource(61, Kind::Texture);
-    cache.observe_decode(Kind::Mesh, std::time::Duration::from_secs(30));
+    cache.observe_decode(Kind::Mesh, Duration::from_secs(30));
     let mesh_request = Request::MeshHeader(expensive_mesh.id);
-    let mesh_header = vec![1; ENTRY_BYTES - crate::cache::MESH_HEADER_FRAME_BYTES];
-    let mesh_entry = crate::cache::mesh_header_frame(ENTRY_BYTES as u64, &mesh_header).expect("frame mesh header");
+    let mesh_header = vec![1; ENTRY_BYTES - MESH_HEADER_FRAME_BYTES];
+    let mesh_entry = mesh_header_frame(ENTRY_BYTES as u64, &mesh_header).expect("frame mesh header");
     cache.put_complete(mesh_request, mesh_entry).expect("store expensive mesh first");
     let one_entry_limit = cache.accounted_size();
     cache.put_complete(Request::new(cheap_texture), vec![2; ENTRY_BYTES]).expect("store cheap texture second");
 
     cache.set_size_limit(one_entry_limit).expect("evict under asset cache limit");
 
-    std::assert_matches!(cache.lookup(mesh_request), AssetLookup::Hit(_));
+    assert_matches!(cache.lookup(mesh_request), AssetLookup::Hit(_));
     assert_eq!(cache.lookup(Request::new(cheap_texture)), AssetLookup::Miss);
     cache.shutdown().expect("close cache");
 }
@@ -193,7 +192,7 @@ fn writes_record_raw_byte_counts() {
     write.run();
     assert_eq!(cache.stats().bytes_written, 8);
     assert_eq!(budget.stats().charged_bytes, 0);
-    std::assert_matches!(cache.lookup(Request::new(resource)), AssetLookup::Hit(CacheValue { bytes, .. }) if bytes == b"settings");
+    assert_matches!(cache.lookup(Request::new(resource)), AssetLookup::Hit(CacheValue { bytes, .. }) if bytes == b"settings");
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
 }
 

@@ -1,7 +1,6 @@
 use std::{
     error::Error,
     fmt,
-    mem::size_of,
     path::Path,
     sync::{
         Arc,
@@ -10,19 +9,15 @@ use std::{
     time::Duration,
 };
 
-use storage::{
-    Cache as StorageCache, CacheValue, EvictionReason, Key as StorageKey, Lookup as StorageLookup, Namespace, NamespaceId, Protection,
-    StorageError, UnavailableReason,
-};
+pub use storage::EvictionReason as CacheEvictionReason;
+use storage::{CacheValue, EvictionReason, Namespace, NamespaceId, Protection, StorageError, UnavailableReason};
 
 use crate::{
     Blob, Budget, Kind, Request,
     budget::Reservation,
     cache_policy::{AssetEvictionPolicy, DecodeCosts},
-    mesh::{MAX_MESH_ASSET_BYTES, MAX_MESH_BLOCK_BYTES, MAX_MESH_HEADER_BYTES, MeshLod},
+    mesh::{MAX_MESH_ASSET_BYTES, MAX_MESH_BLOCK_BYTES, MAX_MESH_HEADER_BYTES, MeshLod, MeshLodRequest},
 };
-
-pub use storage::EvictionReason as CacheEvictionReason;
 
 const MAX_IN_FLIGHT_WRITES: usize = 2;
 const TEXTURES: NamespaceId = NamespaceId::new(0);
@@ -73,7 +68,7 @@ pub(crate) fn parse_mesh_header_frame(bytes: &[u8]) -> Option<(u64, &[u8])> {
     Some((total_length, bytes.get(MESH_HEADER_FRAME_BYTES..)?))
 }
 
-pub(crate) fn mesh_lod_frame(request: crate::mesh::MeshLodRequest, block: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn mesh_lod_frame(request: MeshLodRequest, block: &[u8]) -> Option<Vec<u8>> {
     let range = request.range();
     let block_length = range.end.checked_sub(range.start)?;
     if u64::try_from(block.len()).ok()? != block_length || block_length > MAX_MESH_BLOCK_BYTES as u64 {
@@ -89,7 +84,7 @@ pub(crate) fn mesh_lod_frame(request: crate::mesh::MeshLodRequest, block: &[u8])
     Some(frame)
 }
 
-pub(crate) fn parse_mesh_lod_frame(request: crate::mesh::MeshLodRequest, bytes: &[u8]) -> Option<&[u8]> {
+pub(crate) fn parse_mesh_lod_frame(request: MeshLodRequest, bytes: &[u8]) -> Option<&[u8]> {
     if bytes.len() < MESH_LOD_FRAME_BYTES.checked_add(1)? || bytes.len() > MESH_LOD_FRAME_BYTES.checked_add(MAX_MESH_BLOCK_BYTES)? {
         return None;
     }
@@ -185,7 +180,7 @@ pub(crate) fn read_work_bytes_for_request(request: Request) -> Option<usize> {
 }
 
 pub struct AssetCache {
-    storage: StorageCache,
+    storage: storage::Cache,
     counters: Counters,
     decode_costs: Arc<DecodeCosts>,
 }
@@ -210,8 +205,8 @@ impl AssetCache {
         storage::discard_legacy_layout(directory).map_err(AssetCacheError::Storage)?;
         let decode_costs = Arc::new(DecodeCosts::default());
         let policy = AssetEvictionPolicy::new(Arc::clone(&decode_costs));
-        let storage =
-            StorageCache::open_with_policy(directory.join("assets"), size_limit, &NAMESPACES, policy).map_err(AssetCacheError::Storage)?;
+        let storage = storage::Cache::open_with_policy(directory.join("assets"), size_limit, &NAMESPACES, policy)
+            .map_err(AssetCacheError::Storage)?;
         Ok(Self { storage, counters: Counters::default(), decode_costs })
     }
 
@@ -224,7 +219,7 @@ impl AssetCache {
         let key = storage_key(request);
         let mut bytes_read = 0u64;
         let result = match self.storage.lookup_bounded(key, cache_limit(request)) {
-            StorageLookup::Hit(value) => {
+            storage::Lookup::Hit(value) => {
                 bytes_read = u64::try_from(value.bytes.len()).unwrap_or(u64::MAX);
                 let valid = match request {
                     Request::MeshHeader(_) => parse_mesh_header_frame(&value.bytes).is_some(),
@@ -246,9 +241,9 @@ impl AssetCache {
                     }
                 }
             }
-            StorageLookup::Miss => AssetLookup::Miss,
-            StorageLookup::Corrupt => AssetLookup::Corrupt,
-            StorageLookup::Unavailable(reason) => AssetLookup::Unavailable(reason),
+            storage::Lookup::Miss => AssetLookup::Miss,
+            storage::Lookup::Corrupt => AssetLookup::Corrupt,
+            storage::Lookup::Unavailable(reason) => AssetLookup::Unavailable(reason),
         };
         self.counters.bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
         match &result {
@@ -394,7 +389,7 @@ fn cache_limit(request: Request) -> usize {
     }
 }
 
-fn storage_key(request: Request) -> StorageKey {
+fn storage_key(request: Request) -> storage::Key {
     let (namespace, id) = match request {
         Request::Texture { id, .. } => (TEXTURES, id),
         Request::PbrMaterial(id) => (PBR_MATERIALS, id),
@@ -411,7 +406,7 @@ fn storage_key(request: Request) -> StorageKey {
             (namespace, block.asset_id())
         }
     };
-    StorageKey::new(namespace, *id.uuid().as_bytes())
+    storage::Key::new(namespace, *id.uuid().as_bytes())
 }
 
 fn map_storage_error(error: StorageError) -> AssetCacheError {

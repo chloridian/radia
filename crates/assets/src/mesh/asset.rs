@@ -1,15 +1,14 @@
-use std::{mem::size_of, ops::Range};
+use std::ops::Range;
 
 use flate2::{Decompress, FlushDecompress, Status};
 use llsd::{Limits, Value, binary};
 use math::{Vec2, Vec3};
 use utils::AssetId;
 
-use crate::budget::{Reservation, Resident};
-
 use super::{
     Face, LodGeometry, MAX_MESH_INDICES, MAX_MESH_INDICES_PER_FACE, MAX_MESH_VERTICES, MAX_MESH_VERTICES_PER_FACE, Mesh, MeshError, Vertex,
 };
+use crate::budget::{Reservation, Resident};
 
 pub const MESH_HEADER_BYTES: usize = 4096;
 pub const MAX_MESH_HEADER_BYTES: usize = 64 * 1024;
@@ -658,11 +657,12 @@ mod tests {
     use std::{assert_matches, io::Write};
 
     use flate2::{Compression, write::ZlibEncoder};
-    use proptest::prelude::*;
+    use proptest::{collection, prelude::*};
     use utils::AssetId;
     use uuid::Uuid;
 
     use super::*;
+    use crate::budget::{ASSET_WORK_BYTES, Budget};
 
     fn sized(tag: u8, bytes: &[u8]) -> Vec<u8> {
         let mut encoded = vec![tag];
@@ -965,7 +965,7 @@ mod tests {
 
         assert!(encoded.len() > 2 * 1024 * 1024);
         assert!(encoded.len() <= MAX_MESH_BLOCK_BYTES);
-        let budget = crate::budget::Budget::default();
+        let budget = Budget::default();
         let mut reservation = budget.reserve(encoded.capacity()).unwrap();
         let LodGeometry::Geometry(mesh) =
             decode_lod_cancellable_reserved(&encoded, encoded.capacity(), &mut reservation, || false).unwrap()
@@ -1051,8 +1051,8 @@ mod tests {
         drop(value);
         drop(decoded);
 
-        let budget = crate::budget::Budget::default();
-        let _blocker = budget.reserve(crate::budget::ASSET_WORK_BYTES - parse_peak).unwrap();
+        let budget = Budget::default();
+        let _blocker = budget.reserve(ASSET_WORK_BYTES - parse_peak).unwrap();
         let mut reservation = budget.reserve(encoded.capacity()).unwrap();
         assert_matches!(
             decode_lod_cancellable_reserved(&encoded, encoded.capacity(), &mut reservation, || false),
@@ -1062,7 +1062,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn header_bytes_stay_bounded(bytes in prop::collection::vec(any::<u8>(), 0..=MESH_HEADER_BYTES)) {
+        fn header_bytes_stay_bounded(bytes in collection::vec(any::<u8>(), 0..=MESH_HEADER_BYTES)) {
             let result = decode_header(&bytes, MAX_MESH_ASSET_BYTES as u64);
             if let Ok(header) = result {
                 prop_assert!(header.asset_length() <= MAX_MESH_ASSET_BYTES as u64);
@@ -1077,7 +1077,7 @@ mod tests {
         }
 
         #[test]
-        fn block_bytes_stay_bounded(bytes in prop::collection::vec(any::<u8>(), 0..=4096)) {
+        fn block_bytes_stay_bounded(bytes in collection::vec(any::<u8>(), 0..=4096)) {
             let result = decode_lod(&bytes);
             if let Ok(geometry) = result {
                 match geometry {
