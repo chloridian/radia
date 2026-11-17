@@ -10,4 +10,4 @@ pub(crate) use self::{
     error::SetupError,
     event_queue::{EVENT_QUEUE_NAME, EventQueueExit, EventQueueRoleHandle, EventQueueTask},
 };
-pub use crate::http::{Error as HttpError, ErrorKind as HttpErrorKind, RedirectPolicy};
+pub use crate::http::{Error, ErrorKind, RedirectPolicy};

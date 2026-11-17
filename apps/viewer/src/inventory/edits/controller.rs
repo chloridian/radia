@@ -7,7 +7,7 @@ use inventory::{
 use llsd::{Map, Value};
 use network::{
     AgentSession, Delivery, SessionHandle,
-    capabilities::{CapabilityUrl, Client, HttpErrorKind},
+    capabilities::{self, CapabilityUrl, Client},
 };
 use protocol::{
     inventory::{AisEditResponse, decode_ais_edit_response, decode_created_category_response},
@@ -646,7 +646,7 @@ fn request_outcome(error: network::Error) -> InventoryEditOutcome {
     if request_is_gone(&error) {
         return InventoryEditOutcome::Gone;
     }
-    if matches!(error, network::Error::CapabilityHttp(ref http) if http.kind == HttpErrorKind::Timeout) {
+    if matches!(error, network::Error::CapabilityHttp(ref http) if http.kind == capabilities::ErrorKind::Timeout) {
         return InventoryEditOutcome::TimedOut;
     }
     InventoryEditOutcome::ServerError
@@ -656,7 +656,7 @@ fn request_has_unknown_outcome(error: &network::Error) -> bool {
     matches!(
         error,
         network::Error::CapabilityHttp(http)
-            if matches!(http.kind, HttpErrorKind::Timeout | HttpErrorKind::Transport)
+            if matches!(http.kind, capabilities::ErrorKind::Timeout | capabilities::ErrorKind::Transport)
                 || http.status.is_some_and(|status| status.is_server_error())
     )
 }

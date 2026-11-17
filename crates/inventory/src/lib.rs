@@ -9,8 +9,7 @@ use std::{error::Error, fmt};
 
 pub use self::{
     cache::{
-        InventoryCache, InventoryCacheError, InventoryCacheLoad, InventoryCacheOpenStatus, InventoryCacheRestore,
-        InventoryCacheRestoreProgress, InventoryCacheWrite,
+        InventoryCache, InventoryCacheError, InventoryCacheLoad, InventoryCacheRestore, InventoryCacheRestoreProgress, InventoryCacheWrite,
     },
     mutation::{FolderFetchCommit, InventoryChild, InventoryPreparationCancellation, MAX_FOLDER_FETCH_CHILDREN, PreparedFolderFetch},
     snapshot::InventorySnapshot,

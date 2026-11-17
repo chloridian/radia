@@ -9,7 +9,6 @@ use std::{
     time::Duration,
 };
 
-pub use storage::EvictionReason as CacheEvictionReason;
 use storage::{CacheValue, EvictionReason, Namespace, NamespaceId, Protection, StorageError, UnavailableReason};
 
 use crate::{

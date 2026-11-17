@@ -13,9 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assets::cache::CacheEvictionReason;
 use egui::{Context, DragValue, Slider, ViewportId};
 use render::{CompressionQuality, FrameInput, Overlay, Renderer, RendererInit, Retirement, TextureCompletion, scene};
+use storage::EvictionReason;
 use tokio::{runtime::Handle, task::JoinHandle};
 use tracing::Instrument;
 use utils::Summary;
@@ -1078,11 +1078,11 @@ impl SceneWindow {
                                 .iter()
                                 .filter_map(|reason| {
                                     reason.map(|reason| match reason {
-                                        CacheEvictionReason::Infrequent => "infrequent",
-                                        CacheEvictionReason::Stale => "stale",
-                                        CacheEvictionReason::LowReconstructionCost => "low decode cost",
-                                        CacheEvictionReason::LeastRecentlyUsed => "least recent",
-                                        CacheEvictionReason::LowUtility => "low utility",
+                                        EvictionReason::Infrequent => "infrequent",
+                                        EvictionReason::Stale => "stale",
+                                        EvictionReason::LowReconstructionCost => "low decode cost",
+                                        EvictionReason::LeastRecentlyUsed => "least recent",
+                                        EvictionReason::LowUtility => "low utility",
                                     })
                                 })
                                 .collect::<Vec<_>>()

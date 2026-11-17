@@ -8,10 +8,9 @@ use std::{
     },
 };
 
-use inventory::{
-    Category, CategoryKey, ChangeSet, Inventory, InventoryCache, InventoryCacheOpenStatus, InventoryCacheRestore, InventorySnapshot,
-};
+use inventory::{Category, CategoryKey, ChangeSet, Inventory, InventoryCache, InventoryCacheRestore, InventorySnapshot};
 use network::Grid;
+use storage::sqlite::OpenStatus;
 use tokio::{
     runtime::Handle,
     sync::{mpsc, oneshot},
@@ -112,7 +111,7 @@ pub(super) enum InventoryCacheEvent {
     Ready {
         cache: InventoryCache,
         restore: InventoryCacheRestore,
-        status: InventoryCacheOpenStatus,
+        status: OpenStatus,
         disposal: InventoryDisposalPermit,
     },
     OpenFailed(String),
@@ -179,7 +178,7 @@ impl InventoryCacheSession {
         &mut self,
         runtime: &Handle,
         inventory: &Inventory,
-        open: impl FnOnce() -> Result<(InventoryCache, InventoryCacheOpenStatus), inventory::InventoryCacheError> + Send + 'static,
+        open: impl FnOnce() -> Result<(InventoryCache, OpenStatus), inventory::InventoryCacheError> + Send + 'static,
     ) {
         if !matches!(&self.lifecycle, CacheLifecycle::Dormant) {
             return;
@@ -474,7 +473,7 @@ impl InventoryCacheSession {
         runtime: &Handle,
         cache: InventoryCache,
         restore: InventoryCacheRestore,
-        status: InventoryCacheOpenStatus,
+        status: OpenStatus,
         disposal: InventoryDisposalPermit,
         inventory: &mut Inventory,
     ) -> InventoryCacheEventOutcome {
