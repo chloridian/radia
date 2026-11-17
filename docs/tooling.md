@@ -1,4 +1,4 @@
-Run commands from the repository root unless stated otherwise. Windows is the primary development platform; use WSL2 for Linux builds and fuzzing. CI checks Windows, macOS, and Linux. The Rust toolchain follows the stable channel rather than a fixed release. CI installs Nextest 0.9; other development tools may vary by checkout.
+Run commands from the repository root unless stated otherwise. Windows is the primary development platform; use WSL2 for Linux builds. CI checks Windows, macOS, and Linux. The Rust toolchain follows the stable channel rather than a fixed release. CI installs Nextest 0.9; other development tools may vary by checkout.
 
 Network HTTPS uses Reqwest 0.13 with rustls and aws-lc. Building aws-lc requires a C/C++ compiler. Windows x86-64 assembly uses NASM when available or the crate's enabled prebuilt objects. The selected non-FIPS build does not require CMake, bindgen, or Go. See the [aws-lc-rs build guide](https://github.com/aws/aws-lc-rs#build) for supported toolchains. Certificate verification follows the operating system trust configuration.
 
@@ -34,17 +34,15 @@ cargo clippy -p <crate> --all-targets -- -D warnings
 # Test
 cargo xtest --workspace
 cargo xtest -p <crate>
-cargo nextest run --workspace --all-features
-cargo nextest run -p <crate>
 cargo nextest list --workspace
-cargo test --workspace
-cargo test -p <crate>
 
 # Run specific tests
 cargo nextest run -p <crate> -E 'test(<name>)'
 cargo nextest run -p <crate> --run-ignored only
-cargo test -p <crate> <name>
-cargo test -p <crate> -- --nocapture
+cargo test -p <crate> <name> -- --nocapture
+
+# Render GPU tests (need a Vulkan adapter)
+cargo nextest run -p render --release --run-ignored only
 
 # Repeat affected tests under parallel test load
 cargo nextest archive --workspace --all-features --archive-file target/timing-tests.tar.zst
@@ -59,6 +57,7 @@ cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target
 - `cargo xtest` runs Nextest with all features, but does not explicitly select the workspace. Add `--workspace` when needed.
 - Replace `<crate>`, `<name>`, and `<args>` with the relevant values.
 - Optional features may require platform-specific dependencies.
+- Ignored tests do not run in `cargo xtest`. The `render` GPU tests need a Vulkan adapter; run them with the command above on render changes.
 - Stress runs use the same production constants as ordinary tests. Keep the workspace load running throughout the focused repetition and record both commands and their results.
 - Build the archive after edits are complete and use fresh extraction directories for each validation run. Both runs use the archived executables, so subsequent Cargo builds cannot overwrite running test binaries on Windows.
 
@@ -73,72 +72,6 @@ git config --local core.hooksPath .githooks
 This command changes the local Git configuration for the current checkout.
 
 The pre-commit hook checks formatting. There is no pre-push hook. CI runs workspace Clippy with warnings denied, then the all-feature workspace suite through Nextest without stopping at the first failure.
-
-## Fuzzing
-
-Use WSL2 and nightly Rust. `fuzz/` is a separate workspace.
-
-```bash
-# Discover targets
-cargo +nightly fuzz list
-
-# Time-limited runs
-cargo +nightly fuzz run <target> -- -max_total_time=<seconds> -max_len=<bytes>
-cargo +nightly fuzz run <target> -- -max_total_time=<seconds>
-
-# Run with a dictionary
-cargo +nightly fuzz run <target> -- -dict=fuzz/dictionaries/<target>.dict -max_total_time=<seconds>
-
-# Fixed number of executions
-cargo +nightly fuzz run <target> -- -runs=<count>
-
-# Reproduce and minimize a failure
-cargo +nightly fuzz run <target> <artifact-path>
-cargo +nightly fuzz tmin <target> <artifact-path>
-
-# Minimize corpus
-cargo +nightly fuzz cmin <target>
-
-# Add a target
-cargo +nightly fuzz add <target>
-```
-
-- Corpus: `fuzz/corpus/<target>/`
-- Dictionaries: `fuzz/dictionaries/`
-- Failures: `fuzz/artifacts/<target>/`
-- Coverage: `fuzz/coverage/<target>/`
-
-Corpus inputs are reused across runs. Back up the corpus before minimization. Use sanitized LLUDP fixtures as seeds; remove private session data before committing fixtures.
-
-Dictionaries contain protocol-specific byte sequences that guide mutations. Create and commit curated dictionaries using verified protocol constants. Pass `-dict=<file-path>` explicitly when running with a dictionary.
-
-Fuzzing detects crashes and other failures, not semantic protocol correctness.
-
-### Fuzz coverage
-
-Requires `cargo-binutils` and nightly LLVM tools in WSL2.
-
-```bash
-# Select target
-TARGET="<target>"
-
-# Generate coverage data
-cargo +nightly fuzz coverage "$TARGET"
-
-# Locate instrumented executable
-BIN=$(find fuzz/target target -type f -path "*/coverage/*/release/$TARGET" -print -quit 2>/dev/null)
-
-# Generate HTML report
-cargo +nightly cov -- show "$BIN" \
-  -instr-profile="fuzz/coverage/$TARGET/coverage.profdata" \
-  -format=html \
-  -output-dir="fuzz/coverage/$TARGET/html"
-
-# Open report
-explorer.exe "$(wslpath -w "$(pwd)/fuzz/coverage/$TARGET/html/index.html")"
-```
-
-Verify `BIN` points to the instrumented executable. Coverage reflects saved corpus execution, not whole-workspace coverage.
 
 ## Test coverage
 
@@ -183,27 +116,11 @@ cargo bench -p <crate> -- <filter> --sample-size 30 --warm-up-time 1 --measureme
 cargo bench -p <crate> -- <filter> --sample-size 200 --warm-up-time 5 --measurement-time 15
 ```
 
-Each crate has one `main` benchmark target. Replace the package and Criterion filter as needed. The inventory package name is version-qualified because a dependency also uses `inventory`. For example, `cargo bench -p render -- reconcile` selects reconciliation benchmarks. The protocol receive benchmark is `cargo bench -p protocol -- receive_pipeline`. It reports packets per second for mixed packet framing, preflight, and decode. It does not include circuit deduplication or ack bookkeeping.
-
-Inventory restore preparation has a folder-heavy workload: `cargo bench -p inventory@0.0.1 --bench main -- cache_prepare_restore_10k_folders`. It prepares a restore for 10,000 sibling folders, with SQLite reads and fixture construction outside the timed operation. A setup check verifies that the restore includes all folders and their root.
-
-The storage burst workload is `cargo bench -p storage --bench main -- put_burst_16`. It measures sixteen concurrent 64-byte writes against a cache containing 50,000 entries. Producer threads persist across samples. Timing includes producer signaling and completion of all writes, but excludes thread startup, teardown, and removal of the prior sample's entries.
-
-Network also has an ignored loopback measurement through the production session, UDP receive, ACK, and application-event paths:
-
-```bash
-cargo test --release --locked -p network udp_burst_measurement -- --ignored --nocapture
-```
-
-It measures one primary circuit and one session with three neighbors, excluding setup, packet construction, and shutdown. Reported ACK latency includes circuit batching and pacing. The acknowledged-burst completion rate is a closed-loop measurement, not saturation throughput. Delivery observations end at the application receiver; they do not include World or scene processing or real-network latency.
-
-Storage's insertion benchmarks start each sample with 50,000 existing entries and reset inserted keys outside the measured operation. The lookup and reopen benchmarks verify that same fixture size. Run timing baselines without concurrent tests or builds; the parallel workspace load above is for flakiness validation.
+Each crate has one `main` benchmark target. Replace the package and Criterion filter as needed. The inventory package name is version-qualified (`-p inventory@0.0.1`) because a dependency also uses `inventory`. For example, `cargo bench -p render -- reconcile` selects reconciliation benchmarks. Run timing baselines without concurrent tests or builds; the parallel workspace load above is for flakiness validation.
 
 - `cargo perf` runs workspace benchmarks with 200 samples, a 5-second warm-up, and a 15-second measurement. `cargo perf-quick` uses 30 samples, a 1-second warm-up, a 3-second measurement, and no plot. Use `cargo bench -p <crate> -- <filter> ...` for a focused run.
 - `cargo profile`: viewer profiling build with Tracy.
 - `cargo flamegraph`: requires a configured profiler backend; WSL2 may restrict Linux `perf`.
-
-For object geometry evidence, Alt-click a visible face in the viewer. The normal focus action also writes one `geometry pick` record to the session JSON log under `target/logs`. A hit records object identity, the actual cached mesh counts and bounds, its source LOD key, submitted face counts, and GPU allocation ranges. When a replacement is pending, its source publication is recorded separately from the mesh being drawn. Misses and pick-limit outcomes do not identify an object. Capture the same object before and after refinement to distinguish geometry changes from unchanged geometry with different materials. The record does not contain the scene planner's desired LOD or request status.
 
 ## Dependencies
 
@@ -223,7 +140,6 @@ cargo +nightly udeps --workspace
 ```
 
 - `cargo deny` requires `deny.toml`.
-- `cargo outdated` may fail on Git/path dependencies, including `dxr`.
 - `cargo udeps` may report false positives for optional features.
 - Duplicate dependencies are not necessarily problems; inspect before consolidating.
 
@@ -252,8 +168,8 @@ cargo mutants -f <file-path>
 
 ## Platforms
 
-Windows is the primary local development platform. The CI workflow builds, lints, and tests on Windows, macOS, and Linux.
+The CI workflow builds, lints, and tests on Windows, macOS, and Linux.
 
-Use WSL2 for Linux builds, fuzzing, corpus management, and fuzz coverage. Confirmed Linux utilities include `cargo-fuzz` and `cargo-binutils`. Prefer `~/Radia` over `/mnt/c/Radia` for Linux build performance. Keep build artifacts separate between platforms. Windows `.exe` tools exposed through WSL's `PATH` do not replace Linux-native installations.
+Prefer `~/Radia` over `/mnt/c/Radia` for Linux builds under WSL2. Keep build artifacts separate between platforms. Windows `.exe` tools exposed through WSL's `PATH` do not replace Linux-native installations.
 
 On Linux, remembered login storage uses Secret Service and requires a running provider such as GNOME Keyring or KWallet.
