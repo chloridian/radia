@@ -1,18 +1,24 @@
 use std::{
     any::Any,
+    collections::VecDeque,
     error::Error,
     ffi::OsString,
     fmt,
     fs::{self, File, OpenOptions},
+    io, mem,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
-    sync::{Arc, Condvar, Mutex, mpsc},
+    sync,
+    sync::{
+        Arc, Condvar, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread::{self, JoinHandle},
     time::Duration,
 };
 
 use futures::channel::oneshot;
-use rusqlite::{Connection, Error as RusqliteError, Transaction, TransactionBehavior, ffi::ErrorCode};
+use rusqlite::{Connection, Transaction, TransactionBehavior, ffi::ErrorCode};
 
 pub const MAX_BATCH_ROWS: usize = 256;
 pub const MAX_BATCH_BYTES: usize = 1024 * 1024;
@@ -29,8 +35,8 @@ pub enum SqliteError {
     QueueFull,
     BatchTooLarge { rows: usize, bytes: usize },
     WorkerStopped,
-    Unavailable(std::io::Error),
-    Sqlite(RusqliteError),
+    Unavailable(io::Error),
+    Sqlite(rusqlite::Error),
 }
 
 impl fmt::Debug for SqliteError {
@@ -75,8 +81,8 @@ impl Error for SqliteError {
     }
 }
 
-impl From<std::io::Error> for SqliteError {
-    fn from(error: std::io::Error) -> Self {
+impl From<io::Error> for SqliteError {
+    fn from(error: io::Error) -> Self {
         Self::Unavailable(error)
     }
 }
@@ -84,11 +90,11 @@ impl From<std::io::Error> for SqliteError {
 #[derive(Debug)]
 pub enum MigrationError {
     SchemaMismatch,
-    Sqlite(RusqliteError),
+    Sqlite(rusqlite::Error),
 }
 
-impl From<RusqliteError> for MigrationError {
-    fn from(error: RusqliteError) -> Self {
+impl From<rusqlite::Error> for MigrationError {
+    fn from(error: rusqlite::Error) -> Self {
         Self::Sqlite(error)
     }
 }
@@ -107,7 +113,7 @@ pub enum OpenStatus {
     Recreated(RecoveryReason),
 }
 
-type BatchAction = dyn for<'transaction> FnOnce(&Transaction<'transaction>) -> Result<(), RusqliteError> + Send + 'static;
+type BatchAction = dyn for<'transaction> FnOnce(&Transaction<'transaction>) -> Result<(), rusqlite::Error> + Send + 'static;
 
 pub struct SqliteBatch {
     rows: usize,
@@ -118,7 +124,7 @@ pub struct SqliteBatch {
 impl SqliteBatch {
     pub fn new<F>(rows: usize, bytes: usize, run: F) -> Result<Self, SqliteError>
     where
-        F: for<'transaction> FnOnce(&Transaction<'transaction>) -> Result<(), RusqliteError> + Send + 'static,
+        F: for<'transaction> FnOnce(&Transaction<'transaction>) -> Result<(), rusqlite::Error> + Send + 'static,
     {
         if rows > MAX_BATCH_ROWS || bytes > MAX_BATCH_BYTES {
             return Err(SqliteError::BatchTooLarge { rows, bytes });
@@ -164,7 +170,7 @@ struct QueuedWork {
 
 #[derive(Default)]
 struct QueueState {
-    work: std::collections::VecDeque<QueuedWork>,
+    work: VecDeque<QueuedWork>,
     pending_bytes: usize,
     pending_rows: usize,
     pending_batches: usize,
@@ -214,7 +220,7 @@ impl WorkQueue {
     fn receive(&self) -> Vec<QueuedWork> {
         let mut state = lock(&self.state);
         while state.work.is_empty() && !state.closed {
-            state = self.ready.wait(state).unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = self.ready.wait(state).unwrap_or_else(PoisonError::into_inner);
         }
         state.work.drain(..).collect()
     }
@@ -247,7 +253,7 @@ impl WorkQueue {
             state.control_pending = 0;
             state.blocked = false;
             self.ready.notify_all();
-            std::mem::take(&mut state.work)
+            mem::take(&mut state.work)
         };
         drop(work);
     }
@@ -356,8 +362,8 @@ impl SqliteDb {
                 remove_database_files(path)?;
                 Ok(true)
             }
-            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
-            Err(std::fs::TryLockError::Error(error)) => Err(SqliteError::Unavailable(error)),
+            Err(fs::TryLockError::WouldBlock) => Ok(false),
+            Err(fs::TryLockError::Error(error)) => Err(SqliteError::Unavailable(error)),
         }
     }
 
@@ -383,7 +389,7 @@ impl SqliteDb {
 
     pub fn read<F, T>(&self, weight_bytes: usize, query: F) -> Result<SqliteReceipt<T>, SqliteError>
     where
-        F: for<'transaction> FnOnce(&Transaction<'transaction>) -> Result<T, RusqliteError> + Send + 'static,
+        F: for<'transaction> FnOnce(&Transaction<'transaction>) -> Result<T, rusqlite::Error> + Send + 'static,
         T: Send + 'static,
     {
         if weight_bytes > MAX_QUEUED_BYTES {
@@ -489,8 +495,8 @@ fn recreate_database(path: &Path, migrate: &Migration, reason: RecoveryReason) -
     let exclusive = open_lock_file(path)?;
     match exclusive.try_lock() {
         Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => return Err(SqliteError::Busy),
-        Err(std::fs::TryLockError::Error(error)) => return Err(SqliteError::Unavailable(error)),
+        Err(fs::TryLockError::WouldBlock) => return Err(SqliteError::Busy),
+        Err(fs::TryLockError::Error(error)) => return Err(SqliteError::Unavailable(error)),
     }
     remove_database_files(path)?;
     let mut connection = open_connection(path)?;
@@ -513,7 +519,7 @@ fn open_connection(path: &Path) -> Result<Connection, SqliteError> {
     connection.busy_timeout(BUSY_TIMEOUT).map_err(map_sqlite_error)?;
     let journal_mode: String = connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0)).map_err(map_sqlite_error)?;
     if !journal_mode.eq_ignore_ascii_case("wal") {
-        return Err(SqliteError::Sqlite(RusqliteError::InvalidQuery));
+        return Err(SqliteError::Sqlite(rusqlite::Error::InvalidQuery));
     }
     connection.pragma_update(None, "synchronous", "NORMAL").map_err(map_sqlite_error)?;
     Ok(connection)
@@ -545,8 +551,8 @@ fn open_shared_lock(path: &Path) -> Result<File, SqliteError> {
     let file = open_lock_file(path)?;
     match file.try_lock_shared() {
         Ok(()) => Ok(file),
-        Err(std::fs::TryLockError::WouldBlock) => Err(SqliteError::Busy),
-        Err(std::fs::TryLockError::Error(error)) => Err(SqliteError::Unavailable(error)),
+        Err(fs::TryLockError::WouldBlock) => Err(SqliteError::Busy),
+        Err(fs::TryLockError::Error(error)) => Err(SqliteError::Unavailable(error)),
     }
 }
 
@@ -564,7 +570,7 @@ fn remove_database_files(path: &Path) -> Result<(), SqliteError> {
         file_name.push(suffix);
         match fs::remove_file(PathBuf::from(file_name)) {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(SqliteError::Unavailable(error)),
         }
     }
@@ -579,18 +585,18 @@ fn recovery_reason(error: &SqliteError) -> Option<RecoveryReason> {
     }
 }
 
-fn map_sqlite_error(error: RusqliteError) -> SqliteError {
+fn map_sqlite_error(error: rusqlite::Error) -> SqliteError {
     if matches!(
         &error,
-        RusqliteError::FromSqlConversionFailure(..)
-            | RusqliteError::InvalidColumnIndex(..)
-            | RusqliteError::InvalidColumnName(..)
-            | RusqliteError::InvalidColumnType(..)
-            | RusqliteError::IntegralValueOutOfRange(..)
+        rusqlite::Error::FromSqlConversionFailure(..)
+            | rusqlite::Error::InvalidColumnIndex(..)
+            | rusqlite::Error::InvalidColumnName(..)
+            | rusqlite::Error::InvalidColumnType(..)
+            | rusqlite::Error::IntegralValueOutOfRange(..)
     ) {
         return SqliteError::Corrupt;
     }
-    let RusqliteError::SqliteFailure(details, _) = &error else {
+    let rusqlite::Error::SqliteFailure(details, _) = &error else {
         return SqliteError::Sqlite(error);
     };
     match details.code {
@@ -696,7 +702,7 @@ fn reset_database(path: &Path, migrate: &Migration, database: &mut WorkerDatabas
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+fn lock<T>(mutex: &Mutex<T>) -> sync::MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),

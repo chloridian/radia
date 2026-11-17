@@ -3,6 +3,8 @@ mod index;
 mod protection;
 mod writer;
 
+#[cfg(test)]
+use std::sync::mpsc::SyncSender;
 use std::{
     collections::HashMap,
     error::Error,
@@ -21,19 +23,16 @@ use std::{
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
-use std::sync::mpsc::SyncSender;
-
+use self::writer::WritePoint;
+pub use self::{
+    eviction::{EvictionCandidate, EvictionPolicy, EvictionReason, EvictionScore, LruPolicy},
+    protection::Protection,
+};
 use self::{
     index::{Index, Record},
     protection::{EVICTION_HISTORY_LEN, EvictionHistory, ProtectionRegistry, ProtectionShared, lock_protection},
     writer::{Command, WorkerState, WriteQueue, writer_loop},
 };
-
-pub use self::eviction::{EvictionCandidate, EvictionPolicy, EvictionReason, EvictionScore, LruPolicy};
-pub use self::protection::Protection;
-
-#[cfg(test)]
-use self::writer::WritePoint;
 
 pub const DEFAULT_SIZE_LIMIT: u64 = 1024 * 1024 * 1024;
 pub const MAX_VALUE_BYTES: usize = 64 * 1024 * 1024;
@@ -750,8 +749,8 @@ impl Cache {
         let lock_file = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(root.join(LOCK_FILE))?;
         match lock_file.try_lock() {
             Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => return Err(StorageError::InUse),
-            Err(std::fs::TryLockError::Error(error)) => return Err(StorageError::Io(error)),
+            Err(fs::TryLockError::WouldBlock) => return Err(StorageError::InUse),
+            Err(fs::TryLockError::Error(error)) => return Err(StorageError::Io(error)),
         }
         discard_old_index_files(&root);
         let (index, records) = Index::open(root.join(INDEX_FILE), &namespaces)?;
@@ -957,8 +956,8 @@ pub fn discard_legacy_layout(directory: impl AsRef<Path>) -> Result<(), StorageE
     let lock_file = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(root.join(LOCK_FILE))?;
     match lock_file.try_lock() {
         Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => return Err(StorageError::InUse),
-        Err(std::fs::TryLockError::Error(error)) => return Err(StorageError::Io(error)),
+        Err(fs::TryLockError::WouldBlock) => return Err(StorageError::InUse),
+        Err(fs::TryLockError::Error(error)) => return Err(StorageError::Io(error)),
     }
     for path in [snapshot, journal_path] {
         match fs::remove_file(path) {
