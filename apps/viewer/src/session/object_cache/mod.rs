@@ -737,7 +737,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_returns_empty_flags() {
+    async fn timeout_reports_empty_cache() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let mut cache = open_cache(directory.path().join("objects.sqlite"));
         let scope = cache.identities.get(&SIMULATOR).expect("simulator has a cache scope").clone();

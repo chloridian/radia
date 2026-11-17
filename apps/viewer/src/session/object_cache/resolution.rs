@@ -658,7 +658,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn corrupt_entries_miss_and_delete() {
+    async fn corrupt_entries_are_evicted() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let path = directory.path().join("objects.sqlite");
         let mut cache = open_cache(&path);

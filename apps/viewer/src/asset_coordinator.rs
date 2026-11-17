@@ -1051,7 +1051,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn material_posts_are_bounded_serial_and_paced() {
+    async fn material_posts_are_throttled() {
         let (batcher, mut posts) = fake_batcher();
         let ids: Vec<AssetId> = (1..=120).map(material_id).collect();
         let senders = {
@@ -1291,7 +1291,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn demand_fetches_header_then_lod() {
+    async fn demand_fetches_header_first() {
         let (asset, _compressed_empty_lod, header_size) = mesh_fixture_asset();
         assert!(header_size > assets::mesh::MESH_HEADER_BYTES);
         let asset_length = asset.len();
