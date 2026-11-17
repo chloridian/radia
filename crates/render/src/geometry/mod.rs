@@ -125,10 +125,6 @@ pub struct Stats {
     pub gpu_mesh_retirements: usize,
     pub gpu_mesh_retired_bytes: usize,
     pub rebuild_pending: bool,
-    #[cfg(test)]
-    pub(crate) layout_stale_reason: Option<&'static str>,
-    #[cfg(test)]
-    pub(crate) layout_invalidation_reason: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
