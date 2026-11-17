@@ -54,10 +54,10 @@ async fn session_drop_cancels_full_event() {
     let retained_handle = session.handle();
     drop(session);
 
-    assert!(matches!(
+    std::assert_matches!(
         timeout(Duration::from_secs(1), publish).await.expect("session drop should release event publication"),
         EventSendOutcome::Shutdown
-    ));
+    );
     assert!(*retained_handle.disconnect_requested.borrow());
 }
 
@@ -179,7 +179,7 @@ async fn inventory_loss_gates_later_event() {
         .expect("queue the accepted inventory event");
     let mut session = test_session_with_coverage(targeted_send_handle(commands, disconnect), event_receiver, ledger.clone());
 
-    assert!(matches!(session.recv_event().await, Some(Event::CapabilityEvent { message, .. }) if message == "BulkUpdateInventory"));
+    std::assert_matches!(session.recv_event().await, Some(Event::CapabilityEvent { message, .. }) if message == "BulkUpdateInventory");
     assert!(session.report_current_event_loss(CoverageLossReason::InventoryAdmission).is_some());
     let next_watermark = ledger.watermark(simulator_id, coverage_source);
     events
@@ -196,7 +196,7 @@ async fn inventory_loss_gates_later_event() {
         assert!(receive.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
     }
     session.acknowledge_coverage_loss(loss.watermark);
-    assert!(matches!(session.recv_event().await, Some(Event::Failed(message)) if message == "later source event"));
+    std::assert_matches!(session.recv_event().await, Some(Event::Failed(message)) if message == "later source event");
 }
 
 #[tokio::test(flavor = "multi_thread")]

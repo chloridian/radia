@@ -460,11 +460,13 @@ mod tests {
         manager.update(&BTreeMap::new(), None, &BTreeMap::from([(asset(2), region)]));
 
         assert!(manager.entries.contains_key(&asset(1)));
-        assert!(
-            matches!(manager.event(), Some(AssetChange::UpdatePriority { ticket, priority: Priority::Background }) if ticket == old_ticket)
+        std::assert_matches!(
+            manager.event(),
+            Some(AssetChange::UpdatePriority { ticket, priority: Priority::Background }) if ticket == old_ticket
         );
-        assert!(
-            matches!(manager.event(), Some(AssetChange::Request(AssetRequest { request: Request::Texture { id, .. }, .. })) if id == asset(2))
+        std::assert_matches!(
+            manager.event(),
+            Some(AssetChange::Request(AssetRequest { request: Request::Texture { id, .. }, .. })) if id == asset(2)
         );
         assert!(manager.events.iter().all(|event| !matches!(event, AssetChange::Release(ticket) if *ticket == old_ticket)));
     }
@@ -477,12 +479,14 @@ mod tests {
         manager.request(id, Desired { region, priority: Priority::Background });
         let Some(AssetChange::Request(request)) = manager.event() else { panic!("background texture request") };
         manager.update_existing(id, Desired { region, priority: Priority::Visible });
-        assert!(
-            matches!(manager.event(), Some(AssetChange::UpdatePriority { ticket, priority: Priority::Visible }) if ticket == request.ticket)
+        std::assert_matches!(
+            manager.event(),
+            Some(AssetChange::UpdatePriority { ticket, priority: Priority::Visible }) if ticket == request.ticket
         );
         manager.update_existing(id, Desired { region, priority: Priority::Background });
-        assert!(
-            matches!(manager.event(), Some(AssetChange::UpdatePriority { ticket, priority: Priority::Background }) if ticket == request.ticket)
+        std::assert_matches!(
+            manager.event(),
+            Some(AssetChange::UpdatePriority { ticket, priority: Priority::Background }) if ticket == request.ticket
         );
         assert!(manager.event().is_none());
     }
@@ -495,8 +499,9 @@ mod tests {
         manager.request(id, Desired { region, priority: Priority::Visible });
         let Some(AssetChange::Request(request)) = manager.event() else { panic!("active texture request") };
         manager.update(&BTreeMap::new(), None, &BTreeMap::new());
-        assert!(
-            matches!(manager.event(), Some(AssetChange::UpdatePriority { ticket, priority: Priority::Background }) if ticket == request.ticket)
+        std::assert_matches!(
+            manager.event(),
+            Some(AssetChange::UpdatePriority { ticket, priority: Priority::Background }) if ticket == request.ticket
         );
     }
 
@@ -510,7 +515,7 @@ mod tests {
         manager.request(id, Desired { region: first_region, priority: Priority::Background });
         let Some(AssetChange::Request(first)) = manager.event() else { panic!("first texture request") };
         manager.update_existing(id, Desired { region: second_region, priority: Priority::Background });
-        assert!(matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == first.ticket));
+        std::assert_matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == first.ticket);
         let Some(AssetChange::Request(second)) = manager.event() else { panic!("route texture request") };
         assert_eq!(second.region, second_region);
         assert_ne!(first.ticket, second.ticket);
@@ -529,7 +534,7 @@ mod tests {
         let handle = loaded_texture(id);
         assert_eq!(manager.complete(request.ticket, &Status::Ready(Content::Texture(handle.clone()))), Some(true));
         manager.update_existing(id, Desired { region: second_region, priority: Priority::Background });
-        assert!(matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == request.ticket));
+        std::assert_matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == request.ticket);
         assert!(manager.event().is_none());
         let entry = manager.entries.get(&id).expect("ready entry is retained");
         assert_eq!(entry.region, second_region);

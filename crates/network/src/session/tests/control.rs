@@ -192,7 +192,7 @@ async fn neighbor_logout_bypasses_full_queues() {
     assert!(logout.is_reliable());
     std::assert_matches!(logout.message(), Message::LogoutRequest(_));
     assert!(timeout(WAIT, logout_response).await.expect("logout send should complete").expect("logout reply").is_ok());
-    assert!(matches!(logout_receipt_response.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+    std::assert_matches!(logout_receipt_response.try_recv(), Err(oneshot::error::TryRecvError::Empty));
 
     shutdown_signal.send_replace(true);
     assert!(timeout(WAIT, worker).await.expect("neighbor should stop after shutdown").expect("neighbor task").is_ok());

@@ -171,6 +171,7 @@ enum OwnerTurnInput {
     WorldRead(ReadRequest),
 }
 
+#[derive(Debug)]
 enum OwnerTurnProgress {
     Continue,
     Cancelled,

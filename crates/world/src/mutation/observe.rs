@@ -500,7 +500,7 @@ mod tests {
         let journal = world.journal.entries.iter().map(|entry| (entry.revision, entry.changes.clone())).collect::<Vec<_>>();
         let result = world.observe_object(observation(region, 27, 2, 3));
 
-        assert!(matches!(result, Err(ApplyError::AddressGenerationExhausted)));
+        std::assert_matches!(result, Err(ApplyError::AddressGenerationExhausted));
         assert_eq!(world.revision(), revision);
         assert_eq!(world.journal.entries.iter().map(|entry| (entry.revision, entry.changes.clone())).collect::<Vec<_>>(), journal);
         assert_eq!(world.entity(Uuid::from_u128(27)), Some(first));

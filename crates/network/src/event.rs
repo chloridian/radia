@@ -57,6 +57,7 @@ pub struct EventQueueBatchOrder {
     pub ordinal: u64,
 }
 
+#[derive(Debug)]
 pub(crate) enum EventSendOutcome {
     Sent,
     ReceiverClosed,

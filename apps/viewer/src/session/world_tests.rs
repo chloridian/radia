@@ -230,8 +230,9 @@ async fn deep_lookup_yields_keeping_order() {
     progress_rx.await.expect("unrelated task gets a turn during ancestry traversal");
     assert!(!worker.is_finished(), "the 600-edge lookup spans multiple bounded turns");
     let (session, summary) = worker.await.expect("world owner completes update");
-    assert!(
-        matches!(summary.blocks[0], BlockOutcome::Applied { ref applied, .. } if matches!(applied.outcome, world::ApplyOutcome::Updated(_)))
+    std::assert_matches!(
+        summary.blocks[0],
+        BlockOutcome::Applied { ref applied, .. } if matches!(applied.outcome, world::ApplyOutcome::Updated(_))
     );
     let entity = session.world().entity_at(LocalAddress::new(region, local_id)).expect("patched object remains visible");
     assert_eq!(session.world().object(entity).expect("patched object").scale(), Some(Vec3::splat(2.0)));

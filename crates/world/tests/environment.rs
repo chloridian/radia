@@ -133,24 +133,24 @@ fn versions_and_failures_are_atomic() {
         EnvironmentSource::Inline(vec![0; MAX_ENVIRONMENT_SOURCE_BYTES + 1].into()),
         EnvironmentSource::Asset(AssetId::new(Uuid::nil())),
     ] {
-        assert!(matches!(
+        std::assert_matches!(
             world.observe_environment(target, source(region, 30), assignment(invalid, 11)),
             Err(ApplyError::InvalidValue { .. })
-        ));
+        );
         assert_eq!(world.environment(region).unwrap().region_assignment, Some(original.clone()));
         assert_eq!(world.revision(), revision);
     }
     let other_region = world.register_region().unwrap();
-    assert!(matches!(
+    std::assert_matches!(
         world.observe_environment(target, source(other_region, 30), original.clone()),
         Err(ApplyError::InvalidValue { field: "environment_region" })
-    ));
+    );
     let mut invalid = original;
     invalid.altitudes = Some([f32::NAN, 0.0, 0.0]);
-    assert!(matches!(
+    std::assert_matches!(
         world.observe_environment(target, source(region, 30), invalid),
         Err(ApplyError::InvalidValue { field: "environment_altitudes" })
-    ));
+    );
     let _ = world.observe_environment(target, source(region, 21), assignment(EnvironmentSource::Inherit, 11)).unwrap();
     assert!(world.revision() > revision, "rejected input cannot advance ordering fences");
 }

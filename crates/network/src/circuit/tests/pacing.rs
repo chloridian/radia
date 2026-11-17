@@ -177,8 +177,8 @@ fn full_queue_retires_dropped_pacer() {
     assert!(connections.is_empty());
     assert!(order.is_empty());
     assert!(pending.is_empty());
-    assert!(matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
-    assert!(matches!(receiver.try_recv(), Ok(super::Command::Shutdown(_))));
+    std::assert_matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+    std::assert_matches!(receiver.try_recv(), Ok(super::Command::Shutdown(_)));
 }
 
 #[test]
@@ -511,8 +511,9 @@ async fn leases_reserve_burst_capacity() {
     for _ in 0..8 {
         task::yield_now().await;
     }
-    assert!(
-        matches!(next_request.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+    std::assert_matches!(
+        next_request.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty),
         "refill must count the delayed lease against the burst ceiling"
     );
 

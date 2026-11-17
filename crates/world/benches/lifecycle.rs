@@ -38,7 +38,7 @@ fn bench_spawn(group: &mut BenchmarkGroup<'_, WallTime>) {
         group.throughput(Throughput::Elements(count as u64));
         let mut verification = empty_scene(count, false);
         for row in &verification.rows {
-            assert!(matches!(verification.world.observe_object(observation(*row)).expect("object introduction").outcome, Introduced(_)));
+            std::assert_matches!(verification.world.observe_object(observation(*row)).expect("object introduction").outcome, Introduced(_));
         }
         assert_eq!(verification.world.object_count(), count);
 
@@ -177,7 +177,7 @@ fn bench_agent_handoff(group: &mut BenchmarkGroup<'_, WallTime>) {
                     .world
                     .handoff_agent(from, ObjectObservation::new(source(to, source_order), agent.id, agent.local_id, Kind::Avatar, Root))
                     .expect("agent handoff");
-                assert!(matches!(&applied.outcome, AgentHandedOff(_)));
+                std::assert_matches!(&applied.outcome, AgentHandedOff(_));
                 in_source = !in_source;
                 source_order += 1;
                 let _ = black_box(applied);
@@ -196,7 +196,7 @@ fn linked_scene(count: usize, linkset_size: usize) -> Scene {
     let rows = rows_for_regions(count, 0, &regions, count);
     for row in &rows {
         let applied = world.observe_object(observation(*row)).expect("introduce linked object");
-        assert!(matches!(applied.outcome, Introduced(_)));
+        std::assert_matches!(applied.outcome, Introduced(_));
     }
     let mut scene = Scene { world, rows, regions };
     for (index, row) in scene.rows.iter().enumerate() {

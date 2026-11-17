@@ -221,7 +221,7 @@ fn malformed_shape_params_preserve_shape() {
     assert_eq!(malformed_observation.shape, FieldUpdate::Keep);
 
     let applied = world.observe_object(malformed_observation.clone()).expect("unrelated valid fields still apply");
-    assert!(matches!(applied.outcome, Updated(_)));
+    std::assert_matches!(applied.outcome, Updated(_));
     assert_eq!(
         world.object(entity).expect("object remains").shape(),
         Some(Shape::Sculpt {
