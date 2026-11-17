@@ -252,7 +252,7 @@ async fn primary_activity_resets_keepalive() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn neighbor_fails_after_inactivity() {
+async fn inactive_neighbor_fails() {
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
     let endpoint = neighbor.local_addr().expect("read neighbor address");
     let simulator_id = SimulatorId::allocate().expect("allocate neighbor ID");

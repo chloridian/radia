@@ -781,7 +781,7 @@ async fn request_body_is_bounded() {
 }
 
 #[tokio::test]
-async fn posts_encode_after_admission() {
+async fn posts_encode_once_admitted() {
     let request_count = MAX_CONCURRENT_CAPABILITY_REQUESTS + 2;
     let mut server = ConcurrentCapabilityTestServer::start(request_count);
     let budget = CapabilityBudget::new();

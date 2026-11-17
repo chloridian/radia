@@ -200,7 +200,7 @@ async fn targeted_send_full() {
 }
 
 #[tokio::test]
-async fn sends_rejected_after_disconnect() {
+async fn disconnect_rejects_sends() {
     let (commands, mut command_receiver) = mpsc::channel(2);
     let (disconnect_requested, _) = watch::channel(false);
     let handle = targeted_send_handle(commands, disconnect_requested);

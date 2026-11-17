@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ipv6_udp_round_trip() {
+    async fn ipv6_round_trip() {
         let server = match UdpSocket::bind("[::1]:0").await {
             Ok(server) => server,
             Err(error) if ipv6_is_disabled(&error) => {

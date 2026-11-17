@@ -891,7 +891,7 @@ async fn run_stale_event_queue_completion_after_capability_replacement_preserves
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn crossed_region_promotes_after_movement() {
+async fn crossed_region_awaits_movement() {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind destination simulator");
     let primary_endpoint = primary.local_addr().expect("primary simulator address");

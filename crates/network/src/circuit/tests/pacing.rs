@@ -148,7 +148,7 @@ async fn shutdown_stops_saturated_worker() {
 }
 
 #[test]
-fn dropped_registration_retires_when_full() {
+fn full_queue_retires_dropped_pacer() {
     let (commands, mut receiver) = mpsc::channel(1);
     let (completed, _) = oneshot::channel();
     assert!(commands.try_send(super::Command::Shutdown(completed)).is_ok());
@@ -182,7 +182,7 @@ fn dropped_registration_retires_when_full() {
 }
 
 #[test]
-fn retry_reduces_then_recovers_rate() {
+fn loss_backoff_recovers_rate() {
     let start = Instant::now();
     let mut bucket = Bucket::new(20_000, start);
 
@@ -245,7 +245,7 @@ async fn worker_shares_configured_rate() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn worker_reweights_after_promotion() {
+async fn promotion_reweights_worker() {
     let budget = OutboundBudget::new(5_000);
     let mut pacers = Vec::new();
     for id in 0..=5 {

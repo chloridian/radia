@@ -391,7 +391,7 @@ async fn sustained_application_pressure_disconnects() {
 }
 
 #[tokio::test]
-async fn retry_resends_then_expires() {
+async fn retry_resends_until_limit() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let client = UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect local UDP socket");
     let mut circuit = Circuit::new();

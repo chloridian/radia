@@ -169,7 +169,7 @@ async fn login_reports_rejection() {
 }
 
 #[tokio::test]
-async fn xmlrpc_fault_and_http_status() {
+async fn xmlrpc_fault_on_http_error() {
     let fault = "<methodResponse><fault><value><struct><member><name>faultCode</name><value><int>7</int></value></member><member><name>faultString</name><value><string>Denied</string></value></member></struct></value></fault></methodResponse>";
     let server = LocalServer::start(vec![response(500, "Error", "text/xml", None, fault)]);
     let error = login_at(&credentials(), "", "", &server.url("/login.cgi")).await.expect_err("XML-RPC fault on HTTP error");
