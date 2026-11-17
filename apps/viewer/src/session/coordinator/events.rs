@@ -26,7 +26,7 @@ use crate::session::{
         decode_object_message, decode_sit_target_update,
     },
     object_cache::{CachedObjectContinuation, ObjectCacheSession},
-    world::{IngestStatus, IngestSummary, ObjectBatchContinuation, RegistrationError, SessionWorld},
+    world::{IngestStatus, IngestSummary, ObjectBatchContinuation, RegistrationError, SessionWorld, ValueRejection},
 };
 
 const MAX_HANDOFF_OBSERVATIONS: usize = 32;
@@ -215,12 +215,20 @@ pub(super) fn decode_simulator_world_update(
             tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "could not update region terrain settings");
         }
         let region_id = handshake.region_info2.as_ref().map(|info| info.region_id).filter(|id| !id.is_nil());
-        if let Err(error) = world.update_handshake_metadata(
+        match world.update_handshake_metadata(
             UpdateSource::new(region, sequence, order_evidence(packet_order), 0),
             region_id,
             handshake.region_info1.sim_name.clone(),
         ) {
-            tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "could not update region handshake metadata");
+            Ok(()) => tracing::info!(
+                simulator = simulator_id.get(),
+                region = region.get(),
+                name = ?handshake.region_info1.sim_name,
+                "region handshake"
+            ),
+            Err(error) => {
+                tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "could not update region handshake metadata")
+            }
         }
     }
     if let Message::RegionInfo(info) = message {
@@ -457,9 +465,7 @@ impl WorldHandoff {
                 let region = world.region_for(simulator_id)?;
                 let (batch, requests, overrides) =
                     object_cache.resolve_cached(simulator_id, region, sequence, order_evidence(packet_order), world, cached, batch).await;
-                if let Err(error) = world.retain_cached_overrides(overrides) {
-                    tracing::warn!(?error, "cached PBR material overrides could not be restored");
-                }
+                world.restore_cached_overrides(overrides);
                 recovered_media_requests = requests;
                 DecodedWorldUpdate::Object(batch)
             }
@@ -738,7 +744,7 @@ impl WorldHandoff {
                         continuation.extra_summary = applied.map(|applied| {
                             let mut summary = IngestSummary::new(IngestStatus::Applied);
                             summary.push_applied(applied, Some(LocalAddress::new(observation.source.region(), observation.local_id)));
-                            summary.log_incomplete_data(continuation.simulator_id, world.region_for(continuation.simulator_id));
+                            world.record_ingest(&summary, continuation.simulator_id);
                             summary
                         });
                     }
@@ -803,21 +809,19 @@ impl WorldHandoff {
             #[cfg(not(test))]
             DecodedWorldUpdate::Object(_) => None,
             DecodedWorldUpdate::SitTarget { source, update } => {
-                let object = update.object_id;
                 let address = address_for_resolved_entity(world, simulator_id, resolved_entity);
-                let local_id = address.map(|address| address.local_id().get());
                 let result = world.apply_sit_target_update(simulator_id, source, update);
                 match result {
                     Some(Ok(applied)) => {
                         if !applied.rejections.is_empty() {
-                            tracing::debug!(simulator = simulator_id.get(), region = source.region().get(), object = %object, local_id, rejections = ?applied.rejections, "avatar sit response contained rejected metadata");
+                            world.record_value_rejection(simulator_id, address, ValueRejection::Sit, None);
                         }
                         let mut summary = IngestSummary::new(IngestStatus::Applied);
                         summary.push_applied(applied, address);
                         Some((simulator_id, summary))
                     }
                     Some(Err(error)) => {
-                        tracing::debug!(simulator = simulator_id.get(), region = source.region().get(), object = %object, local_id, %error, "could not apply avatar sit target");
+                        world.record_value_rejection(simulator_id, address, ValueRejection::SitError, Some(error));
                         let mut summary = IngestSummary::new(IngestStatus::Applied);
                         summary.push_error(error, address);
                         Some((simulator_id, summary))
@@ -826,14 +830,12 @@ impl WorldHandoff {
                 }
             }
             DecodedWorldUpdate::AvatarAppearance { source, update } => {
-                let object = update.object_id;
                 let invalid_fields = update.invalid_fields;
                 let address = address_for_resolved_entity(world, simulator_id, resolved_entity);
-                let local_id = address.map(|address| address.local_id().get());
                 match world.apply_avatar_appearance(simulator_id, source, resolved_entity, update) {
                     Some(Ok(applied)) => {
                         if !applied.rejections.is_empty() {
-                            tracing::debug!(simulator = simulator_id.get(), region = source.region().get(), object = %object, local_id, rejections = ?applied.rejections, "avatar appearance contained rejected fields");
+                            world.record_value_rejection(simulator_id, address, ValueRejection::Appearance, None);
                         }
                         let mut summary = IngestSummary::new(IngestStatus::Applied);
                         summary.invalid_fields = invalid_fields;
@@ -841,7 +843,7 @@ impl WorldHandoff {
                         Some((simulator_id, summary))
                     }
                     Some(Err(error)) => {
-                        tracing::debug!(simulator = simulator_id.get(), region = source.region().get(), object = %object, local_id, %error, "could not apply avatar appearance");
+                        world.record_value_rejection(simulator_id, address, ValueRejection::AppearanceError, Some(error));
                         let mut summary = IngestSummary::new(IngestStatus::Applied);
                         summary.invalid_fields = invalid_fields;
                         summary.push_error(error, address);
@@ -1099,7 +1101,7 @@ impl WorldHandoff {
         let summary = applied.map(|applied| {
             let mut summary = IngestSummary::new(IngestStatus::Applied);
             summary.push_applied(applied, Some(address));
-            summary.log_incomplete_data(target, world.region_for(target));
+            world.record_ingest(&summary, target);
             summary
         });
         (completed, summary)

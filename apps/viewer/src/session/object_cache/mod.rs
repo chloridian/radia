@@ -269,6 +269,7 @@ impl ObjectCacheSession {
     pub(super) fn handle_event(&mut self, event: ObjectCacheEvent) -> Option<(SimulatorId, u32)> {
         match event {
             ObjectCacheEvent::Ready { db, status, writer } => {
+                tracing::info!(?status, "object cache opened");
                 if matches!(status, OpenStatus::Recreated(_)) {
                     tracing::warn!(?status, "object cache database was recreated; cached objects will be refetched");
                 }

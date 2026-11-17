@@ -485,7 +485,7 @@ impl InventoryCacheSession {
                 return InventoryCacheEventOutcome::Stale;
             }
         };
-        tracing::debug!(?status, "inventory cache opened");
+        tracing::info!(?status, "inventory cache opened");
         let writer = start_cache_writer(runtime, cache, self.event_sender.clone());
         let sender = writer.sender.clone();
         self.lifecycle = CacheLifecycle::Active { writer };
@@ -772,9 +772,7 @@ fn start_cache_writer(runtime: &Handle, cache: InventoryCache, sender: mpsc::Unb
                     {
                         tracing::warn!(%error, "inventory cache shutdown failed");
                     }
-                    if completion.send(()).is_err() {
-                        tracing::trace!("inventory cache session stopped before shutdown acknowledgement");
-                    }
+                    completion.send(()).ok();
                     return;
                 }
             }

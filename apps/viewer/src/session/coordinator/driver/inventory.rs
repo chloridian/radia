@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     mem::size_of,
+    time::{Duration, Instant},
 };
 
 use ::inventory::{
@@ -29,6 +30,43 @@ use crate::{
 
 use super::{DeferredInventoryEvent, PendingFolderPreparation, SessionDriver};
 use crate::session::coordinator::inventory_cache::InventoryDisposalPermit;
+
+pub(super) const INVENTORY_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
+#[derive(Default)]
+pub(super) struct InventoryRejections {
+    rejected_blocks: u64,
+    last_error: Option<InventoryIntakeError>,
+}
+
+impl InventoryRejections {
+    fn report(self) {
+        tracing::warn!(
+            rejected_blocks = self.rejected_blocks,
+            last_error = self.last_error.as_ref().map(tracing::field::display),
+            "inventory updates contain rejected blocks"
+        );
+    }
+}
+
+#[derive(Default)]
+pub(super) struct InventoryFetchFailures {
+    failed: u64,
+    sample: Option<(CategoryKey, InventoryFetchError)>,
+}
+
+impl InventoryFetchFailures {
+    fn report(self) {
+        let Some((folder, error)) = self.sample else { return };
+        tracing::warn!(
+            failed = self.failed,
+            sample_owner = %folder.owner().id(),
+            sample_folder = %folder.id().uuid(),
+            last_error = %error,
+            "inventory folder fetches failed"
+        );
+    }
+}
 
 impl SessionDriver {
     pub(super) fn handle_inventory_udp(&mut self, message: &Message) -> bool {
@@ -176,16 +214,33 @@ impl SessionDriver {
     }
 
     fn note_rejected_inventory_blocks(&mut self, count: usize) {
-        self.rejected_inventory_blocks = self.rejected_inventory_blocks.saturating_add(count as u64);
-        if count > 0 && self.rejected_inventory_blocks / 64 != (self.rejected_inventory_blocks - count as u64) / 64 {
-            tracing::warn!(rejected_blocks = self.rejected_inventory_blocks, "inventory updates contain rejected blocks");
+        if count > 0 {
+            self.record_rejected_inventory_blocks(count as u64, None);
         }
     }
 
     fn note_rejected_inventory_blocks_with_error(&mut self, error: InventoryIntakeError) {
-        self.rejected_inventory_blocks = self.rejected_inventory_blocks.saturating_add(1);
-        if self.rejected_inventory_blocks.is_multiple_of(64) {
-            tracing::warn!(rejected_blocks = self.rejected_inventory_blocks, %error, "inventory updates were rejected");
+        self.record_rejected_inventory_blocks(1, Some(error));
+    }
+
+    fn record_rejected_inventory_blocks(&mut self, count: u64, error: Option<InventoryIntakeError>) {
+        let due = self.rejected_inventory_blocks.record(Instant::now(), |rejections| {
+            rejections.rejected_blocks = rejections.rejected_blocks.saturating_add(count);
+            if error.is_some() {
+                rejections.last_error = error;
+            }
+        });
+        if let Some(due) = due {
+            due.report();
+        }
+    }
+
+    pub(super) fn flush_inventory_summaries(&mut self) {
+        if let Some(due) = self.rejected_inventory_blocks.flush() {
+            due.report();
+        }
+        if let Some(due) = self.inventory_fetch_failures.flush() {
+            due.report();
         }
     }
 
@@ -199,9 +254,7 @@ impl SessionDriver {
         }
         if self.inventory_bootstrap_dirty {
             self.inventory_cache.invalidate_restore();
-            tracing::warn!(
-                "early inventory updates arrived before login inventory was ready; cached contents will be refreshed from the simulator"
-            );
+            tracing::debug!("inventory updates arrived before login inventory; refreshing cached contents");
         }
         if let Some(session) = &self.active_session {
             let library_owner = inventory.roots().library().map(|root| root.owner().id());
@@ -282,9 +335,7 @@ impl SessionDriver {
         match event {
             InventoryEditEvent::Apply { confirmation, applied } => {
                 let result = self.apply_inventory_confirmation(confirmation, disposal);
-                if applied.send(result).is_err() {
-                    tracing::trace!("inventory edit worker stopped before apply acknowledgement");
-                }
+                applied.send(result).ok();
             }
             InventoryEditEvent::RefreshFolders { folders, refreshed } => {
                 let folder_count = folders.len();
@@ -292,34 +343,26 @@ impl SessionDriver {
                 if !refreshed_inventory {
                     tracing::debug!(folder_count, "inventory folder refresh could not be queued after an edit failure");
                 }
-                if refreshed.send(refreshed_inventory).is_err() {
-                    tracing::trace!("inventory edit worker stopped before folder refresh acknowledgement");
-                }
+                refreshed.send(refreshed_inventory).ok();
             }
             InventoryEditEvent::MoveStarted { expectation, confirmed, registered } => {
                 self.inventory_pending_moves.insert(expectation.node, (expectation, confirmed));
                 drop(disposal);
-                if registered.send(()).is_err() {
-                    tracing::trace!("inventory edit worker stopped before move registration acknowledgement");
-                }
+                registered.send(()).ok();
             }
             InventoryEditEvent::MoveAborted { expectation, removed } => {
                 if self.inventory_pending_moves.get(&expectation.node).is_some_and(|(current, _)| *current == expectation) {
                     self.inventory_pending_moves.remove(&expectation.node);
                 }
                 drop(disposal);
-                if removed.send(()).is_err() {
-                    tracing::trace!("inventory edit worker stopped before move abort acknowledgement");
-                }
+                removed.send(()).ok();
             }
             InventoryEditEvent::MoveTimedOut { expectation, refreshed } => {
                 if self.inventory_pending_moves.get(&expectation.node).is_some_and(|(current, _)| *current == expectation) {
                     self.inventory_pending_moves.remove(&expectation.node);
                 }
                 let applied = self.mark_inventory_folders_incomplete([expectation.from, expectation.to], disposal);
-                if refreshed.send(applied).is_err() {
-                    tracing::trace!("inventory edit worker stopped before move timeout acknowledgement");
-                }
+                refreshed.send(applied).ok();
             }
         }
     }
@@ -414,9 +457,7 @@ impl SessionDriver {
             InventoryFetchEvent::Folder { fetch, applied } => {
                 let folder = fetch.folder;
                 let Some(inventory) = self.inventory.as_ref() else {
-                    if applied.send(FolderApplyOutcome::Rejected).is_err() {
-                        tracing::trace!(folder = %folder.id().uuid(), "inventory fetch worker stopped before apply acknowledgement");
-                    }
+                    applied.send(FolderApplyOutcome::Rejected).ok();
                     disposal.reclaim(fetch);
                     return;
                 };
@@ -461,7 +502,13 @@ impl SessionDriver {
     fn record_inventory_failure(&mut self, folder: CategoryKey, error: InventoryFetchError) {
         self.inventory_failed.insert(folder);
         self.inventory_last_failure = Some((folder, error.clone()));
-        tracing::warn!(owner = %folder.owner().id(), folder = %folder.id().uuid(), %error, "inventory folder fetch failed");
+        let due = self.inventory_fetch_failures.record(Instant::now(), |failures| {
+            failures.failed = failures.failed.saturating_add(1);
+            failures.sample = Some((folder, error));
+        });
+        if let Some(due) = due {
+            due.report();
+        }
     }
 
     pub(super) fn publish_inventory_status(&self) {
@@ -539,10 +586,8 @@ fn resolve_pending_inventory_moves_between(
         })
         .collect::<Vec<_>>();
     for node in resolved {
-        if let Some((_, confirmed)) = pending.remove(&node)
-            && confirmed.send(()).is_err()
-        {
-            tracing::trace!("inventory edit worker stopped before receiving move confirmation");
+        if let Some((_, confirmed)) = pending.remove(&node) {
+            confirmed.send(()).ok();
         }
     }
 }
@@ -602,9 +647,7 @@ pub(super) fn finish_inventory_fetch_preparation(
         Ok(Ok(PreparedInventoryFetch::Prepared(prepared))) => {
             let Some(inventory) = driver.inventory.as_mut() else {
                 disposal.reclaim((prepared, before));
-                if applied.send(FolderApplyOutcome::Rejected).is_err() {
-                    tracing::trace!(folder = %folder.id().uuid(), "inventory fetch worker stopped before apply acknowledgement");
-                }
+                applied.send(FolderApplyOutcome::Rejected).ok();
                 return;
             };
             match inventory.commit_folder_fetch(prepared) {
@@ -649,9 +692,7 @@ pub(super) fn finish_inventory_fetch_preparation(
             FolderApplyOutcome::Rejected
         }
     };
-    if applied.send(outcome).is_err() {
-        tracing::debug!(folder = %folder.id().uuid(), "inventory fetch worker stopped before apply acknowledgement");
-    }
+    applied.send(outcome).ok();
     driver.publish_inventory_status();
 }
 

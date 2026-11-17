@@ -8,6 +8,7 @@ use tokio::{
     sync::watch,
     time::{Instant, sleep_until},
 };
+use utils::Summary;
 use uuid::Uuid;
 
 use super::agent;
@@ -17,6 +18,7 @@ const MIN_UPDATE_INTERVAL: Duration = Duration::from_millis(8);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 const CAMERA_POSITION_THRESHOLD: f64 = 0.01;
 const CAMERA_AXIS_THRESHOLD: f32 = 0.1f32.to_radians();
+const DEFERRED_UPDATE_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) struct CameraUplink {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -32,6 +34,25 @@ pub(crate) struct CameraUplink {
     followup_at: Option<Instant>,
     last_always_run: Option<(SimulatorId, Uuid, Uuid, bool)>,
     always_run_retry_at: Option<Instant>,
+    deferred: Summary<DeferredUpdates>,
+}
+
+#[derive(Default)]
+struct DeferredUpdates {
+    always_run: u64,
+    agent: u64,
+    last_error: Option<Error>,
+}
+
+impl DeferredUpdates {
+    fn report(self) {
+        tracing::debug!(
+            always_run = self.always_run,
+            agent = self.agent,
+            last_error = self.last_error.as_ref().map(tracing::field::display),
+            "agent updates deferred"
+        );
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -85,6 +106,27 @@ impl CameraUplink {
             followup_at: None,
             last_always_run: None,
             always_run_retry_at: None,
+            deferred: Summary::new(DEFERRED_UPDATE_REPORT_INTERVAL),
+        }
+    }
+
+    pub(crate) fn flush_summary(&mut self) {
+        if let Some(due) = self.deferred.flush() {
+            due.report();
+        }
+    }
+
+    fn record_deferred(&mut self, now: Instant, error: Error, always_run: bool) {
+        let due = self.deferred.record(now.into_std(), |deferred| {
+            if always_run {
+                deferred.always_run = deferred.always_run.saturating_add(1);
+            } else {
+                deferred.agent = deferred.agent.saturating_add(1);
+            }
+            deferred.last_error = Some(error);
+        });
+        if let Some(due) = due {
+            due.report();
         }
     }
 
@@ -174,7 +216,7 @@ impl CameraUplink {
                     }
                     Err(error) => {
                         self.always_run_retry_at = Some(now + MIN_UPDATE_INTERVAL);
-                        tracing::debug!(%error, "always-run update deferred");
+                        self.record_deferred(now, error, true);
                     }
                 }
             }
@@ -250,7 +292,7 @@ impl CameraUplink {
                     self.last_sent = None;
                     self.last_sent_at = None;
                     self.pending_at = Some(now + MIN_UPDATE_INTERVAL);
-                    tracing::debug!(%error, "agent update deferred");
+                    self.record_deferred(now, error, false);
                 }
             }
         }
