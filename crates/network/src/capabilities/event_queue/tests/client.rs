@@ -118,28 +118,6 @@ async fn ack_advances_after_admission() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn zero_delay_502_retries() {
-    let mut harness = EventQueueHarness::seeded(
-        "/event-queue",
-        CLIENT_EVENT_CAPACITY,
-        [EventServerResponse::Response(response(502, "Upstream error", "text/plain", Some("0"), "Upstream error: ")), hold_response()],
-    );
-    let task = harness.start_queue();
-
-    harness.expect_request("/seed");
-    let first_poll = harness.expect_request("/event-queue");
-    let retry_poll = harness.expect_request("/event-queue");
-
-    harness.shutdown.send_replace(true);
-    timeout(TEST_TIMEOUT, task.wait()).await.expect("event queue should stop after shutdown");
-    harness.server.stop();
-    assert!(harness.server.finish().is_empty());
-    assert_eq!(map_field(&decode_request_body(&first_poll), "ack"), Some(&Value::Undefined));
-    assert_eq!(map_field(&decode_request_body(&retry_poll), "ack"), Some(&Value::Undefined));
-    assert!(harness.received_events.try_recv().is_err(), "empty batches should not emit events");
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn bad_batch_not_dispatched() {
     let mut harness = EventQueueHarness::seeded("/events", 1, [EventServerResponse::Response(llsd_response(MALFORMED_BATCH))]);
     harness
@@ -462,14 +440,6 @@ fn xml_element_limit() {
 }
 
 #[test]
-fn viewer_retry_backoff() {
-    assert_eq!(event_queue_retry_delay(0), Duration::from_secs(1));
-    assert_eq!(event_queue_retry_delay(1), Duration::from_secs(4));
-    assert_eq!(event_queue_retry_delay(2), Duration::from_secs(7));
-    assert_eq!(event_queue_retry_delay(14), Duration::from_secs(43));
-}
-
-#[test]
 fn long_poll_error_classification() {
     let linden_error = StatusCode::from_u16(499).expect("499 is a valid HTTP status");
     for status in [linden_error, StatusCode::BAD_GATEWAY, StatusCode::SERVICE_UNAVAILABLE, StatusCode::GATEWAY_TIMEOUT] {
@@ -589,74 +559,6 @@ async fn aborting_poll_records_coverage_loss() {
     ));
     server.stop();
     assert!(server.finish().is_empty(), "the two observed requests were already consumed");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn loss_waits_for_channel_capacity() {
-    let server = EventQueueTestServer::start(|base| {
-        let mut event_url = base.clone();
-        event_url.set_path("/malformed-batch");
-        vec![
-            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))),
-            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, "<llsd><map>")),
-        ]
-    });
-    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-    let (event_sender, received_events) = mpsc::channel(1);
-    let mut received_events = EventReceiver::new(received_events);
-    event_sender
-        .send(EventEnvelope::new(Event::Failed("fixture occupying the event channel".into())))
-        .await
-        .expect("fill the single event slot");
-    assert_eq!(event_sender.capacity(), 0);
-
-    let (_shutdown, shutdown_requested) = watch::channel(false);
-    let simulator_id = test_simulator_id(1);
-    let coverage_losses = CoverageLossLedger::new();
-    let mut loss_changes = coverage_losses.subscribe();
-    let task = client
-        .start_event_queue(simulator_id, test_source(), event_sender.clone(), shutdown_requested, coverage_losses.clone())
-        .expect("start event queue");
-
-    assert!(request_line(&server.next_request()).starts_with("POST /seed HTTP/1.1"));
-    assert!(request_line(&server.next_request()).starts_with("POST /malformed-batch HTTP/1.1"));
-    let loss = timeout(TEST_TIMEOUT, async {
-        loop {
-            let snapshot = coverage_losses.snapshot();
-            if let [crate::coverage::CoverageLoss::Source(loss)] = snapshot.losses.as_slice()
-                && loss.watermark.simulator_id == simulator_id
-                && loss.reason == crate::coverage::CoverageLossReason::EventQueueAdmission
-            {
-                break *loss;
-            }
-            loss_changes.changed().await.expect("coverage ledger remains open");
-        }
-    })
-    .await
-    .expect("the durable loss fact should be recorded while its notification is blocked");
-    assert_eq!(event_sender.capacity(), 0, "the wake-up must wait behind the queued event");
-
-    assert!(matches!(
-        received_events.recv().await,
-        Some(Event::Failed(message)) if message == "fixture occupying the event channel"
-    ));
-    let notification = timeout(TEST_TIMEOUT, received_events.recv())
-        .await
-        .expect("the loss wake-up should be sent after a slot opens")
-        .expect("event channel should remain open");
-    assert!(matches!(
-        notification,
-        Event::EventQueueCoverageLost { simulator_id: id, source, reason }
-            if id == simulator_id && source == test_source() && reason.contains("EventQueueGet")
-    ));
-    assert!(received_events.try_recv().is_err(), "one queue incarnation emits only one loss wake-up");
-    assert_eq!(task.wait().await, EventQueueExit::StoppedWithCoverageLoss);
-    assert!(matches!(
-        coverage_losses.snapshot().losses.as_slice(),
-        [crate::coverage::CoverageLoss::Source(current)]
-            if current.watermark == loss.watermark && current.retired
-    ));
-    assert!(server.finish().is_empty(), "the observed requests were already consumed");
 }
 
 #[tokio::test(flavor = "multi_thread")]

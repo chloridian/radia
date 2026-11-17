@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::future::Future;
 use std::{error::Error as StdError, fmt};
 
 use tokio::{
@@ -268,12 +266,4 @@ fn logout_completion_error(error: Error) -> LogoutAttemptError {
         Error::SimulatorLogoutSendAgeExpired => LogoutAttemptError::Unavailable(LogoutUnavailable::SendDeadline),
         error => LogoutAttemptError::Unexpected(error),
     }
-}
-
-#[cfg(test)]
-pub(super) async fn send_logout_with_deadline(
-    send: impl Future<Output = Result<(), LogoutAttemptError>>,
-    deadline_reason: LogoutUnavailable,
-) -> Result<(), LogoutAttemptError> {
-    time::timeout(LOGOUT_TIMEOUT, send).await.map_err(|_| LogoutAttemptError::Unavailable(deadline_reason))?
 }

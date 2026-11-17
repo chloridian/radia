@@ -422,174 +422,107 @@ async fn promoted_logout_bypasses_full_queue() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn saturated_neighbor_keeps_ack_completion() {
-    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
-    let simulator_address = simulator.local_addr().expect("simulator address");
-    let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
-    let connection = connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, CoverageLossLedger::new())
-        .await
-        .expect("connect neighbor simulator");
-    let (events, mut received_events) = mpsc::channel(1);
-    let (shutdown, shutdown_receiver) = watch::channel(false);
-    let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
-    let (commands, command_receiver) = mpsc::channel(1);
-    let (_logout, logout) = mpsc::channel(1);
-    let task = spawn(connection.run(
-        events.clone(),
-        shutdown_receiver,
-        neighbor_requests,
-        command_receiver,
-        logout,
-        SimulatorMemoryBudget::new().for_neighbor(),
-    ));
+async fn saturated_channel_delivers_completion() {
+    for (case, expire, reliable_sequence) in [("sent", false, 40_001_u32), ("expired", true, 40_002_u32)] {
+        let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
+        let simulator_address = simulator.local_addr().expect("simulator address");
+        let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
+        let mut connection = connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, CoverageLossLedger::new())
+            .await
+            .expect("connect neighbor simulator");
+        let (send_gate, pause_sends, send_entered) = new_send_gate();
+        set_send_gate(Arc::get_mut(&mut connection.socket).expect("connection owns socket"), send_gate);
+        let (events, mut received_events) = mpsc::channel(1);
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
+        let (commands, command_receiver) = mpsc::channel(1);
+        let (_logout, logout) = mpsc::channel(1);
+        let task = spawn(connection.run(
+            events.clone(),
+            shutdown_receiver,
+            neighbor_requests,
+            command_receiver,
+            logout,
+            SimulatorMemoryBudget::new().for_neighbor(),
+        ));
 
-    let (use_circuit_code, peer) = receive_packet(&simulator).await;
-    send_ack(&simulator, peer, use_circuit_code.sequence()).await;
-    receive_connected(&mut received_events).await;
+        let (use_circuit_code, peer) = receive_packet(&simulator).await;
+        send_ack(&simulator, peer, use_circuit_code.sequence()).await;
+        receive_connected(&mut received_events).await;
 
-    let (completed, response) = oneshot::channel();
-    commands
-        .send(SimulatorCommand::Send {
-            message: Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 12 } }),
-            delivery: Delivery::Unreliable,
-            completed: Some(completed),
-            cancel_target: None,
-            report_failure: true,
-        })
-        .await
-        .expect("queue send that reports failures only");
-    let (sent, _) = receive_packet(&simulator).await;
-    std::assert_matches!(sent.message(), Message::CompletePingCheck(_));
-    assert!(response.await.expect("local send result").is_ok());
-    assert!(
-        matches!(received_events.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-        "a successful send without a generation target must not emit a completion event"
-    );
+        let (completed, response) = oneshot::channel();
+        commands
+            .send(SimulatorCommand::Send {
+                message: Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 12 } }),
+                delivery: Delivery::Unreliable,
+                completed: Some(completed),
+                cancel_target: None,
+                report_failure: true,
+            })
+            .await
+            .expect("queue send that reports failures only");
+        let (sent, _) = receive_packet(&simulator).await;
+        std::assert_matches!(sent.message(), Message::CompletePingCheck(_), "{case}");
+        assert!(response.await.expect("local send result").is_ok(), "{case}");
+        assert!(
+            matches!(received_events.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "{case}: a successful send without a generation target must not emit a completion event"
+        );
 
-    events
-        .try_send(SimulatorEvent::SendCompleted { simulator_id, cancel_target: None, error: None, report_failure: false })
-        .expect("fill the neighbor event channel");
-    let (promotion, cancel_target) = handoff_cancellation_for_test(simulator_id, simulator_address);
-    let handoff_state = HandoffState::Preparing(promotion);
-    let (completed, response) = oneshot::channel();
-    commands
-        .send(SimulatorCommand::Send {
-            message: Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 13 } }),
-            delivery: Delivery::Unreliable,
-            completed: Some(completed),
-            cancel_target: Some(cancel_target),
-            report_failure: true,
-        })
-        .await
-        .expect("queue reportable handoff control message");
-    let (sent, _) = receive_packet(&simulator).await;
-    std::assert_matches!(sent.message(), Message::CompletePingCheck(_));
-    assert!(response.await.expect("local send result").is_ok());
-
-    let reliable_sequence = 40_001_u32;
-    let mut reliable_chat = parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("parse chat fixture");
-    reliable_chat[0] |= 0x40;
-    reliable_chat[1..5].copy_from_slice(&reliable_sequence.to_be_bytes());
-    simulator.send_to(&reliable_chat, peer).await.expect("send reliable simulator event");
-    for _ in 0..16 {
-        yield_now().await;
-    }
-    advance(ACK_INTERVAL).await;
-    receive_ack(&simulator, reliable_sequence).await;
-
-    assert!(matches!(received_events.try_recv(), Ok(SimulatorEvent::SendCompleted { .. })), "remove the channel filler");
-    loop {
-        if let Some(SimulatorEvent::SendCompleted { simulator_id: completed_id, cancel_target: Some(actual), error, report_failure }) =
-            received_events.recv().await
-        {
-            assert_eq!(completed_id, simulator_id);
-            assert!(error.is_none(), "successful local send has no error");
-            assert!(!report_failure, "successful send completion does not report a failure");
-            assert!(matches_handoff_cancellation(&handoff_state, actual));
-            break;
+        events
+            .try_send(SimulatorEvent::SendCompleted { simulator_id, cancel_target: None, error: None, report_failure: false })
+            .expect("fill the neighbor event channel");
+        let (promotion, cancel_target) = handoff_cancellation_for_test(simulator_id, simulator_address);
+        let handoff_state = HandoffState::Preparing(promotion);
+        pause_sends.send_replace(expire);
+        let (completed, response) = oneshot::channel();
+        commands
+            .send(SimulatorCommand::Send {
+                message: Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 13 } }),
+                delivery: Delivery::Unreliable,
+                completed: Some(completed),
+                cancel_target: Some(cancel_target),
+                report_failure: true,
+            })
+            .await
+            .expect("queue reportable handoff control message");
+        if expire {
+            timeout(WAIT, send_entered.notified()).await.expect("send should enter the gate");
+            advance(MAX_SEND_AGE).await;
+            std::assert_matches!(response.await.expect("expired local send result"), Err(Error::SimulatorSend(_)), "{case}");
+            pause_sends.send_replace(false);
+        } else {
+            let (sent, _) = receive_packet(&simulator).await;
+            std::assert_matches!(sent.message(), Message::CompletePingCheck(_), "{case}");
+            assert!(response.await.expect("local send result").is_ok(), "{case}");
         }
-    }
 
-    shutdown.send_replace(true);
-    assert!(task.await.expect("connection task").is_ok());
-}
-
-#[tokio::test(start_paused = true)]
-async fn saturated_channel_delivers_expired_failure() {
-    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
-    let simulator_address = simulator.local_addr().expect("simulator address");
-    let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
-    let mut connection = connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, CoverageLossLedger::new())
-        .await
-        .expect("connect neighbor simulator");
-    let (send_gate, pause_sends, send_entered) = new_send_gate();
-    set_send_gate(Arc::get_mut(&mut connection.socket).expect("connection owns socket"), send_gate);
-    let (events, mut received_events) = mpsc::channel(1);
-    let (shutdown, shutdown_receiver) = watch::channel(false);
-    let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
-    let (commands, command_receiver) = mpsc::channel(1);
-    let (_logout, logout) = mpsc::channel(1);
-    let task = spawn(connection.run(
-        events.clone(),
-        shutdown_receiver,
-        neighbor_requests,
-        command_receiver,
-        logout,
-        SimulatorMemoryBudget::new().for_neighbor(),
-    ));
-
-    let (use_circuit_code, peer) = receive_packet(&simulator).await;
-    send_ack(&simulator, peer, use_circuit_code.sequence()).await;
-    receive_connected(&mut received_events).await;
-    events
-        .try_send(SimulatorEvent::SendCompleted { simulator_id, cancel_target: None, error: None, report_failure: false })
-        .expect("fill the neighbor event channel");
-
-    let (promotion, cancel_target) = handoff_cancellation_for_test(simulator_id, simulator_address);
-    let handoff_state = HandoffState::Preparing(promotion);
-    pause_sends.send_replace(true);
-    let (completed, response) = oneshot::channel();
-    commands
-        .send(SimulatorCommand::Send {
-            message: Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 14 } }),
-            delivery: Delivery::Unreliable,
-            completed: Some(completed),
-            cancel_target: Some(cancel_target),
-            report_failure: true,
-        })
-        .await
-        .expect("queue reportable send");
-    timeout(WAIT, send_entered.notified()).await.expect("send should enter the gate");
-    advance(MAX_SEND_AGE).await;
-    std::assert_matches!(response.await.expect("expired local send result"), Err(Error::SimulatorSend(_)));
-
-    pause_sends.send_replace(false);
-    let reliable_sequence = 40_002_u32;
-    let mut reliable_chat = parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("parse chat fixture");
-    reliable_chat[0] |= 0x40;
-    reliable_chat[1..5].copy_from_slice(&reliable_sequence.to_be_bytes());
-    simulator.send_to(&reliable_chat, peer).await.expect("send reliable simulator event while notification is buffered");
-    for _ in 0..16 {
-        yield_now().await;
-    }
-    advance(ACK_INTERVAL).await;
-    receive_ack(&simulator, reliable_sequence).await;
-
-    assert!(matches!(received_events.try_recv(), Ok(SimulatorEvent::SendCompleted { .. })), "remove the channel filler");
-    loop {
-        if let Some(SimulatorEvent::SendCompleted { simulator_id: completed_id, cancel_target: Some(actual), error, report_failure }) =
-            received_events.recv().await
-        {
-            assert_eq!(completed_id, simulator_id);
-            assert!(error.is_some(), "expired send reports its failure");
-            assert!(report_failure);
-            assert!(matches_handoff_cancellation(&handoff_state, actual));
-            break;
+        let mut reliable_chat = parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("parse chat fixture");
+        reliable_chat[0] |= 0x40;
+        reliable_chat[1..5].copy_from_slice(&reliable_sequence.to_be_bytes());
+        simulator.send_to(&reliable_chat, peer).await.expect("send reliable simulator event while notification is buffered");
+        for _ in 0..16 {
+            yield_now().await;
         }
-    }
+        advance(ACK_INTERVAL).await;
+        receive_ack(&simulator, reliable_sequence).await;
 
-    shutdown.send_replace(true);
-    assert!(task.await.expect("connection task").is_ok());
+        assert!(matches!(received_events.try_recv(), Ok(SimulatorEvent::SendCompleted { .. })), "{case}: remove the channel filler");
+        loop {
+            if let Some(SimulatorEvent::SendCompleted { simulator_id: completed_id, cancel_target: Some(actual), error, report_failure }) =
+                received_events.recv().await
+            {
+                assert_eq!(completed_id, simulator_id, "{case}");
+                assert_eq!(error.is_some(), expire, "{case}: only an expired send reports an error");
+                assert_eq!(report_failure, expire, "{case}: only an expired send reports a failure");
+                assert!(matches_handoff_cancellation(&handoff_state, actual), "{case}");
+                break;
+            }
+        }
+
+        shutdown.send_replace(true);
+        assert!(task.await.expect("connection task").is_ok(), "{case}");
+    }
 }
 
 #[tokio::test]

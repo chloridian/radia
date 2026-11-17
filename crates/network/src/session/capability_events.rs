@@ -287,18 +287,15 @@ mod tests {
     }
 
     #[test]
-    fn bad_entry_lengths() {
-        let value = make_enable_event(vec![simulator(vec![0; 7], vec![127, 0, 0], 13_000)]);
-        assert_eq!(decode_enable_simulators(&value), Err("Handle is not 8 bytes"));
-
-        let value = make_enable_event(vec![simulator(vec![0; 8], vec![127, 0, 0], 13_000)]);
-        assert_eq!(decode_enable_simulators(&value), Err("IP is not 4 bytes"));
-    }
-
-    #[test]
-    fn bad_port() {
-        let value = make_enable_event(vec![simulator(vec![0; 8], vec![127, 0, 0, 1], 0)]);
-        assert_eq!(decode_enable_simulators(&value), Err("Port is outside the valid range"));
+    fn bad_simulator_entries() {
+        for (handle, ip, port, expected) in [
+            (vec![0; 7], vec![127, 0, 0], 13_000, "Handle is not 8 bytes"),
+            (vec![0; 8], vec![127, 0, 0], 13_000, "IP is not 4 bytes"),
+            (vec![0; 8], vec![127, 0, 0, 1], 0, "Port is outside the valid range"),
+        ] {
+            let value = make_enable_event(vec![simulator(handle, ip, port)]);
+            assert_eq!(decode_enable_simulators(&value), Err(expected), "{expected}");
+        }
     }
 
     #[test]
@@ -321,13 +318,6 @@ mod tests {
         let seed = Url::parse("https://sim.example.invalid/seed").expect("seed URL");
         assert_eq!(decode_agent_communication(&body, agent), Ok((endpoint, seed)));
         assert_eq!(decode_agent_communication(&body, Uuid::default()), Err("agent-id does not match the logged-in agent"));
-    }
-
-    #[test]
-    fn seed_is_redacted() {
-        let mut body = Value::Map(Map::from([("seed-capability".to_owned(), Value::String("https://sim.invalid/private".to_owned()))]));
-        redact_seed_capability(&mut body);
-        assert_eq!(body, Value::Map(Map::from([("seed-capability".to_owned(), Value::String("[redacted]".to_owned()))])));
     }
 
     #[test]

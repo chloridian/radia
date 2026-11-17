@@ -76,13 +76,13 @@ use crate::{
     },
     coverage::{CoverageLoss, CoverageLossLedger, CoverageLossReason, CoverageRecord, CoverageSource},
     event::{
-        CLIENT_EVENT_CAPACITY, CapabilityEvent, Event, EventEnvelope, EventQueueBatchOrder, EventRetention, EventSendOutcome,
-        PRIMARY_TERMINAL_EVENT_CAPACITY, PacketOrder::Ordered, SimulatorId,
+        CLIENT_EVENT_CAPACITY, Event, EventEnvelope, EventRetention, EventSendOutcome, PRIMARY_TERMINAL_EVENT_CAPACITY,
+        PacketOrder::Ordered, SimulatorId,
     },
     session::{COMMAND_CAPACITY, Command, DEFAULT_UPSTREAM_BYTES_PER_SECOND, NETWORK_THREAD_STACK_SIZE},
 };
 
-use super::logout::{LogoutAttemptError, LogoutOutcome, PendingLogout, SessionLogout, send_logout_with_deadline};
+use super::logout::{LogoutOutcome, PendingLogout, SessionLogout};
 use super::*;
 use super::{
     EventQueueLifecycle, HandoffState, NEIGHBOR_COMMAND_CAPACITY, SimulatorCapabilitySession, SimulatorConnection,
@@ -412,16 +412,6 @@ fn run_large_paused_stack_test<F: Future<Output = ()> + 'static>(test: fn() -> F
         .expect("runtime test thread")
         .join()
         .expect("runtime test completes");
-}
-
-fn duration_percentiles(samples: &[Duration]) -> Option<(Duration, Duration, Duration)> {
-    if samples.is_empty() {
-        return None;
-    }
-    let mut sorted = samples.to_vec();
-    sorted.sort_unstable();
-    let percentile = |percent: usize| sorted[(sorted.len() - 1) * percent / 100];
-    Some((percentile(50), percentile(95), percentile(99)))
 }
 
 async fn connected_neighbor() -> NeighborHarness {

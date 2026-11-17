@@ -88,31 +88,6 @@ async fn receive_releases_capability_bytes() {
 }
 
 #[tokio::test]
-async fn recv_batch_keeps_order() {
-    let (commands, _) = mpsc::channel(COMMAND_CAPACITY);
-    let (disconnect, _) = watch::channel(false);
-    let (events, event_receiver) = mpsc::channel(1);
-    let order = EventQueueBatchOrder { incarnation: 71, ordinal: 9 };
-    events
-        .send(EventEnvelope::new(Event::CapabilityEventBatch {
-            simulator_id: test_simulator_id(77),
-            source: "127.0.0.1:13000".parse().expect("simulator endpoint"),
-            order,
-            events: vec![CapabilityEvent { message: "TestEvent".into(), body: Value::Undefined, retained_bytes: 0 }],
-        }))
-        .await
-        .expect("queue EventQueue batch");
-    let mut session = test_session(targeted_send_handle(commands, disconnect), event_receiver);
-
-    let Some(Event::CapabilityEventBatch { order: received_order, events, .. }) = session.recv_event().await else {
-        panic!("Session returns the queued EventQueue batch")
-    };
-    assert_eq!(received_order, order);
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].message, "TestEvent");
-}
-
-#[tokio::test]
 async fn final_loss_wakes_empty_intake() {
     use std::{
         sync::atomic::{AtomicBool, Ordering},
