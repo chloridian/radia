@@ -222,13 +222,10 @@ impl SessionState {
                     ),
                     Err(error) => SimulatorTaskOutcome::ConnectFailed(error),
                 };
-                if finish_events
+                finish_events
                     .send(SimulatorEvent::Finished { simulator_id, region_handle: Some(region_handle), endpoint, outcome: outcome.clone() })
                     .await
-                    .is_err()
-                {
-                    tracing::debug!(simulator = simulator_id.get(), region = region_handle, "neighbor result receiver closed");
-                }
+                    .ok();
                 (simulator_id, Some(region_handle), endpoint, outcome)
             }
             .in_current_span(),
@@ -260,8 +257,8 @@ impl SessionState {
     ) -> Result<(), SessionError> {
         let client = match self.new_capability_client(seed.clone()) {
             Ok(client) => client,
-            Err(_error) => {
-                tracing::warn!(simulator = simulator_id.get(), "could not start neighbor capability requests");
+            Err(error) => {
+                tracing::warn!(simulator = simulator_id.get(), %error, "could not start neighbor capability requests");
                 return Ok(());
             }
         };
@@ -273,9 +270,9 @@ impl SessionState {
             self.coverage_losses.clone(),
         ) {
             Ok(event_queue) => event_queue,
-            Err(_error) => {
+            Err(error) => {
                 client.close_session();
-                tracing::warn!(simulator = simulator_id.get(), "could not start neighbor event queue");
+                tracing::warn!(simulator = simulator_id.get(), %error, "could not start neighbor event queue");
                 return Ok(());
             }
         };
@@ -349,8 +346,13 @@ impl SessionDispatcher<'_> {
             && *simulator_id == self.state.simulator_id
             && self.startup.observe_primary_message(message, self.state.session.agent_id, self.state.session.session_id)
         {
-            tracing::info!("simulator session ready");
-            tracing::info!(lifecycle = "connected", "network lifecycle changed");
+            let primary = self.state.primary();
+            tracing::info!(
+                simulator = self.state.simulator_id.get(),
+                region = primary.region_handle,
+                endpoint = %primary.endpoint,
+                "simulator session ready"
+            );
             self.state.primary().primary_state.send_replace(PrimaryState::Ready { generation: 0 });
             if self.startup.should_publish_ready() {
                 self.state.publish_session_ready(&self.events, &mut self.run_state).await?;
@@ -485,19 +487,34 @@ impl SessionDispatcher<'_> {
         if connection.endpoint != endpoint || (!connection.is_current() && !connection.is_retiring()) {
             return Ok(RuntimeAction::Continue);
         }
-        if let Some(pending) = self.handoff_state.pending().filter(|pending| pending.target == simulator_id) {
+        let error = match &outcome {
+            SimulatorTaskOutcome::Finished(Err(error)) | SimulatorTaskOutcome::ConnectFailed(error) => Some(error),
+            SimulatorTaskOutcome::Finished(Ok(())) => None,
+        };
+        let handoff_failed = if let Some(pending) = self.handoff_state.pending().filter(|pending| pending.target == simulator_id) {
             let reason = match &outcome {
                 SimulatorTaskOutcome::Finished(Err(_)) => "destination connection ended with an error",
                 SimulatorTaskOutcome::Finished(Ok(())) => "destination connection ended before promotion",
                 SimulatorTaskOutcome::ConnectFailed(_) => "destination connection failed",
             };
-            tracing::info!(simulator = simulator_id.get(), region = pending.handoff.region_handle, reason, "simulator handoff failed");
+            tracing::warn!(
+                simulator = simulator_id.get(),
+                region = pending.handoff.region_handle,
+                %endpoint,
+                reason,
+                error = error.map(tracing::field::display),
+                "simulator handoff failed"
+            );
             self.handoff_state.take_pending();
-        }
-        if simulator_id != self.state.primary_id
-            && let SimulatorTaskOutcome::Finished(Err(error)) | SimulatorTaskOutcome::ConnectFailed(error) = &outcome
+            true
+        } else {
+            false
+        };
+        if !handoff_failed
+            && simulator_id != self.state.primary_id
+            && let Some(error) = error
         {
-            tracing::warn!(simulator = simulator_id.get(), region = ?region_handle, endpoint = %endpoint, %error, "neighbor simulator connection failed");
+            tracing::warn!(simulator = simulator_id.get(), region = ?region_handle, %endpoint, %error, "neighbor simulator connection failed");
         }
         let connection_region = region_handle.or(connection.region_handle);
         let was_connected = connection.connection == SimulatorConnectionLifecycle::Connected;

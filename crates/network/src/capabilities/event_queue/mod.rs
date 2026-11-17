@@ -726,8 +726,7 @@ async fn post_event_queue(
     let body = xml::to_string(&payload)
         .map_err(|error| http::Error::resource_exhausted(format!("Could not encode an EventQueueGet request: {error}")))?
         .into_bytes();
-    let incoming =
-        client.post_headers("event_queue", url, "application/llsd+xml", Some("application/llsd+xml"), body, max_response_bytes).await?;
+    let incoming = client.post_headers(url, "application/llsd+xml", Some("application/llsd+xml"), body, max_response_bytes).await?;
     read_admitted_body(incoming, body_budget).await
 }
 
@@ -777,7 +776,7 @@ async fn retry_event_queue_with_hint(
 
     pending_loss.commit();
     let delay = event_queue_retry_delay_with_hint(*error_count, retry_after);
-    tracing::debug!(attempt = *error_count, delay_ms = delay.as_millis(), "retrying event queue poll");
+    tracing::debug!(attempt = *error_count, delay_ms = delay.as_millis(), %error, "retrying event queue poll");
     *error_count += 1;
     wait_for_retry(delay, stop).await
 }
@@ -810,7 +809,7 @@ async fn retry_seed_capability_lookup(
 
     *retries += 1;
     let delay = seed_retry_delay(*retries, retry_after);
-    tracing::debug!(attempt = *retries, delay_ms = delay.as_millis(), "retrying event queue discovery");
+    tracing::debug!(attempt = *retries, delay_ms = delay.as_millis(), %error, "retrying event queue discovery");
     wait_for_retry(delay, stop).await
 }
 

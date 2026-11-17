@@ -88,7 +88,7 @@ pub(super) async fn request_capabilities_response(
     let body = xml::to_vec_with_max_bytes(&payload, MAX_CAPABILITY_REQUEST_BODY_BYTES)
         .map_err(|error| Error::Capability(format!("Could not encode an LLSD request: {error}")))?;
     let response = client
-        .post("seed_capability", seed, "application/llsd+xml", Some("application/llsd+xml"), body, max_response_bytes)
+        .post(seed, "application/llsd+xml", Some("application/llsd+xml"), body, max_response_bytes)
         .await
         .map_err(Error::CapabilityHttp)?;
     if !response.status.is_success() {
@@ -130,8 +130,7 @@ pub(super) async fn post_capability(
     body: Vec<u8>,
     max_response_bytes: usize,
 ) -> Result<Response, http::Error> {
-    let response =
-        client.post("capability_post", url, "application/llsd+xml", Some("application/llsd+xml"), body, max_response_bytes).await?;
+    let response = client.post(url, "application/llsd+xml", Some("application/llsd+xml"), body, max_response_bytes).await?;
     if !response.status.is_success() {
         return Err(http::Error::http_status(response.status, response.elapsed, response.retry_after(), "Capability request failed"));
     }
@@ -144,8 +143,7 @@ pub(super) async fn patch_capability(
     body: Vec<u8>,
     max_response_bytes: usize,
 ) -> Result<Response, http::Error> {
-    let response =
-        client.patch("capability_patch", url, "application/llsd+xml", Some("application/llsd+xml"), body, max_response_bytes).await?;
+    let response = client.patch(url, "application/llsd+xml", Some("application/llsd+xml"), body, max_response_bytes).await?;
     if !response.status.is_success() {
         return Err(http::Error::http_status(response.status, response.elapsed, response.retry_after(), "Capability request failed"));
     }
@@ -153,7 +151,7 @@ pub(super) async fn patch_capability(
 }
 
 pub(super) async fn delete_capability(client: &http::Client, url: &Url, max_response_bytes: usize) -> Result<Response, http::Error> {
-    let response = client.delete("capability_delete", url, Some("application/llsd+xml"), max_response_bytes).await?;
+    let response = client.delete(url, Some("application/llsd+xml"), max_response_bytes).await?;
     if !response.status.is_success() {
         return Err(http::Error::http_status(response.status, response.elapsed, response.retry_after(), "Capability request failed"));
     }
@@ -168,12 +166,12 @@ pub(super) async fn get_capability_bytes(
     redirect_policy: RedirectPolicy,
 ) -> Result<Response, http::Error> {
     let response = match (accept, redirect_policy) {
-        (Some(accept), RedirectPolicy::None) => client.get_with_accept("capability_get", url, accept, max_response_bytes).await?,
-        (None, RedirectPolicy::None) => client.get("capability_get", url, max_response_bytes).await?,
+        (Some(accept), RedirectPolicy::None) => client.get_with_accept(url, accept, max_response_bytes).await?,
+        (None, RedirectPolicy::None) => client.get(url, max_response_bytes).await?,
         (Some(accept), RedirectPolicy::ViewerAsset) => {
-            client.get_with_accept_and_redirect_policy("capability_get", url, accept, max_response_bytes, redirect_policy).await?
+            client.get_with_accept_and_redirect_policy(url, accept, max_response_bytes, redirect_policy).await?
         }
-        (None, redirect_policy) => client.get_with_redirect_policy("capability_get", url, max_response_bytes, redirect_policy).await?,
+        (None, redirect_policy) => client.get_with_redirect_policy(url, max_response_bytes, redirect_policy).await?,
     };
     if !response.status.is_success() || response.status == reqwest::StatusCode::PARTIAL_CONTENT {
         return Err(http::Error::http_status(
@@ -195,7 +193,7 @@ pub(super) async fn get_capability_range_bytes(
 ) -> Result<RangeResponse, http::Error> {
     let end = range.end - 1;
     let value = format!("bytes={}-{}", range.start, end);
-    let response = client.get_range_with_redirect_policy("capability_range_get", url, &value, max_response_bytes, redirect_policy).await?;
+    let response = client.get_range_with_redirect_policy(url, &value, max_response_bytes, redirect_policy).await?;
     match response.status {
         StatusCode::OK => Ok(RangeResponse::Full(response.body)),
         StatusCode::PARTIAL_CONTENT => {

@@ -141,7 +141,7 @@ impl StdError for LogoutAttemptError {
 
 impl SessionState {
     pub(super) async fn disconnect_once(&mut self) -> Result<LogoutOutcome, SessionError> {
-        tracing::info!("simulator disconnect started");
+        tracing::debug!("simulator logout started");
         let outcome = if self.logout.is_received() {
             LogoutOutcome::AlreadyReceived
         } else if let Some(reason) = self.logout.unavailable() {
@@ -181,14 +181,10 @@ impl SessionState {
         };
         match outcome {
             LogoutOutcome::Received => {
-                tracing::debug!(local_send_completed = true, remote_receipt_confirmed = true, "simulator logout reply received");
+                tracing::debug!(already_received = false, "simulator logout reply received");
             }
             LogoutOutcome::AlreadyReceived => {
-                tracing::debug!(
-                    local_send_completed = true,
-                    remote_receipt_confirmed = true,
-                    "simulator logout reply was already received"
-                );
+                tracing::debug!(already_received = true, "simulator logout reply received");
             }
             LogoutOutcome::Unavailable(reason) => {
                 self.record_logout_unavailable(reason, self.logout.deadline());

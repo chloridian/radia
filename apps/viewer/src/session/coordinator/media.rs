@@ -1,10 +1,12 @@
 use std::{
     collections::{HashMap, VecDeque},
     future::pending,
+    time::{Duration, Instant},
 };
 
 use network::{SimulatorId, capabilities::Client};
-use world::Entity;
+use utils::Summary;
+use world::{ApplyError, Entity};
 
 use crate::session::{
     object_media::{FetchError, ObjectMediaFetcher, ObjectMediaResult, ObjectMediaTarget, response_is_stale},
@@ -13,6 +15,34 @@ use crate::session::{
 
 const MAX_WAITING_OBJECT_MEDIA: usize = MAX_WORLD_ENTITIES;
 const MAX_MEDIA_FLUSH_BATCH: usize = 64;
+const MEDIA_SUMMARY_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+pub(super) struct MediaSummary {
+    queue_full: u64,
+    rejected: u64,
+    load_failed: u64,
+    sample: Option<ObjectMediaTarget>,
+    last_rejection: Option<ApplyError>,
+    last_load_error: Option<FetchError>,
+}
+
+impl MediaSummary {
+    fn report(self) {
+        let Some(sample) = self.sample else { return };
+        tracing::debug!(
+            queue_full = self.queue_full,
+            rejected = self.rejected,
+            load_failed = self.load_failed,
+            sample_simulator = sample.simulator_id.get(),
+            sample_object = %sample.binding.object_id(),
+            sample_local_id = sample.binding.address().local_id().get(),
+            last_rejection = self.last_rejection.map(tracing::field::display),
+            last_load_error = self.last_load_error.map(tracing::field::debug),
+            "object media summary"
+        );
+    }
+}
 
 #[derive(Default)]
 pub(super) struct WaitingObjectMedia {
@@ -77,6 +107,7 @@ pub(super) enum ObjectMediaIntake {
         clients: HashMap<SimulatorId, Client>,
         waiting: WaitingObjectMedia,
         pending_flush: Option<(ObjectMediaTarget, ObjectMediaTargetCheck)>,
+        summary: Summary<MediaSummary>,
     },
     Disabled,
 }
@@ -95,7 +126,13 @@ pub(super) enum ObjectMediaApplyProgress {
 
 impl ObjectMediaIntake {
     pub(super) fn new(fetcher: ObjectMediaFetcher) -> Self {
-        Self::Enabled { fetcher, clients: HashMap::new(), waiting: WaitingObjectMedia::default(), pending_flush: None }
+        Self::Enabled {
+            fetcher,
+            clients: HashMap::new(),
+            waiting: WaitingObjectMedia::default(),
+            pending_flush: None,
+            summary: Summary::new(MEDIA_SUMMARY_INTERVAL),
+        }
     }
 
     pub(super) async fn next_result(&mut self) -> Option<ObjectMediaResult> {
@@ -106,6 +143,7 @@ impl ObjectMediaIntake {
     }
 
     pub(super) fn disable(&mut self) {
+        self.flush_summary();
         *self = Self::Disabled;
     }
 
@@ -123,7 +161,7 @@ impl ObjectMediaIntake {
     }
 
     pub(super) fn forget_simulator(&mut self, simulator_id: SimulatorId) {
-        let Self::Enabled { fetcher, clients, waiting, pending_flush } = self else { return };
+        let Self::Enabled { fetcher, clients, waiting, pending_flush, .. } = self else { return };
         clients.remove(&simulator_id);
         fetcher.forget_simulator(simulator_id);
         waiting.forget_simulator(simulator_id);
@@ -143,26 +181,33 @@ impl ObjectMediaIntake {
             return;
         }
         if !waiting.insert(target) {
-            tracing::debug!(
-                simulator = target.simulator_id.get(),
-                region = target.binding.address().region().get(),
-                object = %target.binding.object_id(),
-                local_id = target.binding.address().local_id().get(),
-                "object media queue reached the live object limit"
-            );
+            self.record_summary(target, |summary| summary.queue_full = summary.queue_full.saturating_add(1));
         }
     }
 
     fn queue_for_validation(&mut self, target: ObjectMediaTarget) {
         let Self::Enabled { waiting, .. } = self else { return };
         if !waiting.insert(target) {
-            tracing::debug!(
-                simulator = target.simulator_id.get(),
-                region = target.binding.address().region().get(),
-                object = %target.binding.object_id(),
-                local_id = target.binding.address().local_id().get(),
-                "object media queue reached the live object limit"
-            );
+            self.record_summary(target, |summary| summary.queue_full = summary.queue_full.saturating_add(1));
+        }
+    }
+
+    fn record_summary(&mut self, sample: ObjectMediaTarget, update: impl FnOnce(&mut MediaSummary)) {
+        let Self::Enabled { summary, .. } = self else { return };
+        let due = summary.record(Instant::now(), |summary| {
+            update(summary);
+            summary.sample = Some(sample);
+        });
+        if let Some(due) = due {
+            due.report();
+        }
+    }
+
+    pub(super) fn flush_summary(&mut self) {
+        if let Self::Enabled { summary, .. } = self
+            && let Some(due) = summary.flush()
+        {
+            due.report();
         }
     }
 
@@ -172,7 +217,7 @@ impl ObjectMediaIntake {
         let requested_version = retry.map_or(result.target.version, |target| target.version);
         let response_version = result.update.as_ref().as_ref().ok().map(|update| update.version());
         if response_version.is_some_and(|version| response_is_stale(version, requested_version)) {
-            tracing::debug!(
+            tracing::trace!(
                 simulator = target.simulator_id.get(),
                 region = target.binding.address().region().get(),
                 object = %target.binding.object_id(),
@@ -201,39 +246,21 @@ impl ObjectMediaIntake {
         };
         let Some(update) = pending.update.take() else { return ObjectMediaApplyProgress::Complete };
         match update {
-            Ok(update) if current => {
-                if let Some(applied) = world.apply_object_media_after_check(target, update) {
-                    let address = target.binding.address();
-                    match applied {
-                        Ok(applied) if !applied.rejections.is_empty() => tracing::debug!(
-                            simulator = target.simulator_id.get(),
-                            region = address.region().get(),
-                            object = %target.binding.object_id(),
-                            local_id = address.local_id().get(),
-                            rejections = ?applied.rejections,
-                            "object media update contained rejected fields"
-                        ),
-                        Err(error) => tracing::debug!(
-                            simulator = target.simulator_id.get(),
-                            region = address.region().get(),
-                            object = %target.binding.object_id(),
-                            local_id = address.local_id().get(),
-                            %error,
-                            "object media update was rejected by world"
-                        ),
-                        Ok(_) => {}
-                    }
+            Ok(update) if current => match world.apply_object_media_after_check(target, update) {
+                Some(Ok(applied)) if !applied.rejections.is_empty() => {
+                    self.record_summary(target, |summary| summary.rejected = summary.rejected.saturating_add(1));
                 }
-            }
-            Err(error) if current => tracing::debug!(
-                simulator = target.simulator_id.get(),
-                region = target.binding.address().region().get(),
-                object = %target.binding.object_id(),
-                local_id = target.binding.address().local_id().get(),
-                ?error,
-                "object media could not be loaded"
-            ),
-            Err(error) => tracing::debug!(
+                Some(Err(error)) => self.record_summary(target, |summary| {
+                    summary.rejected = summary.rejected.saturating_add(1);
+                    summary.last_rejection = Some(error);
+                }),
+                Some(Ok(_)) | None => {}
+            },
+            Err(error) if current => self.record_summary(target, |summary| {
+                summary.load_failed = summary.load_failed.saturating_add(1);
+                summary.last_load_error = Some(error);
+            }),
+            Err(error) => tracing::trace!(
                 simulator = target.simulator_id.get(),
                 region = target.binding.address().region().get(),
                 object = %target.binding.object_id(),
@@ -250,7 +277,7 @@ impl ObjectMediaIntake {
     }
 
     pub(super) fn flush_step(&mut self, world: &mut SessionWorld) -> bool {
-        let Self::Enabled { fetcher, clients, waiting, pending_flush } = self else { return false };
+        let Self::Enabled { fetcher, clients, waiting, pending_flush, .. } = self else { return false };
         let mut work = 0usize;
         for _ in 0..MAX_MEDIA_FLUSH_BATCH {
             if work >= world::MAX_OBJECT_LOOKUP_WORK_ITEMS {

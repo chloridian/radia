@@ -11,7 +11,7 @@ async fn held_body(
     let request = {
         let client = client.clone();
         let url = server.url("/event-queue");
-        spawn(async move { client.post_headers("event_queue", &url, "application/llsd+xml", None, Vec::new(), 1024).await })
+        spawn(async move { client.post_headers(&url, "application/llsd+xml", None, Vec::new(), 1024).await })
     };
     let mut stream = server.next_poll();
     write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {body_bytes}\r\nRetry-After: 7\r\nConnection: close\r\n\r\n")
@@ -81,7 +81,7 @@ async fn body_admission_keeps_deadline() {
     let server = LocalServer::start(vec![b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nRetry-After: 7\r\nConnection: close\r\n\r\n".to_vec()]);
     let client = http::Client::new(Some(crate::capabilities::budget::EVENT_QUEUE_REQUEST_TIMEOUT), false, None).expect("HTTP client");
     let incoming = client
-        .post_headers("event_queue", &server.url("/event-queue"), "application/llsd+xml", None, Vec::new(), 1024)
+        .post_headers(&server.url("/event-queue"), "application/llsd+xml", None, Vec::new(), 1024)
         .await
         .expect("parsed response headers");
     let budget = Arc::new(Semaphore::new(1));

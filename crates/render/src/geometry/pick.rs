@@ -54,7 +54,7 @@ impl GeometryRenderer {
 
     fn log_pick(&self, query: &PickQuery, outcome: PickOutcome) {
         let Some(hit) = query.hit.as_ref().filter(|_| outcome == PickOutcome::Hit) else {
-            tracing::info!(
+            tracing::debug!(
                 outcome = ?outcome,
                 triangles_tested = query.work,
                 visible_items = self.cache.visible.len(),
@@ -63,7 +63,7 @@ impl GeometryRenderer {
             return;
         };
         let Some(item) = self.cache.index(hit.item_id).and_then(|index| self.cache.items.get(index)) else {
-            tracing::info!(
+            tracing::debug!(
                 outcome = ?PickOutcome::HitItemUnavailable,
                 triangles_tested = query.work,
                 visible_items = self.cache.visible.len(),
@@ -92,7 +92,7 @@ impl GeometryRenderer {
             .iter()
             .filter(|id| self.cache.items.get(**id).is_some_and(|visible| visible.mesh.id() == item.mesh.id()))
             .count();
-        tracing::info!(
+        tracing::debug!(
             outcome = ?outcome,
             object_uuid = ?source.map(|source| source.detail().summary.id),
             entity = ?item.entity,

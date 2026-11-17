@@ -22,7 +22,7 @@ use crate::{
     coverage::CoverageLossLedger,
     error::Error,
     event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, EventSendOutcome, PRIMARY_TERMINAL_EVENT_CAPACITY, send_client_event},
-    login::{LoginResponse, login_at_url},
+    login::{LoginError, LoginResponse, login_at_url},
 };
 
 pub(super) struct Channels {
@@ -42,7 +42,7 @@ pub(super) fn start_at(credentials: LoginCredentials, options: SessionOptions, l
     let terminal_event_permit = event_sender.clone().try_reserve_owned().expect("new event channel has capacity");
     let (disconnect_sender, disconnect_receiver) = watch::channel(false);
     let (worker_finished_sender, worker_finished) = watch::channel(false);
-    tracing::info!(lifecycle = "logging_in", "network lifecycle changed");
+    tracing::info!("login started");
     let failure_sender = event_sender.clone();
     let mut failure_shutdown = disconnect_receiver.clone();
     let worker_command_sender = command_sender.clone();
@@ -55,8 +55,8 @@ pub(super) fn start_at(credentials: LoginCredentials, options: SessionOptions, l
             let runtime = match Builder::new_multi_thread().enable_all().build() {
                 Ok(runtime) => runtime,
                 Err(error) => {
+                    tracing::error!(%error, "network runtime could not start");
                     let error = format!("Could not start the network runtime: {error}");
-                    tracing::info!(lifecycle = "failed", "network lifecycle changed");
                     terminal_event_permit.send(EventEnvelope::new(Event::Failed(error)));
                     worker_finished_sender.send_replace(true);
                     return;
@@ -73,10 +73,15 @@ pub(super) fn start_at(credentials: LoginCredentials, options: SessionOptions, l
             };
             let result = runtime.block_on(run_client(credentials, channels, login_url, options));
             if let Err(error) = result {
-                tracing::info!(lifecycle = "failed", "network lifecycle changed");
+                match &error {
+                    SessionError::Login(LoginError::Rejected { reason, .. }) => {
+                        tracing::warn!(kind = "rejected", %reason, "network session failed");
+                    }
+                    error => tracing::warn!(%error, "network session failed"),
+                }
                 runtime.block_on(crate::event::send_failure_event(&failure_sender, error.to_string(), &mut failure_shutdown));
             } else {
-                tracing::info!(lifecycle = "disconnected", "network lifecycle changed");
+                tracing::debug!("network worker finished");
             }
             runtime.shutdown_background();
             worker_finished_sender.send_replace(true);
@@ -114,16 +119,12 @@ pub(super) async fn run_client(
         let response = match wait_for_login(login_at_url(&credentials, &mfa_token, &mfa_hash, &login_url), &mut disconnect_requested).await
         {
             Some(Ok(response)) => response,
-            Some(Err(error)) => {
-                tracing::warn!("Login failed");
-                return Err(SessionError::Login(error));
-            }
+            Some(Err(error)) => return Err(SessionError::Login(error)),
             None => return Ok(()),
         };
         match response {
             LoginResponse::Authenticated { session, mfa_hash: returned_hash, data } => {
-                tracing::info!(target: "network::client", "Login authenticated");
-                tracing::info!(lifecycle = "connecting", "network lifecycle changed");
+                tracing::info!("login authenticated");
                 let remembered_hash = returned_hash.or_else(|| (!mfa_hash.is_empty()).then(|| mfa_hash.clone()));
                 if !matches!(
                     send_client_event(&events, Event::LoginAccepted { mfa_hash: remembered_hash }, &mut disconnect_requested).await,
@@ -134,7 +135,7 @@ pub(super) async fn run_client(
                 break (*session, data);
             }
             LoginResponse::MfaChallenge => {
-                tracing::info!("Login requires MFA");
+                tracing::info!("login requires MFA");
                 mfa_token.clear();
                 mfa_hash.clear();
                 let challenge = MfaChallenge::new(command_sender.clone());

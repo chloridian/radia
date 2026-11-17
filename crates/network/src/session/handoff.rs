@@ -238,13 +238,14 @@ impl SessionState {
         else {
             return Ok(());
         };
-        if let Err(_error) =
+        if let Err(error) =
             self.ensure_handoff_capabilities(simulator_id, &handoff, setup.capability_events.clone(), setup.shutdown.clone(), setup.state)
         {
             tracing::warn!(
                 simulator = simulator_id.get(),
                 region = handoff.region_handle,
                 reason = "destination capabilities failed",
+                %error,
                 "simulator handoff failed"
             );
             if let Some(connection) = self.simulators.get_mut(&simulator_id) {
@@ -355,7 +356,10 @@ impl SessionState {
                         )
                         .await
                     }
-                    Err(_reason) => Ok(()),
+                    Err(reason) => {
+                        tracing::debug!(simulator = source.get(), announcement = "TeleportFinish", reason, "handoff announcement rejected");
+                        Ok(())
+                    }
                 }
             }
             Message::TeleportFailed(failed) if failed.agent_id == self.session.agent_id => {
@@ -440,7 +444,7 @@ impl SessionDispatcher<'_> {
                 && connection.region_handle == Some(promotion.handoff.region_handle)
                 && connection.endpoint == promotion.handoff.endpoint
         }) else {
-            tracing::info!(
+            tracing::debug!(
                 simulator = promotion.target.get(),
                 region = promotion.handoff.region_handle,
                 reason = "destination circuit is stale",

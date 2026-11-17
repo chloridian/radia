@@ -14,7 +14,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, NamedTempFile};
-use utils::PersistBudget;
+use utils::{PersistBudget, Summary};
 
 #[cfg(test)]
 use std::sync::{
@@ -32,7 +32,7 @@ use crate::{
     cache::eviction::Lru,
     sqlite::{MAX_BATCH_ROWS, SqliteError},
 };
-use disk::{DATA_TEMP_PREFIX, delete_data, fail_temporary, remove_path};
+use disk::{CLEANUP_FAILURE_INTERVAL, CleanupFailures, DATA_TEMP_PREFIX, delete_data, fail_temporary, remove_path};
 use support::{clone_error, is_index_file, is_simulated_crash, lock, mutations, read_map, simulated_crash_error, write_map};
 
 pub(in crate::cache) use queue::{Command, WriteQueue, writer_loop};
@@ -244,8 +244,45 @@ pub(super) struct WorkerState {
     hooks: Arc<FaultHooks>,
     sweep: Vec<(PathBuf, ReadDir)>,
     sweep_complete: bool,
+    sweep_failures: SweepFailures,
+    cleanup_failures: Summary<CleanupFailures>,
     invalid_cleanup_failures: usize,
     touch_flush_failures: usize,
+}
+
+#[derive(Default)]
+struct SweepFailures {
+    inspect: u64,
+    open: u64,
+    remove_file: u64,
+    read_entry: u64,
+    remove_dir: u64,
+    depth_limited: u64,
+    depth_limited_path: Option<PathBuf>,
+    first_error: Option<io::Error>,
+}
+
+impl SweepFailures {
+    fn note_error(&mut self, error: io::Error) {
+        self.first_error.get_or_insert(error);
+    }
+
+    fn report(self) {
+        if self.inspect + self.open + self.remove_file + self.read_entry + self.remove_dir + self.depth_limited == 0 {
+            return;
+        }
+        tracing::warn!(
+            inspect = self.inspect,
+            open = self.open,
+            remove_file = self.remove_file,
+            read_entry = self.read_entry,
+            remove_dir = self.remove_dir,
+            depth_limited = self.depth_limited,
+            depth_limited_path = self.depth_limited_path.as_ref().map(|path| tracing::field::display(path.display())),
+            first_error = self.first_error.as_ref().map(tracing::field::display),
+            "cache orphan sweep incomplete"
+        );
+    }
 }
 
 impl WorkerState {
@@ -298,6 +335,8 @@ impl WorkerState {
             hooks,
             sweep: Vec::new(),
             sweep_complete: false,
+            sweep_failures: SweepFailures::default(),
+            cleanup_failures: Summary::new(CLEANUP_FAILURE_INTERVAL),
             invalid_cleanup_failures: 0,
             touch_flush_failures: 0,
         };
@@ -578,7 +617,7 @@ impl WorkerState {
     }
 
     fn finish_failed_replacements(
-        &self,
+        &mut self,
         replacing: &[Arc<Entry>],
         renamed: &HashSet<Key>,
         changes: &[PlannedChange],
@@ -605,7 +644,7 @@ impl WorkerState {
         if !crashed {
             for change in changes {
                 if !committed.contains(&change.key) && change.next.is_some() && renamed.contains(&change.key) {
-                    delete_data(&self.root, &self.read_state.namespaces, &change.key);
+                    delete_data(&self.root, &self.read_state.namespaces, &change.key, &mut self.cleanup_failures);
                 }
             }
         }
@@ -646,7 +685,7 @@ impl WorkerState {
                 self.entry_count = self.entry_count.saturating_add(1);
                 self.adjust_live_directories(&change.key, 1);
             } else {
-                delete_data(&self.root, &self.read_state.namespaces, &change.key);
+                delete_data(&self.root, &self.read_state.namespaces, &change.key, &mut self.cleanup_failures);
             }
             if let Some(reason) = change.eviction_reason {
                 self.read_state.evictions.record(reason);
@@ -773,7 +812,7 @@ impl WorkerState {
         lock(&self.read_state.invalid).clear();
         lock(&self.read_state.touches).clear();
         for key in old.keys().chain(changes.iter().map(|change| &change.key)) {
-            delete_data(&self.root, &self.read_state.namespaces, key);
+            delete_data(&self.root, &self.read_state.namespaces, key, &mut self.cleanup_failures);
         }
         self.update_accounted_size();
     }
@@ -803,7 +842,7 @@ impl WorkerState {
         lock(&self.read_state.invalid).clear();
         lock(&self.read_state.touches).clear();
         for key in old.keys() {
-            delete_data(&self.root, &self.read_state.namespaces, key);
+            delete_data(&self.root, &self.read_state.namespaces, key, &mut self.cleanup_failures);
         }
         self.update_accounted_size();
         Ok(())
@@ -817,6 +856,9 @@ impl WorkerState {
     fn shutdown(mut self) -> Result<(), StorageError> {
         self.drain_invalid();
         self.sweep_all();
+        if let Some(failures) = self.cleanup_failures.flush() {
+            failures.report();
+        }
         self.flush()?;
         self.index.shutdown().map_err(super::index::map_sqlite_error)
     }
@@ -963,19 +1005,24 @@ impl WorkerState {
                     let file_type = match item.file_type() {
                         Ok(file_type) => file_type,
                         Err(error) => {
-                            tracing::warn!(error = %error, "cache orphan sweep could not inspect a path");
+                            self.sweep_failures.inspect += 1;
+                            self.sweep_failures.note_error(error);
                             continue;
                         }
                     };
                     if file_type.is_dir() {
                         if self.sweep.len() >= MAX_SWEEP_DEPTH {
-                            tracing::warn!(path = %path.display(), "cache orphan sweep reached its directory depth limit");
+                            self.sweep_failures.depth_limited += 1;
+                            self.sweep_failures.depth_limited_path.get_or_insert(path);
                             continue;
                         }
                         match fs::read_dir(&path) {
                             Ok(read_dir) if self.sweep.try_reserve(1).is_ok() => self.sweep.push((path, read_dir)),
-                            Ok(_) => tracing::warn!("cache orphan sweep could not grow its directory stack"),
-                            Err(error) => tracing::warn!(error = %error, "cache orphan sweep could not open a directory"),
+                            Ok(_) => self.sweep_failures.open += 1,
+                            Err(error) => {
+                                self.sweep_failures.open += 1;
+                                self.sweep_failures.note_error(error);
+                            }
                         }
                     } else {
                         let is_index = is_index_file(&self.root, &path);
@@ -988,13 +1035,15 @@ impl WorkerState {
                             && !referenced
                             && let Err(error) = remove_path(&path)
                         {
-                            tracing::warn!(error = %error, "cache orphan sweep could not remove a file");
+                            self.sweep_failures.remove_file += 1;
+                            self.sweep_failures.note_error(error);
                         }
                     }
                 }
                 Some(Err(error)) => {
                     processed += 1;
-                    tracing::warn!(error = %error, "cache orphan sweep could not read a directory entry");
+                    self.sweep_failures.read_entry += 1;
+                    self.sweep_failures.note_error(error);
                 }
                 None => {
                     let popped = self.sweep.pop();
@@ -1004,11 +1053,15 @@ impl WorkerState {
                         match fs::remove_dir(directory) {
                             Ok(()) => {}
                             Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty) => {}
-                            Err(error) => tracing::warn!(error = %error, "cache orphan sweep could not remove an empty directory"),
+                            Err(error) => {
+                                self.sweep_failures.remove_dir += 1;
+                                self.sweep_failures.note_error(error);
+                            }
                         }
                     }
                     if self.sweep.is_empty() {
                         self.sweep_complete = true;
+                        std::mem::take(&mut self.sweep_failures).report();
                         return true;
                     }
                 }

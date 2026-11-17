@@ -10,6 +10,7 @@ use tokio::{
     sync::{OwnedSemaphorePermit, mpsc},
     time::Instant,
 };
+use utils::Summary;
 
 use super::{
     ConnectionError, ConnectionRole, ConnectionTask, MAX_CONNECTION_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS,
@@ -55,16 +56,18 @@ struct DecodedPacket {
     memory_reservation: Option<PacketMemoryReservation>,
 }
 
-#[derive(Default)]
-pub(super) struct PacketRejections {
-    counts: [u64; 8],
-    last_reported_at: Option<Instant>,
+pub(super) struct PacketRejections(Summary<[u64; 8]>);
+
+impl Default for PacketRejections {
+    fn default() -> Self {
+        Self(Summary::new(PACKET_REJECTION_SUMMARY_INTERVAL))
+    }
 }
 
 impl PacketRejections {
     pub(super) fn flush(&mut self) {
-        if self.counts.iter().any(|count| *count > 0) {
-            self.report(Instant::now());
+        if let Some(counts) = self.0.flush() {
+            report_packet_rejections(counts);
         }
     }
 
@@ -79,15 +82,25 @@ impl PacketRejections {
             RejectionKind::AllocationEstimateMismatch => 6,
             RejectionKind::EventAdmission => 7,
         };
-        self.counts[index] = self.counts[index].saturating_add(1);
-        let now = Instant::now();
-        if self.last_reported_at.is_none_or(|last| now.saturating_duration_since(last) >= PACKET_REJECTION_SUMMARY_INTERVAL) {
-            self.report(now);
+        if let Some(counts) = self.0.record(Instant::now().into_std(), |counts| counts[index] = counts[index].saturating_add(1)) {
+            report_packet_rejections(counts);
         }
     }
+}
 
-    fn report(&mut self, now: Instant) {
-        let [
+fn report_packet_rejections(counts: [u64; 8]) {
+    let [
+        frame_inspection,
+        acknowledgement_admission,
+        decode_admission,
+        preflight,
+        retained_memory_admission,
+        decode,
+        allocation_estimate_mismatch,
+        event_admission,
+    ] = counts;
+    if allocation_estimate_mismatch > 0 {
+        tracing::error!(
             frame_inspection,
             acknowledgement_admission,
             decode_admission,
@@ -96,33 +109,20 @@ impl PacketRejections {
             decode,
             allocation_estimate_mismatch,
             event_admission,
-        ] = std::mem::take(&mut self.counts);
-        self.last_reported_at = Some(now);
-        if allocation_estimate_mismatch > 0 {
-            tracing::error!(
-                frame_inspection,
-                acknowledgement_admission,
-                decode_admission,
-                preflight,
-                retained_memory_admission,
-                decode,
-                allocation_estimate_mismatch,
-                event_admission,
-                "simulator packets rejected; allocation estimate mismatch"
-            );
-        } else {
-            tracing::warn!(
-                frame_inspection,
-                acknowledgement_admission,
-                decode_admission,
-                preflight,
-                retained_memory_admission,
-                decode,
-                allocation_estimate_mismatch,
-                event_admission,
-                "simulator packets rejected"
-            );
-        }
+            "simulator packets rejected; allocation estimate mismatch"
+        );
+    } else {
+        tracing::warn!(
+            frame_inspection,
+            acknowledgement_admission,
+            decode_admission,
+            preflight,
+            retained_memory_admission,
+            decode,
+            allocation_estimate_mismatch,
+            event_admission,
+            "simulator packets rejected"
+        );
     }
 }
 

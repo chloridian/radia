@@ -132,10 +132,8 @@ impl InventoryEditController {
     }
 
     pub(crate) async fn stop(&mut self) {
-        if let Some(stop) = self.stop_tx.take()
-            && stop.send(()).is_err()
-        {
-            tracing::trace!("inventory edit worker stopped before shutdown signal");
+        if let Some(stop) = self.stop_tx.take() {
+            stop.send(()).ok();
         }
         if let Some(task) = self.task.take()
             && let Err(error) = task.await
@@ -179,9 +177,7 @@ async fn run_edits(
             _ = cancellation.clone() => break,
             outcome = &mut process => outcome,
         };
-        if request.response.send(outcome).is_err() {
-            tracing::trace!("inventory edit caller stopped before receiving its outcome");
-        }
+        request.response.send(outcome).ok();
     }
 }
 
@@ -617,8 +613,8 @@ async fn execute_move(
     };
     if transport.send(movement).is_err() {
         let (removed, result) = oneshot::channel();
-        if events.send(InventoryEditEvent::MoveAborted { expectation, removed }).await.is_ok() && result.await.is_err() {
-            tracing::trace!("inventory edit worker stopped before move abort acknowledgement");
+        if events.send(InventoryEditEvent::MoveAborted { expectation, removed }).await.is_ok() {
+            result.await.ok();
         }
         return InventoryEditOutcome::ServerError;
     }

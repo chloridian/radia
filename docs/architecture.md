@@ -126,7 +126,7 @@ Provides shared protocol vectors, texture and mesh fixtures, allocation measurem
 
 ### `crates/utils`
 
-Provides shared ID newtypes and general helpers such as atomic file replacement. Domain validity stays with the owning type, and Utils has no subsystem dependencies. Replacement retries preserve the existing destination on failure and share a bounded retry budget across a cache commit.
+Provides shared ID newtypes and general helpers such as atomic file replacement and rate-limited summaries for hot-path logging. Domain validity stays with the owning type, and Utils has no subsystem dependencies. Replacement retries preserve the existing destination on failure and share a bounded retry budget across a cache commit.
 
 ### `crates/world`
 

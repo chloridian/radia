@@ -24,7 +24,9 @@ pub(crate) fn init() -> Option<WorkerGuard> {
             let (writer, guard) = tracing_appender::non_blocking(file);
             let file_filter = EnvFilter::try_from_env("FILE_LOG")
                 .unwrap_or_else(|_| {
-                    EnvFilter::new("info,viewer=debug,network=debug,protocol=debug,world=debug,render=debug,assets=debug,llsd=debug")
+                    EnvFilter::new(
+                        "info,viewer=debug,network=debug,assets=debug,storage=debug,inventory=debug,render=debug,world=info,protocol=info,llsd=info",
+                    )
                 })
                 .add_directive("jpeg2k=warn".parse().expect("valid jpeg2k tracing directive"));
             let json = fmt::layer()
@@ -40,7 +42,7 @@ pub(crate) fn init() -> Option<WorkerGuard> {
     };
 
     let console_filter = EnvFilter::try_from_env("LOG")
-        .unwrap_or_else(|_| EnvFilter::new("warn,viewer=info"))
+        .unwrap_or_else(|_| EnvFilter::new("warn,viewer=info,network=info"))
         .add_directive("jpeg2k=warn".parse().expect("valid jpeg2k tracing directive"));
 
     let console = fmt::layer()

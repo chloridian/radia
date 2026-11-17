@@ -420,9 +420,7 @@ pub(crate) fn map_request_coordinates(cell: RegionGridCell) -> Option<(u16, u16)
 
 fn finish(pending: PendingLookup, result: Result<String, RegionLookupError>) {
     for sender in pending.waiters.into_values() {
-        if sender.send(result.clone()).is_err() {
-            tracing::trace!("region lookup receiver closed");
-        }
+        sender.send(result.clone()).ok();
     }
 }
 
