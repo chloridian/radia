@@ -29,3 +29,5 @@ flamegraph.svg
 
 **/*.proptest-regressions
 **/proptest-regressions/
+
+plans/
