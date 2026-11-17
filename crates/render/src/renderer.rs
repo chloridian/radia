@@ -24,6 +24,8 @@ use crate::pipeline::{PostProcess, SCENE_CLEAR, camera_view, projection};
 use crate::scene::{AgentPose, Camera, SceneView};
 use crate::texture::{TextureCompletion, TextureJob};
 
+const MAX_STORAGE_BUFFER_BYTES: u64 = 512 * 1024 * 1024;
+
 #[derive(Debug)]
 pub enum Error {
     Surface(CreateSurfaceError),
@@ -370,6 +372,7 @@ impl RendererInit {
                 required_features: (supported_features
                     & (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::INDIRECT_FIRST_INSTANCE))
                     | timestamp_features,
+                required_limits: scene_limits(&adapter.limits()),
                 ..Default::default()
             })
             .await
@@ -441,6 +444,16 @@ impl Retirement {
             .poll(PollType::Wait { submission_index: None, timeout: Some(Duration::from_millis(500)) })
             .map(|_| ())
             .map_err(Error::Poll)
+    }
+}
+
+fn scene_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
+    let defaults = wgpu::Limits::default();
+    let granted = |offered: u64, default: u64| offered.min(MAX_STORAGE_BUFFER_BYTES).max(default);
+    wgpu::Limits {
+        max_storage_buffer_binding_size: granted(adapter.max_storage_buffer_binding_size, defaults.max_storage_buffer_binding_size),
+        max_buffer_size: granted(adapter.max_buffer_size, defaults.max_buffer_size),
+        ..defaults
     }
 }
 

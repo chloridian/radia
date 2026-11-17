@@ -15,7 +15,7 @@ use crate::{
     environment::Evaluated,
     geometry::{
         cache::{CacheUpdate, MeshDemandOrder, item_is_live, range_moved},
-        draw_list::{LAYOUT_TIME_PER_FRAME, MAX_FACE_INSTANCES},
+        draw_list::LAYOUT_TIME_PER_FRAME,
         instance::{instance_base, parameter_part, scene_origin},
         items::{CachedFace, CachedItem, ItemIndex},
         visibility::WorldSphere,
@@ -467,11 +467,16 @@ impl GeometryRenderer {
             self.draw_list.patch(&self.cache.items, &self.cache.patch_faces, &update.pose_items, self.active_origin, frame_origin);
         let draw_upload_started = Instant::now();
         if layout_committed {
-            let uploaded = self.draw_list.upload_layout(&self.queue, &self.instances);
+            let grown = self.instances.fit(device, &self.queue, self.draw_list.slot_count());
+            if grown {
+                self.pipelines.set_faces(device, &self.textures, &self.instances.instances);
+                self.main_view.clear();
+            }
+            let uploaded = self.draw_list.upload_layout(&self.queue, &self.instances.instances, grown);
             self.stats.draw_instance_bytes_uploaded += uploaded.bytes;
             self.stats.draw_instance_write_calls += uploaded.calls;
         } else if !self.cache.patch_faces.is_empty() || self.draw_list.has_dirty_slots() {
-            let uploaded = self.draw_list.upload_patch(&self.queue, &self.instances);
+            let uploaded = self.draw_list.upload_patch(&self.queue, &self.instances.instances);
             self.stats.draw_instance_bytes_uploaded += uploaded.bytes;
             self.stats.draw_instance_write_calls += uploaded.calls;
         }
@@ -485,7 +490,7 @@ impl GeometryRenderer {
             self.stats.blended_sorts += usize::from(culled.blended_sorted);
             let bytes = self.main_view.indirect_bytes();
             if culled.changed && !bytes.is_empty() {
-                self.queue.write_buffer(&self.indirect, 0, bytes);
+                self.queue.write_buffer(&self.instances.indirect, 0, bytes);
                 self.stats.draw_command_bytes_uploaded = bytes.len();
             }
         }
@@ -567,8 +572,8 @@ impl GeometryRenderer {
             tracing::warn!(
                 omitted_faces = self.stats.omitted_faces,
                 mesh_budget_blocked = self.stats.mesh_budget_blocked,
-                instance_capacity = MAX_FACE_INSTANCES,
-                instance_buffer_bytes = super::INSTANCE_BUFFER_BYTES,
+                instance_capacity = self.instances.cap(),
+                instance_buffer_bytes = self.instances.bytes(),
                 draw_submissions = self.stats.draw_calls,
                 "scene geometry exceeded its GPU instance buffer budget"
             );
@@ -1251,7 +1256,7 @@ mod tests {
         let object = view.objects().next().expect("fixture object");
         let (_, mesh) = object.mesh().expect("fixture mesh");
         let info = mesh_info(mesh);
-        let mut draw_list = DrawList::default();
+        let mut draw_list = DrawList::new(usize::MAX);
         for (shading, pipeline) in [(ShadingMode::Terrain, Pipeline::Terrain), (ShadingMode::RegionWater, Pipeline::RegionWater)] {
             let faces = cached_faces(
                 CachedFaceContext {
@@ -1280,7 +1285,7 @@ mod tests {
         let (_, mesh) = object.mesh().expect("fixture mesh");
         let Placement::Ready(transform) = object.placement() else { panic!("fixture placement") };
         let info = mesh_info(mesh);
-        let mut draw_list = DrawList::default();
+        let mut draw_list = DrawList::new(usize::MAX);
         let mut faces = cached_faces(
             CachedFaceContext {
                 id: object_item_id(object),
