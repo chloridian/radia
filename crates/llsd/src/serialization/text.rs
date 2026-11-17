@@ -2,12 +2,11 @@ use std::fmt;
 
 use serde::ser::{self, Impossible, Serialize};
 
+use super::{Format, Serializer};
 use crate::{
     Error, Result,
     value::{DATE_NEWTYPE, URI_NEWTYPE, UUID_NEWTYPE},
 };
-
-use super::{Format, Serializer};
 
 #[derive(Clone, Copy)]
 pub(super) enum TextKind {

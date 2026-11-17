@@ -27,6 +27,8 @@ fn trim_text_end(input: &[u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
     use crate::Value;
 
@@ -54,7 +56,7 @@ mod tests {
         let input = b"  <? LLSD/XML ?>
 <llsd><string>sky</string></llsd>";
         let limits = Limits { max_bytes: input.len() - 1, ..Limits::default() };
-        std::assert_matches!(from_slice_with_limits::<Value>(input, limits), Err(Error::LimitExceeded("input bytes")));
+        assert_matches!(from_slice_with_limits::<Value>(input, limits), Err(Error::LimitExceeded("input bytes")));
     }
 
     #[test]

@@ -58,13 +58,13 @@ impl fmt::Display for Uri {
 }
 
 impl Serialize for Uri {
-    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_newtype_struct(URI_NEWTYPE, &self.0)
     }
 }
 
 impl<'de> Deserialize<'de> for Uri {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_newtype_struct(URI_NEWTYPE, UriVisitor)
     }
 }
@@ -78,7 +78,7 @@ impl<'de> Visitor<'de> for UriVisitor {
         formatter.write_str("an LLSD URI")
     }
 
-    fn visit_newtype_struct<D: Deserializer<'de>>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error> {
+    fn visit_newtype_struct<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         String::deserialize(deserializer).map(Uri)
     }
 }

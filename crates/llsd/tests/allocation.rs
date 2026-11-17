@@ -1,5 +1,4 @@
-use std::assert_matches;
-use std::{fmt::Write, hint::black_box};
+use std::{assert_matches, fmt::Write, hint::black_box};
 
 use llsd::{Error, Limits, Value, binary, notation, xml};
 use test_support::allocation::{self, CountingAllocator, live_bytes};
@@ -64,7 +63,7 @@ fn xml_decoding_releases_allocations() {
 
 #[test]
 fn oversized_keys_stay_bounded() {
-    type Decode = fn(&[u8], Limits) -> Result<Value, llsd::Error>;
+    type Decode = fn(&[u8], Limits) -> Result<Value, Error>;
     let large = "x".repeat(1024 * 1024);
     let binary_map = |key: &str| {
         let mut bytes = b"{\0\0\0\x01k".to_vec();
@@ -80,15 +79,15 @@ fn oversized_keys_stay_bounded() {
             b"<llsd><map><key>xxx</key><undef/></map></llsd>".to_vec(),
             format!("<llsd><map><key>{large}</key><undef/></map></llsd>").into_bytes(),
         ),
-        ("notation", llsd::notation::from_slice_with_limits, b"{'xxx':!}".to_vec(), format!("{{'{large}':!}}").into_bytes()),
-        ("binary", llsd::binary::from_slice_with_limits, binary_map("xxx"), binary_map(&large)),
+        ("notation", notation::from_slice_with_limits, b"{'xxx':!}".to_vec(), format!("{{'{large}':!}}").into_bytes()),
+        ("binary", binary::from_slice_with_limits, binary_map("xxx"), binary_map(&large)),
     ];
     for (name, decode, small, large) in cases {
         let limits = Limits { max_map_key_bytes: 2, ..Limits::default() };
         let (small_result, small_live, small_peak) = measure(|| decode(&small, limits));
         let (large_result, large_live, large_peak) = measure(|| decode(&large, limits));
-        assert_matches!(small_result, Err(llsd::Error::LimitExceeded("map key bytes")), "small key for {name}");
-        assert_matches!(large_result, Err(llsd::Error::LimitExceeded("map key bytes")), "large key for {name}");
+        assert_matches!(small_result, Err(Error::LimitExceeded("map key bytes")), "small key for {name}");
+        assert_matches!(large_result, Err(Error::LimitExceeded("map key bytes")), "large key for {name}");
         assert_eq!((small_live, large_live), (0, 0), "failed decode retained storage for {name}");
         assert!(large_peak <= small_peak + 4096, "oversized key was copied for {name}: {small_peak} -> {large_peak}");
     }

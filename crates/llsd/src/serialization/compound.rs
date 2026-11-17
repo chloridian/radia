@@ -5,9 +5,8 @@ use serde::ser::{
     SerializeTupleVariant,
 };
 
-use crate::{Error, Result};
-
 use super::{Container, Format, Serializer, key::KeySerializer};
+use crate::{Error, Result};
 
 pub(super) struct Compound<'a, F: Format> {
     pub(super) serializer: &'a mut Serializer<F>,

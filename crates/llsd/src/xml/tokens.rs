@@ -6,9 +6,8 @@ use quick_xml::{
     events::{BytesRef, BytesStart, Event},
 };
 
-use crate::{Error, Limits, Result};
-
 use super::is_xml_char;
+use crate::{Error, Limits, Result};
 
 const MAX_BINARY_ATTRIBUTES: usize = 4096;
 
@@ -194,8 +193,7 @@ fn base64_encoding(mut text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches;
-    use std::borrow::Cow;
+    use std::{assert_matches, borrow::Cow};
 
     use super::{Token, Tokens};
     use crate::Limits;

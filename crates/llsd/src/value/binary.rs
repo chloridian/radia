@@ -1,6 +1,6 @@
 use std::{fmt, ops::Deref};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, de::Visitor};
 
 use super::BINARY_NEWTYPE;
 
@@ -52,13 +52,13 @@ impl Deref for Binary {
 }
 
 impl Serialize for Binary {
-    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_newtype_struct(BINARY_NEWTYPE, &ByteSlice(&self.0))
     }
 }
 
 impl<'de> Deserialize<'de> for Binary {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_newtype_struct(BINARY_NEWTYPE, BinaryVisitor)
     }
 }
@@ -66,7 +66,7 @@ impl<'de> Deserialize<'de> for Binary {
 struct ByteSlice<'a>(&'a [u8]);
 
 impl Serialize for ByteSlice<'_> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_bytes(self.0)
     }
 }
@@ -80,7 +80,7 @@ impl<'de> Visitor<'de> for BinaryVisitor {
         formatter.write_str("LLSD binary data")
     }
 
-    fn visit_newtype_struct<D: Deserializer<'de>>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error> {
+    fn visit_newtype_struct<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         deserializer.deserialize_byte_buf(BinaryPayloadVisitor)
     }
 }
@@ -94,11 +94,11 @@ impl<'de> Visitor<'de> for BinaryPayloadVisitor {
         formatter.write_str("binary data")
     }
 
-    fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> std::result::Result<Self::Value, E> {
+    fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
         Ok(Binary(value.to_vec()))
     }
 
-    fn visit_byte_buf<E: serde::de::Error>(self, value: Vec<u8>) -> std::result::Result<Self::Value, E> {
+    fn visit_byte_buf<E: de::Error>(self, value: Vec<u8>) -> Result<Self::Value, E> {
         Ok(Binary(value))
     }
 }

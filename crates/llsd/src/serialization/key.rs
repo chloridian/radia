@@ -2,9 +2,8 @@ use std::{fmt, marker::PhantomData};
 
 use serde::ser::{self, Impossible, Serialize};
 
-use crate::{Error, Result, encoding::real_text};
-
 use super::Format;
+use crate::{Error, Result, encoding::real_text};
 
 pub(super) struct KeySerializer<F> {
     pub(super) budget: Option<usize>,
