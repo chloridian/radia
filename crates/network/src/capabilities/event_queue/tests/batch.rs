@@ -264,7 +264,7 @@ async fn cancelled_batch_records_loss() {
     ));
     assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
     shutdown.send_replace(true);
-    assert!(matches!(admission.await, EventSendOutcome::Shutdown));
+    std::assert_matches!(admission.await, EventSendOutcome::Shutdown);
     let mut changed = changed;
     changed.changed().await.expect("durable loss wakes ledger subscribers");
     std::assert_matches!(
@@ -317,7 +317,7 @@ async fn size_limit_event_stays_single() {
     at_limit.retained_bytes = MAX_QUEUED_CAPABILITY_EVENT_BYTES;
     let expected_bytes = capability_event_batch_retained_size(from_ref(&at_limit), 1);
 
-    assert!(matches!(
+    std::assert_matches!(
         send_batch(
             &events,
             test_simulator_id(1),
@@ -329,7 +329,7 @@ async fn size_limit_event_stays_single() {
         )
         .await,
         EventSendOutcome::Sent
-    ));
+    );
     let envelope = received.recv().await.expect("one batch envelope");
     std::assert_matches!(
         &envelope.event,
@@ -355,7 +355,7 @@ async fn event_batch_admission_is_atomic() {
     assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
     assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES - expected_bytes);
     std::assert_matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::Failed(_)));
-    assert!(matches!(admission.await, EventSendOutcome::Sent));
+    std::assert_matches!(admission.await, EventSendOutcome::Sent);
     let envelope = received.recv().await.expect("one complete batch envelope");
     let Event::CapabilityEventBatch { events: batch, .. } = &envelope.event else {
         panic!("the EventQueue response must be one application event")
@@ -417,7 +417,7 @@ async fn receiver_close_records_loss() {
     ));
     assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
     drop(received);
-    assert!(matches!(admission.await, EventSendOutcome::ReceiverClosed));
+    std::assert_matches!(admission.await, EventSendOutcome::ReceiverClosed);
     std::assert_matches!(
         ledger.snapshot().losses.as_slice(),
         [CoverageLoss::Source(loss)] if loss.reason == CoverageLossReason::EventQueueAdmission
