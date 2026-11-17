@@ -19,7 +19,7 @@ use wgpu::{
 use super::*;
 use crate::geometry::{
     fixtures::{scene, scene_with_agent, scene_with_world, vulkan_device},
-    instance::{InstanceBuffers, instance_base, packed_instance},
+    instance::{InstanceBuffers, SLOT_BYTES, instance_base, packed_instance},
 };
 use crate::material::FaceParams;
 use crate::pipeline::{INSTANCE_BYTES, Pipeline, VERTEX_BYTES};
@@ -1747,6 +1747,11 @@ fn gpu_instance_buffer_grows_at_layout_commit() {
     assert_eq!(geometry.stats.omitted_faces, 0);
     assert!(geometry.draw_list.slot_count() > near_slots, "the far objects enlarge the layout");
     assert!(geometry.stats.instance_buffer_bytes >= geometry.draw_list.slot_count() * INSTANCE_BYTES);
+    assert_eq!(
+        geometry.memory.instances.load(std::sync::atomic::Ordering::Acquire),
+        geometry.stats.instance_buffer_bytes / INSTANCE_BYTES * SLOT_BYTES,
+        "the grown buffers replace the initial charge"
+    );
     assert!(geometry.cache.items.iter().all(|(_, item)| item.faces.iter().all(|face| face.slot.is_some())), "every face is placed");
     compare(&mut geometry, &mut reference, camera(256.0, Vec3::NEG_X), "objects placed by the growing layout draw");
 }
