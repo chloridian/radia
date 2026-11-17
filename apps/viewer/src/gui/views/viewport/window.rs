@@ -3,7 +3,12 @@ use std::{
     fmt,
     future::Future,
     ops::{Deref, DerefMut},
-    sync::{Arc, mpsc, mpsc::TryRecvError},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+        mpsc::TryRecvError,
+    },
     time::{Duration, Instant},
 };
 
@@ -12,6 +17,7 @@ use render::scene;
 use render::{CompressionQuality, FrameInput, Overlay, Renderer, RendererInit, Retirement, TextureCompletion};
 use tokio::{runtime::Handle, task::JoinHandle};
 use tracing::Instrument;
+use utils::Summary;
 #[cfg(target_os = "linux")]
 use winit::platform::startup_notify::{EventLoopExtStartupNotify, WindowAttributesExtStartupNotify, reset_activation_token_env};
 use winit::{
@@ -34,6 +40,7 @@ use crate::{
 };
 
 const RECOVERY_DELAY: Duration = Duration::from_millis(500);
+const TEXTURE_DROP_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 pub(super) const MAX_RECOVERIES: u32 = 3;
 
 fn display_refresh_interval(window: &Window) -> Duration {
@@ -386,6 +393,8 @@ pub(super) struct SceneWindow {
     retired: Vec<Retirement>,
     texture_sender: mpsc::SyncSender<TextureCompletion>,
     texture_receiver: mpsc::Receiver<TextureCompletion>,
+    dropped_textures: Arc<AtomicU64>,
+    texture_drops: Summary<u64>,
     feed: Option<SceneFeed>,
     renderer: SceneRendererLifecycle,
     runtime: Handle,
@@ -468,6 +477,8 @@ impl SceneWindow {
             retired: Vec::new(),
             texture_sender,
             texture_receiver,
+            dropped_textures: Arc::new(AtomicU64::new(0)),
+            texture_drops: Summary::new(TEXTURE_DROP_REPORT_INTERVAL),
             feed: None,
             renderer: RendererLifecycle::initializing(generation, pending),
             runtime,
@@ -538,7 +549,6 @@ impl SceneWindow {
                 }
             }
             WindowEvent::Focused(focused) => {
-                tracing::info!(focused, "viewport focus changed");
                 self.focused = *focused;
                 if !focused {
                     self.release_drag(false);
@@ -900,7 +910,7 @@ impl SceneWindow {
                 if let Ok(renderer) = result {
                     self.retired.push(renderer.retire());
                 }
-                tracing::warn!("discarded stale scene GPU initialization completion");
+                tracing::debug!("discarded stale scene GPU initialization");
                 if initial {
                     return Err(SceneWindowError::RendererInitializationStopped);
                 }
@@ -931,6 +941,12 @@ impl SceneWindow {
     }
 
     fn complete_texture_jobs(&mut self) {
+        let dropped = self.dropped_textures.swap(0, Ordering::Relaxed);
+        if dropped > 0
+            && let Some(dropped) = self.texture_drops.record(Instant::now(), |total| *total = total.saturating_add(dropped))
+        {
+            tracing::warn!(dropped, "texture completions dropped; queue full");
+        }
         if let Some(renderer) = self.renderer.ready_mut() {
             while let Ok(completion) = self.texture_receiver.try_recv() {
                 renderer.complete_texture(completion);
@@ -1184,6 +1200,7 @@ impl SceneWindow {
             };
             while let Some(job) = renderer.next_texture_job() {
                 let sender = self.texture_sender.clone();
+                let dropped = Arc::clone(&self.dropped_textures);
                 let wake = Arc::clone(&self.wake);
                 let span = tracing::Span::current();
                 let work = feed.runtime.spawn_blocking(move || span.in_scope(|| job.run(CompressionQuality::Fast)));
@@ -1193,7 +1210,9 @@ impl SceneWindow {
                             match work.await {
                                 Ok(completion) => match sender.try_send(completion) {
                                     Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
-                                    Err(mpsc::TrySendError::Full(_)) => tracing::warn!("texture completion queue is full"),
+                                    Err(mpsc::TrySendError::Full(_)) => {
+                                        dropped.fetch_add(1, Ordering::Relaxed);
+                                    }
                                 },
                                 Err(error) => tracing::error!(%error, "texture worker stopped unexpectedly"),
                             }
@@ -1299,6 +1318,10 @@ fn deadline_passed(deadline: Option<Instant>, now: Instant) -> bool {
 impl Drop for SceneWindow {
     fn drop(&mut self) {
         self.release_drag(false);
+        let dropped = self.texture_drops.flush().unwrap_or(0).saturating_add(self.dropped_textures.swap(0, Ordering::Relaxed));
+        if dropped > 0 {
+            tracing::warn!(dropped, "texture completions dropped; queue full");
+        }
     }
 }
 

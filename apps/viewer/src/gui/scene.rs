@@ -190,10 +190,8 @@ fn viewport_event(event: crate::gui::views::viewport::ViewportEvent, cx: &mut Ap
         ViewportEvent::Ready(generation) if main == MainWindow::Starting(generation) => {
             cx.global_mut::<AppLifecycle>().scene.main = MainWindow::Scene(generation);
             show_chat(false, cx);
-            if let Some(window) = cx.global_mut::<AppLifecycle>().login_window.take()
-                && window.update(cx, |_, window, _| window.remove_window()).is_err()
-            {
-                tracing::trace!("login window was already unavailable after scene startup");
+            if let Some(window) = cx.global_mut::<AppLifecycle>().login_window.take() {
+                window.update(cx, |_, window, _| window.remove_window()).ok();
             }
         }
         ViewportEvent::Chat(generation) if main == MainWindow::Scene(generation) => show_chat(true, cx),
@@ -225,9 +223,7 @@ fn show_login(cx: &mut App) {
         return;
     }
     if let Some(handle) = lifecycle.login_window {
-        if handle.update(cx, |_, window, _| window.activate_window()).is_err() {
-            tracing::trace!("login window was already unavailable during activation");
-        }
+        handle.update(cx, |_, window, _| window.activate_window()).ok();
     } else {
         let Some(controller) = lifecycle.controller.clone() else {
             return;
@@ -243,10 +239,8 @@ fn show_login(cx: &mut App) {
             }
         }
     }
-    if let Some(chat) = cx.global_mut::<AppLifecycle>().scene.chat_window.take()
-        && chat.update(cx, |_, window, _| window.remove_window()).is_err()
-    {
-        tracing::trace!("chat window was already unavailable during removal");
+    if let Some(chat) = cx.global_mut::<AppLifecycle>().scene.chat_window.take() {
+        chat.update(cx, |_, window, _| window.remove_window()).ok();
     }
 }
 
@@ -256,8 +250,8 @@ fn show_chat(focus: bool, cx: &mut App) {
         return;
     }
     if let Some(window) = lifecycle.scene.chat_window {
-        if focus && window.update(cx, |_, window, _| window.activate_window()).is_err() {
-            tracing::trace!("nearby chat window was already unavailable during activation");
+        if focus {
+            window.update(cx, |_, window, _| window.activate_window()).ok();
         }
         return;
     }
@@ -288,7 +282,7 @@ fn show_chat(focus: bool, cx: &mut App) {
         cx.new(|cx| Root::new(view, window, cx))
     }) {
         Ok(window) => cx.global_mut::<AppLifecycle>().scene.chat_window = Some(window.into()),
-        Err(error) => tracing::error!(%error, "could not open nearby chat window"),
+        Err(error) => tracing::warn!(%error, "could not open nearby chat window"),
     }
 }
 
