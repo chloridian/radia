@@ -51,9 +51,3 @@ Start with the protocol, format, observed behavior, or failing compatibility cas
 Record each compatibility decision's source URL and revision, specification or template version, and fixture provenance in the PR description and in fixture or test names, not in this document. Redact session data before adding captured fixtures. Implement the behavior behind Radia's own boundaries and verify it with tests. Do not translate source files or mirror abstractions. The ignore categories are priorities, not bans on inspection; consult any file that resolves a real compatibility question.
 
 **Preserve what Second Life requires. Redesign how Radia achieves it.**
-
-## Pinned baselines
-
-Compare Classic rendering output with Firestorm 7.2.4.80712 on its Mid graphics preset. Its source is pinned to [`10bd3c9f930c76e1427ddd4ecece6cdf36b4406d`](https://github.com/FirestormViewer/phoenix-firestorm/tree/10bd3c9f930c76e1427ddd4ecece6cdf36b4406d); do not substitute current upstream `develop`. The observed defaults are HDR enabled when supported, exposure 1, ACES tone mapping mixed at 0.7, dynamic exposure coefficient 0.5, diffuse luminance scale 0.5, and sky exposure settings disabled. User overrides are unknown.
-
-Compare protocol and client behavior with the official viewer at revision [`c74c2c9bcbee16aef25b47487fb3211d4d5fe238`](https://github.com/secondlife/viewer/tree/c74c2c9bcbee16aef25b47487fb3211d4d5fe238).
