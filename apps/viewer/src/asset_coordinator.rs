@@ -21,7 +21,7 @@ use assets::{
 use futures::{FutureExt, StreamExt, channel::oneshot, pin_mut, stream::FuturesUnordered};
 use network::{
     Error,
-    capabilities::{CapabilityUrl, Client, ContentRange, HttpErrorKind, RangeResponse, RedirectPolicy},
+    capabilities::{self, CapabilityUrl, Client, ContentRange, RangeResponse, RedirectPolicy},
 };
 use tokio::{
     runtime::Handle,
@@ -539,7 +539,7 @@ fn classify_network_error(error: Error, kind: Kind) -> Failure {
         Error::CapabilitySessionClosed | Error::SessionClosed => Failure::RouteClosed,
         Error::CapabilityRequestCanceled => Failure::Cancelled,
         Error::CapabilityHttp(error) => match error.kind {
-            HttpErrorKind::HttpStatus => match error.status.map(|status| status.as_u16()) {
+            capabilities::ErrorKind::HttpStatus => match error.status.map(|status| status.as_u16()) {
                 Some(401 | 403) => Failure::Denied,
                 Some(404 | 410) => Failure::NotFound,
                 Some(416) if kind == Kind::Mesh => Failure::MalformedBlock,
@@ -550,11 +550,13 @@ fn classify_network_error(error: Error, kind: Kind) -> Failure {
                 }
                 None => Failure::Network,
             },
-            HttpErrorKind::Transport | HttpErrorKind::Timeout => Failure::Transient { retry_after: error.retry_after.unwrap_or_default() },
-            HttpErrorKind::ResourceExhausted => Failure::TooLarge,
-            HttpErrorKind::InvalidResponse => Failure::MalformedBlock,
-            HttpErrorKind::Cancelled => Failure::Cancelled,
-            HttpErrorKind::InvalidUrl => Failure::Network,
+            capabilities::ErrorKind::Transport | capabilities::ErrorKind::Timeout => {
+                Failure::Transient { retry_after: error.retry_after.unwrap_or_default() }
+            }
+            capabilities::ErrorKind::ResourceExhausted => Failure::TooLarge,
+            capabilities::ErrorKind::InvalidResponse => Failure::MalformedBlock,
+            capabilities::ErrorKind::Cancelled => Failure::Cancelled,
+            capabilities::ErrorKind::InvalidUrl => Failure::Network,
             _ => Failure::Network,
         },
         _ => Failure::Network,
@@ -564,7 +566,7 @@ fn classify_network_error(error: Error, kind: Kind) -> Failure {
 fn classify_mesh_range_error(error: Error) -> Failure {
     match &error {
         Error::CapabilityHttp(error)
-            if error.kind == HttpErrorKind::ResourceExhausted && error.status.is_some_and(|status| status.as_u16() == 200) =>
+            if error.kind == capabilities::ErrorKind::ResourceExhausted && error.status.is_some_and(|status| status.as_u16() == 200) =>
         {
             Failure::FullAssetRequired
         }

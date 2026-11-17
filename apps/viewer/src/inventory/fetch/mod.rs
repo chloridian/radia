@@ -7,7 +7,7 @@ mod state;
 use std::{error, fmt, time::Duration};
 
 use inventory::{CategoryKey, InventoryChild, InventoryError, InventoryRevision, ServerVersion};
-use network::capabilities::HttpErrorKind;
+use network::capabilities;
 use tokio::sync::oneshot;
 
 pub use self::scheduler::{InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequestError, InventoryLoadingStatus};
@@ -39,13 +39,13 @@ fn classify_request_error(error: network::Error) -> RequestFailure {
             RequestFailure::Missing
         }
         network::Error::CapabilityHttp(error)
-            if error.kind == HttpErrorKind::Transport
-                || error.kind == HttpErrorKind::Timeout
+            if error.kind == capabilities::ErrorKind::Transport
+                || error.kind == capabilities::ErrorKind::Timeout
                 || error.status.is_some_and(|status| status.is_server_error() || status.as_u16() == 429) =>
         {
             RequestFailure::Transient(error.retry_after)
         }
-        network::Error::CapabilityHttp(error) if error.kind == HttpErrorKind::ResourceExhausted => RequestFailure::FolderTooLarge,
+        network::Error::CapabilityHttp(error) if error.kind == capabilities::ErrorKind::ResourceExhausted => RequestFailure::FolderTooLarge,
         network::Error::Capability(_) => RequestFailure::InvalidResponse,
         _ => RequestFailure::Failed,
     }

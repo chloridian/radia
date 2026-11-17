@@ -14,10 +14,9 @@ use std::{
 };
 
 use rusqlite::{Transaction, params};
-pub use storage::sqlite::OpenStatus as InventoryCacheOpenStatus;
 use storage::{
     StorageError, default_cache_dir,
-    sqlite::{SqliteBatch, SqliteControl, SqliteDb, SqliteError, SqliteReceipt},
+    sqlite::{OpenStatus, SqliteBatch, SqliteControl, SqliteDb, SqliteError, SqliteReceipt},
 };
 use uuid::Uuid;
 
@@ -297,11 +296,7 @@ pub(super) struct CachedFolder {
 }
 
 impl InventoryCache {
-    pub fn open(
-        grid_id: &str,
-        agent_id: Uuid,
-        library_owner: Option<Uuid>,
-    ) -> Result<(Self, InventoryCacheOpenStatus), InventoryCacheError> {
+    pub fn open(grid_id: &str, agent_id: Uuid, library_owner: Option<Uuid>) -> Result<(Self, OpenStatus), InventoryCacheError> {
         let root = default_cache_dir()?;
         Self::open_at_root(root, grid_id, agent_id, library_owner)
     }
@@ -311,7 +306,7 @@ impl InventoryCache {
         grid_id: &str,
         agent_id: Uuid,
         library_owner: Option<Uuid>,
-    ) -> Result<(Self, InventoryCacheOpenStatus), InventoryCacheError> {
+    ) -> Result<(Self, OpenStatus), InventoryCacheError> {
         if !valid_identity(grid_id) || agent_id.is_nil() || library_owner.is_some_and(|owner| owner.is_nil() || owner == agent_id) {
             return Err(InventoryCacheError::InvalidIdentity);
         }

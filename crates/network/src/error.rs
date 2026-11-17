@@ -1,6 +1,6 @@
 use std::{error, fmt, io};
 
-use crate::capabilities::HttpError;
+use crate::http;
 
 #[non_exhaustive]
 pub enum Error {
@@ -19,7 +19,7 @@ pub enum Error {
     SimulatorConnectionClosed,
     CapabilityRequestCanceled,
     CapabilitySessionClosed,
-    CapabilityHttp(HttpError),
+    CapabilityHttp(http::Error),
     Capability(String),
 }
 
