@@ -78,7 +78,7 @@ Source has no comments or doc comments, and that includes safety comments on `un
 ## Testing
 
 - Use [rust-testing](.agents/skills/rust-testing/SKILL.md) for all Rust test work.
-- Smallest proof first. Run tests and clippy with `--release` for the crates you touched. Run the workspace-wide suite only when asked, because CI owns it.
+- Smallest proof first. Run tests and clippy for the crates you touched. Run the workspace-wide suite only when asked, because CI owns it.
 - Spend tests where running the viewer will not expose the bug: untrusted wire and asset input, concurrency, cancellation and ordering, `World` and cache invariants with their reverse transitions, recovery paths, and regressions likely to return. Visual output, gui layout, and straight-line plumbing are verified live; for them, adding no test is a complete answer.
 - Test behavior through public APIs. Skip tests that assert callback wiring or mirror the implementation. Extend an existing test or harness before adding a new one.
 - Use property-based or stateful tests where operations interact (reordering, reparenting, stale updates, ID reuse). Generators must be domain-valid and failures reproducible.
