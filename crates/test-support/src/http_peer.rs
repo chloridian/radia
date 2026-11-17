@@ -47,7 +47,7 @@ impl LoopbackPeer {
                 let mut stream = loop {
                     match listener.accept() {
                         Ok((stream, _)) => break stream,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
                             thread::sleep(Duration::from_millis(1))
                         }
                         Err(error) => panic!("expected loopback request: {error}"),
@@ -130,7 +130,7 @@ impl LoopbackPeer {
         (requests, u64::try_from(response_bytes).expect("loopback byte count fits u64"))
     }
 
-    fn signal_stop(&self) -> std::io::Result<()> {
+    fn signal_stop(&self) -> io::Result<()> {
         if let Some(address) = self.stop_address {
             let deadline = Instant::now() + RESPONSE_WRITE_TIMEOUT;
             let mut stream = TcpStream::connect_timeout(&address, RESPONSE_WRITE_TIMEOUT)?;
@@ -166,9 +166,8 @@ fn reap_finished_workers(workers: &mut Vec<thread::JoinHandle<()>>) {
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
-    read_request_inner(stream)?
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "request ended before framing completed"))
+fn read_request(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+    read_request_inner(stream)?.ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "request ended before framing completed"))
 }
 
 fn read_request_inner(stream: &mut TcpStream) -> io::Result<Option<Vec<u8>>> {
@@ -291,6 +290,7 @@ fn write_until(stream: &mut TcpStream, mut bytes: &[u8], deadline: Instant) -> i
 #[cfg(test)]
 mod tests {
     use std::{
+        io,
         io::{ErrorKind, Read, Write},
         net::{Shutdown, SocketAddr, TcpListener, TcpStream},
         sync::mpsc,
@@ -300,7 +300,7 @@ mod tests {
 
     use super::{LoopbackPeer, MAX_REQUEST_BYTES, read_request_inner, write_until};
 
-    fn read_request(request: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
+    fn read_request(request: &[u8]) -> io::Result<Option<Vec<u8>>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let mut client = TcpStream::connect(listener.local_addr()?)?;
         let (mut peer, _) = listener.accept()?;
