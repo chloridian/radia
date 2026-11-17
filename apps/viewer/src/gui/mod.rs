@@ -174,9 +174,7 @@ fn shutdown(cx: &mut App) -> bool {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     let scene_shutdown = cx.global_mut::<AppLifecycle>().scene.shutdown(background_executor);
     for window in cx.windows() {
-        if window.update(cx, |_, window, _| window.remove_window()).is_err() {
-            tracing::trace!("window was already unavailable during shutdown");
-        }
+        window.update(cx, |_, window, _| window.remove_window()).ok();
     }
     cx.spawn(async move |cx| {
         disconnect_session(&session_lifecycle).await;

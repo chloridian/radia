@@ -312,9 +312,7 @@ impl WindowApp {
             && let Err(error) = self.events.try_send(ViewportEvent::Chat(generation))
         {
             self.shared.chat_pending.store(false, Ordering::Release);
-            if error.is_disconnected() {
-                tracing::trace!(%error, "nearby chat request receiver was closed");
-            } else {
+            if !error.is_disconnected() {
                 tracing::warn!(%error, "nearby chat request queue is full");
             }
         }
