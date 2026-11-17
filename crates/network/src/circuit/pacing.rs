@@ -86,6 +86,7 @@ impl ConnectionRole {
     }
 }
 
+#[derive(Debug)]
 enum Command {
     Register { id: u64, role: ConnectionRole, active: Arc<AtomicBool> },
     Unregister { id: u64 },
@@ -115,6 +116,7 @@ struct ConnectionState {
     active: Arc<AtomicBool>,
 }
 
+#[derive(Debug)]
 struct Bucket {
     rate_bytes_per_second: u64,
     max_rate_bytes_per_second: u64,
@@ -231,6 +233,7 @@ impl Bucket {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct BudgetLease {
     bucket: Arc<Mutex<Bucket>>,
     bytes: usize,

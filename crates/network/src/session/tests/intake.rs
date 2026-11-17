@@ -54,10 +54,10 @@ async fn session_drop_cancels_full_event() {
     let retained_handle = session.handle();
     drop(session);
 
-    assert!(matches!(
+    std::assert_matches!(
         timeout(Duration::from_secs(1), publish).await.expect("session drop should release event publication"),
         EventSendOutcome::Shutdown
-    ));
+    );
     assert!(*retained_handle.disconnect_requested.borrow());
 }
 
