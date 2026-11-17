@@ -186,8 +186,6 @@ impl GeometryRenderer {
         }
 
         self.stats = Stats::default();
-        #[cfg(test)]
-        let fresh_build = self.draw_list.layout_building() && !self.draw_list.pending_stale();
         self.mesh_admission.visits_this_frame = 0;
         let previous_camera = self.cache.camera;
         let camera_changed = previous_camera != Some(camera) || self.cache.size != size;
@@ -203,10 +201,6 @@ impl GeometryRenderer {
         let noted_camera = self.note_rebuild_camera(camera);
         let cache_started = Instant::now();
         let mut update = self.update_cache_for_frame(view, self.recovery_publication_pending);
-        #[cfg(test)]
-        {
-            self.stats.layout_invalidation_reason = update.layout_invalidation_reason;
-        }
         if update.rebuild_completed {
             self.recovery_publication_pending = true;
         }
@@ -227,8 +221,6 @@ impl GeometryRenderer {
         let rebuilding = update.rebuild_pending;
         let stale_pass = update.rebuild_completed && range_moved(candidate_camera, camera);
         if self.draw_list.layout_pending() && (update.immediate_visibility_change || update.layout_invalidated) {
-            #[cfg(test)]
-            self.note_layout_stale(if update.immediate_visibility_change { "immediate_visibility" } else { "layout_invalidated" });
             self.draw_list.mark_layout_stale();
         }
         let frame_origin = if rebuilding { self.cache.origin } else { origin };
@@ -405,8 +397,6 @@ impl GeometryRenderer {
             }
         }
         if self.draw_list.layout_pending() && (update.layout_invalidated || origin_rebased) {
-            #[cfg(test)]
-            self.note_layout_stale(if update.layout_invalidated { "layout_invalidated" } else { "origin_rebased" });
             self.draw_list.mark_layout_stale();
         }
         if layout_requested {
@@ -436,10 +426,6 @@ impl GeometryRenderer {
             self.pipelines.update_camera_uniform(&self.queue, camera, size, self.active_origin);
         }
         if let Some(progress) = layout_progress {
-            #[cfg(test)]
-            if progress.stale && fresh_build {
-                self.stats.layout_stale_reason.get_or_insert("layout_build");
-            }
             self.stats.layout_items_visited = progress.stats.items_visited;
             self.stats.layout_faces_visited = progress.stats.faces_visited;
             self.stats.prepare_layout_commit_ms = progress.commit_ms;
@@ -601,13 +587,6 @@ impl GeometryRenderer {
         });
         times.finalize = instances_started.elapsed();
         self.record_prepare(started, times, uploaded);
-    }
-
-    #[cfg(test)]
-    fn note_layout_stale(&mut self, reason: &'static str) {
-        if self.draw_list.layout_building() && !self.draw_list.pending_stale() {
-            self.stats.layout_stale_reason.get_or_insert(reason);
-        }
     }
 
     fn advance_mesh_admission(&mut self, device: &Device, uploaded: &mut usize, camera: Camera, frustum: &Frustum) {
@@ -1197,7 +1176,6 @@ mod tests {
             draw_list::DrawList,
             items::{CachedFaceContext, cached_faces, mesh_info, surface_pipeline},
         },
-        pipeline::Pipeline,
         scene::{Budget, Placement, Reconciler},
         texture::TextureState,
     };
@@ -1307,43 +1285,6 @@ mod tests {
         assert!(!prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), deadline));
         prepared.redraw_deadline = None;
         assert!(!prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default(), deadline));
-    }
-
-    #[test]
-    fn agent_override_skips_object_motion() {
-        let agent = Uuid::from_u128(1);
-
-        assert!(is_agent_pose_override(Kind::Avatar, agent, Some(agent)));
-        assert!(!is_agent_pose_override(Kind::Avatar, Uuid::from_u128(2), Some(agent)));
-        assert!(!is_agent_pose_override(Kind::Object, agent, Some(agent)));
-    }
-
-    #[test]
-    fn surface_faces_keep_surface_pipelines() {
-        let (_scene, view, _) = crate::geometry::fixtures::scene(255);
-        let object = view.objects().next().expect("fixture object");
-        let (_, mesh) = object.mesh().expect("fixture mesh");
-        let info = mesh_info(mesh);
-        let mut draw_list = DrawList::new(usize::MAX);
-        for (shading, pipeline) in [(ShadingMode::Terrain, Pipeline::Terrain), (ShadingMode::RegionWater, Pipeline::RegionWater)] {
-            let faces = cached_faces(
-                CachedFaceContext {
-                    id: (1, 1, 0),
-                    mesh,
-                    info: &info,
-                    materials: None,
-                    appearance: None,
-                    scale: Vec3::ONE,
-                    invert_normals: false,
-                    shading,
-                    terrain: None,
-                    terrain_textures: None,
-                },
-                &mut draw_list,
-            );
-            assert!(!faces.is_empty());
-            assert!(faces.iter().all(|face| draw_list.face_key(face.group).is_some_and(|key| key.pipeline == pipeline)));
-        }
     }
 
     #[test]

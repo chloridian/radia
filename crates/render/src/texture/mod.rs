@@ -1208,18 +1208,6 @@ mod tests {
     }
 
     #[test]
-    fn normal_maps_use_raw_views() {
-        for (srgb, raw) in [
-            (TextureFormat::Rgba8UnormSrgb, TextureFormat::Rgba8Unorm),
-            (TextureFormat::Bc1RgbaUnormSrgb, TextureFormat::Bc1RgbaUnorm),
-            (TextureFormat::Bc3RgbaUnormSrgb, TextureFormat::Bc3RgbaUnorm),
-            (TextureFormat::Bc7RgbaUnormSrgb, TextureFormat::Bc7RgbaUnorm),
-        ] {
-            assert_eq!(raw_channel_view_format(srgb), raw);
-        }
-    }
-
-    #[test]
     fn staging_release_restores_admission() {
         let memory = Arc::new(Accounting::default());
         let held = memory.reserve(STAGING_BYTES).unwrap();

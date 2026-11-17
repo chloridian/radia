@@ -463,17 +463,11 @@ mod tests {
     }
 
     #[test]
-    fn patch_normals_use_neighbors() {
-        let seam = 9.0 * 16.0;
-        let height = |x: f64, _y: f64| (x - seam).max(0.0);
-        assert_edge_normals_match(terrain(8, 0.0, height), terrain(9, 0.0, height), seam);
-    }
-
-    #[test]
-    fn region_normals_stitch_neighbors() {
-        let seam = 256.0;
-        let height = |x: f64, _y: f64| (x - seam).max(0.0);
-        assert_edge_normals_match(terrain(15, 0.0, height), terrain(0, 256.0, height), seam);
+    fn edge_normals_use_neighbors() {
+        for (west_patch, east_patch, east_origin, seam) in [(8, 9, 0.0, 9.0 * 16.0), (15, 0, 256.0, 256.0)] {
+            let height = |x: f64, _y: f64| (x - seam).max(0.0);
+            assert_edge_normals_match(terrain(west_patch, 0.0, height), terrain(east_patch, east_origin, height), seam);
+        }
     }
 
     #[test]

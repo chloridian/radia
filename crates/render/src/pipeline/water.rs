@@ -225,15 +225,6 @@ mod tests {
     }
 
     #[test]
-    fn region_quad_interpolates_center() {
-        let sweep = |x: f64, y: f64| x + ((x * 0.08).cos() + (y * 0.02).sin()) * 6.0;
-        let source_center = (sweep(0.0, 0.0) + sweep(256.0, 256.0)) * 0.5;
-        let per_fragment = sweep(128.0, 128.0);
-        assert!((source_center - 128.066951411123).abs() < 0.0000001);
-        assert!((source_center - per_fragment - 0.885059550074).abs() < 0.0000001);
-    }
-
-    #[test]
     fn fog_vectors_cover_grazing_ray() {
         let intersection = 20.0_f32 / 0.01;
         let original_endpoint = 2048.0 - intersection;

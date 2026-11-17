@@ -1451,7 +1451,6 @@ impl GeometryRenderer {
         update.items_updated += 1;
         if let Some(index) = old_index {
             update.layout_invalidated = true;
-            update.layout_invalidation_reason = Some("object_update");
             if let Some(previous) = self.remove_item(index, update, false)
                 && self.cache.rebuild.is_some()
             {
@@ -1527,7 +1526,6 @@ impl GeometryRenderer {
             update.layout_changed = true;
             update.mesh_dirty = true;
             update.layout_invalidated = true;
-            update.layout_invalidation_reason = Some("replacement_promoted");
             changed = true;
         }
         if changed {
@@ -1562,7 +1560,6 @@ impl GeometryRenderer {
                 old_index.is_none_or(|index| self.cache.items.get(index).is_none_or(|previous| previous.mesh.id() != item.mesh.id()));
             if let Some(index) = old_index {
                 update.layout_invalidated = true;
-                update.layout_invalidation_reason = Some("surface_updated");
                 self.remove_item(index, update, false);
             }
             self.cache.insert_item(item);
@@ -1713,9 +1710,6 @@ impl GeometryRenderer {
         }
         update.immediate_visibility_change |= was_visible && immediate_visibility;
         update.layout_invalidated |= was_visible && immediate_visibility;
-        if was_visible && immediate_visibility {
-            update.layout_invalidation_reason = Some("immediate_visibility");
-        }
         self.cache.replacements.remove(&index);
         self.draw_list.release_faces(&item.faces);
         if let Some(replacement) = item.replacement.as_ref() {
@@ -1899,7 +1893,6 @@ pub(super) struct CacheUpdate {
     pub(super) immediate_visibility_change: bool,
     pub(super) rebuild_visibility_changed: bool,
     pub(super) layout_invalidated: bool,
-    pub(super) layout_invalidation_reason: Option<&'static str>,
 }
 
 pub(super) fn object_item_id(object: &Object) -> ItemId {

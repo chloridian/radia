@@ -228,7 +228,7 @@ fn overflow_retries_after_publication() {
 }
 
 #[test]
-fn lod_falls_back_then_refines() {
+fn fallback_lod_precedes_refinement() {
     let asset = AssetId::new(Uuid::from_u128(700));
     let bytes = test_support::mesh::asset(&[0, 2, 3], 1);
     let mut world = world();

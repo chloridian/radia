@@ -250,11 +250,13 @@ mod tests {
         let (triangle, indices) = first_triangle(&mesh);
         let (camera, center, ray) = camera_for_triangle(triangle);
         let position_at = |distance| camera.position() + ray * distance - center;
-        let items = [
-            (mesh.clone(), position_at(1.0), ShadingMode::Surface, vec![(indices.clone(), false, 0)]),
-            (mesh, position_at(2.0), ShadingMode::Surface, vec![(indices, false, 0)]),
-        ];
-        assert_hit_near(&items, camera, ray, camera.position() + ray);
+        for (near, far, expected) in [(1.0, 2.0, 1.0), (0.01, 0.1, 0.1)] {
+            let items = [
+                (mesh.clone(), position_at(near), ShadingMode::Surface, vec![(indices.clone(), false, 0)]),
+                (mesh.clone(), position_at(far), ShadingMode::Surface, vec![(indices.clone(), false, 0)]),
+            ];
+            assert_hit_near(&items, camera, ray, camera.position() + ray * expected);
+        }
     }
 
     #[test]
@@ -297,19 +299,6 @@ mod tests {
         assert_eq!(hit.material_slot, 7);
         let point = query.result().expect("expected a picked point");
         assert!(point.distance(camera.position() + ray) < 1e-4, "picked {point:?} from {hit:?}");
-    }
-
-    #[test]
-    fn min_distance_skips_near_hit() {
-        let mesh = shared_mesh();
-        let (triangle, indices) = first_triangle(&mesh);
-        let (camera, center, ray) = camera_for_triangle(triangle);
-        let position_at = |distance| camera.position() + ray * distance - center;
-        let items = [
-            (mesh.clone(), position_at(0.01), ShadingMode::Surface, vec![(indices.clone(), false, 0)]),
-            (mesh, position_at(0.1), ShadingMode::Surface, vec![(indices, false, 0)]),
-        ];
-        assert_hit_near(&items, camera, ray, camera.position() + ray * 0.1);
     }
 
     #[test]
