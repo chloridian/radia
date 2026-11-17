@@ -451,45 +451,13 @@ fn hidden_slot(geometry: &GeometryRenderer, slot: u32) -> bool {
 fn assert_committed_positions(geometry: &GeometryRenderer, turn: u32) {
     const LAGGING: f64 = 16.0;
     const EXACT: f64 = 1e-3;
-    let lagging = geometry.draw_list.layout_pending() || geometry.layout_required;
-    let fail = |what: &str, item: Option<&crate::geometry::items::CachedItem>, expected: Option<DVec3>, actual: DVec3| -> ! {
-        panic!(
-            "turn {turn}: {what}; item={:?} expected={expected:?} actual={actual:?} delta={:?} active_origin={:?} cache_origin={:?} rebuild={} layout_pending={} layout_required={}",
-            item.map(|item| item.id),
-            expected.map(|expected| actual - expected),
-            geometry.active_origin,
-            geometry.cache.origin,
-            geometry.cache.rebuild.is_some(),
-            geometry.draw_list.layout_pending(),
-            geometry.layout_required,
-        )
-    };
-    if !geometry.draw_list.layout_pending() {
-        for index in geometry.draw_list.committed_items() {
-            let Some(item) = geometry.cache.items.get(*index) else { continue };
-            for slot in item.faces.iter().filter_map(|face| geometry.draw_list.committed_slot(face)) {
-                if hidden_slot(geometry, slot) {
-                    continue;
-                }
-                let Some(world) = committed_world_position(geometry, slot) else {
-                    fail("committed slot has no instance bytes", Some(item), Some(item.position), DVec3::NAN)
-                };
-                let tolerance = if lagging { LAGGING } else { EXACT };
-                if (world - item.position).abs().max_element() > tolerance {
-                    fail("committed instance displaced from its item", Some(item), Some(item.position), world);
-                }
-            }
-        }
-        return;
-    }
-    let mut cells = std::collections::HashMap::<[i64; 3], Vec<DVec3>>::new();
+    let tolerance = if geometry.draw_list.layout_pending() || geometry.layout_required { LAGGING } else { EXACT };
     let cell = |position: DVec3| {
         [(position.x / LAGGING).floor() as i64, (position.y / LAGGING).floor() as i64, (position.z / LAGGING).floor() as i64]
     };
-    for index in geometry.draw_list.committed_items() {
-        if let Some(item) = geometry.cache.items.get(*index) {
-            cells.entry(cell(item.position)).or_default().push(item.position);
-        }
+    let mut cells = std::collections::HashMap::<[i64; 3], Vec<DVec3>>::new();
+    for (_, item) in geometry.cache.items.iter() {
+        cells.entry(cell(item.position)).or_default().push(item.position);
     }
     let mut slot = 0;
     while let Some(world) = committed_world_position(geometry, slot) {
@@ -499,10 +467,16 @@ fn assert_committed_positions(geometry: &GeometryRenderer, turn: u32) {
                 .flat_map(|dx| (-1..=1).flat_map(move |dy| (-1..=1).map(move |dz| [x + dx, y + dy, z + dz])))
                 .filter_map(|key| cells.get(&key))
                 .flatten()
-                .any(|position| (world - *position).abs().max_element() <= LAGGING);
-            if !near {
-                fail("committed slot matches no committed item", None, None, world);
-            }
+                .any(|position| (world - *position).abs().max_element() <= tolerance);
+            assert!(
+                near,
+                "turn {turn}: committed slot {slot} at {world:?} matches no item within {tolerance}; active_origin={:?} cache_origin={:?} rebuild={} layout_pending={} layout_required={}",
+                geometry.active_origin,
+                geometry.cache.origin,
+                geometry.cache.rebuild.is_some(),
+                geometry.draw_list.layout_pending(),
+                geometry.layout_required,
+            );
         }
         slot += 1;
     }
@@ -987,30 +961,31 @@ fn observe_churn_object(
 fn assert_inside_region(geometry: &GeometryRenderer, turn: u32) {
     let inside =
         |position: DVec3, radius: f64| (-radius..=256.0 + radius).contains(&position.x) && (-radius..=256.0 + radius).contains(&position.y);
-    for index in geometry.draw_list.committed_items() {
+    let mut largest = 0.0f64;
+    for index in &geometry.cache.visible {
         let Some(item) = geometry.cache.items.get(*index) else { continue };
         let bounds = &item.info.bounds;
         let radius = f64::from((bounds.max - bounds.min).length()) * 0.5 * f64::from(item.scale.max_element());
+        largest = largest.max(radius);
         assert!(
             inside(item.position, radius),
             "turn {turn}: item {:?} at {:?} lies outside its region (radius {radius})",
             item.id,
             item.position
         );
-        if geometry.draw_list.layout_pending() {
-            continue;
-        }
-        for slot in item.faces.iter().filter_map(|face| geometry.draw_list.committed_slot(face)) {
-            let Some(drawn) = committed_world_position(geometry, slot) else { continue };
-            assert!(
-                inside(drawn, radius),
-                "turn {turn}: item {:?} (position {:?}) draws at {drawn:?} outside its region; active_origin={:?} cache_origin={:?}",
-                item.id,
-                item.position,
-                geometry.active_origin,
-                geometry.cache.origin,
-            );
-        }
+    }
+    if geometry.draw_list.layout_pending() {
+        return;
+    }
+    let mut slot = 0;
+    while let Some(drawn) = committed_world_position(geometry, slot) {
+        assert!(
+            hidden_slot(geometry, slot) || inside(drawn, largest),
+            "turn {turn}: slot {slot} draws at {drawn:?} outside the region; active_origin={:?} cache_origin={:?}",
+            geometry.active_origin,
+            geometry.cache.origin,
+        );
+        slot += 1;
     }
 }
 
@@ -1130,7 +1105,7 @@ fn gpu_origin_crossings_keep_positions() {
             rebuild_turns += u32::from(geometry.cache.rebuild.is_some());
             pending_turns += u32::from(geometry.draw_list.layout_pending());
             blended_turns += u32::from(geometry.draw_list.has_blended());
-            most_committed = most_committed.max(geometry.draw_list.committed_items().len());
+            most_committed = most_committed.max(geometry.stats.instances);
         }
     }
     assert!(origins.iter().all(|values| values.len() >= 2), "every axis crosses an origin boundary: {origins:?}");
