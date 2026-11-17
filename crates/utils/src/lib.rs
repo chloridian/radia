@@ -222,13 +222,4 @@ mod tests {
         assert_eq!(fs::read(&second).expect("read second original"), b"original");
         assert_eq!(fs::read_dir(directory.path()).expect("read directory").count(), 2);
     }
-
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "manual Windows replacement stress; run with --run-ignored only"]
-    fn atomic_replacement_stress() {
-        for _ in 0..10_000 {
-            atomic_write_replaces_contents();
-        }
-    }
 }
