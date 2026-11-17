@@ -117,6 +117,7 @@ cargo bench -p <crate> -- <filter> --sample-size 200 --warm-up-time 5 --measurem
 ```
 
 Each crate has one `main` benchmark target. Replace the package and Criterion filter as needed. The inventory package name is version-qualified (`-p inventory@0.0.1`) because a dependency also uses `inventory`. For example, `cargo bench -p render -- reconcile` selects reconciliation benchmarks. Run timing baselines without concurrent tests or builds; the parallel workspace load above is for flakiness validation.
+
 - `cargo perf` runs workspace benchmarks with 200 samples, a 5-second warm-up, and a 15-second measurement. `cargo perf-quick` uses 30 samples, a 1-second warm-up, a 3-second measurement, and no plot. Use `cargo bench -p <crate> -- <filter> ...` for a focused run.
 - `cargo profile`: viewer profiling build with Tracy.
 - `cargo flamegraph`: requires a configured profiler backend; WSL2 may restrict Linux `perf`.
