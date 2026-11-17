@@ -44,6 +44,7 @@ struct TerrainOutput {
     let light_norm_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_norm.xyz, 0.0)).xyz;
     let color = shade_surface(
         albedo.rgb,
+        vec3<f32>(0.0),
         v.position_view,
         normal_eye,
         light_direction_eye,

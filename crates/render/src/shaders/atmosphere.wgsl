@@ -1,3 +1,5 @@
+const MAX_SCENE_RADIANCE: f32 = 65504.0;
+
 struct Atmosphere {
     blue_horizon: vec4<f32>,
     blue_density: vec4<f32>,
@@ -174,6 +176,7 @@ fn atmospheric_surface(color: vec3<f32>, terms: ObjectAtmosphereTerms, atmospher
 
 fn shade_surface(
     color: vec3<f32>,
+    emissive: vec3<f32>,
     position_eye: vec3<f32>,
     normal_eye: vec3<f32>,
     light_direction_eye: vec3<f32>,
@@ -184,5 +187,5 @@ fn shade_surface(
     let terms = object_atmosphere_terms(position_eye, light_direction_eye, light_norm_eye, atmosphere);
     let irradiance = legacy_surface_irradiance(normal_eye, light_direction_eye, terms, atmosphere);
     let lit_color = select(color * irradiance, color, fullbright);
-    return atmospheric_surface(lit_color, terms, atmosphere);
+    return clamp(atmospheric_surface(lit_color + emissive, terms, atmosphere), vec3<f32>(0.0), vec3<f32>(MAX_SCENE_RADIANCE));
 }

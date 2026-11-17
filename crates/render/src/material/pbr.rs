@@ -86,7 +86,6 @@ mod tests {
             alpha_mode: PbrAlphaMode::Blend,
             alpha_cutoff: 0.2,
             double_sided: true,
-            ..PbrMaterial::default()
         };
         let transform = PbrTextureTransformOverride { offset: Some([0.0; 2]), scale: Some([1.0; 2]), rotation: Some(0.0) };
         let overrides = PbrMaterialOverride {

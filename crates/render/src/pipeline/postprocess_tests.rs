@@ -87,6 +87,19 @@ fn exposure_keeps_zero_depth_linear() {
     assert_rgba_near(sky, [202, 151, 97, 255], 1);
 }
 
+#[test]
+#[ignore = "requires Vulkan; run with cargo test -p render --lib exposure_leaves_unscaled_class -- --ignored"]
+fn exposure_leaves_unscaled_class() {
+    let instance =
+        wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
+    let (device, queue) = block_on(async {
+        let adapter = instance.request_adapter(&Default::default()).await.expect("Vulkan adapter is available");
+        adapter.request_device(&DeviceDescriptor::default()).await.expect("Vulkan device is available")
+    });
+    let unscaled = render_exposure_scene(&device, &queue, None, [0.25, 0.25, 0.25, 0.5], 0.5);
+    assert_rgba_near(unscaled, [156, 156, 156, 255], 1);
+}
+
 fn render_exposure_scene(
     device: &Device,
     queue: &Queue,

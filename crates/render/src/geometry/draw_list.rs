@@ -18,12 +18,12 @@ use super::{
     items::{CachedFace, CachedItem, ItemId, ItemIndex, ItemSlab, draw_priority, surface_pipeline},
     mesh::GpuMesh,
     storage::Buffers,
-    texture_bindings::{TerrainDemand, TextureDemand},
+    texture_bindings::{MaterialImages, TerrainDemand, TextureDemand},
 };
 use crate::{
     pipeline::{INSTANCE_BYTES, Pipeline},
     scene::{Camera, MeshId},
-    texture::TextureKey,
+    texture::MaterialTextures,
 };
 
 pub(super) const MAX_FACE_INSTANCES: usize = INSTANCE_BUFFER_BYTES / INSTANCE_BYTES;
@@ -59,13 +59,17 @@ pub(super) struct DrawKey {
     pub(super) start: u32,
     pub(super) end: u32,
     pub(super) pipeline: Pipeline,
-    pub(super) texture: Option<TextureKey>,
+    pub(super) textures: MaterialTextures,
     pub(super) terrain: Option<Region>,
 }
 
 impl DrawKey {
     pub(super) fn blended(self) -> bool {
         matches!(self.pipeline, Pipeline::Blend | Pipeline::BlendDoubleSided | Pipeline::BlendFlipped)
+    }
+
+    pub(super) fn fullbright(self) -> bool {
+        matches!(self.pipeline, Pipeline::Fullbright | Pipeline::FullbrightDoubleSided | Pipeline::FullbrightFlipped)
     }
 
     fn command(self, group: u32, first: u32, count: u32) -> DrawCommand {
@@ -76,7 +80,7 @@ impl DrawKey {
             first,
             count,
             indices: self.start..self.end,
-            texture: self.texture,
+            textures: self.textures,
             terrain: self.terrain,
         }
     }
@@ -89,14 +93,14 @@ pub(super) struct DrawCommand {
     pub(super) first: u32,
     pub(super) count: u32,
     pub(super) indices: Range<u32>,
-    pub(super) texture: Option<TextureKey>,
+    pub(super) textures: MaterialTextures,
     pub(super) terrain: Option<Region>,
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub(super) struct DrawBatchKey {
     pub(super) pipeline: Pipeline,
-    pub(super) texture: Option<TextureKey>,
+    pub(super) textures: MaterialTextures,
     pub(super) terrain: Option<Region>,
     page: usize,
 }
@@ -135,7 +139,7 @@ struct DrawIndexedArgs {
 struct DrawGroup {
     key: DrawKey,
     refs: usize,
-    texture: Option<TextureHandle>,
+    images: MaterialImages,
     terrain_textures: Option<[Option<TextureHandle>; 4]>,
     batch: Option<BatchBinding>,
 }
@@ -154,14 +158,14 @@ impl DrawInterner {
     pub(super) fn intern(
         &mut self,
         key: DrawKey,
-        texture: Option<&TextureHandle>,
+        images: &MaterialImages,
         terrain_textures: Option<&[Option<TextureHandle>; 4]>,
     ) -> Option<u32> {
         if let Some(id) = self.by_key.get(&key).copied() {
             let group = self.groups.get_mut(id as usize).and_then(Option::as_mut)?;
             group.refs = group.refs.checked_add(1)?;
-            if texture.is_some() {
-                group.texture = texture.cloned();
+            if !images.is_empty() {
+                group.images = images.clone();
             }
             if terrain_textures.is_some() {
                 group.terrain_textures = terrain_textures.cloned();
@@ -176,7 +180,7 @@ impl DrawInterner {
             self.groups.push(None);
         }
         let slot = self.groups.get_mut(id as usize)?;
-        *slot = Some(DrawGroup { key, refs: 1, texture: texture.cloned(), terrain_textures: terrain_textures.cloned(), batch: None });
+        *slot = Some(DrawGroup { key, refs: 1, images: images.clone(), terrain_textures: terrain_textures.cloned(), batch: None });
         self.by_key.insert(key, id);
         Some(id)
     }
@@ -395,6 +399,7 @@ enum LayoutPhase {
     CountSelected,
     HideOmitted,
     Commands,
+    FullbrightCommands,
     Allocate,
     Fill,
     EmitBlended,
@@ -510,7 +515,7 @@ pub(super) struct LayoutState {
     active_groups: Vec<u32>,
     active_textures: Vec<TextureDemand>,
     active_terrain: Vec<TerrainDemand>,
-    texture_seen: HashSet<TextureKey>,
+    texture_seen: HashSet<MaterialTextures>,
     terrain_seen: HashSet<Region>,
     group_counts: Vec<usize>,
     group_offsets: Vec<usize>,
@@ -551,7 +556,7 @@ pub(super) struct DrawList {
     active_groups: Vec<u32>,
     active_textures: Vec<TextureDemand>,
     active_terrain: Vec<TerrainDemand>,
-    texture_seen: HashSet<TextureKey>,
+    texture_seen: HashSet<MaterialTextures>,
     terrain_seen: HashSet<Region>,
     group_counts: Vec<usize>,
     group_offsets: Vec<usize>,
@@ -648,6 +653,7 @@ impl DrawList {
             LayoutPhase::CountSelected => "count_selected",
             LayoutPhase::HideOmitted => "hide_omitted",
             LayoutPhase::Commands => "commands",
+            LayoutPhase::FullbrightCommands => "fullbright_commands",
             LayoutPhase::Allocate => "allocate",
             LayoutPhase::Fill => "fill",
             LayoutPhase::EmitBlended => "emit_blended",
@@ -909,28 +915,37 @@ impl DrawList {
                     }
                     build.face_cursor += 1;
                 }
-                LayoutPhase::Commands => {
+                LayoutPhase::Commands | LayoutPhase::FullbrightCommands => {
+                    let fullbright = matches!(build.phase, LayoutPhase::FullbrightCommands);
                     if build.group_cursor >= build.state.active_groups.len() {
-                        build.state.opaque_draws = build.state.draws.len();
-                        build.state.opaque_instances = build.opaque_count;
                         build.group_cursor = 0;
-                        build.phase = LayoutPhase::Allocate;
+                        if fullbright {
+                            build.state.opaque_draws = build.state.draws.len();
+                            build.state.opaque_instances = build.opaque_count;
+                            build.phase = LayoutPhase::Allocate;
+                        } else {
+                            build.phase = LayoutPhase::FullbrightCommands;
+                        }
                         continue;
                     }
                     let group_id = build.state.active_groups[build.group_cursor];
                     let group_index = group_id as usize;
                     let count = build.state.group_counts.get(group_index).copied().unwrap_or_default();
-                    if group_index >= build.group_limits.len() {
-                        build.group_limits.resize(group_index + 1, 0);
-                    }
-                    build.group_limits[group_index] = count;
-                    if let Some(group) = self.groups.group(group_id) {
-                        if let Some(key) = group.key.texture
-                            && build.state.texture_seen.insert(key)
-                        {
-                            build.state.active_textures.push(TextureDemand { key, handle: group.texture.clone() });
+                    if !fullbright {
+                        if group_index >= build.group_limits.len() {
+                            build.group_limits.resize(group_index + 1, 0);
                         }
-                        if let Some(region) = group.key.terrain
+                        build.group_limits[group_index] = count;
+                    }
+                    if let Some(group) = self.groups.group(group_id) {
+                        if !fullbright
+                            && group.key.textures != MaterialTextures::default()
+                            && build.state.texture_seen.insert(group.key.textures)
+                        {
+                            build.state.active_textures.push(TextureDemand { key: group.key.textures, images: group.images.clone() });
+                        }
+                        if !fullbright
+                            && let Some(region) = group.key.terrain
                             && build.state.terrain_seen.insert(region)
                         {
                             build.state.active_terrain.push(TerrainDemand {
@@ -938,7 +953,7 @@ impl DrawList {
                                 textures: group.terrain_textures.clone().unwrap_or_else(|| std::array::from_fn(|_| None)),
                             });
                         }
-                        if !group.key.blended() {
+                        if !group.key.blended() && group.key.fullbright() == fullbright {
                             build.state.group_offsets[group_index] = build.opaque_count;
                             build.state.group_cursors[group_index] = 0;
                             build.opaque_count = build.opaque_count.saturating_add(count);
@@ -1409,36 +1424,39 @@ impl DrawList {
         let layout_items = if required > MAX_FACE_INSTANCES { &self.layout_items } else { visible };
 
         let mut opaque_count = 0usize;
-        for group_id in &self.active_groups {
-            let index = *group_id as usize;
-            let count = std::mem::take(&mut self.group_counts[index]);
-            let Some(group) = self.groups.groups[index].as_ref() else { continue };
-            if let Some(key) = group.key.texture
-                && self.texture_seen.insert(key)
-            {
-                self.active_textures.push(TextureDemand { key, handle: group.texture.clone() });
-            }
-            if let Some(region) = group.key.terrain
-                && self.terrain_seen.insert(region)
-            {
-                self.active_terrain.push(TerrainDemand {
-                    region,
-                    textures: group.terrain_textures.clone().unwrap_or_else(|| std::array::from_fn(|_| None)),
-                });
-            }
-            if !group.key.blended() {
-                self.group_offsets[index] = opaque_count;
-                self.group_cursors[index] = 0;
-                opaque_count = opaque_count.saturating_add(count);
-                if count > 0
-                    && let (Ok(first), Ok(count)) = (u32::try_from(opaque_count - count), u32::try_from(count))
+        for fullbright in [false, true] {
+            for group_id in &self.active_groups {
+                let index = *group_id as usize;
+                let count = self.group_counts[index];
+                let Some(group) = self.groups.groups[index].as_ref() else { continue };
+                if !fullbright && group.key.textures != MaterialTextures::default() && self.texture_seen.insert(group.key.textures) {
+                    self.active_textures.push(TextureDemand { key: group.key.textures, images: group.images.clone() });
+                }
+                if !fullbright
+                    && let Some(region) = group.key.terrain
+                    && self.terrain_seen.insert(region)
                 {
-                    self.mesh_references.insert(group.key.mesh);
-                    self.draws.push(group.key.command(*group_id, first, count));
+                    self.active_terrain.push(TerrainDemand {
+                        region,
+                        textures: group.terrain_textures.clone().unwrap_or_else(|| std::array::from_fn(|_| None)),
+                    });
+                }
+                if !group.key.blended() && group.key.fullbright() == fullbright {
+                    self.group_offsets[index] = opaque_count;
+                    self.group_cursors[index] = 0;
+                    opaque_count = opaque_count.saturating_add(count);
+                    if count > 0
+                        && let (Ok(first), Ok(count)) = (u32::try_from(opaque_count - count), u32::try_from(count))
+                    {
+                        self.mesh_references.insert(group.key.mesh);
+                        self.draws.push(group.key.command(*group_id, first, count));
+                    }
                 }
             }
         }
-        self.active_groups.clear();
+        for group in self.active_groups.drain(..) {
+            self.group_counts[group as usize] = 0;
+        }
         self.opaque_draws = self.draws.len();
         self.opaque_instances = opaque_count;
         self.instance_bytes.resize(opaque_count.saturating_mul(INSTANCE_BYTES), 0);
@@ -1704,10 +1722,10 @@ impl DrawList {
     pub(super) fn intern_face(
         &mut self,
         key: DrawKey,
-        texture: Option<&TextureHandle>,
+        images: &MaterialImages,
         terrain_textures: Option<&[Option<TextureHandle>; 4]>,
     ) -> Option<u32> {
-        self.groups.intern(key, texture, terrain_textures)
+        self.groups.intern(key, images, terrain_textures)
     }
 
     #[cfg(test)]
@@ -1730,11 +1748,11 @@ impl DrawList {
         for face in faces {
             let Some(mut key) = self.groups.key(face.group) else { continue };
             let previous_pipeline = key.pipeline;
-            key.pipeline = surface_pipeline(face.base_params.blend, face.base_params.double_sided, scale, invert_normals);
+            key.pipeline = surface_pipeline(&face.base_params, scale, invert_normals);
             if key.pipeline == previous_pipeline {
                 continue;
             }
-            if let Some(group) = self.groups.intern(key, face.texture.as_ref(), None) {
+            if let Some(group) = self.groups.intern(key, &face.images, None) {
                 self.groups.release(face.group);
                 face.group = group;
                 changed = true;
@@ -1830,6 +1848,10 @@ impl DrawList {
 
     pub(super) fn texture_demands(&self) -> &[TextureDemand] {
         &self.active_textures
+    }
+
+    pub(super) fn texture_keys(&self) -> &HashSet<MaterialTextures> {
+        &self.texture_seen
     }
 
     pub(super) fn terrain_demands(&self) -> &[TerrainDemand] {
@@ -2066,7 +2088,7 @@ fn ensure_batch(groups: &mut DrawInterner, draw: &DrawCommand, meshes: &HashMap<
         let allocation = &mesh.allocation;
         let buffers = allocation.buffers();
         let key =
-            DrawBatchKey { pipeline: draw.pipeline, texture: draw.texture, terrain: draw.terrain, page: Arc::as_ptr(buffers) as usize };
+            DrawBatchKey { pipeline: draw.pipeline, textures: draw.textures, terrain: draw.terrain, page: Arc::as_ptr(buffers) as usize };
         let binding = BatchBinding {
             id: groups.intern_batch(key, buffers),
             index_offset: allocation.indices().start,

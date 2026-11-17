@@ -6,6 +6,7 @@ use world::{Entity, FaceAppearance, Region, SurfaceAppearance};
 
 use super::draw_list::{DrawKey, DrawList, FaceOrder, FaceSlot, LayoutId};
 use super::instance::parameter_part;
+use super::texture_bindings::MaterialImages;
 use super::{ShadingMode, TRANSFORM_BYTES};
 use crate::{
     material::{FaceMaterial, FaceParams},
@@ -29,7 +30,7 @@ pub(super) struct CachedFace {
     pub(super) center: Vec3,
     pub(super) base_params: FaceParams,
     pub(super) params: FaceParams,
-    pub(super) texture: Option<TextureHandle>,
+    pub(super) images: MaterialImages,
     pub(super) material_index: Option<usize>,
     pub(super) texture_entry_transform: math::UvTransform,
     pub(super) group: u32,
@@ -194,21 +195,22 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
         if !params.is_visible() {
             continue;
         }
-        let texture = material.and_then(|material| material.base_color_texture.as_ref()).and_then(|binding| binding.image()).cloned();
+        let images = MaterialImages::new(material, params.textures);
         let pipeline = match shading {
             ShadingMode::Terrain => Pipeline::Terrain,
             ShadingMode::RegionWater => Pipeline::RegionWater,
-            ShadingMode::Surface => surface_pipeline(params.blend, params.double_sided, scale, invert_normals),
+            ShadingMode::Surface => surface_pipeline(&params, scale, invert_normals),
         };
-        let key = DrawKey { mesh: mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, texture: params.texture, terrain };
-        let Some(group) = draw_list.intern_face(key, texture.as_ref(), terrain_textures) else { continue };
+        let key =
+            DrawKey { mesh: mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, textures: params.textures, terrain };
+        let Some(group) = draw_list.intern_face(key, &images, terrain_textures) else { continue };
         cached.push(CachedFace {
             order: (id.0, id.1, id.2, face.slot),
             indices: face.indices.clone(),
             center: info.centers.get(index).copied().unwrap_or(Vec3::ZERO),
             base_params: params,
             params,
-            texture,
+            images,
             material_index,
             texture_entry_transform: appearance
                 .and_then(|appearance| appearance.face(face.slot))
@@ -253,14 +255,17 @@ pub(super) fn draw_priority(item: &CachedItem, camera: Camera) -> (f64, f64) {
     (radius / distance.max(1.0), distance)
 }
 
-pub(super) fn surface_pipeline(blend: bool, double_sided: bool, scale: Vec3, invert_normals: bool) -> Pipeline {
-    match (blend, double_sided, math::flips_winding(scale) ^ invert_normals) {
-        (true, true, _) => Pipeline::BlendDoubleSided,
-        (true, false, true) => Pipeline::BlendFlipped,
-        (true, false, false) => Pipeline::Blend,
-        (false, true, _) => Pipeline::DoubleSided,
-        (false, false, true) => Pipeline::FlippedWinding,
-        (false, false, false) => Pipeline::Surface,
+pub(super) fn surface_pipeline(params: &FaceParams, scale: Vec3, invert_normals: bool) -> Pipeline {
+    match (params.blend, params.fullbright, params.double_sided, math::flips_winding(scale) ^ invert_normals) {
+        (true, _, true, _) => Pipeline::BlendDoubleSided,
+        (true, _, false, true) => Pipeline::BlendFlipped,
+        (true, _, false, false) => Pipeline::Blend,
+        (false, true, true, _) => Pipeline::FullbrightDoubleSided,
+        (false, true, false, true) => Pipeline::FullbrightFlipped,
+        (false, true, false, false) => Pipeline::Fullbright,
+        (false, false, true, _) => Pipeline::DoubleSided,
+        (false, false, false, true) => Pipeline::FlippedWinding,
+        (false, false, false, false) => Pipeline::Surface,
     }
 }
 
@@ -317,6 +322,36 @@ mod tests {
             assert_eq!(normals.first(), Some(&expected_normal));
             assert_eq!(normals.get(5), Some(&expected_normal));
             assert_eq!(normals.get(10), Some(&expected_normal));
+        }
+    }
+
+    #[test]
+    fn surface_pipeline_covers_every_class() {
+        let mirrored = Vec3::new(-1.0, 1.0, 1.0);
+        for (blend, fullbright, double_sided, scale, expected) in [
+            (false, false, false, Vec3::ONE, Pipeline::Surface),
+            (false, false, false, mirrored, Pipeline::FlippedWinding),
+            (false, false, true, Vec3::ONE, Pipeline::DoubleSided),
+            (false, false, true, mirrored, Pipeline::DoubleSided),
+            (false, true, false, Vec3::ONE, Pipeline::Fullbright),
+            (false, true, false, mirrored, Pipeline::FullbrightFlipped),
+            (false, true, true, Vec3::ONE, Pipeline::FullbrightDoubleSided),
+            (false, true, true, mirrored, Pipeline::FullbrightDoubleSided),
+            (true, false, false, Vec3::ONE, Pipeline::Blend),
+            (true, false, false, mirrored, Pipeline::BlendFlipped),
+            (true, false, true, Vec3::ONE, Pipeline::BlendDoubleSided),
+            (true, false, true, mirrored, Pipeline::BlendDoubleSided),
+            (true, true, false, Vec3::ONE, Pipeline::Blend),
+            (true, true, false, mirrored, Pipeline::BlendFlipped),
+            (true, true, true, Vec3::ONE, Pipeline::BlendDoubleSided),
+            (true, true, true, mirrored, Pipeline::BlendDoubleSided),
+        ] {
+            let params = FaceParams { blend, fullbright, double_sided, ..FaceParams::new(None) };
+            assert_eq!(
+                surface_pipeline(&params, scale, false),
+                expected,
+                "blend {blend} fullbright {fullbright} double {double_sided} scale {scale}"
+            );
         }
     }
 }
