@@ -291,11 +291,11 @@ pub fn complete_texture_refinements(fixture: &mut BenchmarkTextures, indexes: [u
             .request(fixture.route, Request::Texture { id, size: TextureSize::new(size) }, Priority::Visible, now)
             .expect("benchmark texture refinement request");
         let Some(job) = fixture.store.next_job(now) else {
-            assert!(matches!(demand.status(), AssetStatus::Ready(_)), "benchmark texture refinement has no job or ready content");
+            assert_matches!(demand.status(), AssetStatus::Ready(_), "benchmark texture refinement has no job or ready content");
             continue;
         };
         complete_benchmark_texture_job(&mut fixture.store, job, now);
-        assert!(matches!(demand.status(), AssetStatus::Ready(_)), "benchmark texture refinement did not complete");
+        assert_matches!(demand.status(), AssetStatus::Ready(_), "benchmark texture refinement did not complete");
         completed += 1;
     }
     completed
