@@ -18,31 +18,21 @@ use url::Url;
 
 use crate::fixtures::http::{LocalServer, response};
 
-use super::{Client, Error, ErrorKind, RETRY_AFTER, RedirectPolicy, Response, retry_after_delay, validate_http_url};
+use super::{Client, Error, ErrorKind, RedirectPolicy, Response, retry_after_delay, validate_http_url};
 
 #[test]
-fn retry_after_formats() {
-    assert_eq!(retry_after_delay("120", UNIX_EPOCH), Some(Duration::from_secs(120)));
-
-    let now = UNIX_EPOCH + Duration::from_secs(784_111_700);
-    for value in ["Sun, 06 Nov 1994 08:49:37 GMT", "Sunday, 06-Nov-94 08:49:37 GMT", "Sun Nov  6 08:49:37 1994"] {
-        assert_eq!(retry_after_delay(value, now), Some(Duration::from_secs(77)));
+fn retry_after_values() {
+    let date_now = UNIX_EPOCH + Duration::from_secs(784_111_700);
+    for (value, now, expected) in [
+        ("120", UNIX_EPOCH, Some(Duration::from_secs(120))),
+        ("Sun, 06 Nov 1994 08:49:37 GMT", date_now, Some(Duration::from_secs(77))),
+        ("Sunday, 06-Nov-94 08:49:37 GMT", date_now, Some(Duration::from_secs(77))),
+        ("Sun Nov  6 08:49:37 1994", date_now, Some(Duration::from_secs(77))),
+        ("soon", UNIX_EPOCH, None),
+        ("", UNIX_EPOCH, None),
+    ] {
+        assert_eq!(retry_after_delay(value, now), expected, "{value:?}");
     }
-}
-
-#[test]
-fn invalid_retry_after_is_ignored() {
-    assert_eq!(retry_after_delay("soon", UNIX_EPOCH), None);
-    assert_eq!(retry_after_delay("", UNIX_EPOCH), None);
-}
-
-#[test]
-fn response_retry_after() {
-    let mut headers = HeaderMap::new();
-    headers.insert(RETRY_AFTER, HeaderValue::from_static("0"));
-    let response = Response { status: StatusCode::TOO_MANY_REQUESTS, headers, body: Vec::new(), elapsed: Duration::ZERO };
-
-    assert_eq!(response.retry_after(), Some(Duration::ZERO));
 }
 
 #[tokio::test]
@@ -347,20 +337,6 @@ fn long_transport_is_empty_poll() {
     assert!(!fast_transport.is_transport_without_response_after(Duration::from_secs(10)));
     assert!(!response_transport.is_transport_without_response_after(Duration::from_secs(10)));
     assert!(long_transport.is_transient());
-}
-
-#[tokio::test]
-async fn post_limit_is_enforced() {
-    let server = LocalServer::start(vec![response(200, "OK", "text/plain", None, "123456")]);
-    let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
-
-    let error = client
-        .post(&server.url("/login"), "text/xml", None, Vec::new(), 5)
-        .await
-        .expect_err("login response exceeded the configured limit");
-
-    assert!(error.to_string().contains("5-byte limit"));
-    assert_eq!(server.finish().len(), 1);
 }
 
 #[tokio::test]

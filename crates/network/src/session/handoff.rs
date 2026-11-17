@@ -639,25 +639,27 @@ mod tests {
     };
 
     #[test]
-    fn evidence_keeps_newest_packet_finish() {
-        let mut evidence = HandoffEvidence::default();
-        evidence.record(HandoffAnnouncement::TeleportFinish(HandoffOrder::Packet(PacketOrder::Ordered(10))));
-        evidence.record(HandoffAnnouncement::TeleportFinish(HandoffOrder::Packet(PacketOrder::Ordered(8))));
-        assert_eq!(evidence.teleport_finish, Some(FinishOrder::Packet(10)));
+    fn evidence_keeps_newest_finish() {
+        let packet = |sequence| HandoffOrder::Packet(PacketOrder::Ordered(sequence));
+        let queue = |batch, index| HandoffOrder::EventQueue { incarnation: 4, batch, index };
+        let cases = [
+            ("packet", [packet(10), packet(8), packet(12)], FinishOrder::Packet(10), FinishOrder::Packet(12)),
+            (
+                "event queue",
+                [queue(7, 3), queue(7, 2), queue(8, 0)],
+                FinishOrder::EventQueue { incarnation: 4, batch: 7, index: 3 },
+                FinishOrder::EventQueue { incarnation: 4, batch: 8, index: 0 },
+            ),
+        ];
+        for (case, [newest, older, newer], kept, replaced) in cases {
+            let mut evidence = HandoffEvidence::default();
+            evidence.record(HandoffAnnouncement::TeleportFinish(newest));
+            evidence.record(HandoffAnnouncement::TeleportFinish(older));
+            assert_eq!(evidence.teleport_finish, Some(kept), "{case}");
 
-        evidence.record(HandoffAnnouncement::TeleportFinish(HandoffOrder::Packet(PacketOrder::Ordered(12))));
-        assert_eq!(evidence.teleport_finish, Some(FinishOrder::Packet(12)));
-    }
-
-    #[test]
-    fn evidence_keeps_newest_queue_finish() {
-        let mut evidence = HandoffEvidence::default();
-        evidence.record(HandoffAnnouncement::TeleportFinish(HandoffOrder::EventQueue { incarnation: 4, batch: 7, index: 3 }));
-        evidence.record(HandoffAnnouncement::TeleportFinish(HandoffOrder::EventQueue { incarnation: 4, batch: 7, index: 2 }));
-        assert_eq!(evidence.teleport_finish, Some(FinishOrder::EventQueue { incarnation: 4, batch: 7, index: 3 }));
-
-        evidence.record(HandoffAnnouncement::TeleportFinish(HandoffOrder::EventQueue { incarnation: 4, batch: 8, index: 0 }));
-        assert_eq!(evidence.teleport_finish, Some(FinishOrder::EventQueue { incarnation: 4, batch: 8, index: 0 }));
+            evidence.record(HandoffAnnouncement::TeleportFinish(newer));
+            assert_eq!(evidence.teleport_finish, Some(replaced), "{case}");
+        }
     }
 
     #[test]

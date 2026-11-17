@@ -3,21 +3,21 @@ use crate::fixtures::event_with_coverage_watermark;
 use tokio::time;
 
 #[tokio::test]
-async fn retry_limit_keeps_primary_connected() {
+async fn primary_queue_exit_keeps_session() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
     let connection = connect_runtime(login_session(endpoint), ResponseData::default()).await.expect("connect simulator circuit");
     let _ = receive(&simulator).await;
 
-    connection.state.note_primary_event_queue_exit(connection.state.primary_id, EventQueueExit::Stopped);
     let mut buffer = [0; 65_535];
-    assert_eq!(simulator.try_recv_from(&mut buffer).expect_err("ordinary poll stop sends no logout").kind(), ErrorKind::WouldBlock);
-
-    connection.state.note_primary_event_queue_exit(connection.state.primary_id, EventQueueExit::RetryLimitReached);
-    assert_eq!(
-        simulator.try_recv_from(&mut buffer).expect_err("EventQueue failure must not log out the simulator").kind(),
-        ErrorKind::WouldBlock
-    );
+    for exit in [EventQueueExit::Stopped, EventQueueExit::RetryLimitReached, EventQueueExit::StoppedWithCoverageLoss] {
+        connection.state.note_primary_event_queue_exit(connection.state.primary_id, exit);
+        assert_eq!(
+            simulator.try_recv_from(&mut buffer).expect_err("EventQueue exit must not log out the simulator").kind(),
+            ErrorKind::WouldBlock,
+            "{exit:?}"
+        );
+    }
 }
 
 #[test]
@@ -35,19 +35,6 @@ fn former_primary_failure_keeps_identity() {
         Event::SimulatorFailed { simulator_id: failed_id, region_handle: None, endpoint: failed_endpoint, reason }
             if failed_id == simulator_id && failed_endpoint == endpoint && reason == "retry limit reached"
     );
-}
-
-#[tokio::test]
-async fn primary_coverage_loss_keeps_session() {
-    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
-    let connection = connect_runtime(login_session(simulator.local_addr().expect("read simulator address")), ResponseData::default())
-        .await
-        .expect("connect simulator circuit");
-    let _ = receive(&simulator).await;
-
-    connection.state.note_primary_event_queue_exit(connection.state.primary_id, EventQueueExit::StoppedWithCoverageLoss);
-    let mut buffer = [0; 65_535];
-    assert_eq!(simulator.try_recv_from(&mut buffer).expect_err("coverage loss must not send logout").kind(), ErrorKind::WouldBlock);
 }
 
 #[tokio::test]

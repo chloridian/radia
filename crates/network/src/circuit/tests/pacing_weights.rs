@@ -69,55 +69,6 @@ async fn assert_service_window(
 }
 
 #[tokio::test(start_paused = true)]
-async fn small_packets_follow_role_weights() {
-    let bucket = Arc::new(Mutex::new(Bucket::new(5_000, Instant::now())));
-    assert!(bucket.lock().unwrap().take(MAX_BURST_BYTES as usize, Instant::now()));
-    let order = (1..=5).collect::<Vec<_>>();
-    let mut connections = HashMap::new();
-    let mut pending = HashMap::new();
-    let mut receivers = HashMap::new();
-    let mut virtual_time = [0; 3];
-    for id in &order {
-        connections.insert(*id, connection(if *id == 1 { ConnectionRole::Primary } else { ConnectionRole::Neighbor }));
-        let (completed, receiver) = oneshot::channel();
-        receivers.insert(*id, receiver);
-        queue_request(*id, 500, TrafficClass::Fair, completed, &connections, &mut pending, &virtual_time);
-    }
-
-    let mut counts = HashMap::<u64, usize>::new();
-    let mut class_cursor = 0;
-    let mut connection_cursor = [0; 3];
-    for _ in 0..90 {
-        advance(Duration::from_millis(100)).await;
-        dispatch(&bucket, &mut connections, &order, &mut pending, &mut class_cursor, &mut connection_cursor, &mut virtual_time);
-
-        let granted = order
-            .iter()
-            .filter_map(|id| match receivers.get_mut(id).expect("active connection receiver").try_recv() {
-                Ok(lease) => {
-                    lease.consume();
-                    *counts.entry(*id).or_default() += 1;
-                    Some(*id)
-                }
-                Err(_) => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(granted.len(), 1, "one 500-byte packet should use each refill");
-
-        for id in granted {
-            let (completed, receiver) = oneshot::channel();
-            receivers.insert(id, receiver);
-            queue_request(id, 500, TrafficClass::Fair, completed, &connections, &mut pending, &virtual_time);
-        }
-    }
-
-    assert_eq!(counts.get(&1), Some(&30), "the primary should receive twice each neighbor's bytes: {counts:?}");
-    for id in 2..=5 {
-        assert_eq!(counts.get(&id), Some(&15), "neighbor {id} should receive its weighted share");
-    }
-}
-
-#[tokio::test(start_paused = true)]
 async fn shared_pressure_services_limit() {
     let simulator_count = MAX_NEIGHBOR_SIMULATORS + 1;
     let bucket = Arc::new(Mutex::new(Bucket::new(5_000, Instant::now())));

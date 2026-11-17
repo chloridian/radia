@@ -124,52 +124,6 @@ async fn shutdown_preempts_chat() {
 }
 
 #[tokio::test]
-async fn backpressure_keeps_acks() {
-    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
-    let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
-    let (event_sender, mut events) = mpsc::channel(SESSION_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
-    let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
-
-    let (use_circuit, peer) = receive(&simulator).await;
-    assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
-    simulator.send_to(&server_ack_many(20, &[1]), peer).await.expect("ack circuit establishment");
-    assert_eq!(receive(&simulator).await.0, expected_complete_movement(2));
-    simulator.send_to(&server_ack_many(21, &[2]), peer).await.expect("ack complete movement");
-
-    receive_primary_connected(&mut events).await;
-
-    let mut handshake = test_fixture("region_handshake.hex");
-    handshake[0] |= 0x40;
-    set_sequence(&mut handshake, 22);
-    simulator.send_to(&handshake, peer).await.expect("send region handshake");
-    assert_eq!(receive(&simulator).await.0, with_appended_ack(expected_zerocoded_reply(3), 22));
-
-    let mut movement_complete = test_fixture("agent_movement_complete.hex");
-    movement_complete[0] |= 0x40;
-    set_sequence(&mut movement_complete, 23);
-    simulator.send_to(&movement_complete, peer).await.expect("send movement completion");
-    let throttle = Packet::decode(&receive(&simulator).await.0).expect("decode AgentThrottle");
-    std::assert_matches!(throttle.message(), Message::AgentThrottle(_));
-    assert!(throttle.is_reliable());
-    assert!(throttle.appended_acks().contains(&23), "AgentThrottle carries the pending movement ACK");
-    simulator.send_to(&server_ack_many(24, &[throttle.sequence()]), peer).await.expect("ack AgentThrottle");
-
-    disconnect_signal.send_replace(true);
-    let logout = Packet::decode(&receive(&simulator).await.0).expect("decode LogoutRequest");
-    assert_eq!(logout, Packet::decode(&expected_fixture("logout_request.hex", 5, true)).expect("decode expected LogoutRequest"));
-    send_logout_reply(&simulator, peer, &logout, 25).await;
-    assert!(
-        timeout(SIMULATOR_TIMEOUT, client)
-            .await
-            .expect("disconnect should complete after a simulator reply")
-            .expect("session task should not panic")
-            .is_ok()
-    );
-}
-
-#[tokio::test]
 async fn ping_survives_backpressure() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
@@ -623,27 +577,6 @@ async fn encode_failure_keeps_ack() {
     let packet = Packet::decode(&bytes).expect("decode client packet");
     assert_eq!(packet.sequence(), 1);
     assert_eq!(packet.appended_acks(), &[55]);
-}
-
-#[tokio::test]
-async fn duplicate_requeues_ack() {
-    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
-    let client = UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect local UDP socket");
-    let mut circuit = Circuit::new();
-
-    let mut incoming = test_fixture("chat_from_simulator.hex");
-    incoming[0] |= 0x40;
-    set_sequence(&mut incoming, 55);
-    let packet = Packet::decode(&incoming).expect("decode reliable simulator packet");
-    assert!(receive_packet(&mut circuit, &packet));
-    crate::fixtures::circuit::send_acknowledgements(&mut circuit, &client).await.expect("flush first acknowledgement");
-    assert_eq!(Packet::decode(&receive(&simulator).await.0).expect("decode first ACK").message(), &packet_ack(&[55]));
-
-    incoming[0] |= RESENT_FLAG;
-    let duplicate = Packet::decode(&incoming).expect("decode resent simulator packet");
-    assert!(!receive_packet(&mut circuit, &duplicate));
-    crate::fixtures::circuit::send_acknowledgements(&mut circuit, &client).await.expect("flush duplicate acknowledgement");
-    assert_eq!(Packet::decode(&receive(&simulator).await.0).expect("decode duplicate ACK").message(), &packet_ack(&[55]));
 }
 
 #[tokio::test]

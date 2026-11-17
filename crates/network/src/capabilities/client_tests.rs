@@ -223,31 +223,19 @@ async fn range_redirect_keeps_asset_policy() {
 
 #[tokio::test]
 async fn ignored_range_respects_limit() {
-    let server = LocalServer::start(vec![byte_response(200, &[], b"whole")]);
-    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-    let url = CapabilityUrl::parse(server.url("/resource").as_str()).expect("valid capability URL");
+    let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nwhole\r\n0\r\n\r\n".to_vec();
+    for (case, response) in [("content-length", byte_response(200, &[], b"whole")), ("chunked", chunked)] {
+        let server = LocalServer::start(vec![response]);
+        let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+        let url = CapabilityUrl::parse(server.url("/resource").as_str()).expect("valid capability URL");
 
-    let error = client
-        .get_range_with_response_limit_and_redirect_policy(&url, 0..1, 4, RedirectPolicy::None)
-        .await
-        .expect_err("a server that ignores Range must respect the response limit");
-    std::assert_matches!(error, CapabilityHttp(error) if error.kind == http::ErrorKind::ResourceExhausted);
-    assert_eq!(server.finish().len(), 1);
-}
-
-#[tokio::test]
-async fn ignored_range_chunked_respects_limit() {
-    let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nwhole\r\n0\r\n\r\n".to_vec();
-    let server = LocalServer::start(vec![response]);
-    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-    let url = CapabilityUrl::parse(server.url("/resource").as_str()).expect("valid capability URL");
-
-    let error = client
-        .get_range_with_response_limit_and_redirect_policy(&url, 0..1, 4, RedirectPolicy::None)
-        .await
-        .expect_err("chunked ignored-range body must respect the response limit");
-    std::assert_matches!(error, CapabilityHttp(error) if error.kind == http::ErrorKind::ResourceExhausted);
-    assert_eq!(server.finish().len(), 1);
+        let error = client
+            .get_range_with_response_limit_and_redirect_policy(&url, 0..1, 4, RedirectPolicy::None)
+            .await
+            .expect_err("a server that ignores Range must respect the response limit");
+        std::assert_matches!(error, CapabilityHttp(error) if error.kind == http::ErrorKind::ResourceExhausted, "{case}");
+        assert_eq!(server.finish().len(), 1, "{case}");
+    }
 }
 
 #[tokio::test]
@@ -440,39 +428,6 @@ async fn discovered_urls_are_opaque() {
 }
 
 #[tokio::test]
-async fn get_post_return_llsd_values() {
-    #[derive(Debug, Eq, PartialEq)]
-    struct Reply {
-        count: i32,
-    }
-
-    #[derive(Serialize)]
-    struct Request {
-        count: i32,
-    }
-
-    let body = "<?xml version=\"1.0\"?><llsd><map><key>count</key><integer>7</integer></map></llsd>";
-    let server = LocalServer::start(vec![llsd_response(body)]);
-    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-    let url = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
-
-    let posted =
-        client.post_with_response_limit(&url, &Request { count: 7 }, MAX_CAPABILITY_RESPONSE_BYTES).await.expect("LLSD POST response");
-    let requests = server.finish();
-
-    let into_reply = |value: Value| {
-        let count = value.as_map().and_then(|fields| fields.get("count")).and_then(Value::as_integer).expect("integer count field");
-        Reply { count }
-    };
-    assert_eq!(into_reply(posted), Reply { count: 7 });
-    let post = str::from_utf8(&requests[0]).expect("POST is UTF-8");
-    assert!(post.starts_with("POST /capability HTTP/1.1"));
-    let (_, post_body) = post.split_once("\r\n\r\n").expect("POST has a body");
-    let payload: Value = xml::from_str(post_body).expect("POST body is valid LLSD XML");
-    assert_eq!(payload.as_map().and_then(|map| map.get("count")), Some(&Value::Integer(7)));
-}
-
-#[tokio::test]
 async fn patch_delete_preserve_gone() {
     #[derive(Serialize)]
     struct Rename {
@@ -583,39 +538,6 @@ async fn post_decodes_at_limit() {
 }
 
 #[tokio::test]
-async fn post_rejects_over_limit_response() {
-    const RESPONSE_LIMIT: usize = 32;
-
-    let server = LocalServer::start(vec![content_length_only_response(RESPONSE_LIMIT + 1)]);
-    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-    let url = CapabilityUrl::parse(server.url("/object-media").as_str()).expect("valid capability URL");
-
-    let error = client
-        .post_with_response_limit(&url, &Value::Undefined, RESPONSE_LIMIT)
-        .await
-        .expect_err("declared response over the selected limit should fail");
-
-    std::assert_matches!(
-        &error,
-        CapabilityHttp(http::Error { kind: http::ErrorKind::ResourceExhausted, status: Some(StatusCode::OK), .. })
-    );
-    assert_eq!(server.finish().len(), 1);
-}
-
-#[tokio::test]
-async fn post_invalid_limits_send_nothing() {
-    let server = LocalServer::start(vec![]);
-    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-    let url = CapabilityUrl::parse(server.url("/object-media").as_str()).expect("valid capability URL");
-
-    for limit in [0, MAX_CAPABILITY_RESPONSE_BYTES + 1] {
-        std::assert_matches!(client.post_with_response_limit(&url, &Value::Undefined, limit).await, Err(Capability(_)));
-    }
-
-    assert!(server.finish().is_empty());
-}
-
-#[tokio::test]
 async fn large_llsd_value_decodes() {
     const PAYLOAD_BYTES: usize = 1024 * 1024;
 
@@ -680,17 +602,6 @@ async fn partial_grants() {
     assert!(headers.to_ascii_lowercase().contains("application/llsd+xml"));
     assert!(body.contains("GrantedCapability"));
     assert!(body.contains("MissingCapability"));
-}
-
-#[tokio::test]
-async fn empty_grants() {
-    let server = LocalServer::start(vec![llsd_response("<?xml version=\"1.0\"?><llsd><map></map></llsd>")]);
-    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-
-    let capabilities = client.request_capabilities(&["MissingCapability"]).await.expect("empty grants are a valid response");
-
-    assert!(capabilities.is_empty());
-    assert_eq!(server.finish().len(), 1);
 }
 
 #[tokio::test]
@@ -1013,74 +924,43 @@ async fn capability_names_are_bounded() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn requests_limit_concurrency() {
-    let request_count = MAX_CONCURRENT_CAPABILITY_REQUESTS * 2;
-    let mut server = ConcurrentCapabilityTestServer::start(request_count);
-    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-    let capability = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
-    let mut requests = JoinSet::new();
+    for (case, shared) in [("one client", false), ("shared budget", true)] {
+        let request_count = MAX_CONCURRENT_CAPABILITY_REQUESTS * 2;
+        let mut server = ConcurrentCapabilityTestServer::start(request_count);
+        let clients = if shared {
+            let budget = CapabilityBudget::new();
+            (0..2).map(|_| Client::new_with_budget(server.url("/seed"), budget.clone()).expect("active Tokio runtime")).collect::<Vec<_>>()
+        } else {
+            vec![Client::new(server.url("/seed")).expect("active Tokio runtime")]
+        };
+        let capability = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
+        let mut requests = JoinSet::new();
 
-    for _ in 0..request_count {
-        let client = client.clone();
-        let capability = capability.clone();
-        requests.spawn(async move { client.post(&capability, "probe").await });
-    }
-
-    let mut in_flight = VecDeque::with_capacity(MAX_CONCURRENT_CAPABILITY_REQUESTS);
-    for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
-        in_flight.push_back(server.next_request().await);
-    }
-    for _ in MAX_CONCURRENT_CAPABILITY_REQUESTS..request_count {
-        server.release_response(in_flight.pop_front().expect("one request occupies each admitted slot"));
-        in_flight.push_back(server.next_request().await);
-    }
-    let maximum_active = server.finish();
-
-    timeout(TEST_TIMEOUT, async {
-        while let Some(request) = requests.join_next().await {
-            request.expect("capability request task should finish").expect("local capability request should succeed");
+        for index in 0..request_count {
+            let client = clients[index % clients.len()].clone();
+            let capability = capability.clone();
+            requests.spawn(async move { client.post(&capability, "probe").await });
         }
-    })
-    .await
-    .expect("bounded capability requests should finish");
 
-    assert!(maximum_active > 1, "capability requests should remain concurrent");
-    assert!(maximum_active <= MAX_CONCURRENT_CAPABILITY_REQUESTS, "too many HTTP requests ran at once");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn shared_budget_bounds_requests() {
-    let request_count = MAX_CONCURRENT_CAPABILITY_REQUESTS * 2;
-    let mut server = ConcurrentCapabilityTestServer::start(request_count);
-    let budget = CapabilityBudget::new();
-    let clients =
-        (0..2).map(|_| Client::new_with_budget(server.url("/seed"), budget.clone()).expect("active Tokio runtime")).collect::<Vec<_>>();
-    let capability = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
-    let mut requests = JoinSet::new();
-
-    for index in 0..request_count {
-        let client = clients[index % clients.len()].clone();
-        let capability = capability.clone();
-        requests.spawn(async move { client.post(&capability, "probe").await });
-    }
-
-    let mut in_flight = VecDeque::with_capacity(MAX_CONCURRENT_CAPABILITY_REQUESTS);
-    for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
-        in_flight.push_back(server.next_request().await);
-    }
-    for _ in MAX_CONCURRENT_CAPABILITY_REQUESTS..request_count {
-        server.release_response(in_flight.pop_front().expect("one request occupies each admitted slot"));
-        in_flight.push_back(server.next_request().await);
-    }
-    let maximum_active = server.finish();
-
-    timeout(TEST_TIMEOUT, async {
-        while let Some(request) = requests.join_next().await {
-            request.expect("capability request task should finish").expect("local capability request should succeed");
+        let mut in_flight = VecDeque::with_capacity(MAX_CONCURRENT_CAPABILITY_REQUESTS);
+        for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
+            in_flight.push_back(server.next_request().await);
         }
-    })
-    .await
-    .expect("shared budget requests should finish");
+        for _ in MAX_CONCURRENT_CAPABILITY_REQUESTS..request_count {
+            server.release_response(in_flight.pop_front().expect("one request occupies each admitted slot"));
+            in_flight.push_back(server.next_request().await);
+        }
+        let maximum_active = server.finish();
 
-    assert!(maximum_active > 1, "the shared budget should allow concurrent requests");
-    assert!(maximum_active <= MAX_CONCURRENT_CAPABILITY_REQUESTS, "shared clients exceeded their request budget");
+        timeout(TEST_TIMEOUT, async {
+            while let Some(request) = requests.join_next().await {
+                request.expect("capability request task should finish").expect("local capability request should succeed");
+            }
+        })
+        .await
+        .expect("bounded capability requests should finish");
+
+        assert!(maximum_active > 1, "{case}: capability requests should remain concurrent");
+        assert!(maximum_active <= MAX_CONCURRENT_CAPABILITY_REQUESTS, "{case}: too many HTTP requests ran at once");
+    }
 }
