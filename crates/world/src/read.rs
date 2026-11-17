@@ -2,22 +2,18 @@ use std::{
     collections::Bound::{Excluded, Unbounded},
     error::Error,
     fmt::{self, Display, Formatter},
-    mem::size_of,
+    mem::{self},
 };
 
 use uuid::Uuid;
 
-use crate::removal::{VisibilityCache, VisibilityCursor, VisibilityLookupCache, VisibilityStep};
-use crate::update::Stamp;
 use crate::{
-    Appearance, AttachmentPoint, AvatarAppearance, LinearMotion, ObjectMedia, PbrMaterialAssignments, SitTarget, SurfaceAppearance,
-    TextureAnimation, Transform,
+    Appearance, AttachmentPoint, AvatarAppearance, Entity, Kind, LinearMotion, LocalAddress, Object, ObjectMedia, Parent,
+    PbrMaterialAssignments, PbrMaterialOverrides, PoseError, PoseState, Region, RegionInfo, Shape, SitTarget, SurfaceAppearance,
+    TerrainSettings, TextureAnimation, Transform, UpdateSource, World, WorldChange, WorldId, WorldRevision, WorldTransformState,
+    removal::{VisibilityCache, VisibilityCursor, VisibilityLookupCache, VisibilityStep},
+    update::Stamp,
 };
-use crate::{
-    Entity, Kind, LocalAddress, Parent, PbrMaterialOverrides, PoseError, PoseState, Region, RegionInfo, Shape, TerrainSettings,
-    UpdateSource, WorldRevision, WorldTransformState,
-};
-use crate::{Object, World, WorldChange, WorldId};
 
 pub const MAX_OBJECT_PAGE_ITEMS: usize = 256;
 pub const MAX_OBJECT_PAGE_WORK_ITEMS: usize = 256;
@@ -363,7 +359,7 @@ impl World {
         cursor: Option<ObjectPageCursor>,
         limit: usize,
     ) -> Result<ObjectListPage, WorldReadError> {
-        let mut visibility_lookup = std::mem::take(&mut self.lookup_visibility);
+        let mut visibility_lookup = mem::take(&mut self.lookup_visibility);
         let page = self.object_list_page_inner(cursor, limit, Some(&mut visibility_lookup));
         self.lookup_visibility = visibility_lookup;
         page

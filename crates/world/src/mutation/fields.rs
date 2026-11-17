@@ -1,17 +1,20 @@
 use math::{Quat, Vec3};
 use uuid::Uuid;
 
-use super::Origin;
-use super::facet::{FacetChanges, FacetSet, FacetUpdates};
-use crate::FieldRejectionReason::{InvalidRotation, InvalidValue, ParentCycle, ParentDependsOnRejectedParent, StaleFrame, UntrustedSource};
-use crate::UpdateAuthority::{Tracked, Untracked};
-use crate::history::WorldChangeClasses;
-use crate::update::FieldStamp;
-use crate::{
-    Appearance, ApplyError, AttachmentPoint, FieldGroup, FieldRejectionReason, FieldUpdate, Kind, LinearMotion, MotionUpdateKind,
-    ObjectObservation, ObjectPatch, Parent, ParentUpdate, Pose, Rejections, UpdateAuthority, WorldPose,
+use super::{
+    Origin,
+    facet::{FacetChanges, FacetSet, FacetUpdates},
 };
-use crate::{Fences, ObjectOrdering, ObjectState, ParentRejectionBarrier};
+use crate::{
+    Appearance, ApplyError, AttachmentPoint, Fences, FieldGroup, FieldRejectionReason,
+    FieldRejectionReason::{InvalidRotation, InvalidValue, ParentCycle, ParentDependsOnRejectedParent, StaleFrame, UntrustedSource},
+    FieldUpdate, Kind, LinearMotion, MotionUpdateKind, ObjectObservation, ObjectOrdering, ObjectPatch, ObjectState, Parent,
+    ParentRejectionBarrier, ParentUpdate, Pose, Rejections,
+    UpdateAuthority::{Tracked, Untracked},
+    WorldPose,
+    history::WorldChangeClasses,
+    update::FieldStamp,
+};
 
 const MOTION_COMPONENT_SANITY_LIMIT: f32 = 4096.0;
 const TERSE_VELOCITY_COMPONENT_LIMIT: f32 = 128.0;
@@ -220,7 +223,7 @@ impl Fields {
                 rejections.reject(group, UntrustedSource);
             }
         }
-        self.facets.reject_untrusted(facets, UpdateAuthority::Untracked, rejections);
+        self.facets.reject_untrusted(facets, Untracked, rejections);
     }
 }
 
@@ -490,6 +493,8 @@ fn apply_field_update<T: Copy>(current: Option<T>, update: FieldUpdate<T>) -> Op
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     #[test]
@@ -499,9 +504,9 @@ mod tests {
         let edge = f32::from_bits(1.0_f32.to_bits() + 260);
         let outside_edge = f32::from_bits(1.0_f32.to_bits() + 261);
         assert!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, edge)).is_ok());
-        std::assert_matches!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, outside_edge)), Err(InvalidRotation));
-        std::assert_matches!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, 0.0)), Err(InvalidRotation));
-        std::assert_matches!(normalized_rotation(Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0)), Err(InvalidRotation));
-        std::assert_matches!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, 1.2)), Err(InvalidRotation));
+        assert_matches!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, outside_edge)), Err(InvalidRotation));
+        assert_matches!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, 0.0)), Err(InvalidRotation));
+        assert_matches!(normalized_rotation(Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0)), Err(InvalidRotation));
+        assert_matches!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, 1.2)), Err(InvalidRotation));
     }
 }

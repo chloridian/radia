@@ -1,9 +1,19 @@
 #![allow(unexpected_cfgs)]
 
-use std::{hint::black_box, time::Instant};
+#[cfg(all(world_bench_uninstrumented, windows))]
+use std::ffi::c_void;
+#[cfg(world_bench_uninstrumented)]
+use std::thread;
+use std::{
+    assert_matches,
+    hint::black_box,
+    time::{Duration, Instant},
+};
 
 use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, measurement::WallTime};
 use math::{Quat, Vec3};
+#[cfg(not(world_bench_uninstrumented))]
+use test_support::{allocation, allocation::CountingAllocator};
 use uuid::Uuid;
 use world::{
     ApplyOutcome::{AgentHandedOff, Introduced, Removed},
@@ -15,7 +25,7 @@ use world::{
 
 #[cfg(not(world_bench_uninstrumented))]
 #[global_allocator]
-static ALLOCATOR: test_support::allocation::CountingAllocator = test_support::allocation::CountingAllocator;
+static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 use super::support::{
     INITIAL_ORDER, PER_REGION, Row, SCENE_SIZES, Scene, empty_scene, limits, observation, populated_scene, rows_for_regions, size_name,
@@ -38,7 +48,7 @@ fn bench_spawn(group: &mut BenchmarkGroup<'_, WallTime>) {
         group.throughput(Throughput::Elements(count as u64));
         let mut verification = empty_scene(count, false);
         for row in &verification.rows {
-            std::assert_matches!(verification.world.observe_object(observation(*row)).expect("object introduction").outcome, Introduced(_));
+            assert_matches!(verification.world.observe_object(observation(*row)).expect("object introduction").outcome, Introduced(_));
         }
         assert_eq!(verification.world.object_count(), count);
 
@@ -136,7 +146,7 @@ fn bench_local_id_reuse(group: &mut BenchmarkGroup<'_, WallTime>) {
     }
 }
 
-fn bench_region_reset(group: &mut BenchmarkGroup<'_, criterion::measurement::WallTime>) {
+fn bench_region_reset(group: &mut BenchmarkGroup<'_, WallTime>) {
     for &count in SCENE_SIZES {
         group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(BenchmarkId::new("region_reset", size_name(count)), &count, |b, &count| {
@@ -177,7 +187,7 @@ fn bench_agent_handoff(group: &mut BenchmarkGroup<'_, WallTime>) {
                     .world
                     .handoff_agent(from, ObjectObservation::new(source(to, source_order), agent.id, agent.local_id, Kind::Avatar, Root))
                     .expect("agent handoff");
-                std::assert_matches!(&applied.outcome, AgentHandedOff(_));
+                assert_matches!(&applied.outcome, AgentHandedOff(_));
                 in_source = !in_source;
                 source_order += 1;
                 let _ = black_box(applied);
@@ -196,7 +206,7 @@ fn linked_scene(count: usize, linkset_size: usize) -> Scene {
     let rows = rows_for_regions(count, 0, &regions, count);
     for row in &rows {
         let applied = world.observe_object(observation(*row)).expect("introduce linked object");
-        std::assert_matches!(applied.outcome, Introduced(_));
+        assert_matches!(applied.outcome, Introduced(_));
     }
     let mut scene = Scene { world, rows, regions };
     for (index, row) in scene.rows.iter().enumerate() {
@@ -242,7 +252,7 @@ fn drain_removals(world: &mut World) -> (usize, usize) {
 }
 
 #[cfg(not(world_bench_uninstrumented))]
-fn drain_changes(world: &World, cursor: &mut WorldChangeCursor) -> (usize, std::time::Duration) {
+fn drain_changes(world: &World, cursor: &mut WorldChangeCursor) -> (usize, Duration) {
     let started = Instant::now();
     let mut count = 0;
     loop {
@@ -260,22 +270,22 @@ fn drain_changes(world: &World, cursor: &mut WorldChangeCursor) -> (usize, std::
 
 #[cfg(not(world_bench_uninstrumented))]
 struct RemovalProfile {
-    trigger: std::time::Duration,
-    owner_point_lookup: std::time::Duration,
+    trigger: Duration,
+    owner_point_lookup: Duration,
     owner_point_lookup_turns: usize,
     owner_point_lookup_work_units: usize,
-    owner_point_lookup_max_turn: std::time::Duration,
+    owner_point_lookup_max_turn: Duration,
     trigger_live_delta: i128,
-    post_trigger_read: std::time::Duration,
+    post_trigger_read: Duration,
     post_trigger_read_live_delta: i128,
-    initial_publication_read: std::time::Duration,
-    turn_publication_read: std::time::Duration,
-    cleanup: std::time::Duration,
-    total: std::time::Duration,
+    initial_publication_read: Duration,
+    turn_publication_read: Duration,
+    cleanup: Duration,
+    total: Duration,
     turns: usize,
-    maximum_turn: std::time::Duration,
+    maximum_turn: Duration,
     maximum_turn_index: usize,
-    final_turn: std::time::Duration,
+    final_turn: Duration,
     removal_work: usize,
     maximum_removal_work: usize,
     object_pages: usize,
@@ -283,19 +293,19 @@ struct RemovalProfile {
     visible_objects: usize,
     object_read_work: usize,
     maximum_object_page_work: usize,
-    maximum_object_page: std::time::Duration,
+    maximum_object_page: Duration,
     detail_batches: usize,
     detail_read_work: usize,
     maximum_detail_page_work: usize,
-    maximum_detail_page: std::time::Duration,
+    maximum_detail_page: Duration,
     published_changes: usize,
 }
 
 #[cfg(not(world_bench_uninstrumented))]
 fn report_removal_profile(name: &str, mut scene: Scene, retire: bool, expected_remaining: usize, lookup_id: Uuid) {
     let mut turn_times = Vec::with_capacity(16_384);
-    let live_before = test_support::allocation::live_bytes();
-    let (profile, allocations) = test_support::allocation::measure(|| {
+    let live_before = allocation::live_bytes();
+    let (profile, allocations) = allocation::measure(|| {
         let mut change_cursor = scene.world.read_barrier().changes;
         let total_started = Instant::now();
         let trigger_started = Instant::now();
@@ -309,12 +319,12 @@ fn report_removal_profile(name: &str, mut scene: Scene, retire: bool, expected_r
                 .expect("remove profile root");
         }
         let trigger = trigger_started.elapsed();
-        let trigger_live_delta = test_support::allocation::live_bytes() - live_before;
+        let trigger_live_delta = allocation::live_bytes() - live_before;
         let owner_lookup_started = Instant::now();
         let mut lookup_cursor = None;
         let mut owner_point_lookup_turns = 0;
         let mut owner_point_lookup_work_units = 0;
-        let mut owner_point_lookup_max_turn = std::time::Duration::ZERO;
+        let mut owner_point_lookup_max_turn = Duration::ZERO;
         loop {
             owner_point_lookup_turns += 1;
             let turn_started = Instant::now();
@@ -341,7 +351,7 @@ fn report_removal_profile(name: &str, mut scene: Scene, retire: bool, expected_r
         let mut visible_objects = 0;
         let mut object_read_work = 0;
         let mut maximum_object_page_work = 0;
-        let mut maximum_read_page = std::time::Duration::ZERO;
+        let mut maximum_read_page = Duration::ZERO;
         let mut object_entities = Vec::new();
         loop {
             let page_started = Instant::now();
@@ -365,7 +375,7 @@ fn report_removal_profile(name: &str, mut scene: Scene, retire: bool, expected_r
         let mut detail_batches = 0;
         let mut detail_read_work = 0;
         let mut maximum_detail_page_work = 0;
-        let mut maximum_detail_page = std::time::Duration::ZERO;
+        let mut maximum_detail_page = Duration::ZERO;
         for entities in object_entities.chunks(MAX_OBJECT_DETAIL_BATCH_ITEMS) {
             let mut detail_cursor = None;
             loop {
@@ -385,17 +395,17 @@ fn report_removal_profile(name: &str, mut scene: Scene, retire: bool, expected_r
         }
         assert!(barrier.object_count_upper_bound >= visible_objects);
         let post_trigger_read = read_started.elapsed();
-        let post_trigger_read_live_delta = test_support::allocation::live_bytes() - live_before;
+        let post_trigger_read_live_delta = allocation::live_bytes() - live_before;
         drop(object_entities);
         let (mut published_changes, initial_publication_read) = drain_changes(&scene.world, &mut change_cursor);
         let cleanup_started = Instant::now();
-        let mut maximum_turn = std::time::Duration::ZERO;
+        let mut maximum_turn = Duration::ZERO;
         let mut maximum_turn_index = 0;
         let mut turn_index = 0;
-        let mut final_turn = std::time::Duration::ZERO;
+        let mut final_turn = Duration::ZERO;
         let mut removal_work = 0;
         let mut maximum_removal_work = 0;
-        let mut turn_publication_read = std::time::Duration::ZERO;
+        let mut turn_publication_read = Duration::ZERO;
         while scene.world.has_pending_removals() {
             turn_index += 1;
             let started = Instant::now();
@@ -455,7 +465,7 @@ fn report_removal_profile(name: &str, mut scene: Scene, retire: bool, expected_r
         }
     });
     assert_eq!(scene.world.object_count(), expected_remaining);
-    let retained_delta = test_support::allocation::live_bytes() - live_before;
+    let retained_delta = allocation::live_bytes() - live_before;
     turn_times.sort_unstable();
     let p99_turn = turn_times[(turn_times.len() - 1) * 99 / 100];
     let p999_turn = turn_times[(turn_times.len() - 1) * 999 / 1000];
@@ -504,7 +514,7 @@ fn report_removal_profile(name: &str, mut scene: Scene, retire: bool, expected_r
 #[cfg(world_bench_uninstrumented)]
 #[derive(Clone, Copy, Default)]
 struct PhaseTime {
-    wall: std::time::Duration,
+    wall: Duration,
     cycles: Option<u64>,
 }
 
@@ -545,33 +555,33 @@ struct LatencySample {
     recovery_cancellations: usize,
     published_changes: usize,
     #[cfg(world_bench_detailed)]
-    reclamation_work_time: std::time::Duration,
+    reclamation_work_time: Duration,
     #[cfg(world_bench_detailed)]
-    finalization_time: std::time::Duration,
+    finalization_time: Duration,
     #[cfg(world_bench_detailed)]
-    entity_children_time: std::time::Duration,
+    entity_children_time: Duration,
     #[cfg(world_bench_detailed)]
-    entity_relationship_time: std::time::Duration,
+    entity_relationship_time: Duration,
     #[cfg(world_bench_detailed)]
-    region_objects_time: std::time::Duration,
+    region_objects_time: Duration,
     #[cfg(world_bench_detailed)]
-    region_state_time: std::time::Duration,
+    region_state_time: Duration,
     #[cfg(world_bench_detailed)]
-    region_tombstones_time: std::time::Duration,
+    region_tombstones_time: Duration,
     #[cfg(world_bench_detailed)]
-    transfer_time: std::time::Duration,
+    transfer_time: Duration,
     #[cfg(world_bench_detailed)]
-    index_removal_time: std::time::Duration,
+    index_removal_time: Duration,
     #[cfg(world_bench_detailed)]
-    component_destruction_time: std::time::Duration,
+    component_destruction_time: Duration,
     #[cfg(world_bench_detailed)]
-    tombstone_insertion_time: std::time::Duration,
+    tombstone_insertion_time: Duration,
     #[cfg(world_bench_detailed)]
-    journal_publication_time: std::time::Duration,
+    journal_publication_time: Duration,
     #[cfg(world_bench_detailed)]
-    recovery_compaction_time: std::time::Duration,
+    recovery_compaction_time: Duration,
     #[cfg(world_bench_detailed)]
-    final_buffer_release_time: std::time::Duration,
+    final_buffer_release_time: Duration,
 }
 
 #[cfg(world_bench_uninstrumented)]
@@ -777,7 +787,7 @@ fn report_removal_latency(
 
 #[cfg(world_bench_uninstrumented)]
 fn report_latency_distribution(name: &str, samples: &[LatencySample]) {
-    let durations: [(&str, fn(&LatencySample) -> std::time::Duration); 15] = [
+    let durations: [(&str, fn(&LatencySample) -> Duration); 15] = [
         ("trigger", |sample| sample.trigger.wall),
         ("lookup", |sample| sample.lookup.wall),
         ("lookup_max_turn", |sample| sample.lookup_max_turn.wall),
@@ -929,8 +939,6 @@ fn cycle_delta(start: Option<u64>, end: Option<u64>) -> Option<u64> {
 fn thread_cycles() -> Option<u64> {
     #[cfg(windows)]
     {
-        use std::ffi::c_void;
-
         #[link(name = "kernel32")]
         unsafe extern "system" {
             fn GetCurrentThread() -> *mut c_void;
@@ -1006,7 +1014,7 @@ fn bench_linked_removal(group: &mut BenchmarkGroup<'_, WallTime>) {
         report_latency_distribution("deep_kill_65k_depth_4096", &deep_kill_samples);
         eprintln!(
             "latency-environment mode=allocator-free repetitions=5 processors={} system_busy_percent={}",
-            std::thread::available_parallelism().map_or(0, |processors| processors.get()),
+            thread::available_parallelism().map_or(0, |processors| processors.get()),
             system_busy_percentage(machine_start, system_cpu_times())
                 .map_or_else(|| "unavailable".to_owned(), |percent| format!("{percent:.1}")),
         );

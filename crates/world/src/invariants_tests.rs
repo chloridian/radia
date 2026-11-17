@@ -1,18 +1,22 @@
 use std::num::{NonZeroU8, NonZeroU32};
 
 use math::{Quat, Vec3};
+use proptest::{collection, test_runner::Config};
 use uuid::Uuid;
 
-use crate::ApplyError::InvalidValue;
-use crate::ApplyOutcome::{Introduced, Unchanged, Updated};
-use crate::FieldRejectionReason::ParentCycle;
-use crate::FieldUpdate;
-use crate::Kind::{Avatar, Object};
-use crate::OrderEvidence::Ordered;
-use crate::ParentUpdate::{Local, Root};
 use crate::{
-    Appearance, AttachmentPoint, FieldGroup, FieldRejection, ObjectObservation, ObjectPatch, Parent, ParentUpdate, PbrMaterialOverride,
-    PbrMaterialOverrides, Pose, Region, RegionInfo, UpdateSource, World, WorldLimits,
+    Appearance,
+    ApplyError::InvalidValue,
+    ApplyOutcome::{Introduced, Unchanged, Updated},
+    AttachmentPoint, FieldGroup, FieldRejection,
+    FieldRejectionReason::ParentCycle,
+    FieldUpdate,
+    Kind::{Avatar, Object},
+    ObjectObservation, ObjectPatch,
+    OrderEvidence::Ordered,
+    Parent, ParentUpdate,
+    ParentUpdate::{Local, Root},
+    PbrMaterialOverride, PbrMaterialOverrides, Pose, Region, RegionInfo, UpdateSource, World, WorldLimits,
 };
 
 fn limits() -> WorldLimits {
@@ -49,11 +53,11 @@ fn object(source: UpdateSource, id: u128, local_id_value: u32, parent: ParentUpd
 }
 
 proptest::proptest! {
-    #![proptest_config(proptest::test_runner::Config { cases: 48, max_shrink_iters: 128, ..Default::default() })]
+    #![proptest_config(Config { cases: 48, max_shrink_iters: 128, ..Default::default() })]
 
     #[test]
     fn queued_relationships_preserve_indexes(
-        operations in proptest::collection::vec((0_u8..6, 2_u32..130, 0_usize..9), 1..80)
+        operations in collection::vec((0_u8..6, 2_u32..130, 0_usize..9), 1..80)
     ) {
 
         let mut bounds = limits();
@@ -94,7 +98,7 @@ proptest::proptest! {
 
     #[test]
     fn mutation_sequences_preserve_world_indexes(
-        operations in proptest::collection::vec((0_u8..5, 0_u8..3, 0_u8..16, 0_u8..8, 1_u8..32, 0_u8..9, 0_u8..32), 1..128)
+        operations in collection::vec((0_u8..5, 0_u8..3, 0_u8..16, 0_u8..8, 1_u8..32, 0_u8..9, 0_u8..32), 1..128)
     ) {
         let mut world_limits = limits();
         world_limits.max_regions = 3;
@@ -218,11 +222,11 @@ fn cycle_check_exceeds_pose_limit() {
 }
 
 proptest::proptest! {
-    #![proptest_config(proptest::test_runner::Config { cases: 48, max_shrink_iters: 128, ..Default::default() })]
+    #![proptest_config(Config { cases: 48, max_shrink_iters: 128, ..Default::default() })]
 
     #[test]
     fn override_retention_preserves_world_indexes(
-        operations in proptest::collection::vec((0_u8..6, 0_u8..2, 0_u8..8, 0_u8..8, 1_u8..32, 0_u8..4), 1..128)
+        operations in collection::vec((0_u8..6, 0_u8..2, 0_u8..8, 0_u8..8, 1_u8..32, 0_u8..4), 1..128)
     ) {
         let mut world_limits = limits();
         world_limits.max_entities = 16;

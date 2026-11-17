@@ -1,8 +1,7 @@
 use math::Quat;
 
-use crate::World;
 use crate::{
-    CoordinateFrame, Entity, Kind, Parent, PoseError, PoseState, RegionInfo, UnresolvedReason, WorldPose, WorldTransform,
+    CoordinateFrame, Entity, Kind, Parent, PoseError, PoseState, RegionInfo, UnresolvedReason, World, WorldPose, WorldTransform,
     WorldTransformState,
 };
 
@@ -192,15 +191,16 @@ fn record_unresolved(current: &mut Option<UnresolvedReason>, next: UnresolvedRea
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
+    use std::{assert_matches, num::NonZeroU32};
+
+    use math::{DVec3, Vec3};
+    use uuid::Uuid;
 
     use super::*;
     use crate::{
         ApplyOutcome::Introduced, Kind::Object, ObjectObservation, OrderEvidence::Ordered, ParentUpdate::Root, Pose, RegionInfo,
         UpdateSource, WorldLimits,
     };
-    use math::{DVec3, Vec3};
-    use uuid::Uuid;
 
     #[test]
     fn corrupt_parent_cycle_is_bounded() {
@@ -266,7 +266,7 @@ mod tests {
         };
         let mut world = World::new(limits);
         let region = world.register_region().unwrap();
-        std::assert_matches!(
+        assert_matches!(
             world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap().outcome,
             crate::RegionOutcome::Patched { .. }
         );

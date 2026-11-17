@@ -1,7 +1,9 @@
-use crate::history::WorldChange::{RegionRegistered, RegionRetired, RegionUpdated};
-use crate::update::FieldStamp;
-use crate::{ApplyError, Region, RegionApplied, RegionInfo, RegionOutcome, UpdateSource};
-use crate::{RegionState, World, newer_field};
+use crate::{
+    ApplyError, Region, RegionApplied, RegionInfo, RegionOutcome, RegionState, UpdateSource, World,
+    history::WorldChange::{RegionRegistered, RegionRetired, RegionUpdated},
+    newer_field,
+    update::FieldStamp,
+};
 
 impl World {
     pub fn register_region(&mut self) -> Result<Region, ApplyError> {
@@ -117,9 +119,9 @@ impl World {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::num::NonZeroU32;
+    use std::{assert_matches, num::NonZeroU32};
 
+    use super::*;
     use crate::{
         ApplyError::{RegionGenerationExhausted, RevisionExhausted},
         ApplyOutcome, DeferredReason, LocalAddress, ObjectPatch, PbrMaterialOverrides, WorldLimits, WorldRevision,
@@ -159,7 +161,7 @@ mod tests {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
         world.journal.revision = WorldRevision(u64::MAX);
-        std::assert_matches!(world.retire_region(region), Err(RevisionExhausted));
+        assert_matches!(world.retire_region(region), Err(RevisionExhausted));
         assert!(world.region(region).is_some());
     }
 
@@ -208,7 +210,7 @@ mod tests {
         };
         assert_eq!(world.patch_object(patch(1)).unwrap().outcome, ApplyOutcome::Deferred(DeferredReason::UnknownObject));
 
-        std::assert_matches!(world.retire_region(region).unwrap().outcome, RegionOutcome::Retired { entities_removed: 0, .. });
+        assert_matches!(world.retire_region(region).unwrap().outcome, RegionOutcome::Retired { entities_removed: 0, .. });
         assert_eq!(world.patch_object(patch(2)), Err(ApplyError::RegionRetired));
         assert_eq!(world.check_invariants(), Ok(()));
         while world.has_pending_removals() {

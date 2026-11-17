@@ -1,4 +1,4 @@
-use std::{fmt, mem::size_of, sync::Arc};
+use std::{fmt, sync::Arc};
 
 use math::Vec3;
 use uuid::Uuid;

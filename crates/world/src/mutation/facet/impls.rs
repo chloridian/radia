@@ -1,12 +1,10 @@
 use std::sync::Arc;
 
 use super::{Facet, FacetContext, FacetMerge, FacetSupport, FacetUpdates};
-use crate::MAX_OBJECT_MEDIA_BYTES;
-use crate::history::WorldChangeClasses;
-use crate::update::FieldUpdate;
 use crate::{
-    Appearance, AvatarAppearance, AvatarAppearanceUpdate, FieldGroup, FieldRejectionReason, Kind, ObjectMedia, ObjectMediaUpdate,
-    PbrMaterialAssignments, PbrMaterialOverrides, Shape, SitTarget, SurfaceAppearance, TextureAnimation, UpdateAuthority,
+    Appearance, AvatarAppearance, AvatarAppearanceUpdate, FieldGroup, FieldRejectionReason, Kind, MAX_OBJECT_MEDIA_BYTES, ObjectMedia,
+    ObjectMediaUpdate, PbrMaterialAssignments, PbrMaterialOverrides, Shape, SitTarget, SurfaceAppearance, TextureAnimation,
+    UpdateAuthority, history::WorldChangeClasses, update::FieldUpdate,
 };
 
 impl Facet for Shape {
