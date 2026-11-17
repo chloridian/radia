@@ -100,7 +100,11 @@ winit = { version = "=0.30.13", default-features = false, features = [
     "rwh_06",
 ] }
 
+[workspace.lints.rust]
+unused_qualifications = "deny"
+
 [workspace.lints.clippy]
+absolute_paths = "deny"
 complexity = { level = "deny", priority = -1 }
 correctness = { level = "deny", priority = -1 }
 large_enum_variant = "allow"
