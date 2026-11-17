@@ -1,12 +1,11 @@
 use std::fmt;
 
+use super::is_xml_char;
 use crate::{
     Error, Result,
     encoding::real_text,
     serialization::{Container, Format, Output, Text},
 };
-
-use super::is_xml_char;
 
 pub(super) struct Encoder;
 impl Format for Encoder {

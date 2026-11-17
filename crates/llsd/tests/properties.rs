@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 
 use llsd::{Binary, Date, Limits, Uri, Value, binary, notation, xml};
-use proptest::prelude::*;
+use proptest::{collection, prelude::*};
 use uuid::Uuid;
 
 const CASES: u32 = 96;
 type Decoder = fn(&[u8]) -> Result<Value, llsd::Error>;
 
 fn short_text() -> impl Strategy<Value = String> {
-    prop::collection::vec(0x20u8..=0x7e, 0..17).prop_map(|bytes| String::from_utf8(bytes).expect("ASCII bytes are UTF-8"))
+    collection::vec(0x20u8..=0x7e, 0..17).prop_map(|bytes| String::from_utf8(bytes).expect("ASCII bytes are UTF-8"))
 }
 
 fn xml_character() -> impl Strategy<Value = char> {
@@ -23,7 +23,7 @@ fn xml_character() -> impl Strategy<Value = char> {
 }
 
 fn xml_text() -> impl Strategy<Value = String> {
-    prop::collection::vec(xml_character(), 0..17).prop_map(String::from_iter)
+    collection::vec(xml_character(), 0..17).prop_map(String::from_iter)
 }
 
 fn finite_real() -> impl Strategy<Value = f64> {
@@ -67,7 +67,7 @@ fn values() -> impl Strategy<Value = Value> {
         finite_real().prop_map(Value::Real),
         xml_text().prop_map(Value::String),
         prop_oneof![short_text(), xml_text()].prop_map(|value| Value::Uri(Uri::new(value))),
-        prop::collection::vec(any::<u8>(), 0..17).prop_map(|bytes| Value::Binary(Binary::from(bytes))),
+        collection::vec(any::<u8>(), 0..17).prop_map(|bytes| Value::Binary(Binary::from(bytes))),
         (-2_000_000_000i64..=2_000_000_000)
             .prop_filter_map("valid whole-second date", |seconds| Date::from_unix_seconds(seconds as f64).map(Value::Date)),
         any::<[u8; 16]>().prop_map(|bytes| Value::Uuid(Uuid::from_bytes(bytes))),
@@ -75,8 +75,8 @@ fn values() -> impl Strategy<Value = Value> {
 
     leaves.prop_recursive(3, 32, 4, |inner| {
         prop_oneof![
-            prop::collection::vec(inner.clone(), 0..4).prop_map(Value::Array),
-            prop::collection::btree_map(xml_text(), inner, 0..4).prop_map(|map| Value::Map(BTreeMap::from_iter(map))),
+            collection::vec(inner.clone(), 0..4).prop_map(Value::Array),
+            collection::btree_map(xml_text(), inner, 0..4).prop_map(|map| Value::Map(BTreeMap::from_iter(map))),
         ]
     })
 }
@@ -85,7 +85,7 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: CASES, .. ProptestConfig::default() })]
 
     #[test]
-    fn inputs_do_not_panic(input in prop::collection::vec(any::<u8>(), 0..257)) {
+    fn inputs_do_not_panic(input in collection::vec(any::<u8>(), 0..257)) {
         let decoders: [Decoder; 3] = [xml::from_slice::<Value>, binary::from_slice::<Value>, notation::from_slice::<Value>];
 
         for decode in decoders {
@@ -94,7 +94,7 @@ proptest! {
     }
 
     #[test]
-    fn framed_b16_payload_no_panic(payload in prop::collection::vec(any::<char>(), 0..17)) {
+    fn framed_b16_payload_no_panic(payload in collection::vec(any::<char>(), 0..17)) {
         let mut input = b"b16\"".to_vec();
         input.extend(payload.iter().copied().collect::<String>().as_bytes());
         input.push(b'"');
@@ -102,7 +102,7 @@ proptest! {
     }
 
     #[test]
-    fn framed_b16_valid_bytes_roundtrip(bytes in prop::collection::vec(any::<u8>(), 0..33)) {
+    fn framed_b16_valid_bytes_roundtrip(bytes in collection::vec(any::<u8>(), 0..33)) {
         let mut input = b"b16\"".to_vec();
         for byte in &bytes {
             input.extend_from_slice(format!("{byte:02X}").as_bytes());

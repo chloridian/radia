@@ -2,16 +2,13 @@ mod binary;
 mod date;
 mod de;
 mod uri;
-pub mod uuid;
 
-use std::{collections::BTreeMap, mem::size_of};
+use std::collections::BTreeMap;
 
-use ::uuid::Uuid;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use uuid::Uuid;
 
-pub use self::binary::Binary;
-pub use self::date::Date;
-pub use self::uri::Uri;
+pub use self::{binary::Binary, date::Date, uri::Uri};
 
 pub(crate) const UUID_NEWTYPE: &str = "llsd::UUID";
 pub(crate) const URI_NEWTYPE: &str = "llsd::URI";
@@ -37,10 +34,7 @@ pub enum Value {
 }
 
 impl Value {
-    pub fn deserialize_with_heap_limit<'de, D: Deserializer<'de>>(
-        deserializer: D,
-        max_heap_bytes: usize,
-    ) -> std::result::Result<Self, D::Error> {
+    pub fn deserialize_with_heap_limit<'de, D: Deserializer<'de>>(deserializer: D, max_heap_bytes: usize) -> Result<Self, D::Error> {
         de::deserialize_with_heap_limit(deserializer, max_heap_bytes)
     }
 
@@ -144,7 +138,7 @@ impl Value {
 }
 
 impl Serialize for Value {
-    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::Undefined => serializer.serialize_unit(),
             Self::Boolean(value) => serializer.serialize_bool(*value),
@@ -162,7 +156,7 @@ impl Serialize for Value {
 }
 
 impl<'de> Deserialize<'de> for Value {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         de::deserialize_with_heap_limit(deserializer, usize::MAX)
     }
 }

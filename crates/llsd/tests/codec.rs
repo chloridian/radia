@@ -1,9 +1,10 @@
-use std::assert_matches;
-use std::{collections::BTreeMap, fmt, io::Cursor};
+use std::{array, assert_matches, collections::BTreeMap, fmt, io::Cursor, iter};
 
 use llsd::{Binary, Date, Error, Limits, Map, Uri, Value, binary, notation, xml};
-use serde::ser::{SerializeMap, SerializeSeq};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{
+    Deserialize, Serialize, Serializer,
+    ser::{SerializeMap, SerializeSeq},
+};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
@@ -583,8 +584,8 @@ fn decode_limits_match_formats() {
     ]);
 
     let input_bytes = array_inputs.map(|input| input.to_vec());
-    let input_bytes_at_limit = std::array::from_fn(|index| Limits { max_bytes: input_bytes[index].len(), ..Limits::default() });
-    let input_bytes_over_limit = std::array::from_fn(|index| Limits { max_bytes: input_bytes[index].len() - 1, ..Limits::default() });
+    let input_bytes_at_limit = array::from_fn(|index| Limits { max_bytes: input_bytes[index].len(), ..Limits::default() });
+    let input_bytes_over_limit = array::from_fn(|index| Limits { max_bytes: input_bytes[index].len() - 1, ..Limits::default() });
     cases.push(LimitCase {
         name: "input bytes",
         over_limit_inputs: input_bytes.clone(),
@@ -601,7 +602,7 @@ fn decode_limits_match_formats() {
             binary.extend_from_slice(b"[\0\0\0\x01");
         }
         binary.push(b'!');
-        binary.extend(std::iter::repeat_n(b']', depth));
+        binary.extend(iter::repeat_n(b']', depth));
         let notation = format!("{}!{}", "[".repeat(depth), "]".repeat(depth));
         [xml.into_bytes(), binary, notation.into_bytes()]
     }
