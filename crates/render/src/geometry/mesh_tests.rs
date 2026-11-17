@@ -1284,7 +1284,7 @@ fn gpu_late_recovery_applies_changes() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored ignored-only gpu_mesh_pages"]
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only gpu_mesh_pages"]
 fn gpu_mesh_pages() {
     let (device, queue) = block_on(async {
         let instance =
