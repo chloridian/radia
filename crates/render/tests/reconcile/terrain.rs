@@ -7,7 +7,7 @@ use super::support::{
 };
 
 #[test]
-fn terrain_and_water_lifetimes() {
+fn surfaces_follow_region_lifetime() {
     let mut world = world();
     let region = world_region(&world, 0);
     let first = world::TerrainPatch::new(0, 0, Box::new([7.0; 256])).unwrap();
