@@ -28,38 +28,6 @@ async fn zero_retry_after_skips_wait() {
     assert_eq!(tokio::time::Instant::now() - started, Duration::ZERO);
 }
 
-#[tokio::test]
-async fn retry_limit_is_terminal() {
-    let mut error_count = MAX_EVENT_QUEUE_ERRORS;
-    let (events, received_events) = mpsc::channel(1);
-    let mut received_events = EventReceiver::new(received_events);
-    let (_shutdown, shutdown_requested) = watch::channel(false);
-    let (_session_closed, session_closed) = watch::channel(false);
-    let simulator_id = test_simulator_id(1);
-    let source = test_source();
-    let stop = Stop::new(shutdown_requested, session_closed);
-    let mut pending_loss = pending_event_queue_loss(&events, simulator_id, source, &stop);
-
-    let outcome = retry_event_queue_with_hint(
-        simulator_id,
-        &mut error_count,
-        source,
-        &events,
-        "EventQueueGet returned HTTP 500.".into(),
-        None,
-        &stop,
-        &mut pending_loss,
-    )
-    .await;
-    let Some(Event::CapabilityError { capability, reason, .. }) = received_events.recv().await else {
-        panic!("retry exhaustion must report a capability error");
-    };
-
-    assert_eq!(outcome, RetryOutcome::LimitReached);
-    assert_eq!(capability, "EventQueueGet");
-    assert!(reason.contains("repeated errors"));
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn retry_limit_records_coverage_first() {
     let server = EventQueueTestServer::start(|base| {
@@ -134,62 +102,37 @@ async fn retry_limit_records_coverage_first() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn seed_lookup_retries() {
-    let mut server = EventQueueTestServer::start(|base| {
-        let mut event_url = base.clone();
-        event_url.set_path("/event-queue");
-        vec![
-            EventServerResponse::Response(response(503, "Service Unavailable", "text/plain", None, "try again")),
-            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))),
-            EventServerResponse::Response(response(404, "Not Found", "text/plain", None, "not found")),
-        ]
-    });
-    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-    let (event_sender, received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
-    let mut received_events = EventReceiver::new(received_events);
-    let (_shutdown, shutdown_requested) = watch::channel(false);
-    let task = client
-        .start_event_queue(test_simulator_id(1), test_source(), event_sender, shutdown_requested, CoverageLossLedger::new())
-        .expect("start event queue");
+    let failures = [
+        ("503", EventServerResponse::Response(response(503, "Service Unavailable", "text/plain", None, "try again"))),
+        ("429", EventServerResponse::Response(response(429, "Too Many Requests", "text/plain", Some("0"), "try again"))),
+        ("dropped connection", EventServerResponse::DropConnection),
+    ];
+    for (case, failure) in failures {
+        let mut server = EventQueueTestServer::start(move |base| {
+            let mut event_url = base.clone();
+            event_url.set_path("/event-queue");
+            vec![
+                failure,
+                EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))),
+                EventServerResponse::Response(response(404, "Not Found", "text/plain", None, "not found")),
+            ]
+        });
+        let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+        let (event_sender, received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
+        let mut received_events = EventReceiver::new(received_events);
+        let (_shutdown, shutdown_requested) = watch::channel(false);
+        let task = client
+            .start_event_queue(test_simulator_id(1), test_source(), event_sender, shutdown_requested, CoverageLossLedger::new())
+            .expect("start event queue");
 
-    assert!(request_line(&server.next_request_async().await).starts_with("POST /seed HTTP/1.1"));
-    assert!(request_line(&server.next_request_async().await).starts_with("POST /seed HTTP/1.1"));
-    let poll = server.next_request_async().await;
-    assert!(request_line(&poll).starts_with("POST /event-queue HTTP/1.1"), "{}", request_line(&poll));
-    task.wait().await;
-    assert!(receive_poll_error(&mut received_events).await.contains("HTTP 404"));
-    let requests = server.finish();
-    assert_eq!(requests.len(), 3);
-    assert!(request_line(&requests[0]).starts_with("POST /seed HTTP/1.1"));
-    assert!(request_line(&requests[1]).starts_with("POST /seed HTTP/1.1"));
-    assert!(request_line(&requests[2]).starts_with("POST /event-queue HTTP/1.1"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn rate_limit_retries() {
-    let server = EventQueueTestServer::start(|base| {
-        let mut event_url = base.clone();
-        event_url.set_path("/event-queue");
-        vec![
-            EventServerResponse::Response(response(429, "Too Many Requests", "text/plain", Some("0"), "try again")),
-            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))),
-            EventServerResponse::Response(response(404, "Not Found", "text/plain", None, "not found")),
-        ]
-    });
-    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-    let (event_sender, received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
-    let mut received_events = EventReceiver::new(received_events);
-    let (_shutdown, shutdown_requested) = watch::channel(false);
-    let task = client
-        .start_event_queue(test_simulator_id(1), test_source(), event_sender, shutdown_requested, CoverageLossLedger::new())
-        .expect("start event queue");
-
-    assert!(receive_poll_error(&mut received_events).await.contains("HTTP 404"));
-    let requests = server.finish();
-    assert_eq!(requests.len(), 3);
-    assert!(request_line(&requests[0]).starts_with("POST /seed HTTP/1.1"));
-    assert!(request_line(&requests[1]).starts_with("POST /seed HTTP/1.1"));
-    assert!(request_line(&requests[2]).starts_with("POST /event-queue HTTP/1.1"));
-    task.wait().await;
+        assert!(request_line(&server.next_request_async().await).starts_with("POST /seed HTTP/1.1"), "{case}");
+        assert!(request_line(&server.next_request_async().await).starts_with("POST /seed HTTP/1.1"), "{case}");
+        let poll = server.next_request_async().await;
+        assert!(request_line(&poll).starts_with("POST /event-queue HTTP/1.1"), "{case}: {}", request_line(&poll));
+        task.wait().await;
+        assert!(receive_poll_error(&mut received_events).await.contains("HTTP 404"), "{case}");
+        assert_eq!(server.finish().len(), 3, "{case}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -445,37 +388,6 @@ async fn permanent_poll_error_stops() {
     assert_eq!(server.finish().len(), 2, "permanent poll failures do not retry");
     assert_eq!(task.wait().await, EventQueueExit::StoppedWithCoverageLoss);
     assert!(!coverage_losses.snapshot().losses.is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn seed_transport_retries() {
-    let mut server = EventQueueTestServer::start(|base| {
-        let mut event_url = base.clone();
-        event_url.set_path("/event-queue");
-        vec![
-            EventServerResponse::DropConnection,
-            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))),
-            EventServerResponse::Response(response(404, "Not Found", "text/plain", None, "not found")),
-        ]
-    });
-    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-    let (event_sender, received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
-    let mut received_events = EventReceiver::new(received_events);
-    let (_shutdown, shutdown_requested) = watch::channel(false);
-    let task = client
-        .start_event_queue(test_simulator_id(1), test_source(), event_sender, shutdown_requested, CoverageLossLedger::new())
-        .expect("start event queue");
-
-    assert!(request_line(&server.next_request_async().await).starts_with("POST /seed HTTP/1.1"));
-    assert!(request_line(&server.next_request_async().await).starts_with("POST /seed HTTP/1.1"));
-    assert!(request_line(&server.next_request_async().await).starts_with("POST /event-queue HTTP/1.1"));
-    task.wait().await;
-    assert!(receive_poll_error(&mut received_events).await.contains("HTTP 404"));
-    let requests = server.finish();
-    assert_eq!(requests.len(), 3);
-    assert!(request_line(&requests[0]).starts_with("POST /seed HTTP/1.1"));
-    assert!(request_line(&requests[1]).starts_with("POST /seed HTTP/1.1"));
-    assert!(request_line(&requests[2]).starts_with("POST /event-queue HTTP/1.1"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

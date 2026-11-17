@@ -461,7 +461,7 @@ async fn network_thread_login() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-pub(super) async fn event_queue_coverage_loss_keeps_viewer_session_connected() {
+pub(super) async fn event_queue_loss_keeps_session() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let simulator_address = simulator.local_addr().expect("read simulator address");
     let (login_url, poll_started, fail_poll, http_task) = fake_http_with_event_queue_failure(simulator_address.port()).await;

@@ -12,8 +12,6 @@ struct TeleportFinishScenario {
     retained_primary_bytes: usize,
     held_primary_event: Option<EventEnvelope>,
     held_send: Option<oneshot::Receiver<Result<(), Error>>>,
-    held_send_queued_at: Option<Instant>,
-    completion_latencies: Vec<Duration>,
 }
 
 impl TeleportFinishScenario {
@@ -60,8 +58,6 @@ impl TeleportFinishScenario {
             retained_primary_bytes,
             held_primary_event: Some(held_primary_event),
             held_send: None,
-            held_send_queued_at: None,
-            completion_latencies: Vec::new(),
         }
     }
 
@@ -161,7 +157,6 @@ impl TeleportFinishScenario {
 
         self.harness.pause_sends.send_replace(true);
         let (completed, held_send) = oneshot::channel();
-        let held_send_queued_at = Instant::now();
         self.harness
             .commands
             .send(Command::SendTo {
@@ -205,10 +200,9 @@ impl TeleportFinishScenario {
         assert_eq!(promoted, self.harness.neighbor_id);
         assert_eq!(promoted_endpoint, self.target_endpoint);
         self.held_send = Some(held_send);
-        self.held_send_queued_at = Some(held_send_queued_at);
     }
 
-    async fn finish_loaded_sends(&mut self, send_count: usize) {
+    async fn finish_loaded_sends(&mut self) {
         use protocol::lludp::Message;
 
         self.harness
@@ -216,11 +210,11 @@ impl TeleportFinishScenario {
             .send(Command::SendMessage { message: object_request(), delivery: Delivery::Reliable })
             .await
             .expect("queue default send after destination promotion");
-        let control_send_count = if send_count > 1 { 2 } else { 0 };
+        let send_count = NEIGHBOR_COMMAND_CAPACITY - 1;
+        let control_send_count = 2;
         let mut handoff_sends = Vec::with_capacity(send_count);
         for index in 0..send_count {
             let (completed, completion) = oneshot::channel();
-            let queued_at = Instant::now();
             let message = if index < control_send_count {
                 Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: u8::try_from(index).expect("ping ID fits u8") } })
             } else {
@@ -231,21 +225,18 @@ impl TeleportFinishScenario {
                 .send(Command::SendTo { simulator_id: self.harness.neighbor_id, message, delivery: Delivery::Unreliable, completed })
                 .await
                 .expect("queue exact send on promoted simulator");
-            handoff_sends.push((queued_at, completion));
+            handoff_sends.push(completion);
         }
         let queued_commands = handoff_sends.len() + 1;
         let available_command_slots = self.harness.commands.capacity();
-        if send_count > 1 {
-            assert_eq!(queued_commands, NEIGHBOR_COMMAND_CAPACITY, "the loaded handoff should queue one bounded neighbor backlog");
-            assert_eq!(
-                available_command_slots,
-                COMMAND_CAPACITY - queued_commands,
-                "only the handoff workload should occupy the runtime command channel"
-            );
-        }
-        for (queued_at, completion) in handoff_sends {
+        assert_eq!(queued_commands, NEIGHBOR_COMMAND_CAPACITY, "the loaded handoff should queue one bounded neighbor backlog");
+        assert_eq!(
+            available_command_slots,
+            COMMAND_CAPACITY - queued_commands,
+            "only the handoff workload should occupy the runtime command channel"
+        );
+        for completion in handoff_sends {
             timeout(WAIT, completion).await.expect("handoff send reaches local socket").expect("send completion").expect("local send");
-            self.completion_latencies.push(Instant::now().duration_since(queued_at));
         }
         let expected_fair_sends = queued_commands - control_send_count;
         let mut fair_sends_received = 0;
@@ -285,13 +276,6 @@ impl TeleportFinishScenario {
         assert_eq!(fair_sends_received, expected_fair_sends, "all queued fair sends should arrive at the destination");
         assert_eq!(control_sends_received, control_send_count, "all queued control sends should arrive at the destination");
         assert_eq!(throttle_sends_received, 1, "the promoted connection refreshes its throttle once");
-        if send_count > 1 {
-            assert_eq!(self.completion_latencies.len(), send_count, "every queued handoff send should complete locally");
-            eprintln!(
-                "loaded handoff command burst: exact-sends={}, default-sends=1, total-queued-commands={queued_commands}, neighbor-command-capacity={}, runtime-command-slots-before-release={available_command_slots}, delayed-former-primary-send=true",
-                send_count, NEIGHBOR_COMMAND_CAPACITY,
-            );
-        }
         timeout(WAIT, async {
             while self.harness.packet_memory.neighbor_available_bytes() != self.neighbor_available - self.retained_primary_bytes {
                 task::yield_now().await;
@@ -307,7 +291,7 @@ impl TeleportFinishScenario {
         );
     }
 
-    async fn check_former_primary(&mut self, send_count: usize) {
+    async fn check_former_primary(&mut self) {
         use protocol::lludp::Message::{AgentMovementComplete, ChatFromSimulator};
 
         use crate::event::Event::{Failed, SimulatorMessage};
@@ -316,12 +300,6 @@ impl TeleportFinishScenario {
         let sent = receive_message(&self.harness.primary, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
         let held_send = self.held_send.take().expect("former primary send remains pending");
         assert!(timeout(WAIT, held_send).await.expect("former primary send completes").expect("send reply").is_ok());
-        if send_count > 1 {
-            eprintln!(
-                "exact send held on former primary across promotion: enqueue-to-local-send-completion={:?}",
-                self.held_send_queued_at.expect("former primary send has an enqueue time").elapsed()
-            );
-        }
         self.harness.primary.send_to(&ack(31, sent.sequence()), self.harness.primary_peer).await.expect("ack explicit former-primary send");
         let mut fence = object_request();
         if let Message::RequestMultipleObjects(request) = &mut fence {
@@ -492,44 +470,25 @@ impl TeleportFinishScenario {
         assert_eq!(route_peer, self.harness.neighbor_peer);
     }
 
-    async fn shutdown(self) -> Vec<Duration> {
+    async fn shutdown(self) {
         self.harness.disconnect.send_replace(true);
         let logout = receive_message(&self.harness.neighbor, |message| matches!(message, Message::LogoutRequest(_))).await;
         assert!(logout.is_reliable());
         std::assert_matches!(logout.message(), Message::LogoutRequest(_));
         send_logout_reply(&self.harness.neighbor, self.harness.neighbor_peer, &logout, 51).await;
         assert!(timeout(WAIT, self.harness.client).await.expect("logout should finish").expect("manager task").is_ok());
-        self.completion_latencies
     }
 }
 
 async fn run_teleport_finish_test() {
-    let _ = run_teleport_finish_scenario(1).await;
-}
-
-async fn run_handoff_send_latency_test() {
-    const REPETITIONS: usize = 8;
-    let mut completion_latencies = Vec::with_capacity(REPETITIONS * (NEIGHBOR_COMMAND_CAPACITY - 1));
-    for _ in 0..REPETITIONS {
-        let completion = run_teleport_finish_scenario(NEIGHBOR_COMMAND_CAPACITY - 1).await;
-        completion_latencies.extend(completion);
-    }
-    eprintln!(
-        "repeated loaded handoff latency: repetitions={REPETITIONS} exact-send-samples={} enqueue-to-local-send-completion p50/p95/p99={:?}",
-        completion_latencies.len(),
-        duration_percentiles(&completion_latencies),
-    );
-}
-
-async fn run_teleport_finish_scenario(send_count: usize) -> Vec<Duration> {
     let mut scenario = TeleportFinishScenario::new().await;
     scenario.prepare_destination().await;
     scenario.promote().await;
-    scenario.finish_loaded_sends(send_count).await;
-    scenario.check_former_primary(send_count).await;
+    scenario.finish_loaded_sends().await;
+    scenario.check_former_primary().await;
     scenario.release_primary_resources().await;
     scenario.check_promoted_primary().await;
-    scenario.shutdown().await
+    scenario.shutdown().await;
 }
 
 async fn run_repeated_promotions() {
@@ -780,14 +739,8 @@ async fn handoff_waits_for_matching_movement() {
 }
 
 #[test]
-fn teleport_finish_promotes_after_movement() {
+fn teleport_finish_awaits_movement() {
     run_large_stack_test(run_teleport_finish_test);
-}
-
-#[test]
-#[ignore = "manual loaded loopback handoff latency measurement; run with --release --ignored --nocapture"]
-fn handoff_send_latency() {
-    run_large_stack_test(run_handoff_send_latency_test);
 }
 
 #[test]

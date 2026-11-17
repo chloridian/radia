@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn backlog_timer_resets_after_drain() {
+    fn drain_resets_backlog_timer() {
         let start = Instant::now();
         let mut backlog = PrimaryEventBacklog::default();
 

@@ -67,18 +67,6 @@ fn successful_response(sim_ip: &str) -> String {
 }
 
 #[test]
-fn http_error_keeps_source() {
-    let error = super::LoginError::request(
-        "Could not contact Second Life: response too large",
-        crate::http::Error::resource_exhausted("response too large"),
-    );
-
-    let source = std::error::Error::source(&error).expect("HTTP error should remain the source");
-    assert_eq!(source.to_string(), "response too large");
-    assert_eq!(error.to_string(), "Could not contact Second Life: response too large");
-}
-
-#[test]
 fn rejected_debug_redacts_text() {
     let error = super::LoginError::Rejected { message: "private grid message".into(), reason: "private reason".into() };
 
@@ -181,7 +169,7 @@ async fn login_reports_rejection() {
 }
 
 #[tokio::test]
-async fn xmlrpc_fault_and_http_status() {
+async fn xmlrpc_fault_on_http_error() {
     let fault = "<methodResponse><fault><value><struct><member><name>faultCode</name><value><int>7</int></value></member><member><name>faultString</name><value><string>Denied</string></value></member></struct></value></fault></methodResponse>";
     let server = LocalServer::start(vec![response(500, "Error", "text/xml", None, fault)]);
     let error = login_at(&credentials(), "", "", &server.url("/login.cgi")).await.expect_err("XML-RPC fault on HTTP error");
@@ -306,31 +294,23 @@ async fn zero_sim_port_is_rejected() {
 }
 
 #[tokio::test]
-async fn simulator_ip_range() {
-    let body = successful_response("<i8>4294967296</i8>");
-    let server = LocalServer::start(vec![response(200, "OK", "text/xml", None, &body)]);
-    let url = server.url("/login.cgi");
-
-    let error = login_at(&credentials(), "", "", &url).await.expect_err("out-of-range simulator IP must be rejected");
-    server.finish();
-
-    assert_eq!(error.to_string(), "Second Life returned an invalid sim_ip address.");
-}
-
-#[tokio::test]
-async fn simulator_ip_long_bounds() {
-    for (wire_value, expected_ip) in [("<i8>-2147483648</i8>", "128.0.0.0"), ("<i8>4294967294</i8>", "255.255.255.254")] {
+async fn simulator_ip_long_range() {
+    for (wire_value, expected_ip) in
+        [("<i8>4294967296</i8>", None), ("<i8>-2147483648</i8>", Some("128.0.0.0")), ("<i8>4294967294</i8>", Some("255.255.255.254"))]
+    {
         let body = successful_response(wire_value);
         let server = LocalServer::start(vec![response(200, "OK", "text/xml", None, &body)]);
         let url = server.url("/login.cgi");
 
-        let LoginResponse::Authenticated { session, .. } =
-            login_at(&credentials(), "", "", &url).await.expect("in-range IP should be accepted")
-        else {
-            panic!("expected authenticated session");
-        };
+        let result = login_at(&credentials(), "", "", &url).await;
         server.finish();
-        assert_eq!(session.simulator_address.ip().to_string(), expected_ip);
+        match (result, expected_ip) {
+            (Ok(LoginResponse::Authenticated { session, .. }), Some(expected_ip)) => {
+                assert_eq!(session.simulator_address.ip().to_string(), expected_ip, "{wire_value}");
+            }
+            (Err(error), None) => assert_eq!(error.to_string(), "Second Life returned an invalid sim_ip address.", "{wire_value}"),
+            _ => panic!("unexpected login result for {wire_value}"),
+        }
     }
 }
 

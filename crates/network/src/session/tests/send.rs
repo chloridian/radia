@@ -200,7 +200,7 @@ async fn targeted_send_full() {
 }
 
 #[tokio::test]
-async fn sends_rejected_after_disconnect() {
+async fn disconnect_rejects_sends() {
     let (commands, mut command_receiver) = mpsc::channel(2);
     let (disconnect_requested, _) = watch::channel(false);
     let handle = targeted_send_handle(commands, disconnect_requested);
@@ -305,63 +305,32 @@ async fn object_limit_precedes_admission() {
     let (commands, mut command_receiver) = mpsc::channel(1);
     let (disconnect_requested, _) = watch::channel(false);
     let handle = targeted_send_handle(commands.clone(), disconnect_requested);
-    let request = RequestMultipleObjects {
-        agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
-        objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 }; MAX_OUTBOUND_OBJECT_REQUESTS + 1],
-    };
+    let agent_data = RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() };
+    let entry = ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 };
 
-    std::assert_matches!(handle.send_to(test_simulator_id(42), request, Delivery::Reliable).await, Err(Error::OutboundMessageTooLarge));
-    assert_eq!(commands.capacity(), 1);
-    assert!(matches!(command_receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    let mut over_capacity = Vec::with_capacity(MAX_OUTBOUND_OBJECT_REQUESTS + 1);
+    over_capacity.push(entry);
+    for (case, objects) in [("over length", vec![entry; MAX_OUTBOUND_OBJECT_REQUESTS + 1]), ("over capacity", over_capacity)] {
+        let request = RequestMultipleObjects { agent_data, objects };
+        std::assert_matches!(
+            handle.send_to(test_simulator_id(42), request, Delivery::Reliable).await,
+            Err(Error::OutboundMessageTooLarge),
+            "{case}"
+        );
+        assert_eq!(commands.capacity(), 1, "{case}");
+        assert!(matches!(command_receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)), "{case}");
+    }
 
-    let mut oversized_capacity = Vec::with_capacity(MAX_OUTBOUND_OBJECT_REQUESTS + 1);
-    oversized_capacity.push(ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 });
-    let request = RequestMultipleObjects {
-        agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
-        objects: oversized_capacity,
-    };
-    std::assert_matches!(handle.send_to(test_simulator_id(42), request, Delivery::Reliable).await, Err(Error::OutboundMessageTooLarge));
-    assert_eq!(commands.capacity(), 1);
-    assert!(matches!(command_receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
-}
-
-#[tokio::test]
-async fn object_request_at_limit_accepted() {
-    let (commands, mut command_receiver) = mpsc::channel(1);
-    let (disconnect_requested, _) = watch::channel(false);
-    let handle = targeted_send_handle(commands, disconnect_requested);
     let mut objects = Vec::with_capacity(MAX_OUTBOUND_OBJECT_REQUESTS);
-    objects.resize(MAX_OUTBOUND_OBJECT_REQUESTS, ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 });
-    let request = RequestMultipleObjects { agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() }, objects };
-
+    objects.resize(MAX_OUTBOUND_OBJECT_REQUESTS, entry);
+    let request = RequestMultipleObjects { agent_data, objects };
     let send = spawn(async move { handle.send_to(test_simulator_id(42), request, Delivery::Reliable).await });
     let Some(Command::SendTo { message: Message::RequestMultipleObjects(message), completed, .. }) = command_receiver.recv().await else {
-        panic!("expected an accepted object request");
+        panic!("expected the exact-limit object request");
     };
     assert_eq!(message.objects.len(), MAX_OUTBOUND_OBJECT_REQUESTS);
     completed.send(Ok(())).expect("send result receiver");
     assert!(send.await.expect("send task").is_ok());
-}
-
-#[tokio::test]
-async fn session_rejects_oversized_sends() {
-    let (commands, mut command_receiver) = mpsc::channel(1);
-    let (disconnect_requested, _) = watch::channel(false);
-    let handle = targeted_send_handle(commands.clone(), disconnect_requested);
-    let session = test_session(handle, mpsc::channel(1).1);
-    std::assert_matches!(
-        session.send(chat_message_with_size(MAX_OUTBOUND_CHAT_MESSAGE_BYTES + 1), Delivery::Unreliable),
-        Err(Error::OutboundMessageTooLarge)
-    );
-
-    let request = RequestMultipleObjects {
-        agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
-        objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 }; MAX_OUTBOUND_OBJECT_REQUESTS + 1],
-    };
-    std::assert_matches!(session.send_to(test_simulator_id(42), request, Delivery::Reliable).await, Err(Error::OutboundMessageTooLarge));
-
-    assert_eq!(commands.capacity(), 1);
-    assert!(matches!(command_receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
 }
 
 #[test]

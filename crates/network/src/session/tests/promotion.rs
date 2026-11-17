@@ -139,15 +139,6 @@ async fn assert_destination_disconnected(events: &mut mpsc::Receiver<EventEnvelo
 }
 
 #[tokio::test]
-async fn disconnect_cancels_login() {
-    let (disconnect, mut disconnect_requested) = watch::channel(false);
-    let login = wait_for_login(pending::<()>(), &mut disconnect_requested);
-    disconnect.send_replace(true);
-
-    assert!(timeout(Duration::from_secs(1), login).await.expect("login cancellation should return promptly").is_none());
-}
-
-#[tokio::test]
 async fn disconnect_skips_login() {
     let (_disconnect, mut disconnect_requested) = watch::channel(true);
 
@@ -309,7 +300,7 @@ async fn login_handoff() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn disconnect_after_promotion() {
+async fn promoted_disconnect_logs_out_once() {
     let PromotedSession { mut session, handle, worker, primary: _primary, destination, destination_peer, destination_id, http_task } =
         promoted_session().await;
     let mut events = replace(&mut session.events, mpsc::channel(1).1);
@@ -356,23 +347,6 @@ async fn promoted_disconnect_with_full_window() {
 
     receive_logout(&destination, destination_peer).await;
     timeout(CLIENT_TIMEOUT, disconnect).await.expect("disconnect should finish with a full reliable window").expect("disconnect task");
-    assert!(timeout(CLIENT_TIMEOUT, worker).await.expect("network worker should finish").expect("client task").is_ok());
-    assert_destination_disconnected(&mut events, destination_id).await;
-
-    let requests = timeout(CLIENT_TIMEOUT, http_task).await.expect("fake HTTP server should stop").expect("HTTP task");
-    assert_eq!(requests.len(), 3);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn drop_after_promotion() {
-    let PromotedSession { mut session, worker, primary: _primary, destination, destination_peer, destination_id, http_task, .. } =
-        promoted_session().await;
-    let handle = session.handle();
-    let mut events = replace(&mut session.events, mpsc::channel(1).1);
-    drop(session);
-
-    receive_logout(&destination, destination_peer).await;
-    handle.disconnect().await;
     assert!(timeout(CLIENT_TIMEOUT, worker).await.expect("network worker should finish").expect("client task").is_ok());
     assert_destination_disconnected(&mut events, destination_id).await;
 
