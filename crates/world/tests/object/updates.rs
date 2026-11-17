@@ -378,7 +378,7 @@ fn equal_packet_blocks_keep_order() {
         pose: Some(Pose { position: Some(Vec3::Y), rotation: None }),
         ..ObjectPatch::new(ordered(region, 2, 0), local_id(1))
     };
-    assert!(matches!(world.patch_object(later_block).unwrap().outcome, Updated(_)));
+    std::assert_matches!(world.patch_object(later_block).unwrap().outcome, Updated(_));
     assert_eq!(world.patch_object(earlier_block).unwrap().outcome, Unchanged);
     assert_eq!(world.object(entity).unwrap().position(), Some(Vec3::Z));
 }

@@ -148,7 +148,7 @@ fn self_cof_is_stale() {
     for (id, local_id_value) in [(215, 1), (216, 2)] {
         let mut avatar = object(source(region, 1), id, local_id_value, Avatar, Root);
         avatar.appearance = FieldUpdate::Set(Appearance::Avatar);
-        assert!(matches!(world.observe_object(avatar).unwrap().outcome, Introduced(_)));
+        std::assert_matches!(world.observe_object(avatar).unwrap().outcome, Introduced(_));
     }
     let param = AvatarVisualParamIndex::new(0).unwrap();
     let initial = AvatarAppearanceUpdate::new(Some(1), Some(10), vec![(param, 10)], None).unwrap();
@@ -181,7 +181,7 @@ fn self_missing_cof_is_stale() {
     world.set_self_agent(uuid(218)).unwrap();
     let mut avatar = object(source(region, 1), 218, 1, Avatar, Root);
     avatar.appearance = FieldUpdate::Set(Appearance::Avatar);
-    assert!(matches!(world.observe_object(avatar).unwrap().outcome, Introduced(_)));
+    std::assert_matches!(world.observe_object(avatar).unwrap().outcome, Introduced(_));
 
     let param = AvatarVisualParamIndex::new(0).unwrap();
     let missing = AvatarAppearanceUpdate::new(None, None, vec![(param, 20)], None).unwrap();

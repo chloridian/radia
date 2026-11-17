@@ -59,10 +59,10 @@ fn with_pose(mut object: ObjectObservation, position: Vec3, rotation: Quat) -> O
 fn world_with_origin(origin: DVec3, entities: usize) -> (World, Region) {
     let mut world = World::new(limits(entities));
     let region = world.register_region().unwrap();
-    assert!(matches!(
+    std::assert_matches!(
         world.patch_region(region, RegionInfo { origin: Some(origin), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
-    ));
+    );
     (world, region)
 }
 
@@ -154,10 +154,10 @@ fn late_origin_resolves_existing_pose() {
     let entity = introduced(world.observe_object(with_pose(observation(region, 1, 16, 1, Object, Root), Vec3::X, Quat::IDENTITY)).unwrap());
     assert_eq!(world.object(entity).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::MissingRegionOrigin));
 
-    assert!(matches!(
+    std::assert_matches!(
         world.patch_region(region, RegionInfo { origin: Some(DVec3::new(20.0, 30.0, 0.0)), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
-    ));
+    );
     let PoseState::Resolved(pose) = world.object(entity).unwrap().world_pose().unwrap() else { panic!("expected resolved pose") };
     assert_eq!(pose.position, DVec3::new(21.0, 30.0, 0.0));
 }
@@ -167,10 +167,10 @@ fn handle_origin_resolves_pose() {
     let handle = RegionHandle::new((1024_u64 << 32) | 2048);
     let mut world = World::new(limits(1));
     let region = world.register_region().unwrap();
-    assert!(matches!(
+    std::assert_matches!(
         world.patch_region(region, RegionInfo { handle: Some(handle), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
-    ));
+    );
     let entity = introduced(
         world.observe_object(with_pose(observation(region, 1, 18, 1, Object, Root), Vec3::new(3.0, 4.0, 5.0), Quat::IDENTITY)).unwrap(),
     );
@@ -483,7 +483,7 @@ fn partial_pose_replaces_detach_snapshot() {
     let mut detach = ObjectPatch::new(source(region, 3), local_id(2));
     detach.parent = Some(Root);
     assert_eq!(world.patch_object(detach).unwrap().outcome, Updated(avatar));
-    assert!(matches!(world.object(avatar).unwrap().world_pose().unwrap(), PoseState::Provisional { .. }));
+    std::assert_matches!(world.object(avatar).unwrap().world_pose().unwrap(), PoseState::Provisional { .. });
 
     let mut position = ObjectPatch::new(source(region, 4), local_id(2));
     position.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
@@ -564,14 +564,14 @@ fn transfer_accepts_destination_pose() {
     let mut world = World::new(limits(4));
     let first = world.register_region().unwrap();
     let second = world.register_region().unwrap();
-    assert!(matches!(
+    std::assert_matches!(
         world.patch_region(first, RegionInfo { origin: Some(DVec3::new(100.0, 0.0, 0.0)), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         world.patch_region(second, RegionInfo { origin: Some(DVec3::new(900.0, 0.0, 0.0)), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
-    ));
+    );
     let entity = introduced(world.observe_object(with_pose(observation(first, 100, 8, 1, Object, Root), Vec3::X, Quat::IDENTITY)).unwrap());
 
     let destination = with_pose(observation(second, 1, 8, 1, Object, Root), Vec3::new(3.0, 0.0, 0.0), Quat::IDENTITY);
@@ -739,7 +739,7 @@ fn parent_depth_limit_is_enforced() {
         last = Some(entity);
     }
     let last = last.expect("last entity");
-    assert!(matches!(world.object(last).unwrap().world_pose(), Ok(PoseState::Resolved(_))));
+    std::assert_matches!(world.object(last).unwrap().world_pose(), Ok(PoseState::Resolved(_)));
     assert_eq!(world.object(last).unwrap().coordinate_frame(), Ok(CoordinateFrame::LinksetRoot { root: root.unwrap() }));
 
     let last = introduced(
