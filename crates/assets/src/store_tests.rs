@@ -1,6 +1,7 @@
 use std::{
-    assert_matches,
+    assert_matches, fs,
     io::Write,
+    ptr,
     sync::{Arc, Barrier, mpsc},
     thread,
     time::Duration,
@@ -8,6 +9,7 @@ use std::{
 
 use flate2::{Compression, write::ZlibEncoder};
 use llsd::binary;
+use proptest::collection;
 use tempfile::tempdir;
 use test_support::texture::{GRAY_4096_J2C, RGBA_J2C, RGBA_RAW};
 use uuid::Uuid;
@@ -16,7 +18,10 @@ use super::*;
 use crate::{
     Image, Priority,
     budget::{ASSET_WORK_BYTES, TEXTURE_WORK_BYTES},
-    material::{MaterialDescription, PbrMaterial},
+    cache,
+    material::{MaterialDescription, PbrMaterial, legacy},
+    mesh,
+    mesh::MAX_MESH_VERTICES_PER_FACE,
 };
 
 const PBR_JSON: &str = r#"{"asset":{"version":"2.0"},"materials":[{}]}"#;
@@ -138,7 +143,7 @@ fn mesh_lod_requests(id: AssetId) -> (MeshLodRequest, MeshLodRequest, Vec<u8>) {
     };
     let header = block_header(0, block_size);
     let total = u64::try_from(header.len() + block.len() * 2).unwrap();
-    let header = crate::mesh::decode_header(&header, total).unwrap();
+    let header = mesh::decode_header(&header, total).unwrap();
     (header.lod(id, MeshLod::Low).unwrap(), header.lod(id, MeshLod::High).unwrap(), block)
 }
 
@@ -147,7 +152,7 @@ fn mesh_lod_request(id: AssetId, block: &[u8]) -> MeshLodRequest {
     let mut header_bytes = b"<?llsd/binary?>\n".to_vec();
     header_bytes.extend(mesh_llsd_map(&[("version", mesh_llsd_integer(1)), ("low_lod", entry)]));
     let asset_length = u64::try_from(header_bytes.len() + block.len()).unwrap();
-    crate::mesh::decode_header(&header_bytes, asset_length).unwrap().lod(id, MeshLod::Low).unwrap()
+    mesh::decode_header(&header_bytes, asset_length).unwrap().lod(id, MeshLod::Low).unwrap()
 }
 
 fn large_mesh_lod_request(id: AssetId, size: usize) -> MeshLodRequest {
@@ -155,7 +160,7 @@ fn large_mesh_lod_request(id: AssetId, size: usize) -> MeshLodRequest {
     let mut header = b"<?llsd/binary?>\n".to_vec();
     header.extend(mesh_llsd_map(&[("version", mesh_llsd_integer(1)), ("low_lod", entry)]));
     let asset_length = u64::try_from(header.len().checked_add(size).unwrap()).unwrap();
-    crate::mesh::decode_header(&header, asset_length).unwrap().lod(id, MeshLod::Low).unwrap()
+    mesh::decode_header(&header, asset_length).unwrap().lod(id, MeshLod::Low).unwrap()
 }
 
 fn mesh_full_asset_fixture(id: AssetId, block: &[u8]) -> (MeshLodRequest, Vec<u8>) {
@@ -163,7 +168,7 @@ fn mesh_full_asset_fixture(id: AssetId, block: &[u8]) -> (MeshLodRequest, Vec<u8
     let mut header = b"<?llsd/binary?>\n".to_vec();
     header.extend(mesh_llsd_map(&[("version", mesh_llsd_integer(1)), ("low_lod", entry)]));
     let asset_length = u64::try_from(header.len() + block.len()).unwrap();
-    let request = crate::mesh::decode_header(&header, asset_length).unwrap().lod(id, MeshLod::Low).unwrap();
+    let request = mesh::decode_header(&header, asset_length).unwrap().lod(id, MeshLod::Low).unwrap();
     header.extend_from_slice(block);
     (request, header)
 }
@@ -199,7 +204,7 @@ fn large_mesh_block_fixture(vertex_count: usize, face_count: usize) -> Vec<u8> {
     let faces = vec![submesh; face_count];
     let mut payload = b"<?llsd/binary?>\n".to_vec();
     payload.extend(mesh_llsd_array(&faces));
-    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&payload).unwrap();
     encoder.finish().unwrap()
 }
@@ -216,7 +221,7 @@ fn mesh_decode_job(budget: Budget, now: Instant, id: AssetId, bytes: Vec<u8>) ->
     (store, demand, job)
 }
 
-fn charged_blob(budget: &Budget, bytes: &[u8]) -> crate::Blob {
+fn charged_blob(budget: &Budget, bytes: &[u8]) -> Blob {
     let mut bytes_owned = Vec::new();
     bytes_owned.try_reserve_exact(bytes.len()).expect("reserve blob bytes");
     bytes_owned.extend_from_slice(bytes);
@@ -247,7 +252,7 @@ fn cached(store: &mut Store, now: Instant) -> DecodeInput {
 #[test]
 fn disk_hit_skips_fetch_attempt() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(11);
     cache.put_complete(Request::new(resource), RGBA_J2C.to_vec()).expect("seed validated texture bytes");
     let budget = Budget::default();
@@ -282,7 +287,7 @@ fn disk_hit_skips_fetch_attempt() {
 #[test]
 fn mesh_reads_obey_read_limit() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
     let block = mesh_block_fixture();
     let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
@@ -348,7 +353,7 @@ fn mesh_reads_obey_read_limit() {
 #[test]
 fn cache_read_limit_requeues_lookup() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
     let block = mesh_block_fixture();
     let request = mesh_lod_request(AssetId::new(Uuid::from_u128(212)), &block);
@@ -378,7 +383,7 @@ fn cache_read_limit_requeues_lookup() {
 #[test]
 fn demand_lease_protects_cache_key() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(10);
     let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
     let route = store.register_route().expect("register route");
@@ -401,7 +406,7 @@ fn demand_lease_protects_cache_key() {
 #[test]
 fn retired_route_drops_disk_read() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(12);
     cache.put_complete(Request::new(resource), RGBA_J2C.to_vec()).expect("seed validated texture bytes");
     let budget = Budget::default();
@@ -502,7 +507,7 @@ fn shared_decode_survives_owner_deadline() {
 fn cache_read_survives_route_retirement() {
     for cache_hit in [true, false] {
         let directory = tempdir().expect("cache directory");
-        let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+        let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
         let request = Request::new(resource(993));
         cache.put_complete(request, RGBA_J2C.to_vec()).expect("seed texture bytes");
         let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
@@ -538,7 +543,7 @@ fn cache_read_survives_route_retirement() {
 #[test]
 fn cancelled_read_allows_retry() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(14);
     cache.put_complete(Request::new(resource), RGBA_J2C.to_vec()).expect("seed validated texture bytes");
     let budget = Budget::default();
@@ -584,7 +589,7 @@ fn cancelled_read_allows_retry() {
 #[test]
 fn malformed_disk_payload_refetches() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(13);
     cache.put_complete(Request::new(resource), b"bad".to_vec()).expect("seed semantically malformed payload");
     let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
@@ -606,9 +611,7 @@ fn malformed_disk_payload_refetches() {
     for write in writes {
         write.run();
     }
-    let crate::cache::AssetLookup::Hit(asset) = cache.lookup(Request::new(resource)) else {
-        panic!("valid network bytes replace corrupt cache data")
-    };
+    let AssetLookup::Hit(asset) = cache.lookup(Request::new(resource)) else { panic!("valid network bytes replace corrupt cache data") };
     assert_eq!(asset.bytes, RGBA_J2C);
     drop(store);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
@@ -617,7 +620,7 @@ fn malformed_disk_payload_refetches() {
 #[test]
 fn write_pressure_keeps_fetch_admission() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let write_budget = Budget::default();
     let writes = (0..2u128)
         .map(|id| {
@@ -649,7 +652,7 @@ fn write_pressure_keeps_fetch_admission() {
 
 #[test]
 fn decoded_payloads_round_trip_disk() {
-    fn round_trip(cache: &Arc<crate::cache::AssetCache>, resource: Resource, response: Vec<u8>) {
+    fn round_trip(cache: &Arc<AssetCache>, resource: Resource, response: Vec<u8>) {
         let now = Instant::now();
         let mut store = Store::with_cache(Budget::default(), Arc::clone(cache));
         let route = store.register_route().expect("register route");
@@ -679,7 +682,7 @@ fn decoded_payloads_round_trip_disk() {
     }
 
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let pbr = Resource { id: AssetId::new(Uuid::from_u128(101)), kind: Kind::PbrMaterial };
     let legacy = Resource { id: AssetId::new(Uuid::from_u128(102)), kind: Kind::LegacyMaterial };
     let environment = Resource { id: AssetId::new(Uuid::from_u128(103)), kind: Kind::Environment };
@@ -695,7 +698,7 @@ fn decoded_payloads_round_trip_disk() {
 #[test]
 fn cached_full_mesh_response_finishes() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let budget = Budget::default();
     let now = Instant::now();
     let id = AssetId::new(Uuid::from_u128(104));
@@ -723,16 +726,16 @@ fn cached_full_mesh_response_finishes() {
     for write in writes {
         write.run();
     }
-    let crate::cache::AssetLookup::Hit(cached) = cache.lookup(request) else { panic!("full mesh LOD was cached") };
-    assert_eq!(crate::cache::parse_mesh_lod_frame(lod_request, &cached.bytes), Some(block.as_slice()));
+    let AssetLookup::Hit(cached) = cache.lookup(request) else { panic!("full mesh LOD was cached") };
+    assert_eq!(cache::parse_mesh_lod_frame(lod_request, &cached.bytes), Some(block.as_slice()));
     assert!(cached.bytes.len() < asset.len());
     drop(demand);
     drop(store);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
 
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("reopen cache"));
-    let crate::cache::AssetLookup::Hit(cached) = cache.lookup(request) else { panic!("SQLite index retained the mesh LOD") };
-    assert_eq!(crate::cache::parse_mesh_lod_frame(lod_request, &cached.bytes), Some(block.as_slice()));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("reopen cache"));
+    let AssetLookup::Hit(cached) = cache.lookup(request) else { panic!("SQLite index retained the mesh LOD") };
+    assert_eq!(cache::parse_mesh_lod_frame(lod_request, &cached.bytes), Some(block.as_slice()));
     assert_eq!(cache.stats().entries_by_kind.meshes, 1, "a full response stores only its requested LOD");
     let mut next_store = Store::with_cache(Budget::default(), Arc::clone(&cache));
     let next_route = next_store.register_route().expect("register next route");
@@ -751,7 +754,7 @@ fn cached_full_mesh_response_finishes() {
 #[test]
 fn malformed_partial_lods_stay_uncached() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
 
     for (index, malformed) in ["range", "missing total", "wrong total", "payload"].into_iter().enumerate() {
@@ -778,7 +781,7 @@ fn malformed_partial_lods_stay_uncached() {
         assert_eq!(completion.failure(), Some(Failure::MalformedBlock), "{malformed}");
         assert!(store.complete(completion, now).is_empty(), "{malformed}");
         assert_matches!(demand.status(), Status::Failed { failure: Failure::MalformedBlock, .. }, "{malformed}");
-        assert_eq!(cache.lookup(Request::MeshLod(request)), crate::cache::AssetLookup::Miss, "{malformed}");
+        assert_eq!(cache.lookup(Request::MeshLod(request)), AssetLookup::Miss, "{malformed}");
         drop(demand);
         store.close();
     }
@@ -788,7 +791,7 @@ fn malformed_partial_lods_stay_uncached() {
 #[test]
 fn corrupt_mesh_lods_are_refetched() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
     let block = mesh_block_fixture();
 
@@ -815,11 +818,11 @@ fn corrupt_mesh_lods_are_refetched() {
             let uuid = id.uuid().to_string();
             let shard = uuid.get(..2).expect("UUID shard");
             let path = directory.path().join(format!("assets/meshes/lod/low/{shard}/{uuid}.llmesh"));
-            let mut stored = std::fs::read(&path).expect("read cached LOD");
+            let mut stored = fs::read(&path).expect("read cached LOD");
             if let Some(first) = stored.first_mut() {
                 *first ^= 0xff;
             }
-            std::fs::write(path, stored).expect("damage cached LOD hash");
+            fs::write(path, stored).expect("damage cached LOD hash");
         }
 
         let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
@@ -841,10 +844,8 @@ fn corrupt_mesh_lods_are_refetched() {
             write.run();
         }
         assert_matches!(demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
-        let crate::cache::AssetLookup::Hit(cached) = cache.lookup(Request::MeshLod(request)) else {
-            panic!("{corruption} entry was replaced")
-        };
-        assert_eq!(crate::cache::parse_mesh_lod_frame(request, &cached.bytes), Some(block.as_slice()));
+        let AssetLookup::Hit(cached) = cache.lookup(Request::MeshLod(request)) else { panic!("{corruption} entry was replaced") };
+        assert_eq!(cache::parse_mesh_lod_frame(request, &cached.bytes), Some(block.as_slice()));
         assert_eq!(cache.stats().corrupt_entries, u64::try_from(index + 1).expect("corruption count"));
         drop(demand);
         store.close();
@@ -856,7 +857,7 @@ fn corrupt_mesh_lods_are_refetched() {
 #[test]
 fn malformed_cached_lod_refetches() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
     let id = AssetId::new(Uuid::from_u128(133));
     let block = mesh_block_fixture();
@@ -894,10 +895,8 @@ fn malformed_cached_lod_refetches() {
     }
     assert_matches!(demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
     assert_eq!(cache.stats().corrupt_entries, 1);
-    let crate::cache::AssetLookup::Hit(cached) = cache.lookup(Request::MeshLod(request)) else {
-        panic!("valid block replaced malformed block")
-    };
-    assert_eq!(crate::cache::parse_mesh_lod_frame(request, &cached.bytes), Some(block.as_slice()));
+    let AssetLookup::Hit(cached) = cache.lookup(Request::MeshLod(request)) else { panic!("valid block replaced malformed block") };
+    assert_eq!(cache::parse_mesh_lod_frame(request, &cached.bytes), Some(block.as_slice()));
     drop(demand);
     store.close();
     drop(store);
@@ -907,7 +906,7 @@ fn malformed_cached_lod_refetches() {
 #[test]
 fn corrupt_mesh_header_is_refetched() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
     let id = AssetId::new(Uuid::from_u128(126));
     let block = mesh_block_fixture();
@@ -927,8 +926,8 @@ fn corrupt_mesh_header_is_refetched() {
         write.run();
     }
     assert_matches!(demand.status(), Status::Ready(Content::MeshHeader(header)) if header.asset_length() == asset.len() as u64);
-    let crate::cache::AssetLookup::Hit(cached) = cache.lookup(request) else { panic!("valid header replaced malformed framing") };
-    let (length, header_bytes) = crate::cache::parse_mesh_header_frame(&cached.bytes).expect("valid framed header");
+    let AssetLookup::Hit(cached) = cache.lookup(request) else { panic!("valid header replaced malformed framing") };
+    let (length, header_bytes) = cache::parse_mesh_header_frame(&cached.bytes).expect("valid framed header");
     assert_eq!(length, asset.len() as u64);
     assert_eq!(header_bytes.len(), usize::try_from(lod_request.range().start).expect("header size"));
     assert_eq!(cache.stats().entries_by_kind.meshes, 1);
@@ -941,7 +940,7 @@ fn corrupt_mesh_header_is_refetched() {
 #[test]
 fn mismatched_lod_length_refetches() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
     let id = AssetId::new(Uuid::from_u128(132));
     let block = mesh_block_fixture();
@@ -998,7 +997,7 @@ fn mismatched_lod_length_refetches() {
 #[test]
 fn present_mesh_lod_is_cached() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
     let id = AssetId::new(Uuid::from_u128(127));
     let block = mesh_block_fixture();
@@ -1066,7 +1065,7 @@ fn same_mesh_block_shares_fetch() {
 #[test]
 fn mesh_blocks_are_protected_independently() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let id = AssetId::new(Uuid::from_u128(129));
     let (low, high, block) = mesh_lod_requests(id);
     let low_record = mesh_lod_record_for(low, &block);
@@ -1082,8 +1081,8 @@ fn mesh_blocks_are_protected_independently() {
     let route = store.register_route().expect("register route");
     let demand = store.request(route, Request::MeshLod(high), Priority::Visible, Instant::now()).expect("protect high LOD");
     cache.set_size_limit(one_entry_limit).expect("evict one unprotected block");
-    assert_eq!(cache.lookup(Request::MeshLod(low)), crate::cache::AssetLookup::Miss);
-    assert_matches!(cache.lookup(Request::MeshLod(high)), crate::cache::AssetLookup::Hit(_));
+    assert_eq!(cache.lookup(Request::MeshLod(low)), AssetLookup::Miss);
+    assert_matches!(cache.lookup(Request::MeshLod(high)), AssetLookup::Hit(_));
     assert_eq!(cache.stats().entries_by_kind.meshes, 1);
     drop(demand);
     store.close();
@@ -1094,7 +1093,7 @@ fn mesh_blocks_are_protected_independently() {
 #[test]
 fn mesh_cache_pressure_keeps_entry() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let id = AssetId::new(Uuid::from_u128(130));
     let block_bytes = mesh_block_fixture();
     let request = mesh_lod_request(id, &block_bytes);
@@ -1115,7 +1114,7 @@ fn mesh_cache_pressure_keeps_entry() {
     store.maintain(now);
     assert_eq!(store.next_deadline(now), Some(now + Duration::from_secs(1)));
     assert_eq!(cache.stats().corrupt_entries, 0);
-    assert_matches!(cache.lookup(Request::MeshLod(request)), crate::cache::AssetLookup::Hit(_));
+    assert_matches!(cache.lookup(Request::MeshLod(request)), AssetLookup::Hit(_));
     let bytes_read = cache.stats().bytes_read;
     assert!(store.next_job(now).is_none());
     assert!(store.next_job(now + Duration::from_millis(500)).is_none());
@@ -1138,7 +1137,7 @@ fn mesh_cache_pressure_keeps_entry() {
 #[test]
 fn unavailable_mesh_cache_fetches() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
     let id = AssetId::new(Uuid::from_u128(131));
     let block = mesh_block_fixture();
@@ -1148,7 +1147,7 @@ fn unavailable_mesh_cache_fetches() {
     let route = store.register_route().expect("register route");
     let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
     let LoadJob::ReadCache(read) = store.next_job(now).expect("indexed cache read") else { panic!("indexed asset checks disk") };
-    let completion = read.run_lookup(|_, _| crate::cache::AssetLookup::Unavailable(storage::UnavailableReason::Io));
+    let completion = read.run_lookup(|_, _| AssetLookup::Unavailable(storage::UnavailableReason::Io));
     let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(completion, now) else { panic!("unavailable cache falls back") };
     assert_matches!(demand.status(), Status::Fetching);
     let failed = LoadJob::Fetch(fetch).fail(Failure::Transient { retry_after: Duration::ZERO });
@@ -1471,7 +1470,7 @@ fn uploaded_sources_follow_handle_ownership() {
 #[test]
 fn released_texture_uses_disk_cache() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let budget = Budget::default();
     let mut store = Store::with_cache(budget.clone(), Arc::clone(&cache));
     let now = Instant::now();
@@ -1713,9 +1712,9 @@ fn route_failures_share_success() {
     let job = store.start_decode(input).expect("decode admission");
     store.complete(job.run(), now + Duration::from_secs(61));
     assert_eq!(ready(&a).pixels(), RGBA_RAW);
-    assert!(std::ptr::eq(ready(&a).pixels().as_ptr(), ready(&b).pixels().as_ptr()));
+    assert!(ptr::eq(ready(&a).pixels().as_ptr(), ready(&b).pixels().as_ptr()));
     let cached = store.request(first, Request::new(resource(1)), Priority::Visible, now + Duration::from_secs(62)).unwrap();
-    assert!(std::ptr::eq(ready(&a).pixels().as_ptr(), ready(&cached).pixels().as_ptr()));
+    assert!(ptr::eq(ready(&a).pixels().as_ptr(), ready(&cached).pixels().as_ptr()));
     assert!(store.next_job(now + Duration::from_secs(62)).is_none());
 }
 
@@ -2234,7 +2233,7 @@ fn reacquisition_waits_for_cancelled_job() {
 proptest::proptest! {
     #[test]
     fn demand_churn_preserves_lifetimes(
-        operations in proptest::collection::vec((0u8..5, 0usize..16), 0..120)
+        operations in collection::vec((0u8..5, 0usize..16), 0..120)
     ) {
         let budget = Budget::default();
         let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(budget.clone());
@@ -2320,7 +2319,7 @@ fn shared_material_retains_charge() {
     store.complete(job.run(), now);
     let Status::Ready(Content::Material(material)) = first.status() else { panic!("expected material") };
     let Status::Ready(Content::Material(shared)) = second.status() else { panic!("expected shared material") };
-    assert!(std::ptr::eq(&*material, &*shared));
+    assert!(ptr::eq(&*material, &*shared));
     assert_eq!(budget.stats().resident_bytes, size_of::<MaterialDescription>());
     store.close();
     assert_matches!(second.status(), Status::StaleSession);
@@ -2353,7 +2352,7 @@ fn retired_material_cannot_publish() {
     let result = job.run();
     store.complete(result, now);
     let Status::Ready(Content::Material(material)) = current.status() else { panic!("expected legacy material") };
-    assert_eq!(*material, crate::material::legacy::decode(&binary::to_vec(&llsd::Value::Map(legacy_fields(2, 128))).unwrap()).unwrap());
+    assert_eq!(*material, legacy::decode(&binary::to_vec(&llsd::Value::Map(legacy_fields(2, 128))).unwrap()).unwrap());
 }
 
 #[test]
@@ -2385,12 +2384,8 @@ fn mesh_decodes_share_budget() {
         demands.push(demand);
         jobs.push(job);
     }
-    let (store, demand, job) = mesh_decode_job(
-        budget.clone(),
-        now,
-        AssetId::new(Uuid::from_u128(306)),
-        large_mesh_block_fixture(crate::mesh::MAX_MESH_VERTICES_PER_FACE, 8),
-    );
+    let (store, demand, job) =
+        mesh_decode_job(budget.clone(), now, AssetId::new(Uuid::from_u128(306)), large_mesh_block_fixture(MAX_MESH_VERTICES_PER_FACE, 8));
     stores.push(store);
     demands.push(demand);
     jobs.push(job);

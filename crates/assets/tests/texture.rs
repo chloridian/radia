@@ -1,9 +1,9 @@
-use std::assert_matches;
-use std::time::Instant;
+use std::{assert_matches, time::Instant};
 
 use assets::{
     Budget, ColorSpace, Content, Failure, Image, Kind, LoadJob, PixelAlpha, PixelFormat, Priority, Request, Resource, Status, Store,
 };
+use proptest::prelude;
 use test_support::texture::{
     GRAY_4096_J2C, GRAY_ALPHA_J2C, GRAY_ALPHA_RAW, GRAY_J2C, GRAY_RAW, RGB_J2C, RGB_RAW, RGBA_J2C, RGBA_JP2, RGBA_LOSSY_J2C,
     RGBA_LOSSY_RAW, RGBA_RAW,
@@ -109,7 +109,7 @@ fn jp2_metadata_must_match() {
 
 proptest::proptest! {
     #[test]
-    fn mutations_never_publish_bad_images(offset in 0usize..470, byte in proptest::prelude::any::<u8>()) {
+    fn mutations_never_publish_bad_images(offset in 0usize..470, byte in prelude::any::<u8>()) {
         let mut encoded = RGBA_J2C.to_vec();
         encoded[offset] = byte;
         if let Ok(image) = decode(&encoded) {

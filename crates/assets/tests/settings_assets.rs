@@ -1,8 +1,10 @@
+use std::fs;
+
 use assets::{EnvironmentDescription, EnvironmentSettings};
 
 fn decode(name: &str) -> EnvironmentDescription {
     let path = format!("{}/tests/fixtures/settings/{name}.dat", env!("CARGO_MANIFEST_DIR"));
-    let bytes = std::fs::read(&path).expect("read settings fixture");
+    let bytes = fs::read(&path).expect("read settings fixture");
     EnvironmentDescription::decode(&bytes).unwrap_or_else(|failure| panic!("{name}: {failure:?}"))
 }
 

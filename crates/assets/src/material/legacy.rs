@@ -1,5 +1,4 @@
 use llsd::{Limits, Value, binary};
-
 use math::UvTransform;
 
 use super::{MaterialDescription, MaterialTexture, TextureRef};
@@ -138,9 +137,9 @@ mod tests {
 
     fn legacy_fields(mode: i32, cutoff: i32) -> llsd::Map {
         let mut fields: llsd::Map = [
-            ("NormMap".into(), llsd::Value::Uuid(Uuid::from_u128(7))),
-            ("SpecMap".into(), llsd::Value::Uuid(Uuid::nil())),
-            ("SpecColor".into(), llsd::Value::Array([51, 102, 153, 204].map(llsd::Value::Integer).into())),
+            ("NormMap".into(), Value::Uuid(Uuid::from_u128(7))),
+            ("SpecMap".into(), Value::Uuid(Uuid::nil())),
+            ("SpecColor".into(), Value::Array([51, 102, 153, 204].map(Value::Integer).into())),
         ]
         .into();
         for (name, value) in [
@@ -159,13 +158,13 @@ mod tests {
             ("DiffuseAlphaMode", mode),
             ("AlphaMaskCutoff", cutoff),
         ] {
-            fields.insert(name.into(), llsd::Value::Integer(value));
+            fields.insert(name.into(), Value::Integer(value));
         }
         fields
     }
 
     fn legacy_bytes(mode: i32, cutoff: i32) -> Vec<u8> {
-        binary::to_vec(&llsd::Value::Map(legacy_fields(mode, cutoff))).unwrap()
+        binary::to_vec(&Value::Map(legacy_fields(mode, cutoff))).unwrap()
     }
 
     fn legacy_expected(alpha_mode: LegacyAlphaMode) -> LegacyMaterial {
@@ -207,20 +206,20 @@ mod tests {
         for name in fields.keys() {
             let mut missing = fields.clone();
             missing.remove(name);
-            assert_eq!(decode(&binary::to_vec(&llsd::Value::Map(missing)).unwrap()), Err(Failure::Malformed), "missing {name}");
+            assert_eq!(decode(&binary::to_vec(&Value::Map(missing)).unwrap()), Err(Failure::Malformed), "missing {name}");
             let mut mistyped = fields.clone();
-            mistyped.insert(name.clone(), llsd::Value::String("invalid".into()));
-            assert_eq!(decode(&binary::to_vec(&llsd::Value::Map(mistyped)).unwrap()), Err(Failure::Malformed), "mistyped {name}");
+            mistyped.insert(name.clone(), Value::String("invalid".into()));
+            assert_eq!(decode(&binary::to_vec(&Value::Map(mistyped)).unwrap()), Err(Failure::Malformed), "mistyped {name}");
         }
         for (name, value) in [
-            ("SpecExp", llsd::Value::Integer(-1)),
-            ("EnvIntensity", llsd::Value::Integer(256)),
-            ("SpecColor", llsd::Value::Array(vec![llsd::Value::Integer(255); 3])),
-            ("SpecColor", llsd::Value::Array(vec![llsd::Value::Integer(256); 4])),
+            ("SpecExp", Value::Integer(-1)),
+            ("EnvIntensity", Value::Integer(256)),
+            ("SpecColor", Value::Array(vec![Value::Integer(255); 3])),
+            ("SpecColor", Value::Array(vec![Value::Integer(256); 4])),
         ] {
             let mut invalid = fields.clone();
             invalid.insert(name.into(), value);
-            assert_eq!(decode(&binary::to_vec(&llsd::Value::Map(invalid)).unwrap()), Err(Failure::Malformed), "invalid {name}");
+            assert_eq!(decode(&binary::to_vec(&Value::Map(invalid)).unwrap()), Err(Failure::Malformed), "invalid {name}");
         }
     }
 }

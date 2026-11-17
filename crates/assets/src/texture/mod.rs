@@ -1,10 +1,10 @@
 mod handle;
 mod header;
 
-pub use handle::{ImageInfo, TextureDecodeJob, TextureEvents, TextureHandle, TextureId, TextureUsage, WeakTexture};
-
-use crate::{Blob, Failure, budget::Reservation};
 use jpeg2k::DecodeParameters;
+
+pub use self::handle::{ImageInfo, TextureDecodeJob, TextureEvents, TextureHandle, TextureId, TextureUsage, WeakTexture};
+use crate::{Blob, Failure, budget::Reservation};
 
 pub const MAX_TEXTURE_EDGE: u32 = 2048;
 pub const MAX_SOURCE_EDGE: u32 = 4096;
@@ -221,12 +221,12 @@ fn downsample(
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches;
-    use std::cell::Cell;
+    use std::{assert_matches, cell::Cell};
+
+    use test_support::texture::RGBA_J2C;
 
     use super::*;
     use crate::{Budget, budget::TEXTURE_WORK_BYTES};
-    use test_support::texture::RGBA_J2C;
 
     #[test]
     fn detail_sizes_are_bounded() {
