@@ -110,7 +110,7 @@ fn invalid_blocks_keep_position() {
 
     assert_eq!(batch.invalid_blocks, 1);
     assert!(batch.blocks[0].is_none());
-    assert!(matches!(batch.blocks[1].as_ref(), Some(ObjectOperation::Observe(observation)) if observation.parent == ParentUpdate::Root));
+    std::assert_matches!(batch.blocks[1].as_ref(), Some(ObjectOperation::Observe(observation)) if observation.parent == ParentUpdate::Root);
 }
 
 #[test]
