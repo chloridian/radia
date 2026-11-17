@@ -7,18 +7,21 @@ fn decode(name: &str) -> EnvironmentDescription {
 }
 
 #[test]
-fn library_sky_presets_decode() {
-    for name in ["Midday", "Sunrise", "Sunset", "Midnight", "DefaultSky"] {
-        std::assert_matches!(decode(name).settings, EnvironmentSettings::Sky(_), "{name}");
+fn library_presets_decode() {
+    for (name, expected) in [
+        ("Midday", "sky"),
+        ("Sunrise", "sky"),
+        ("Sunset", "sky"),
+        ("Midnight", "sky"),
+        ("DefaultSky", "sky"),
+        ("DefaultWater", "water"),
+        ("DefaultDaycycle", "day cycle"),
+    ] {
+        let decoded = match decode(name).settings {
+            EnvironmentSettings::Sky(_) => "sky",
+            EnvironmentSettings::Water(_) => "water",
+            EnvironmentSettings::DayCycle(_) => "day cycle",
+        };
+        assert_eq!(decoded, expected, "{name}");
     }
-}
-
-#[test]
-fn library_water_decodes() {
-    std::assert_matches!(decode("DefaultWater").settings, EnvironmentSettings::Water(_));
-}
-
-#[test]
-fn library_day_cycle_decodes() {
-    std::assert_matches!(decode("DefaultDaycycle").settings, EnvironmentSettings::DayCycle(_));
 }

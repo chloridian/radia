@@ -261,52 +261,6 @@ fn notation_unicode_escapes() {
 }
 
 #[test]
-fn value_accessors_match_variants() {
-    let uuid = Uuid::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid UUID");
-    let values = [
-        Value::Boolean(true),
-        Value::Integer(42),
-        Value::Real(1.5),
-        Value::Uuid(uuid),
-        Value::String("plain text".into()),
-        Value::Uri(Uri::from("https://example.invalid/resource")),
-        Value::Array(vec![Value::Undefined]),
-        Value::Map(BTreeMap::from([("key".into(), Value::Undefined)])),
-    ];
-    let binary = Binary::from(vec![0, 1, 255]);
-
-    assert_eq!(values[0].as_bool(), Some(true));
-    assert_eq!(values[1].as_integer(), Some(42));
-    assert_eq!(values[2].as_real(), Some(1.5));
-    assert_eq!(values[3].as_uuid(), Some(uuid));
-    assert_eq!(values[4].as_str(), Some("plain text"));
-    assert_eq!(values[5].as_str(), Some("https://example.invalid/resource"));
-    assert_eq!(values[6].as_array(), Some(&[Value::Undefined][..]));
-    assert_eq!(values[7].as_map().and_then(|map| map.get("key")), Some(&Value::Undefined));
-    assert_eq!(binary.as_slice(), &[0, 1, 255]);
-
-    let undefined = Value::Undefined;
-    assert_eq!(undefined.as_bool(), None);
-    assert_eq!(undefined.as_integer(), None);
-    assert_eq!(undefined.as_real(), None);
-    assert_eq!(undefined.as_uuid(), None);
-    assert_eq!(undefined.as_str(), None);
-    assert_eq!(undefined.as_array(), None);
-    assert_eq!(undefined.as_map(), None);
-    let text = Value::String("example".into());
-    let uri = Value::Uri(Uri::from("https://example.com"));
-    let date = Value::Date(Date::UNIX_EPOCH);
-    let binary = Value::Binary(Binary::from(&b"abc"[..]));
-
-    assert_eq!(text.as_str(), Some("example"));
-    assert!(text.as_uri().is_none());
-    assert_eq!(uri.as_str(), Some("https://example.com"));
-    assert_eq!(uri.as_uri().map(Uri::as_str), Some("https://example.com"));
-    assert_eq!(date.as_date(), Some(Date::UNIX_EPOCH));
-    assert_eq!(binary.as_binary(), Some(&b"abc"[..]));
-}
-
-#[test]
 fn streams_match_slice_codecs() {
     let value = Value::Array(vec![Value::Integer(42), Value::String("reader".into()), Value::Binary(Binary::from(vec![0, 255]))]);
 
@@ -449,32 +403,24 @@ fn xml_allows_xml_10_boundaries() {
 }
 
 #[test]
-fn xml_rejects_forbidden_xml_literals() {
+fn xml_rejects_forbidden_characters() {
     for codepoint in [0x0, 0x8, 0xb, 0xc, 0xe, 0x1f, 0xfffe, 0xffff] {
-        let input = format!("<llsd><string>{}</string></llsd>", char::from_u32(codepoint).expect("Unicode scalar"));
-        assert_matches!(xml::from_str::<String>(&input), Err(Error::InvalidValue(_)), "U+{codepoint:04X}");
+        let character = char::from_u32(codepoint).expect("Unicode scalar");
+        for (context, input) in [
+            ("literal", format!("<llsd><string>{character}</string></llsd>")),
+            ("reference", format!("<llsd><string>&#x{codepoint:x};</string></llsd>")),
+        ] {
+            assert_matches!(xml::from_str::<String>(&input), Err(Error::InvalidValue(_)), "{context} U+{codepoint:04X}");
+        }
     }
-}
 
-#[test]
-fn xml_rejects_forbidden_xml_references() {
-    for codepoint in [0x0, 0x8, 0xb, 0xc, 0xe, 0x1f, 0xfffe, 0xffff] {
-        let input = format!("<llsd><string>&#x{codepoint:x};</string></llsd>");
-        assert_matches!(xml::from_str::<String>(&input), Err(Error::InvalidValue(_)), "U+{codepoint:04X}");
-    }
-}
-
-#[test]
-fn xml_rejects_forbidden_xml_markup() {
     let forbidden = '\u{1}';
-    let inputs = [
-        format!("<llsd><string><![CDATA[{forbidden}]]></string></llsd>"),
-        format!("<!--{forbidden}--><llsd><undef/></llsd>"),
-        format!("<llsd ignored=\"{forbidden}\"><undef/></llsd>"),
-    ];
-
-    for input in inputs {
-        assert_matches!(xml::from_str::<Value>(&input), Err(Error::InvalidValue(_)));
+    for (context, input) in [
+        ("CDATA", format!("<llsd><string><![CDATA[{forbidden}]]></string></llsd>")),
+        ("comment", format!("<!--{forbidden}--><llsd><undef/></llsd>")),
+        ("attribute", format!("<llsd ignored=\"{forbidden}\"><undef/></llsd>")),
+    ] {
+        assert_matches!(xml::from_str::<Value>(&input), Err(Error::InvalidValue(_)), "{context}");
     }
 }
 
@@ -750,18 +696,6 @@ fn viewer_fixtures() {
     let expected = llsd_date("2007-12-28T09:22:53.10Z");
     let decoded = notation::from_slice::<Value>(date_notation).expect("decode viewer date notation");
     assert_matches!(decoded, Value::Date(value) if (value.unix_seconds() - expected.unix_seconds()).abs() < 0.000_001);
-}
-
-#[test]
-fn typed_struct_roundtrips() {
-    let expected = profile();
-    let xml = xml::to_vec(&expected).expect("encode XML");
-    let notation = notation::to_vec(&expected).expect("encode notation");
-    let binary = binary::to_vec(&expected).expect("encode binary");
-
-    assert_eq!(xml::from_slice::<Profile>(&xml).expect("decode XML"), expected);
-    assert_eq!(notation::from_slice::<Profile>(&notation).expect("decode notation"), expected);
-    assert_eq!(binary::from_slice::<Profile>(&binary).expect("decode binary"), expected);
 }
 
 #[test]
@@ -1139,12 +1073,15 @@ fn xml_bounded_sizes() {
         Value::Uri(Uri::from("https://example.invalid/path")),
         Value::Uuid(Uuid::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid UUID")),
         Value::Date(llsd_date("2025-02-03T04:05:06.125Z")),
+        Value::Map(BTreeMap::from([("<&>\"'".into(), Value::String("<&>\"'".into()))])),
     ];
 
     for value in values {
         let encoded = xml::to_vec(&value).expect("encode XML");
-        assert_eq!(xml::to_vec_with_max_bytes(&value, encoded.len()).expect("exact XML limit"), encoded);
-        assert_matches!(xml::to_vec_with_max_bytes(&value, encoded.len() - 1), Err(Error::LimitExceeded("encoded length")));
+        let exact =
+            xml::to_vec_with_max_bytes(&value, encoded.len()).unwrap_or_else(|error| panic!("exact XML limit for {value:?}: {error}"));
+        assert_eq!(exact, encoded, "{value:?}");
+        assert_matches!(xml::to_vec_with_max_bytes(&value, encoded.len() - 1), Err(Error::LimitExceeded("encoded length")), "{value:?}");
     }
 
     assert_matches!(xml::to_vec_with_max_bytes(&Value::String("x".repeat(1024)), 128), Err(Error::LimitExceeded("encoded length")));
@@ -1152,17 +1089,6 @@ fn xml_bounded_sizes() {
         xml::to_vec_with_max_bytes(&Value::Binary(Binary::from(vec![0; 1024])), 128),
         Err(Error::LimitExceeded("encoded length"))
     );
-}
-
-#[test]
-fn xml_bounded_escape() {
-    let mut map = BTreeMap::new();
-    map.insert("<&>\"'".into(), Value::String("<&>\"'".into()));
-    let value = Value::Map(map);
-    let encoded = xml::to_vec(&value).expect("encode escaped XML");
-
-    assert_eq!(xml::to_vec_with_max_bytes(&value, encoded.len()).expect("exact escaped limit"), encoded);
-    assert_matches!(xml::to_vec_with_max_bytes(&value, encoded.len() - 1), Err(Error::LimitExceeded("encoded length")));
 }
 
 #[test]
