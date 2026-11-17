@@ -14,7 +14,7 @@ use crate::{
 
 pub(super) const PARAMETER_BYTES: usize = INSTANCE_BYTES - TRANSFORM_BYTES;
 pub(super) const INITIAL_FACE_INSTANCES: usize = 16_384;
-const SLOT_BYTES: usize = INSTANCE_BYTES + FACE_INDEX_BYTES + INDIRECT_DRAW_BYTES;
+pub(super) const SLOT_BYTES: usize = INSTANCE_BYTES + FACE_INDEX_BYTES + INDIRECT_DRAW_BYTES;
 
 pub(super) struct InstanceBuffers {
     pub(super) instances: Buffer,
