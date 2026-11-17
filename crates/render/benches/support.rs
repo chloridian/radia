@@ -1,4 +1,4 @@
-use std::{f64::consts::PI, num::NonZeroU32, time::Instant};
+use std::{assert_matches, f64::consts::PI, num::NonZeroU32, time::Instant};
 
 use assets::{Budget as AssetBudget, Content, FetchResponse, LoadJob, Priority, Request, Status as AssetStatus, Store, TextureSize};
 use math::{DVec3, Quat, Vec3};
@@ -85,6 +85,25 @@ pub fn update_mesh_one(world: &mut World, row: &Row, index: usize, order: &mut u
         rotation: Some(Quat::IDENTITY),
     });
     let _applied = world.patch_object(patch).expect("benchmark mesh update");
+}
+
+pub fn blend_alternate_objects(world: &mut World, rows: &[Row]) {
+    let order_base = INITIAL_ORDER + rows.len() as u64 * 3 + 100;
+    for (index, row) in rows.iter().step_by(2).enumerate() {
+        let order = order_base + index as u64;
+        let mut patch = ObjectPatch::new(UpdateSource::new(row.region, order as u32, Ordered(order), 0), row.local_id);
+        let mut default_face = *world
+            .object_detail(row.entity)
+            .expect("blended benchmark object detail")
+            .surface_appearance
+            .as_ref()
+            .expect("blended benchmark object appearance")
+            .default_face();
+        default_face.color[3] = 160;
+        patch.surface_appearance = Some(SurfaceAppearance::new(default_face, Vec::new()).expect("blended benchmark appearance"));
+        let applied = world.patch_object(patch).expect("benchmark blend update");
+        assert_matches!(applied.outcome, world::ApplyOutcome::Updated(_));
+    }
 }
 
 pub fn animate_objects(world: &mut World, rows: &[Row], count: usize, rate: f32, smooth: bool) {

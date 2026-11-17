@@ -19,6 +19,7 @@ use crate::support;
 const OBJECTS: usize = 3_000;
 const TEXTURES: usize = 512;
 const ANIMATED_OBJECTS: usize = 500;
+const OBJECTS_87K_FACES: usize = 14_500;
 const SETTLE_FRAMES: usize = 256;
 const SIZE: [u32; 2] = [1024, 1024];
 const DURATION_BUCKETS: usize = 10_001;
@@ -244,9 +245,13 @@ impl Fixture {
         if animated > 0 {
             support::animate_objects(&mut world, &rows, animated, 4.0, true);
         }
+        Self::settle(device, queue, world, rows, regions, camera_at(start_x, 0.0, draw_distance))
+    }
+
+    fn settle(device: &wgpu::Device, queue: &wgpu::Queue, world: World, rows: Vec<support::Row>, regions: usize, camera: Camera) -> Self {
+        let objects = rows.len();
         let textures = support::benchmark_textures(TEXTURES);
-        let scene_camera = camera_at(start_x, 0.0, draw_distance);
-        let (reconciler, view, now) = support::settle_with_textures(&world, objects, scene_camera, &textures.textures);
+        let (reconciler, view, now) = support::settle_with_textures(&world, objects, camera, &textures.textures);
         let prepare = GeometryPrepare::new(device, queue, TextureFormat::Rgba8UnormSrgb);
         let mut fixture = Self { world, rows, textures, reconciler, view, now, prepare };
         let mut setup_cameras = Vec::with_capacity(regions * 2 + 1);
@@ -254,7 +259,7 @@ impl Fixture {
             setup_cameras.push(camera_at(region as f64 * 256.0, 0.0, 1024.0));
             setup_cameras.push(camera_at(region as f64 * 256.0 + 128.0, 0.0, 1024.0));
         }
-        setup_cameras.push(camera_at(start_x, 0.0, draw_distance));
+        setup_cameras.push(camera);
         for camera in setup_cameras {
             for _ in 0..TEXTURES + 32 {
                 fixture.sample(device, queue, camera);
@@ -265,7 +270,7 @@ impl Fixture {
                 }
             }
         }
-        fixture.sample(device, queue, camera_at(start_x, 0.0, draw_distance));
+        fixture.sample(device, queue, camera);
         assert!(!fixture.prepare.stats().rebuild_pending, "fixture rebuild must finish before timing");
         assert_eq!(fixture.prepare.stats().pending_meshes, 0, "fixture meshes must be resident before timing");
         assert_eq!(fixture.prepare.stats().pending_textures, 0, "fixture textures must be resident before timing");
@@ -325,8 +330,17 @@ pub(crate) fn bench(c: &mut Criterion) {
     }
     bench_unchanged(&mut group, &device, &queue);
     bench_camera_walk(&mut group, &device, &queue);
-    bench_camera_culling_rotation(&mut group, &device, &queue, OBJECTS, "camera_culling_rotation_3000_stable");
-    bench_camera_culling_rotation(&mut group, &device, &queue, 10_000, "camera_culling_rotation_10000_stable");
+    for (objects, name) in [(OBJECTS, "camera_culling_rotation_3000_stable"), (10_000, "camera_culling_rotation_10000_stable")] {
+        let fixture = Fixture::settled_with_objects(&device, &queue, objects, 1, 50, 0, 128.0, 128.0);
+        let cameras = [camera_yaw_at(128.0, -0.001, 128.0), camera_yaw_at(128.0, 0.001, 128.0)];
+        bench_camera_culling_rotation(&mut group, &device, &queue, fixture, cameras, name);
+    }
+    let (mut world, rows) = support::live_prepare_world_with_regions(OBJECTS_87K_FACES, 50, TEXTURES, 1);
+    support::blend_alternate_objects(&mut world, &rows);
+    let overhead = DVec3::new(128.0, 72.0, 160.0);
+    let fixture = Fixture::settle(&device, &queue, world, rows, 1, camera_yaw_from(overhead, 0.0, 512.0));
+    let cameras = [camera_yaw_from(overhead, -0.001, 512.0), camera_yaw_from(overhead, 0.001, 512.0)];
+    bench_camera_culling_rotation(&mut group, &device, &queue, fixture, cameras, "camera_culling_rotation_87k_faces_half_blended");
     bench_camera_culling_edge_sweep(&mut group, &device, &queue, OBJECTS, "camera_culling_edge_sweep_3000");
     bench_camera_culling_edge_sweep(&mut group, &device, &queue, 10_000, "camera_culling_edge_sweep_10000");
     bench_pose(&mut group, &device, &queue);
@@ -945,11 +959,10 @@ fn bench_camera_culling_rotation(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    objects: usize,
+    mut fixture: Fixture,
+    cameras: [Camera; 2],
     name: &'static str,
 ) {
-    let mut fixture = Fixture::settled_with_objects(device, queue, objects, 1, 50, 0, 128.0, 128.0);
-    let cameras = [camera_yaw_at(128.0, -0.001, 128.0), camera_yaw_at(128.0, 0.001, 128.0)];
     let initial = fixture.prepare.stats();
     let mut rotated = initial;
     for camera in cameras {
@@ -958,7 +971,7 @@ fn bench_camera_culling_rotation(
         assert_eq!(stats.pending_meshes, 0, "warm rotation must use resident meshes");
         assert_eq!(stats.pending_textures, 0, "warm rotation must use resident textures");
         assert_eq!(stats.omitted_faces, 0);
-        assert_eq!(stats.layouts, 0, "small in-place rotation must preserve candidate membership");
+        assert_eq!(stats.layouts, 0, "small in-place rotation must preserve range membership");
         assert_eq!(stats.instances, initial.instances, "small in-place rotation must preserve drawn items");
         assert_eq!(stats.draw_calls, initial.draw_calls);
         assert_eq!(stats.draw_commands, initial.draw_commands);
@@ -971,6 +984,7 @@ fn bench_camera_culling_rotation(
 
     let mut generation = 0usize;
     let mut latest = fixture.prepare.stats();
+    let mut cull = DurationDistribution::default();
     group.bench_function(name, |b| {
         b.iter_custom(|iters| {
             let mut elapsed = Duration::ZERO;
@@ -978,10 +992,11 @@ fn bench_camera_culling_rotation(
                 generation = generation.wrapping_add(1);
                 elapsed += fixture.sample(device, queue, cameras[generation % cameras.len()]);
                 latest = fixture.prepare.stats();
+                cull.record(duration_ms(latest.prepare_draw_batches_ms));
                 assert_eq!(latest.pending_meshes, 0, "warm rotation must use resident meshes");
                 assert_eq!(latest.pending_textures, 0, "warm rotation must use resident textures");
                 assert_eq!(latest.omitted_faces, 0);
-                assert_eq!(latest.layouts, 0, "small in-place rotation must preserve candidate membership");
+                assert_eq!(latest.layouts, 0, "small in-place rotation must preserve range membership");
                 assert_eq!(latest.instances, initial.instances, "small in-place rotation must preserve drawn items");
                 assert_eq!(latest.draw_calls, initial.draw_calls);
                 assert_eq!(latest.draw_commands, initial.draw_commands);
@@ -990,6 +1005,7 @@ fn bench_camera_culling_rotation(
         });
     });
     report(name, latest);
+    eprintln!("{name}: cull {}", cull.report());
 }
 
 fn bench_camera_culling_edge_sweep(
@@ -1021,13 +1037,16 @@ fn bench_camera_culling_edge_sweep(
         assert_eq!(stats.omitted_faces, 0);
     }
     assert!(!second.rebuild_pending, "edge sweep layout must settle within {SETTLE_FRAMES} frames");
-    assert_ne!(first.instances, second.instances, "edge sweep must change visible item count");
-    assert!(settle_layouts > 0, "edge sweep must rebuild the visible draw layout");
-    eprintln!("{name}: edge sweep instances={}->{} settled after {settle_frames} frames", first.instances, second.instances);
+    assert_ne!(first.draw_commands, second.draw_commands, "edge sweep must change the emitted commands");
+    assert_eq!(settle_layouts, 0, "turning in place must keep range membership");
+    eprintln!(
+        "{name}: edge sweep commands={}->{} instances={} settled after {settle_frames} frames",
+        first.draw_commands, second.draw_commands, second.instances
+    );
 
     let mut generation = 0usize;
-    let mut layouts = 0usize;
     let mut latest = second;
+    let mut cull = DurationDistribution::default();
     group.bench_function(name, |b| {
         b.iter_custom(|iters| {
             let mut elapsed = Duration::ZERO;
@@ -1036,16 +1055,17 @@ fn bench_camera_culling_edge_sweep(
                 generation = generation.wrapping_add(1);
                 elapsed += fixture.sample(device, queue, cameras[camera_index]);
                 latest = fixture.prepare.stats();
+                cull.record(duration_ms(latest.prepare_draw_batches_ms));
                 assert_eq!(latest.pending_meshes, 0, "warm edge sweep must use resident meshes");
                 assert_eq!(latest.pending_textures, 0, "warm edge sweep must use resident textures");
                 assert_eq!(latest.omitted_faces, 0);
-                layouts += latest.layouts;
+                assert_eq!(latest.layouts, 0, "the alternating sweep must keep range membership");
             }
             elapsed
         });
     });
-    eprintln!("{name}: alternating sweep committed {layouts} layouts");
     report(name, latest);
+    eprintln!("{name}: cull {}", cull.report());
 }
 
 fn bench_pose(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
@@ -1344,8 +1364,12 @@ fn camera_at(x: f64, rotation: f64, draw_distance: f64) -> Camera {
 }
 
 fn camera_yaw_at(x: f64, yaw: f64, draw_distance: f64) -> Camera {
+    camera_yaw_from(DVec3::new(x, 15.0, 120.0), yaw, draw_distance)
+}
+
+fn camera_yaw_from(eye: DVec3, yaw: f64, draw_distance: f64) -> Camera {
     let direction = Vec3::new(yaw.sin() as f32, 0.0, -yaw.cos() as f32);
-    Camera::new(DVec3::new(x, 15.0, 120.0), direction, PI / 2.0, SIZE)
+    Camera::new(eye, direction, PI / 2.0, SIZE)
         .expect("benchmark camera")
         .with_quality(draw_distance, 1.0)
         .expect("benchmark camera quality")

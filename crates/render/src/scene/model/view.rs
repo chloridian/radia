@@ -196,6 +196,13 @@ impl SceneView {
         self.changed_sequences.insert((sequence, id));
     }
 
+    fn note_entity_change(&mut self, entity: Entity, sequence: u64) {
+        let Some(id) = self.mirror.objects.get(&entity).map(|object| object.detail().summary.id) else { return };
+        if self.object_order.get(&id) == Some(&entity) {
+            self.note_object_change(id, sequence);
+        }
+    }
+
     pub fn apply(&mut self, batch: Batch) -> Result<(), ApplyError> {
         if !self.session.is_active() || !self.session.same(&batch.session) {
             return Err(ApplyError::StaleSession);
@@ -278,6 +285,16 @@ impl SceneView {
                 change @ Change::InvalidateSubtree(..) | change @ Change::Retire(_) => {
                     visibility_changed = true;
                     self.mirror.apply_at(change, now);
+                }
+                Change::Mesh(mesh) => {
+                    let (MeshChange::Set(entity, ..) | MeshChange::Clear(entity, _)) = mesh;
+                    self.mirror.apply_at(Change::Mesh(mesh), now);
+                    self.note_entity_change(entity, batch.sequence);
+                }
+                Change::Material(material) => {
+                    let entity = material.source.detail().summary.entity;
+                    self.mirror.apply_at(Change::Material(material), now);
+                    self.note_entity_change(entity, batch.sequence);
                 }
                 change => self.mirror.apply_at(change, now),
             }
@@ -555,7 +572,7 @@ mod tests {
 
     use crate::scene::model::Receipt;
     use crate::scene::model::SceneLifetime;
-    use crate::scene::{Budget, Reconciler};
+    use crate::scene::{Budget, Camera, ReadFailure, ReadQuery, ReadReply, ReconcileStep, Reconciler};
 
     struct PageState {
         entries: Vec<(Uuid, Option<Entity>)>,
@@ -864,6 +881,103 @@ mod tests {
         assert_eq!(page, vec![(view.sequence(), changed_id, changed_entity, false)]);
         assert_eq!(cursor, Some((view.sequence(), changed_id)));
         assert!(done, "one small page covers the whole change set regardless of scene size");
+    }
+
+    #[test]
+    fn late_meshes_reach_changed_pages() {
+        let mut world = world::World::new(world::WorldLimits {
+            max_regions: 1,
+            max_entities: 4,
+            max_entities_per_region: 4,
+            max_tombstones_per_region: 4,
+            max_tombstones: 4,
+            max_tombstone_bytes_per_region: world::WorldLimits::tombstone_bytes_for_count(4),
+            max_tombstone_bytes: world::WorldLimits::tombstone_bytes_for_count(4),
+            max_journal_entries: 16,
+            max_journal_changes: 64,
+            max_region_name_bytes: 64,
+            max_recovery_targets: 4,
+        });
+        let region = world.register_region().expect("fixture region registers");
+        let _origin =
+            world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("fixture origin applies");
+        let id = Uuid::from_u128(21);
+        let mut observation = world::ObjectObservation::new(
+            world::UpdateSource::new(region, 1, world::OrderEvidence::Ordered(1), 0),
+            id,
+            std::num::NonZeroU32::new(1).expect("fixture local id"),
+            world::Kind::Object,
+            world::ParentUpdate::Root,
+        );
+        observation.pose = Some(world::Pose { position: Some(math::Vec3::new(10.0, 0.0, 0.0)), rotation: Some(math::Quat::IDENTITY) });
+        observation.scale = Some(math::Vec3::ONE);
+        observation.shape = world::FieldUpdate::Set(world::Shape::Prim(world::PrimShape::default()));
+        observation.appearance = world::FieldUpdate::Set(world::Appearance::Surface);
+        observation.surface_appearance =
+            Some(world::SurfaceAppearance::new(world::FaceAppearance::default(), Vec::new()).expect("fixture appearance"));
+        std::assert_matches!(
+            world.observe_object(observation).expect("fixture object applies").outcome,
+            world::ApplyOutcome::Introduced(_)
+        );
+        let (mut scene, mut view) = Reconciler::new(Budget::default());
+        scene.set_camera(Camera::new(DVec3::ZERO, math::Vec3::X, 1.0, [128, 128]).expect("fixture camera"));
+
+        let mut late = 0;
+        let mut now = Instant::now();
+        for _ in 0..10_000 {
+            match scene.poll(now) {
+                ReconcileStep::Read(job) => {
+                    let reply = match job.query() {
+                        ReadQuery::Barrier => Ok(ReadReply::Barrier(world.read_barrier())),
+                        ReadQuery::Objects(cursor) => world.object_list_page(*cursor, 256).map(ReadReply::Objects),
+                        ReadQuery::Regions(cursor) => world.region_page(*cursor, 64).map(ReadReply::Regions),
+                        ReadQuery::Details(entities) => world.object_detail_batch(entities).map(ReadReply::Details),
+                        ReadQuery::Changes(cursor) => world.change_page(*cursor, 256).map(ReadReply::Changes),
+                        ReadQuery::Terrain(region, cursor) => world.terrain_page(*region, *cursor, 8).map(ReadReply::Terrain),
+                        ReadQuery::Environment(region) => Ok(ReadReply::Environment(world.environment(*region))),
+                    }
+                    .map_err(ReadFailure::World);
+                    scene.complete_read(job, reply, now);
+                }
+                ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
+                ReconcileStep::Publish(batch) => {
+                    let since = view.sequence();
+                    let objects = batch
+                        .changes
+                        .iter()
+                        .filter_map(|change| match change {
+                            Change::Object(object) => Some(object.detail().summary.entity),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let arrivals = batch
+                        .changes
+                        .iter()
+                        .filter_map(|change| match change {
+                            Change::Mesh(MeshChange::Set(entity, ..) | MeshChange::Clear(entity, _)) => Some(*entity),
+                            Change::Material(change) => Some(change.source.detail().summary.entity),
+                            _ => None,
+                        })
+                        .filter(|entity| !objects.contains(entity))
+                        .collect::<Vec<_>>();
+                    view.apply(batch).expect("scene publication");
+                    let (page, _, _) = view.changed_objects_page(since, None, 64);
+                    for entity in arrivals {
+                        late += 1;
+                        assert!(
+                            page.iter().any(|(_, _, changed, _)| *changed == entity),
+                            "a mesh or material published after its object reaches the changed-object pages"
+                        );
+                    }
+                }
+                ReconcileStep::Continue => {}
+                ReconcileStep::Wait(until) => now = until,
+                ReconcileStep::Idle => break,
+                ReconcileStep::Asset(_) | ReconcileStep::Closed => panic!("fixture scene stopped unexpectedly"),
+            }
+        }
+
+        assert!(late > 0, "the fixture publishes a mesh after its object");
     }
 
     #[test]

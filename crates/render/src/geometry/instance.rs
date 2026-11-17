@@ -1,9 +1,90 @@
-use math::{DVec3, Mat4, Quat, Vec3, normal_matrix};
+use std::sync::Arc;
 
-use super::TRANSFORM_BYTES;
-use crate::{material::FaceParams, pipeline::INSTANCE_BYTES};
+use math::{DVec3, Mat4, Quat, Vec3, normal_matrix};
+use wgpu::{
+    Buffer, BufferUsages, Device, Queue,
+    util::{BufferInitDescriptor, DeviceExt},
+};
+
+use super::{Accounting, INSTANCE_BUFFER_BYTES, Lease, TRANSFORM_BYTES, buffer, draw_list::INDIRECT_DRAW_BYTES};
+use crate::{
+    material::FaceParams,
+    pipeline::{FACE_INDEX_BYTES, INSTANCE_BYTES},
+};
 
 pub(super) const PARAMETER_BYTES: usize = INSTANCE_BYTES - TRANSFORM_BYTES;
+pub(super) const INITIAL_FACE_INSTANCES: usize = 16_384;
+pub(super) const SLOT_BYTES: usize = INSTANCE_BYTES + FACE_INDEX_BYTES + INDIRECT_DRAW_BYTES;
+
+pub(super) struct InstanceBuffers {
+    pub(super) instances: Buffer,
+    pub(super) face_indices: Buffer,
+    pub(super) indirect: Buffer,
+    capacity: usize,
+    cap: usize,
+    growths: usize,
+    lease: Lease,
+}
+
+impl InstanceBuffers {
+    pub(super) fn new(device: &Device, memory: &Arc<Accounting>, capacity: usize) -> Self {
+        let limits = device.limits();
+        let bytes = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
+        let cap = (usize::try_from(bytes).unwrap_or(usize::MAX) / INSTANCE_BYTES).min(INSTANCE_BUFFER_BYTES / SLOT_BYTES);
+        let capacity = capacity.min(cap);
+        let (instances, face_indices, indirect) = allocate(device, capacity);
+        let lease = memory.charge(capacity * SLOT_BYTES);
+        Self { instances, face_indices, indirect, capacity, cap, growths: 0, lease }
+    }
+
+    pub(super) fn cap(&self) -> usize {
+        self.cap
+    }
+
+    pub(super) fn bytes(&self) -> usize {
+        self.capacity * INSTANCE_BYTES
+    }
+
+    pub(super) fn growths(&self) -> usize {
+        self.growths
+    }
+
+    pub(super) fn fit(&mut self, device: &Device, queue: &Queue, memory: &Arc<Accounting>, faces: usize) -> bool {
+        if faces <= self.capacity {
+            return false;
+        }
+        let mut capacity = self.capacity.max(1);
+        while capacity < faces {
+            capacity = capacity.saturating_mul(2);
+        }
+        let capacity = capacity.min(self.cap);
+        let (instances, face_indices, indirect) = allocate(device, capacity);
+        let old = (
+            [
+                std::mem::replace(&mut self.instances, instances),
+                std::mem::replace(&mut self.face_indices, face_indices),
+                std::mem::replace(&mut self.indirect, indirect),
+            ],
+            std::mem::replace(&mut self.lease, memory.charge(capacity * SLOT_BYTES)),
+        );
+        queue.on_submitted_work_done(move || drop(old));
+        self.capacity = capacity;
+        self.growths += 1;
+        true
+    }
+}
+
+fn allocate(device: &Device, capacity: usize) -> (Buffer, Buffer, Buffer) {
+    let instances = buffer(device, "Face instances", capacity * INSTANCE_BYTES, BufferUsages::STORAGE);
+    let face_indices: Vec<u8> = (0..u32::try_from(capacity).unwrap_or(u32::MAX)).flat_map(u32::to_le_bytes).collect();
+    let face_indices = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("Face indices"),
+        contents: &face_indices,
+        usage: BufferUsages::VERTEX,
+    });
+    let indirect = buffer(device, "Scene indexed draws", capacity * INDIRECT_DRAW_BYTES, BufferUsages::INDIRECT);
+    (instances, face_indices, indirect)
+}
 
 pub(super) fn model(position: DVec3, rotation: Quat, scale: Vec3, origin: DVec3) -> Mat4 {
     Mat4::from_scale_rotation_translation(scale, rotation, (position - origin).as_vec3())

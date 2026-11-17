@@ -39,7 +39,7 @@ pub(super) struct CachedFace {
     pub(super) slot: Option<u32>,
     pub(super) blended_index: Option<usize>,
     pub(super) layout: LayoutId,
-    pub(super) retained: Option<FaceSlot>,
+    pub(super) committed: Option<FaceSlot>,
 }
 
 pub(super) struct CachedItem {
@@ -222,7 +222,7 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
             slot: None,
             blended_index: None,
             layout: LayoutId::default(),
-            retained: None,
+            committed: None,
         });
     }
     cached
@@ -292,7 +292,7 @@ mod tests {
             (true, true, Pipeline::Surface, 1.0),
         ] {
             let scale = draw_scale(Vec3::ONE, mirror);
-            let mut draw_list = DrawList::default();
+            let mut draw_list = DrawList::new(usize::MAX);
             let faces = cached_faces(
                 CachedFaceContext {
                     id: (2, object.detail().summary.id.as_u128(), 0),
