@@ -499,9 +499,9 @@ mod tests {
         let edge = f32::from_bits(1.0_f32.to_bits() + 260);
         let outside_edge = f32::from_bits(1.0_f32.to_bits() + 261);
         assert!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, edge)).is_ok());
-        assert!(matches!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, outside_edge)), Err(InvalidRotation)));
-        assert!(matches!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, 0.0)), Err(InvalidRotation)));
-        assert!(matches!(normalized_rotation(Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0)), Err(InvalidRotation)));
-        assert!(matches!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, 1.2)), Err(InvalidRotation)));
+        std::assert_matches!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, outside_edge)), Err(InvalidRotation));
+        std::assert_matches!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, 0.0)), Err(InvalidRotation));
+        std::assert_matches!(normalized_rotation(Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0)), Err(InvalidRotation));
+        std::assert_matches!(normalized_rotation(Quat::from_xyzw(0.0, 0.0, 0.0, 1.2)), Err(InvalidRotation));
     }
 }

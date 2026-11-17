@@ -123,7 +123,7 @@ pub(super) fn populated_scene_with_avatars(count: usize, avatar_count: usize, de
     }
     for row in &rows {
         let applied = world.observe_object(observation(*row)).expect("object introduction");
-        assert!(matches!(applied.outcome, Introduced(_)));
+        std::assert_matches!(applied.outcome, Introduced(_));
     }
     assert_eq!(world.object_count(), count);
     Scene { world, rows, regions }

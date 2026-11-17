@@ -56,7 +56,7 @@ fn large_worlds_free_all_memory() {
                 );
                 observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
                 observation.scale = Some(Vec3::ONE);
-                assert!(matches!(world.observe_object(observation).expect("insert benchmark object").outcome, Introduced(_)));
+                std::assert_matches!(world.observe_object(observation).expect("insert benchmark object").outcome, Introduced(_));
             }
             (world, regions)
         });

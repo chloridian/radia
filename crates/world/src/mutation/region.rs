@@ -159,7 +159,7 @@ mod tests {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
         world.journal.revision = WorldRevision(u64::MAX);
-        assert!(matches!(world.retire_region(region), Err(RevisionExhausted)));
+        std::assert_matches!(world.retire_region(region), Err(RevisionExhausted));
         assert!(world.region(region).is_some());
     }
 
