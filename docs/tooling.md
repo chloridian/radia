@@ -53,10 +53,6 @@ cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target
 # In a second terminal
 mkdir target/timing-repeat
 cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target/timing-repeat --stress-count 200 -E 'test(<name>)'
-
-# Manual Windows atomic-replacement stress, 10,000 replacements
-cargo nextest run -p utils -E 'test(atomic_replacement_stress)' --run-ignored only
-
 ```
 
 - `cargo lint` checks all targets and features with warnings denied.
@@ -200,14 +196,6 @@ cargo test --release --locked -p network udp_burst_measurement -- --ignored --no
 ```
 
 It measures one primary circuit and one session with three neighbors, excluding setup, packet construction, and shutdown. Reported ACK latency includes circuit batching and pacing. The acknowledged-burst completion rate is a closed-loop measurement, not saturation throughput. Delivery observations end at the application receiver; they do not include World or scene processing or real-network latency.
-
-Protocol has an ignored inventory decode working-set replay:
-
-```bash
-cargo test --locked -p protocol --test allocation inventory_working_sets -- --ignored --nocapture
-```
-
-It measures an accepted dense unknown-field map and a legacy folder containing 100,000 items. Inputs are built before measurement, cases run sequentially, and decoded outputs are checked for release. The report includes raw buffer capacity and additional Rust allocation live/peak bytes. It excludes transport buffers, allocator overhead and process RSS. Debug elapsed time includes allocation instrumentation and is not a runtime-latency benchmark.
 
 Storage's insertion benchmarks start each sample with 50,000 existing entries and reset inserted keys outside the measured operation. The lookup and reopen benchmarks verify that same fixture size. Run timing baselines without concurrent tests or builds; the parallel workspace load above is for flakiness validation.
 
