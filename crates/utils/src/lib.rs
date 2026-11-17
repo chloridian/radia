@@ -1,3 +1,5 @@
+mod summary;
+
 use std::{
     io::{self, Write},
     path::Path,
@@ -7,6 +9,8 @@ use std::{
 
 use tempfile::NamedTempFile;
 use uuid::Uuid;
+
+pub use summary::Summary;
 
 const PERSIST_ATTEMPTS: usize = 4;
 const PERSIST_RETRY_DELAY: Duration = Duration::from_millis(10);
