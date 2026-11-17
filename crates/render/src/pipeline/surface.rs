@@ -1,5 +1,4 @@
-use math::camera::rh::view::look_to_mat4;
-use math::{DVec3, Mat4, Vec3, Vec4};
+use math::{DVec3, Mat4, Vec3, Vec4, camera::rh::view::look_to_mat4};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
     BindingType, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages,
@@ -9,18 +8,15 @@ use wgpu::{
     VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
 };
 
-use crate::scene::Camera;
-
-use crate::{
-    environment::Evaluated,
-    texture::{TextureKey, TextureViewState, Textures},
-};
-
-use super::TexturePair;
-
 use super::{
+    TexturePair,
     atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values},
     water::water_surface_values,
+};
+use crate::{
+    environment::Evaluated,
+    scene::Camera,
+    texture::{TextureKey, TextureViewState, Textures},
 };
 
 pub(crate) const INSTANCE_BYTES: usize = 240;
@@ -319,7 +315,7 @@ impl SurfacePipelines {
             region_water_normal_states: [None, None],
         }
     }
-    pub(crate) fn update_camera_uniform(&self, queue: &Queue, camera: Camera, size: [u32; 2], origin: math::DVec3) -> Mat4 {
+    pub(crate) fn update_camera_uniform(&self, queue: &Queue, camera: Camera, size: [u32; 2], origin: DVec3) -> Mat4 {
         let projection = projection(camera, size);
         let translation = Mat4::from_translation(-(camera.position() - origin).as_vec3());
         let view = camera_view(camera) * translation;
@@ -484,12 +480,15 @@ pub(crate) fn camera_view(camera: Camera) -> Mat4 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::f64::consts::FRAC_PI_2;
+
     use math::DVec3;
+
+    use super::*;
 
     #[test]
     fn clip_conventions() {
-        let camera = Camera::new(DVec3::splat(1e9), Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap();
+        let camera = Camera::new(DVec3::splat(1e9), Vec3::X, FRAC_PI_2, [1000, 1000]).unwrap();
         let matrix = projection(camera, [1000, 1000]);
         let center = matrix.project_point3(Vec3::new(10.0, 0.0, 0.0));
         assert!(center.x.abs() < 1e-6 && center.y.abs() < 1e-6 && (0.0..1.0).contains(&center.z));

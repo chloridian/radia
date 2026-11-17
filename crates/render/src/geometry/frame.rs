@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    mem,
     ops::Bound::{Excluded, Unbounded},
     time::{Duration, Instant},
 };
@@ -10,6 +11,7 @@ use uuid::Uuid;
 use wgpu::{CommandEncoder, Device};
 use world::{Kind, WorldPose};
 
+use super::{FramePreparation, FramePreparationKey, GeometryRenderer, PrepareTimes, ShadingMode, Stats, mesh::MeshUpload};
 use crate::{
     FrameInput,
     environment::Evaluated,
@@ -21,12 +23,11 @@ use crate::{
         visibility::WorldSphere,
     },
     material::FaceParams,
+    pipeline,
     pipeline::{TexturePair, blend_keys},
     scene::{AgentPose, Camera, Object, Placement, SceneView, motion, texture_animation},
     texture::Textures,
 };
-
-use super::{FramePreparation, FramePreparationKey, GeometryRenderer, PrepareTimes, ShadingMode, Stats, mesh::MeshUpload};
 
 pub(super) const BUDGET_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 pub(super) const SLOW_PREPARE_REPORT_INTERVAL: Duration = Duration::from_secs(10);
@@ -253,7 +254,7 @@ impl GeometryRenderer {
             if self.cache.range_camera.is_none_or(|anchor| range_moved(anchor, candidate_camera)) {
                 self.cache.range_camera = Some(candidate_camera);
             }
-            let candidate_frustum = Frustum::from_clip_matrix(crate::pipeline::projection(candidate_camera, size));
+            let candidate_frustum = Frustum::from_clip_matrix(pipeline::projection(candidate_camera, size));
             let (changed, missing) = self.update_range(view, &range_items, Some((candidate_camera, &candidate_frustum)));
             mesh_demand_missing |= missing;
             changed
@@ -437,7 +438,7 @@ impl GeometryRenderer {
         }
         if layout_committed {
             update.pose_items.extend(
-                std::mem::take(&mut self.layout_pose_items)
+                mem::take(&mut self.layout_pose_items)
                     .into_iter()
                     .filter_map(|(index, entity)| (self.cache.objects.get(&entity) == Some(&index)).then_some(index)),
             );
@@ -500,7 +501,7 @@ impl GeometryRenderer {
         times.texture_bindings += binding_started.elapsed();
         times.textures += texture_started.elapsed();
         if visible_changed {
-            std::mem::swap(&mut self.cache.visible, &mut self.cache.next_visible);
+            mem::swap(&mut self.cache.visible, &mut self.cache.next_visible);
         }
         self.cache.next_visible.clear();
         if !rebuilding {
@@ -1086,7 +1087,7 @@ struct SlowPrepare {
     omitted_faces: usize,
 }
 
-fn set_cached_item_pose(item: &mut super::items::CachedItem, pose: WorldPose, origin: DVec3) -> bool {
+fn set_cached_item_pose(item: &mut CachedItem, pose: WorldPose, origin: DVec3) -> bool {
     if item.position == pose.position && item.rotation == pose.rotation {
         return false;
     }
@@ -1125,7 +1126,7 @@ fn viewed(item: &CachedItem, camera: Camera, frustum: &Frustum) -> bool {
         .is_some_and(|sphere| sphere.visible(item.shading, camera, frustum))
 }
 
-fn next_animation_deadline(item: &super::items::CachedItem, now: Instant) -> Option<Instant> {
+fn next_animation_deadline(item: &CachedItem, now: Instant) -> Option<Instant> {
     if !item.animated_faces.iter().any(|index| item.faces.get(*index).is_some_and(|face| face.slot.is_some())) {
         return None;
     }
@@ -1168,18 +1169,20 @@ fn environment_pairs(view: &SceneView, textures: &Textures, environment: Option<
 
 #[cfg(test)]
 mod tests {
+    use math::{DVec3, Vec3};
+
     use super::*;
     use crate::{
         geometry::{
             MeshState,
             cache::object_item_id,
             draw_list::DrawList,
+            fixtures,
             items::{CachedFaceContext, cached_faces, mesh_info, surface_pipeline},
         },
         scene::{Budget, Placement, Reconciler},
-        texture::TextureState,
+        texture::{GeometryTextureState, TextureState},
     };
-    use math::{DVec3, Vec3};
 
     fn prepare_key(view: &SceneView) -> FramePreparationKey {
         FramePreparationKey {
@@ -1201,25 +1204,25 @@ mod tests {
         let prepared = FramePreparation {
             key: prepare_key(&view),
             textures: texture_state(),
-            geometry_textures: crate::texture::GeometryTextureState::default(),
+            geometry_textures: GeometryTextureState::default(),
             meshes: MeshState::default(),
             more_meshes: false,
             redraw_deadline: None,
         };
         let now = Instant::now();
-        assert!(prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), now));
+        assert!(prepared.reusable(&prepare_key(&view), GeometryTextureState::default(), MeshState::default(), now));
         let mut moved = prepare_key(&view);
         moved.camera = Camera::new(DVec3::X, Vec3::X, 1.0, [720, 720]).expect("moved camera");
-        assert!(!prepared.reusable(&moved, crate::texture::GeometryTextureState::default(), MeshState::default(), now));
+        assert!(!prepared.reusable(&moved, GeometryTextureState::default(), MeshState::default(), now));
         let mut resized = prepare_key(&view);
         resized.size[0] = 1600;
-        assert!(!prepared.reusable(&resized, crate::texture::GeometryTextureState::default(), MeshState::default(), now));
+        assert!(!prepared.reusable(&resized, GeometryTextureState::default(), MeshState::default(), now));
         let mut quality = prepare_key(&view);
         quality.camera = quality.camera.with_quality(128.0, 2.0).expect("changed quality");
-        assert!(!prepared.reusable(&quality, crate::texture::GeometryTextureState::default(), MeshState::default(), now));
-        assert!(!prepared.reusable(&prepare_key(&other), crate::texture::GeometryTextureState::default(), MeshState::default(), now));
+        assert!(!prepared.reusable(&quality, GeometryTextureState::default(), MeshState::default(), now));
+        assert!(!prepared.reusable(&prepare_key(&other), GeometryTextureState::default(), MeshState::default(), now));
         scene.close();
-        assert!(!prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), now));
+        assert!(!prepared.reusable(&prepare_key(&view), GeometryTextureState::default(), MeshState::default(), now));
     }
 
     #[test]
@@ -1229,7 +1232,7 @@ mod tests {
         let mut prepared = FramePreparation {
             key: prepare_key(&view),
             textures: state,
-            geometry_textures: crate::texture::GeometryTextureState::default(),
+            geometry_textures: GeometryTextureState::default(),
             meshes: MeshState::default(),
             more_meshes: false,
             redraw_deadline: None,
@@ -1243,26 +1246,16 @@ mod tests {
             ("soft cap change", TextureState { cap: 64 * 1024 * 1024, ..state }),
         ] {
             assert!(
-                prepared.needs_frame(changed, crate::texture::GeometryTextureState::default(), MeshState::default(), now),
+                prepared.needs_frame(changed, GeometryTextureState::default(), MeshState::default(), now),
                 "{reason} must allow texture progress to schedule a frame"
             );
-            assert!(prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), now));
+            assert!(prepared.reusable(&prepare_key(&view), GeometryTextureState::default(), MeshState::default(), now));
         }
-        assert!(!prepared.reusable(
-            &prepare_key(&view),
-            crate::texture::GeometryTextureState::default(),
-            MeshState { bytes: 4, revision: 0 },
-            now
-        ));
-        assert!(!prepared.reusable(
-            &prepare_key(&view),
-            crate::texture::GeometryTextureState::default(),
-            MeshState { bytes: 0, revision: 1 },
-            now
-        ));
-        assert!(prepared.needs_frame(state, crate::texture::GeometryTextureState(1), MeshState::default(), now));
+        assert!(!prepared.reusable(&prepare_key(&view), GeometryTextureState::default(), MeshState { bytes: 4, revision: 0 }, now));
+        assert!(!prepared.reusable(&prepare_key(&view), GeometryTextureState::default(), MeshState { bytes: 0, revision: 1 }, now));
+        assert!(prepared.needs_frame(state, GeometryTextureState(1), MeshState::default(), now));
         prepared.more_meshes = true;
-        assert!(!prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), now));
+        assert!(!prepared.reusable(&prepare_key(&view), GeometryTextureState::default(), MeshState::default(), now));
     }
 
     #[test]
@@ -1274,22 +1267,22 @@ mod tests {
         let mut prepared = FramePreparation {
             key: prepare_key(&view),
             textures: state,
-            geometry_textures: crate::texture::GeometryTextureState::default(),
+            geometry_textures: GeometryTextureState::default(),
             meshes: MeshState::default(),
             more_meshes: false,
             redraw_deadline: Some(deadline),
         };
-        assert!(!prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default(), now));
-        assert!(prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), now));
-        assert!(prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default(), deadline));
-        assert!(!prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), deadline));
+        assert!(!prepared.needs_frame(state, GeometryTextureState::default(), MeshState::default(), now));
+        assert!(prepared.reusable(&prepare_key(&view), GeometryTextureState::default(), MeshState::default(), now));
+        assert!(prepared.needs_frame(state, GeometryTextureState::default(), MeshState::default(), deadline));
+        assert!(!prepared.reusable(&prepare_key(&view), GeometryTextureState::default(), MeshState::default(), deadline));
         prepared.redraw_deadline = None;
-        assert!(!prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default(), deadline));
+        assert!(!prepared.needs_frame(state, GeometryTextureState::default(), MeshState::default(), deadline));
     }
 
     #[test]
     fn scale_winding_rekeys_faces() {
-        let (_scene, view, _) = crate::geometry::fixtures::scene(255);
+        let (_scene, view, _) = fixtures::scene(255);
         let object = view.objects().next().expect("fixture object");
         let (_, mesh) = object.mesh().expect("fixture mesh");
         let Placement::Ready(transform) = object.placement() else { panic!("fixture placement") };

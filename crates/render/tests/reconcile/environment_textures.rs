@@ -1,9 +1,11 @@
+use std::{assert_matches, collections::HashSet};
+
 use test_support::texture::GRAY_4096_J2C;
 
 use super::support::{
-    AssetChange, AssetId, BTreeSet, Budget, Duration, EnvironmentAssignment, EnvironmentChoice, EnvironmentProperty, EnvironmentPush,
-    EnvironmentScope, EnvironmentSource, ExperienceId, Instant, LocalChoice, Priority, ReconcileStep, Reconciler, Request, Uuid,
-    prepared_asset, settle_materials, source, world, world_region, world_with_region_count,
+    AssetChange, AssetId, AssetRequest, BTreeSet, Budget, Duration, EnvironmentAssignment, EnvironmentChoice, EnvironmentProperty,
+    EnvironmentPush, EnvironmentScope, EnvironmentSource, ExperienceId, Instant, LocalChoice, Priority, ReconcileStep, Reconciler, Request,
+    Uuid, prepared_asset, settle_materials, source, world, world_region, world_with_region_count,
 };
 
 #[test]
@@ -15,14 +17,14 @@ fn keyframe_demands_respect_caps() {
     for (index, region) in ids.iter().copied().enumerate() {
         let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
         let bytes = daycycle_textures(u128::from(region.get()) * 10_000);
-        std::assert_matches!(assets::EnvironmentDescription::decode(bytes.as_bytes()), Ok(_));
+        assert_matches!(assets::EnvironmentDescription::decode(bytes.as_bytes()), Ok(_));
         let assignment = assignment(EnvironmentSource::Inline(bytes.into_bytes().into()), 1);
         let _ = world.observe_environment(target, source(&world, index, 1), assignment).unwrap();
     }
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(ids.iter().filter(|region| view.environment(**region).is_some()).count(), ids.len());
-    let unique: std::collections::BTreeSet<_> = work
+    let unique: BTreeSet<_> = work
         .requested
         .iter()
         .filter_map(|request| match request.request {
@@ -34,7 +36,7 @@ fn keyframe_demands_respect_caps() {
     assert_eq!(unique.len(), work.requested.len(), "keyframes and regions share each requested asset ID once");
     for region in ids {
         let start = u128::from(region.get()) * 10_000;
-        let frame_ids: std::collections::BTreeSet<_> = (1..=20).map(|index| AssetId::new(Uuid::from_u128(start + index))).collect();
+        let frame_ids: BTreeSet<_> = (1..=20).map(|index| AssetId::new(Uuid::from_u128(start + index))).collect();
         assert_eq!(unique.intersection(&frame_ids).count(), 11, "the per-environment cap leaves eleven unique sun textures after defaults");
     }
 }
@@ -84,7 +86,7 @@ fn retirement_retains_texture_tickets() {
     assert_eq!(view.environment_texture(first_id).map(|texture| texture.asset()), Some(first_id));
 
     scene.close();
-    let mut released = std::collections::HashSet::new();
+    let mut released = HashSet::new();
     for _ in 0..3 {
         match scene.poll(now) {
             ReconcileStep::Asset(AssetChange::Release(ticket)) => {
@@ -174,9 +176,9 @@ fn local_texture_tracks_region() {
         .expect("texture is requested on the current route");
     assert_eq!(second_texture.region, second_region);
     assert_ne!(second_texture.ticket, first_texture.ticket);
-    scene.complete_asset(first_texture.ticket, prepared_asset(first_texture.request, test_support::texture::GRAY_4096_J2C.to_vec()));
+    scene.complete_asset(first_texture.ticket, prepared_asset(first_texture.request, GRAY_4096_J2C.to_vec()));
     assert!(view.environment_texture(texture).is_none());
-    scene.complete_asset(second_texture.ticket, prepared_asset(second_texture.request, test_support::texture::GRAY_4096_J2C.to_vec()));
+    scene.complete_asset(second_texture.ticket, prepared_asset(second_texture.request, GRAY_4096_J2C.to_vec()));
     settle_materials(&mut scene, &mut view, &world, &mut now);
     let ready_handle = view.environment_texture(texture).cloned().expect("local texture is ready");
     assert_eq!(ready_handle.asset(), texture);
@@ -209,10 +211,10 @@ fn close_releases_environment_texture_tickets() {
     let _ = world.observe_environment(target, source(&world, 0, 1), assignment).unwrap();
     scene.notify_world_change();
     let pending = settle_materials(&mut scene, &mut view, &world, &mut now);
-    let tickets: std::collections::HashSet<_> = pending.requested.iter().map(|request| request.ticket).collect();
+    let tickets: HashSet<_> = pending.requested.iter().map(|request| request.ticket).collect();
     assert!(!tickets.is_empty());
     scene.close();
-    let mut released = std::collections::HashSet::new();
+    let mut released = HashSet::new();
     for _ in 0..tickets.len() + 1 {
         match scene.poll(now) {
             ReconcileStep::Asset(AssetChange::Release(ticket)) => {
@@ -285,7 +287,7 @@ fn experience_overrides_share_demands() {
     assert_eq!(requested_id(&water_override.requested, water_override_texture), 1);
 }
 
-fn requested_id(requests: &[super::support::AssetRequest], id: AssetId) -> usize {
+fn requested_id(requests: &[AssetRequest], id: AssetId) -> usize {
     requests.iter().filter(|request| matches!(request.request, Request::Texture { id: requested, .. } if requested == id)).count()
 }
 

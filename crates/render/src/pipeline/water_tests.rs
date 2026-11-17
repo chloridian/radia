@@ -1,7 +1,8 @@
-use std::{sync::mpsc, time::Instant};
+use std::{array, sync::mpsc, time::Instant};
 
 use assets::{Budget, Content, Kind, LoadJob, Priority, Request, Resource, Status};
 use futures::executor::block_on;
+use test_support::texture::RGBA_J2C;
 use utils::AssetId;
 use uuid::Uuid;
 use wgpu::{
@@ -11,7 +12,7 @@ use wgpu::{
     TextureViewDimension,
 };
 
-use crate::{texture::CompressionQuality, texture::TextureKey};
+use crate::texture::{CompressionQuality, TextureKey, Textures};
 
 #[test]
 #[ignore = "requires Vulkan; run with cargo test -p render --lib waves_sample_interpolated_field -- --ignored"]
@@ -22,10 +23,10 @@ fn waves_sample_interpolated_field() {
         let adapter = instance.request_adapter(&Default::default()).await.expect("Vulkan adapter is available");
         adapter.request_device(&DeviceDescriptor::default()).await.expect("Vulkan device is available")
     });
-    let texture = loaded_fixture(0x4f6d_7192_3a4c_5e6f_8091_a2b3_c4d5_e6f7, test_support::texture::RGBA_J2C);
+    let texture = loaded_fixture(0x4f6d_7192_3a4c_5e6f_8091_a2b3_c4d5_e6f7, RGBA_J2C);
     let image = texture.image().expect("fixture image pixels remain available");
     let key = TextureKey { id: texture.id(), sampler: assets::Sampler::default() };
-    let mut textures = crate::texture::Textures::new(&device, &queue);
+    let mut textures = Textures::new(&device, &queue);
     textures.request_environment(&texture, 1);
     let job = textures.next_conversion_job().expect("fixture texture upload is admitted");
     textures.complete(job.run(CompressionQuality::Fast));
@@ -236,7 +237,7 @@ fn sample_normal(image: &assets::Image, uv: [f64; 2]) -> [f32; 3] {
         let y = y.rem_euclid(i64::from(height)) as usize;
         f64::from(image.pixels()[(y * width as usize + x) * 4 + channel]) / 255.0
     };
-    std::array::from_fn(|channel| {
+    array::from_fn(|channel| {
         let top = sample(base[0], base[1], channel) * (1.0 - fraction[0]) + sample(base[0] + 1, base[1], channel) * fraction[0];
         let bottom = sample(base[0], base[1] + 1, channel) * (1.0 - fraction[0]) + sample(base[0] + 1, base[1] + 1, channel) * fraction[0];
         ((top * (1.0 - fraction[1]) + bottom * fraction[1]) * 2.0 - 1.0) as f32

@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    f32::consts::FRAC_1_SQRT_2,
+    time::{Duration, Instant},
+};
 
 use assets::{Budget, Content, Environment, EnvironmentDescription, EnvironmentSettings, LoadJob, Priority, Request, Status, Store};
 use utils::AssetId;
@@ -375,8 +378,8 @@ fn fixed_defaults_stay_static() {
 fn rotation_slerps_midpoint() {
     let day = environment(CYCLE);
     let midpoint = evaluated(&day, 7_200.0, 0.0, Schedule::default());
-    close(midpoint.sky.sun_direction[0], std::f32::consts::FRAC_1_SQRT_2);
-    close(midpoint.sky.sun_direction[1], std::f32::consts::FRAC_1_SQRT_2);
+    close(midpoint.sky.sun_direction[0], FRAC_1_SQRT_2);
+    close(midpoint.sky.sun_direction[1], FRAC_1_SQRT_2);
     close(midpoint.sky.sun_direction[2], 0.0);
     let hit = evaluated(&day, 10_800.0, 0.0, Schedule::default());
     close(hit.sky.sun_direction[0], 0.0);

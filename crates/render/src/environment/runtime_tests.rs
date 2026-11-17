@@ -1,4 +1,4 @@
-use std::time::UNIX_EPOCH;
+use std::{array, num::NonZeroU32, time::UNIX_EPOCH};
 
 use math::{DVec3, Quat, Vec3};
 use utils::{AssetId, ExperienceId};
@@ -10,7 +10,8 @@ use world::{
 
 use super::*;
 use crate::scene::{
-    AssetChange, Budget, EnvironmentProperty, EnvironmentPush, ReadFailure, ReadQuery, ReadReply, ReconcileStep, Reconciler,
+    AssetChange, Budget, EnvironmentChoice, EnvironmentPreset, EnvironmentProperty, EnvironmentPush, ReadFailure, ReadQuery, ReadReply,
+    ReconcileStep, Reconciler,
 };
 
 fn world() -> World {
@@ -97,7 +98,7 @@ fn settle(scene: &mut Reconciler, view: &mut SceneView, world: &World) {
 fn add_region_environment(world: &mut World, region: Region, bytes: &[u8], altitudes: Option<[f32; 3]>) {
     let origin = DVec3::new((region.get() - 1) as f64 * 256.0, 0.0, if region.get() == 2 { 500.0 } else { 0.0 });
     let _ = world.patch_region(region, RegionInfo { origin: Some(origin), ..RegionInfo::default() }).unwrap();
-    let target = world.environment_target(region, world::EnvironmentScope::Region).unwrap();
+    let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
     let assignment = EnvironmentAssignment {
         source: EnvironmentSource::Inline(bytes.into()),
         version: Some(1),
@@ -109,7 +110,7 @@ fn add_region_environment(world: &mut World, region: Region, bytes: &[u8], altit
 }
 
 fn replace_region_environment(world: &mut World, region: Region, bytes: &[u8]) {
-    let target = world.environment_target(region, world::EnvironmentScope::Region).unwrap();
+    let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
     let assignment = EnvironmentAssignment {
         source: EnvironmentSource::Inline(bytes.into()),
         version: Some(2),
@@ -255,16 +256,9 @@ fn assert_scalar(actual: f32, from: f32, to: f32, factor: f32) {
     assert!((actual - expected).abs() < 0.00001, "{actual} != {expected}");
 }
 
-fn push_local(
-    scene: &mut Reconciler,
-    view: &mut SceneView,
-    world: &World,
-    region: Region,
-    preset: crate::scene::EnvironmentPreset,
-    bytes: &[u8],
-) {
+fn push_local(scene: &mut Reconciler, view: &mut SceneView, world: &World, region: Region, preset: EnvironmentPreset, bytes: &[u8]) {
     let asset = preset.asset_id().expect("local sky preset has an asset");
-    push_local_asset(scene, view, world, region, crate::scene::EnvironmentChoice::Local(LocalChoice::Preset(preset)), asset, bytes);
+    push_local_asset(scene, view, world, region, EnvironmentChoice::Local(LocalChoice::Preset(preset)), asset, bytes);
 }
 
 fn push_local_asset(
@@ -272,7 +266,7 @@ fn push_local_asset(
     view: &mut SceneView,
     world: &World,
     region: Region,
-    choice: crate::scene::EnvironmentChoice,
+    choice: EnvironmentChoice,
     asset: AssetId,
     bytes: &[u8],
 ) {
@@ -309,7 +303,7 @@ fn active_follows_agent_region() {
     let mut agent = ObjectObservation::new(
         UpdateSource::new(second_region, 1, Ordered(2), 0),
         Uuid::from_u128(100),
-        std::num::NonZeroU32::new(1).unwrap(),
+        NonZeroU32::new(1).unwrap(),
         Kind::Avatar,
         ParentUpdate::Root,
     );
@@ -493,21 +487,14 @@ fn local_preset_precedence_and_clear() {
     let mut active = ActiveEnvironment::default();
     assert!(active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now));
     assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([0.0, 1.0, 0.0]));
-    push_local(
-        &mut scene,
-        &mut view,
-        &world,
-        first_region,
-        crate::scene::EnvironmentPreset::Midday,
-        b"{'type':'sky','sunlight_color':[r0,r0,r1]}",
-    );
+    push_local(&mut scene, &mut view, &world, first_region, EnvironmentPreset::Midday, b"{'type':'sky','sunlight_color':[r0,r0,r1]}");
     assert!(active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(1)));
     assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([0.0, 0.0, 1.0]));
     assert_eq!(active.evaluated().map(|value| value.water.fog_density), Some(7.0));
     assert_eq!(active.next_deadline(), None);
     assert_eq!(
         view.viewer_environment().map(|environment| environment.selected()),
-        Some(&crate::scene::EnvironmentChoice::Local(crate::scene::LocalChoice::Preset(crate::scene::EnvironmentPreset::Midday)))
+        Some(&EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Midday)))
     );
 
     let _ = world.observe_agent_parcel(UpdateSource::new(first_region, 2, Ordered(4), 0), None).unwrap();
@@ -520,14 +507,14 @@ fn local_preset_precedence_and_clear() {
     assert_eq!(active.evaluated().map(|value| value.water.fog_density), Some(7.0));
     assert!(!active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(4)));
 
-    scene.set_local_environment(crate::scene::EnvironmentChoice::Shared, first_region).unwrap();
+    scene.set_local_environment(EnvironmentChoice::Shared, first_region).unwrap();
     settle(&mut scene, &mut view, &world);
     assert!(active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(5)));
     assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([0.0, 0.0, 1.0]));
     active.update(&view, Some((first_region, 0.0)), UNIX_EPOCH, now + Duration::from_secs(6));
     assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([0.0, 1.0, 0.0]));
     assert_eq!(active.evaluated().map(|value| value.water.fog_density), Some(7.0));
-    assert_eq!(view.viewer_environment().map(|environment| environment.selected()), Some(&crate::scene::EnvironmentChoice::Shared));
+    assert_eq!(view.viewer_environment().map(|environment| environment.selected()), Some(&EnvironmentChoice::Shared));
 }
 
 #[test]
@@ -544,12 +531,7 @@ fn local_preset_uses_agent_region() {
     assert!(active.update(&view, Some((agent_region, 0.0)), UNIX_EPOCH, now));
     assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([0.0, 1.0, 0.0]));
 
-    scene
-        .set_local_environment(
-            crate::scene::EnvironmentChoice::Local(crate::scene::LocalChoice::Preset(crate::scene::EnvironmentPreset::Midday)),
-            agent_region,
-        )
-        .unwrap();
+    scene.set_local_environment(EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Midday)), agent_region).unwrap();
     let request = loop {
         match scene.poll(now) {
             ReconcileStep::Asset(AssetChange::Request(request)) => break request,
@@ -567,10 +549,7 @@ fn local_preset_uses_agent_region() {
 
     scene.complete_asset(
         request.ticket,
-        ready_environment(
-            crate::scene::EnvironmentPreset::Midday.asset_id().expect("known sky asset"),
-            b"{'type':'sky','sunlight_color':[r0,r0,r1]}",
-        ),
+        ready_environment(EnvironmentPreset::Midday.asset_id().expect("known sky asset"), b"{'type':'sky','sunlight_color':[r0,r0,r1]}"),
     );
     settle(&mut scene, &mut view, &world);
     assert!(active.update(&view, Some((agent_region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(2)));
@@ -586,8 +565,8 @@ fn crossing_retries_local_asset() {
     add_region_environment(&mut world, agent_region, b"{'type':'sky'}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
-    let choice = crate::scene::EnvironmentChoice::Local(crate::scene::LocalChoice::Preset(crate::scene::EnvironmentPreset::Midday));
-    let asset = crate::scene::EnvironmentPreset::Midday.asset_id().expect("known sky asset");
+    let choice = EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Midday));
+    let asset = EnvironmentPreset::Midday.asset_id().expect("known sky asset");
     let now = Instant::now();
     scene.set_local_environment(choice.clone(), first_region).unwrap();
     let first = loop {
@@ -651,7 +630,7 @@ fn inventory_water_keeps_local_sky() {
         &mut view,
         &world,
         region,
-        crate::scene::EnvironmentChoice::Local(crate::scene::LocalChoice::Inventory {
+        EnvironmentChoice::Local(LocalChoice::Inventory {
             owner_id: Uuid::from_u128(1),
             item_id: Uuid::from_u128(21),
             asset_id: sky_asset,
@@ -672,7 +651,7 @@ fn inventory_water_keeps_local_sky() {
         &mut view,
         &world,
         region,
-        crate::scene::EnvironmentChoice::Local(crate::scene::LocalChoice::Inventory {
+        EnvironmentChoice::Local(LocalChoice::Inventory {
             owner_id: Uuid::from_u128(1),
             item_id: Uuid::from_u128(23),
             asset_id: water_asset,
@@ -692,7 +671,7 @@ fn inventory_water_keeps_local_sky() {
             &mut view,
             &world,
             region,
-            crate::scene::EnvironmentChoice::Local(crate::scene::LocalChoice::Inventory {
+            EnvironmentChoice::Local(LocalChoice::Inventory {
                 owner_id: Uuid::from_u128(1),
                 item_id: Uuid::from_u128(25),
                 asset_id: day_asset,
@@ -715,18 +694,12 @@ fn close_releases_local_request() {
     add_region_environment(&mut world, region, b"{'type':'sky'}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
-    scene
-        .set_local_environment(
-            crate::scene::EnvironmentChoice::Local(crate::scene::LocalChoice::Preset(crate::scene::EnvironmentPreset::Midday)),
-            region,
-        )
-        .unwrap();
+    scene.set_local_environment(EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Midday)), region).unwrap();
     let now = Instant::now();
     let request = loop {
         match scene.poll(now) {
             ReconcileStep::Asset(AssetChange::Request(request))
-                if request.request
-                    == assets::Request::Environment(crate::scene::EnvironmentPreset::Midday.asset_id().expect("preset asset")) =>
+                if request.request == assets::Request::Environment(EnvironmentPreset::Midday.asset_id().expect("preset asset")) =>
             {
                 break request;
             }
@@ -759,12 +732,7 @@ fn failed_preset_publishes_error() {
     add_region_environment(&mut world, region, b"{'type':'sky'}", None);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     settle(&mut scene, &mut view, &world);
-    scene
-        .set_local_environment(
-            crate::scene::EnvironmentChoice::Local(crate::scene::LocalChoice::Preset(crate::scene::EnvironmentPreset::Midday)),
-            region,
-        )
-        .unwrap();
+    scene.set_local_environment(EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Midday)), region).unwrap();
     let now = Instant::now();
     let request = loop {
         match scene.poll(now) {
@@ -780,7 +748,7 @@ fn failed_preset_publishes_error() {
     settle(&mut scene, &mut view, &world);
 
     let environment = view.viewer_environment().expect("failure outcome is published");
-    assert_eq!(environment.selected(), &crate::scene::EnvironmentChoice::default());
+    assert_eq!(environment.selected(), &EnvironmentChoice::default());
     assert_eq!(environment.local_error(), Some(assets::Failure::NotFound));
     assert!(environment.local().is_none());
 }
@@ -905,7 +873,7 @@ fn delayed_replay_preserves_replacement_start() {
         }
         settle(&mut scene, &mut view, &world);
         let defaults = default_evaluated();
-        let midpoint = std::array::from_fn(|index| (defaults.sky.sunlight[index] + [1.0, 0.0, 0.0][index]) * 0.5);
+        let midpoint = array::from_fn(|index| (defaults.sky.sunlight[index] + [1.0, 0.0, 0.0][index]) * 0.5);
         let mut active = ActiveEnvironment::default();
         active.update(&view, Some((region, 0.0)), UNIX_EPOCH, started + Duration::from_secs(10));
         assert_color(active.evaluated().unwrap().sky.sunlight, midpoint, [0.0, 0.0, 1.0], 0.5);
@@ -967,7 +935,7 @@ fn replacement_starts_at_current() {
     settle(&mut scene, &mut view, &world);
     active.update(&view, Some((region, 0.0)), UNIX_EPOCH, replacement_started);
     let at_replacement =
-        std::array::from_fn(|index| defaults.sky.sunlight[index] + ([1.0, 0.0, 0.0][index] - defaults.sky.sunlight[index]) * 0.2);
+        array::from_fn(|index| defaults.sky.sunlight[index] + ([1.0, 0.0, 0.0][index] - defaults.sky.sunlight[index]) * 0.2);
     assert_eq!(active.evaluated().expect("replacement begins").sky.sunlight, at_replacement);
 
     active.update(&view, Some((region, 0.0)), UNIX_EPOCH, started + Duration::from_secs(4));
@@ -1004,8 +972,7 @@ fn clear_fades_one_property() {
 
     active.update(&view, Some((region, 0.0)), UNIX_EPOCH, started + Duration::from_secs(3));
     let evaluated = active.evaluated().expect("removal fade and remaining transition continue");
-    let removal_from =
-        std::array::from_fn(|index| defaults.sky.sunlight[index] + ([1.0, 0.0, 0.0][index] - defaults.sky.sunlight[index]) * 0.2);
+    let removal_from = array::from_fn(|index| defaults.sky.sunlight[index] + ([1.0, 0.0, 0.0][index] - defaults.sky.sunlight[index]) * 0.2);
     assert_color(evaluated.sky.sunlight, removal_from, defaults.sky.sunlight, 0.5);
     assert_scalar(evaluated.sky.moon_brightness, defaults.sky.moon_brightness, 0.8, 0.5);
 
@@ -1033,8 +1000,7 @@ fn clearing_last_fades_to_defaults() {
     let mut active = ActiveEnvironment::default();
     active.update(&view, Some((region, 0.0)), UNIX_EPOCH, started);
     active.update(&view, Some((region, 0.0)), UNIX_EPOCH, clear_started);
-    let at_clear =
-        std::array::from_fn(|index| defaults.sky.sunlight[index] + ([1.0, 0.0, 0.0][index] - defaults.sky.sunlight[index]) * 0.5);
+    let at_clear = array::from_fn(|index| defaults.sky.sunlight[index] + ([1.0, 0.0, 0.0][index] - defaults.sky.sunlight[index]) * 0.5);
     assert_eq!(active.evaluated().expect("property has reached its midpoint").sky.sunlight, at_clear);
 
     scene
@@ -1080,7 +1046,7 @@ fn clearing_replaced_owner_keeps_property() {
     settle(&mut scene, &mut view, &world);
     assert_eq!(view.viewer_environment().unwrap().sky_properties().get("sunlight_color").unwrap().experience(), second);
     active.update(&view, Some((region, 0.0)), UNIX_EPOCH, clear_started);
-    let from = std::array::from_fn(|index| defaults.sky.sunlight[index] + ([1.0, 0.0, 0.0][index] - defaults.sky.sunlight[index]) * 0.2);
+    let from = array::from_fn(|index| defaults.sky.sunlight[index] + ([1.0, 0.0, 0.0][index] - defaults.sky.sunlight[index]) * 0.2);
     assert_color(active.evaluated().unwrap().sky.sunlight, from, [0.0, 0.0, 1.0], 0.25);
     active.update(&view, Some((region, 0.0)), UNIX_EPOCH, started + Duration::from_secs(6));
     assert_eq!(active.evaluated().unwrap().sky.sunlight, [0.0, 0.0, 1.0]);
@@ -1235,18 +1201,11 @@ fn leaving_local_resumes_property_timeline() {
     active.update(&view, Some((region, 0.0)), UNIX_EPOCH, started);
     let initial = active.evaluated().unwrap().sky.moon_brightness;
 
-    push_local(
-        &mut scene,
-        &mut view,
-        &world,
-        region,
-        crate::scene::EnvironmentPreset::Midday,
-        b"{'type':'sky','sunlight_color':[r0,r0,r1]}",
-    );
+    push_local(&mut scene, &mut view, &world, region, EnvironmentPreset::Midday, b"{'type':'sky','sunlight_color':[r0,r0,r1]}");
     active.update(&view, Some((region, 0.0)), UNIX_EPOCH, started + Duration::from_millis(1));
     assert_ne!(active.evaluated().unwrap().sky.moon_brightness, 0.9);
 
-    scene.set_local_environment(crate::scene::EnvironmentChoice::Shared, region).unwrap();
+    scene.set_local_environment(EnvironmentChoice::Shared, region).unwrap();
     settle(&mut scene, &mut view, &world);
     active.update(&view, Some((region, 0.0)), UNIX_EPOCH, started + Duration::from_millis(5));
     active.update(&view, Some((region, 0.0)), UNIX_EPOCH, started + Duration::from_secs(6));

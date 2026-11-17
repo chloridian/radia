@@ -1,4 +1,4 @@
-use std::sync::mpsc;
+use std::{fs, path::PathBuf, sync::mpsc};
 
 use assets::EnvironmentDescription;
 use futures::executor::block_on;
@@ -25,9 +25,9 @@ fn water_color_ignores_far_plane() {
         let adapter = instance.request_adapter(&Default::default()).await.expect("Vulkan adapter is available");
         adapter.request_device(&DeviceDescriptor::default()).await.expect("Vulkan device is available")
     });
-    let settings = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/tests/fixtures/settings");
+    let settings = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/tests/fixtures/settings");
     let presets = ["Midday.dat", "Sunset.dat", "Midnight.dat"].map(|name| {
-        let bytes = std::fs::read(settings.join(name)).expect("environment fixture is available");
+        let bytes = fs::read(settings.join(name)).expect("environment fixture is available");
         let description = EnvironmentDescription::decode(&bytes).expect("environment fixture is valid");
         evaluate(
             &Sources {

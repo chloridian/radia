@@ -1,42 +1,53 @@
 use std::{
     assert_matches,
-    sync::{Arc, mpsc},
-    time::Instant,
+    cmp::Reverse,
+    collections::{BTreeSet, HashMap, HashSet},
+    f64::consts::{FRAC_PI_3, TAU},
+    num::NonZeroU32,
+    sync::{Arc, atomic, mpsc},
+    time::{Duration, Instant},
 };
 
-use assets::{Budget as AssetBudget, Failure, FetchResponse, LoadJob, Priority, Request, Store};
+use assets::{Failure, FetchResponse, LoadJob, Priority, Request, Store, mesh::MeshLod};
 use futures::executor::block_on;
 use math::{DVec3, Vec3};
+use test_support::{mesh, texture::RGB_J2C};
 use utils::AssetId;
 use uuid::Uuid;
-use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     Backends, BufferDescriptor, BufferUsages, Color, DeviceDescriptor, ErrorFilter, Extent3d, InstanceDescriptor, LoadOp, MapMode,
     Operations, Origin3d, PollType, RenderPass, RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor, StoreOp,
     TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    util::{BufferInitDescriptor, DeviceExt},
 };
-
-use super::*;
-use crate::geometry::{
-    fixtures::{scene, scene_with_agent, scene_with_world, vulkan_device},
-    instance::{InstanceBuffers, SLOT_BYTES, instance_base, packed_instance},
-};
-use crate::material::FaceParams;
-use crate::pipeline::{INSTANCE_BYTES, Pipeline, VERTEX_BYTES};
-use crate::scene::{
-    AgentPose, AssetChange, AssetRequest, Camera, DrawnMeshKey, Placement, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView,
-};
-use crate::texture::MaterialTextures;
 use world::{
     Appearance, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, Pose, Region, SculptFlags, Shape, SurfaceAppearance,
     UpdateSource, WorldPose,
+};
+
+use super::*;
+use crate::{
+    geometry::{
+        Accounting, INSTANCE_BUFFER_BYTES, MESH_BYTES, OmissionReason, Resource, cache, fixtures,
+        fixtures::{scene, scene_with_agent, scene_with_world, vulkan_device},
+        frame::MESH_DEMANDS_PER_FRAME,
+        instance::{InstanceBuffers, SLOT_BYTES, instance_base, packed_instance},
+        storage::Buffers,
+    },
+    material::{AlphaBehavior, FaceParams, Resolution},
+    pipeline::{INSTANCE_BYTES, Pipeline, VERTEX_BYTES},
+    scene::{
+        AgentPose, AssetChange, AssetRequest, Budget, Camera, DrawnMeshKey, Placement, ReadFailure, ReadQuery, ReadReply, ReconcileStep,
+        Reconciler, SceneView, distinct_meshes_for_test,
+    },
+    texture::{CompressionQuality, MaterialTextures},
 };
 
 fn fixture_region(world: &world::World) -> Region {
     world.region_page(None, 64).expect("fixture regions fit one page").regions[0].region
 }
 
-fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_pages: bool) {
+fn check_pages(device: &Device, queue: &wgpu::Queue, alpha: u8, separate_pages: bool) {
     let scope = device.push_error_scope(ErrorFilter::Validation);
     let (_scene, view, camera) = scene(alpha);
     let mut geometry = GeometryRenderer::new(device, queue, TextureFormat::Rgba8UnormSrgb);
@@ -242,7 +253,7 @@ fn settle_scene(world: &world::World, scene: &mut Reconciler, view: &mut SceneVi
                     ReadQuery::Terrain(region, cursor) => world.terrain_page(*region, *cursor, 8).map(ReadReply::Terrain),
                     ReadQuery::Environment(region) => Ok(ReadReply::Environment(world.environment(*region))),
                 };
-                scene.complete_read(job, result.map_err(crate::scene::ReadFailure::World), now);
+                scene.complete_read(job, result.map_err(ReadFailure::World), now);
             }
             ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
             ReconcileStep::Publish(batch) => {
@@ -259,8 +270,8 @@ fn settle_scene(world: &world::World, scene: &mut Reconciler, view: &mut SceneVi
 fn move_object(world: &mut world::World, id: u32, order: u64, position: Vec3, color: [u8; 4]) {
     let mut observation = ObjectObservation::new(
         UpdateSource::new(fixture_region(world), u32::try_from(order).expect("fixture sequence"), OrderEvidence::Ordered(order), 0),
-        uuid::Uuid::from_u128(u128::from(id)),
-        std::num::NonZeroU32::new(id).expect("fixture local ID"),
+        Uuid::from_u128(u128::from(id)),
+        NonZeroU32::new(id).expect("fixture local ID"),
         Kind::Object,
         ParentUpdate::Root,
     );
@@ -275,7 +286,7 @@ fn move_mesh_object(world: &mut world::World, id: u32, order: u64, position: Vec
     let mut observation = ObjectObservation::new(
         UpdateSource::new(fixture_region(world), u32::try_from(order).expect("fixture sequence"), OrderEvidence::Ordered(order), 0),
         Uuid::from_u128(100_000 + u128::from(id)),
-        std::num::NonZeroU32::new(id).expect("fixture local ID"),
+        NonZeroU32::new(id).expect("fixture local ID"),
         Kind::Object,
         ParentUpdate::Root,
     );
@@ -286,8 +297,8 @@ fn move_mesh_object(world: &mut world::World, id: u32, order: u64, position: Vec
     assert_matches!(world.observe_object(observation).unwrap().outcome, world::ApplyOutcome::Updated(_));
 }
 
-fn prepare_until_current(device: &wgpu::Device, queue: &wgpu::Queue, geometry: &mut GeometryRenderer, view: &SceneView, camera: Camera) {
-    let deadline = Instant::now() + std::time::Duration::from_secs(60);
+fn prepare_until_current(device: &Device, queue: &wgpu::Queue, geometry: &mut GeometryRenderer, view: &SceneView, camera: Camera) {
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         prepare_frame(device, queue, geometry, view, camera);
         if geometry.cache.rebuild.is_none()
@@ -302,14 +313,8 @@ fn prepare_until_current(device: &wgpu::Device, queue: &wgpu::Queue, geometry: &
     }
 }
 
-fn prepare_cache_until_current(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    geometry: &mut GeometryRenderer,
-    view: &SceneView,
-    camera: Camera,
-) {
-    let deadline = Instant::now() + std::time::Duration::from_secs(60);
+fn prepare_cache_until_current(device: &Device, queue: &wgpu::Queue, geometry: &mut GeometryRenderer, view: &SceneView, camera: Camera) {
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         prepare_frame(device, queue, geometry, view, camera);
         assert_draws_resident(geometry);
@@ -366,7 +371,7 @@ fn mesh_scene_with_alpha(
         let mut observation = ObjectObservation::new(
             UpdateSource::new(region, *id, OrderEvidence::Ordered(u64::from(*id)), 0),
             Uuid::from_u128(100_000 + u128::from(*id)),
-            std::num::NonZeroU32::new(*id).unwrap(),
+            NonZeroU32::new(*id).unwrap(),
             Kind::Object,
             ParentUpdate::Root,
         );
@@ -387,8 +392,8 @@ fn mesh_scene_with_alpha(
         }
         let _applied = world.observe_object(observation).unwrap();
     }
-    let camera = Camera::new(DVec3::ZERO, Vec3::X, std::f64::consts::FRAC_PI_3, [128, 128]).unwrap();
-    let (mut scene, mut view) = Reconciler::new(crate::scene::Budget::default());
+    let camera = Camera::new(DVec3::ZERO, Vec3::X, FRAC_PI_3, [128, 128]).unwrap();
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     scene.set_camera(camera);
     let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
     (world, scene, view, camera, requests)
@@ -396,7 +401,7 @@ fn mesh_scene_with_alpha(
 
 fn prepared_asset(request: Request, bytes: Vec<u8>) -> assets::Status {
     let now = Instant::now();
-    let mut store = Store::new(AssetBudget::default());
+    let mut store = Store::new(assets::Budget::default());
     let route = store.register_route().unwrap();
     let demand = store.request(route, request, Priority::Visible, now).unwrap();
     let LoadJob::Fetch(job) = store.next_job(now).unwrap() else { panic!("fixture request unexpectedly used a cached source") };
@@ -424,7 +429,7 @@ fn prepared_asset(request: Request, bytes: Vec<u8>) -> assets::Status {
     demand.status()
 }
 
-fn prepare_frame(device: &wgpu::Device, queue: &wgpu::Queue, geometry: &mut GeometryRenderer, view: &SceneView, camera: Camera) {
+fn prepare_frame(device: &Device, queue: &wgpu::Queue, geometry: &mut GeometryRenderer, view: &SceneView, camera: Camera) {
     prepare_frame_at(device, queue, geometry, view, camera, Instant::now());
 }
 
@@ -454,7 +459,7 @@ fn assert_committed_positions(geometry: &GeometryRenderer, turn: u32) {
     let cell = |position: DVec3| {
         [(position.x / LAGGING).floor() as i64, (position.y / LAGGING).floor() as i64, (position.z / LAGGING).floor() as i64]
     };
-    let mut cells = std::collections::HashMap::<[i64; 3], Vec<DVec3>>::new();
+    let mut cells = HashMap::<[i64; 3], Vec<DVec3>>::new();
     for (_, item) in geometry.cache.items.iter() {
         cells.entry(cell(item.position)).or_default().push(item.position);
     }
@@ -481,14 +486,7 @@ fn assert_committed_positions(geometry: &GeometryRenderer, turn: u32) {
     }
 }
 
-fn prepare_frame_at(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    geometry: &mut GeometryRenderer,
-    view: &SceneView,
-    camera: Camera,
-    now: Instant,
-) {
+fn prepare_frame_at(device: &Device, queue: &wgpu::Queue, geometry: &mut GeometryRenderer, view: &SceneView, camera: Camera, now: Instant) {
     let frame = geometry.admit().unwrap();
     let mut encoder = device.create_command_encoder(&Default::default());
     geometry.prepare_at(device, &mut encoder, view, None, camera, [128, 128], crate::FrameInput::default(), now);
@@ -515,7 +513,7 @@ fn ready_mesh_scene(objects: &[(u32, AssetId, Vec3)], bytes: Vec<u8>) -> (world:
 }
 
 fn prepare_agent_frame(
-    device: &wgpu::Device,
+    device: &Device,
     queue: &wgpu::Queue,
     geometry: &mut GeometryRenderer,
     view: &SceneView,
@@ -530,8 +528,8 @@ fn prepare_agent_frame(
     device.poll(PollType::Wait { submission_index: None, timeout: None }).expect("submitted frame completes");
 }
 
-fn fill_mesh_pages(device: &wgpu::Device, geometry: &mut GeometryRenderer) -> Vec<crate::geometry::storage::Allocation> {
-    let mut pages: Vec<(Arc<crate::geometry::storage::Buffers>, u32, u32)> = Vec::new();
+fn fill_mesh_pages(device: &Device, geometry: &mut GeometryRenderer) -> Vec<Allocation> {
+    let mut pages: Vec<(Arc<Buffers>, u32, u32)> = Vec::new();
     for mesh in geometry.meshes.values() {
         let buffers = mesh.allocation.buffers().clone();
         if let Some((_, vertices, indices)) = pages.iter_mut().find(|(page, _, _)| Arc::ptr_eq(page, &buffers)) {
@@ -549,7 +547,7 @@ fn fill_mesh_pages(device: &wgpu::Device, geometry: &mut GeometryRenderer) -> Ve
             (buffers.clone(), vertex_capacity - *vertices, index_capacity - *indices)
         })
         .collect();
-    tails.sort_unstable_by_key(|(_, vertices, indices)| std::cmp::Reverse(vertices.saturating_add(*indices)));
+    tails.sort_unstable_by_key(|(_, vertices, indices)| Reverse(vertices.saturating_add(*indices)));
     let mut allocations = Vec::new();
     for (buffers, vertices, indices) in tails {
         if vertices == 0 || indices == 0 {
@@ -576,7 +574,7 @@ fn reference_faces<'a>(
 }
 
 fn render_pixels(
-    device: &wgpu::Device,
+    device: &Device,
     queue: &wgpu::Queue,
     size: [u32; 2],
     depth: &wgpu::TextureView,
@@ -637,8 +635,8 @@ fn render_pixels(
 }
 
 fn assert_visible_draw_coverage(geometry: &GeometryRenderer) {
-    let visible: std::collections::HashSet<_> = geometry.cache.visible.iter().copied().collect();
-    let mut face_slots = std::collections::HashSet::new();
+    let visible: HashSet<_> = geometry.cache.visible.iter().copied().collect();
+    let mut face_slots = HashSet::new();
     for (index, item) in geometry.cache.items.iter() {
         for face in &item.faces {
             match (visible.contains(&index), face.slot) {
@@ -648,7 +646,7 @@ fn assert_visible_draw_coverage(geometry: &GeometryRenderer) {
             }
         }
     }
-    let draw_slots: std::collections::HashSet<_> =
+    let draw_slots: HashSet<_> =
         geometry.draw_list.draws().iter().flat_map(|draw| draw.first..draw.first.saturating_add(draw.count)).collect();
     let draw_only = draw_slots.difference(&face_slots).copied().collect::<Vec<_>>();
     let faces_only = face_slots.difference(&draw_slots).copied().collect::<Vec<_>>();
@@ -666,7 +664,7 @@ fn gpu_removed_pending_reconciles_snapshot() {
     let entity =
         view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("replacement target").detail().summary.entity;
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    geometry.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     let original_mesh = geometry.cache.items.get(geometry.cache.objects[&entity]).expect("original item").mesh.id();
     let target_index = geometry.cache.objects[&entity];
@@ -677,12 +675,12 @@ fn gpu_removed_pending_reconciles_snapshot() {
     let stale_version = geometry.cache.version.clone().expect("prepared view version");
     let fillers = fill_mesh_pages(&device, &mut geometry);
     assert!(!fillers.is_empty(), "fixture mesh pages have spare capacity to reserve");
-    let blocker_bytes = crate::geometry::MESH_BYTES - geometry.memory.mesh_state().bytes;
-    let blocker = geometry.memory.reserve(blocker_bytes, crate::geometry::Resource::Mesh).expect("fill mesh budget");
+    let blocker_bytes = MESH_BYTES - geometry.memory.mesh_state().bytes;
+    let blocker = geometry.memory.reserve(blocker_bytes, Resource::Mesh).expect("fill mesh budget");
 
     let mut patch = world::ObjectPatch::new(
         UpdateSource::new(fixture_region(&world), 20, OrderEvidence::Ordered(20), 0),
-        std::num::NonZeroU32::new(1).expect("target local id"),
+        NonZeroU32::new(1).expect("target local id"),
     );
     patch.shape = FieldUpdate::Set(Shape::Prim(world::PrimShape { path_scale_x: 40, ..Default::default() }));
     let _ = world.patch_object(patch).expect("replacement shape applies");
@@ -704,7 +702,7 @@ fn gpu_removed_pending_reconciles_snapshot() {
     let _ = world
         .remove_object(
             UpdateSource::new(fixture_region(&world), 30, OrderEvidence::Ordered(30), 0),
-            std::num::NonZeroU32::new(1).expect("target local id"),
+            NonZeroU32::new(1).expect("target local id"),
         )
         .expect("target removal applies");
     scene.notify_world_change();
@@ -744,14 +742,14 @@ fn gpu_removed_pending_reconciles_snapshot() {
 #[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_repeated_overflow_matches_clean)'"]
 fn gpu_repeated_overflow_matches_clean() {
     let asset = AssetId::new(Uuid::from_u128(9801));
-    let bytes = test_support::mesh::asset_with_lod_faces(&[(3, 1)]);
+    let bytes = mesh::asset_with_lod_faces(&[(3, 1)]);
     let object_count = 1_024u32;
     let object_count_usize = object_count as usize;
     let objects = (1..=object_count).map(|id| (id, asset, Vec3::new(10.0, 0.0, 0.0))).collect::<Vec<_>>();
     let (mut world, mut scene, mut view, camera) = ready_mesh_scene(&objects, bytes);
     let (device, queue) = vulkan_device();
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    geometry.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     let old_entity = view
         .objects()
@@ -779,13 +777,13 @@ fn gpu_repeated_overflow_matches_clean() {
     let _ = world
         .remove_object(
             UpdateSource::new(fixture_region(&world), 1_100, OrderEvidence::Ordered(1_100), 0),
-            std::num::NonZeroU32::new(1).expect("removed local ID"),
+            NonZeroU32::new(1).expect("removed local ID"),
         )
         .expect("old object removal applies");
     let mut reused = ObjectObservation::new(
         UpdateSource::new(fixture_region(&world), 1_101, OrderEvidence::Ordered(1_101), 0),
         Uuid::from_u128(100_001),
-        std::num::NonZeroU32::new(object_count + 1).expect("reused local ID"),
+        NonZeroU32::new(object_count + 1).expect("reused local ID"),
         Kind::Object,
         ParentUpdate::Root,
     );
@@ -814,7 +812,7 @@ fn gpu_repeated_overflow_matches_clean() {
     let _ = world
         .remove_object(
             UpdateSource::new(fixture_region(&world), 1_102, OrderEvidence::Ordered(1_102), 0),
-            std::num::NonZeroU32::new(200).expect("removed local ID"),
+            NonZeroU32::new(200).expect("removed local ID"),
         )
         .expect("fixture slot removal applies");
     scene.notify_world_change();
@@ -825,7 +823,7 @@ fn gpu_repeated_overflow_matches_clean() {
     let mut added = ObjectObservation::new(
         UpdateSource::new(fixture_region(&world), 1_103, OrderEvidence::Ordered(1_103), 0),
         Uuid::from_u128(200_902),
-        std::num::NonZeroU32::new(object_count + 2).expect("new local ID"),
+        NonZeroU32::new(object_count + 2).expect("new local ID"),
         Kind::Object,
         ParentUpdate::Root,
     );
@@ -861,7 +859,7 @@ fn gpu_repeated_overflow_matches_clean() {
         assert!(geometry.cache.rebuild.is_some(), "camera churn does not restart the pending cache pass");
     }
 
-    let deadline = Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(60);
     for order in 10_000..10_130 {
         assert!(Instant::now() < deadline, "recovery did not stay responsive during updates");
         move_mesh_object(&mut world, 150, order, Vec3::new(10.0, 0.0, 0.0), [order as u8, 128, 64, 255]);
@@ -884,7 +882,7 @@ fn gpu_repeated_overflow_matches_clean() {
     assert_eq!(geometry.cache.objects.len(), object_count_usize);
 
     let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    clean.memory = Arc::new(crate::geometry::Accounting::default());
+    clean.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut clean, &view, camera);
     assert!(clean.cache.rebuild.is_none(), "clean derived-cache build completes");
     let signature = |renderer: &GeometryRenderer| {
@@ -918,12 +916,7 @@ fn gpu_repeated_overflow_matches_clean() {
     assert_eq!(incremental_pixels, clean_pixels, "rendered fixture output matches the clean rebuild");
 }
 
-fn settle_with_meshes(
-    world: &world::World,
-    scene: &mut Reconciler,
-    view: &mut SceneView,
-    assets: &std::collections::HashMap<AssetId, Vec<u8>>,
-) {
+fn settle_with_meshes(world: &world::World, scene: &mut Reconciler, view: &mut SceneView, assets: &HashMap<AssetId, Vec<u8>>) {
     let requests = settle_scene(world, scene, view, Instant::now());
     let _ = complete_mesh_requests_collect_textures(world, scene, view, assets, requests);
 }
@@ -940,7 +933,7 @@ fn observe_churn_object(
     let mut observation = ObjectObservation::new(
         UpdateSource::new(fixture_region(world), u32::try_from(order).expect("fixture sequence"), OrderEvidence::Ordered(order), 0),
         Uuid::from_u128(100_000 + u128::from(id)),
-        std::num::NonZeroU32::new(id).expect("fixture local ID"),
+        NonZeroU32::new(id).expect("fixture local ID"),
         Kind::Object,
         ParentUpdate::Root,
     );
@@ -998,14 +991,14 @@ fn gpu_origin_crossings_keep_positions() {
     const CHURN_STEPS: u32 = 10;
     const HOLD_LIMIT: u32 = 3_000;
     const SWEEP_STEPS: u32 = 30;
-    let bytes = test_support::mesh::asset_with_lod_faces(&[(3, 1)]);
+    let bytes = mesh::asset_with_lod_faces(&[(3, 1)]);
     let assets = (0..MESHES + REPLACEMENT_MESHES).map(|index| AssetId::new(Uuid::from_u128(98_700 + index as u128))).collect::<Vec<_>>();
-    let mesh_bytes = assets.iter().map(|asset| (*asset, bytes.clone())).collect::<std::collections::HashMap<_, _>>();
+    let mesh_bytes = assets.iter().map(|asset| (*asset, bytes.clone())).collect::<HashMap<_, _>>();
     let home = |id: u32| Vec3::new(230.0 + (id % 14) as f32, 230.0 + (id / 14 % 14) as f32, 236.0 + (id / 196 % 6) as f32);
     let alpha = |id: u32| if id.is_multiple_of(5) { 128 } else { 255 };
     let velocity = |id: u32| id.is_multiple_of(8).then_some(Vec3::new(0.05, 0.0, 0.0));
     let camera_at = |turn: u32| {
-        let t = f64::from(turn) * std::f64::consts::TAU;
+        let t = f64::from(turn) * TAU;
         let position = DVec3::new(256.0 + 3.0 * (t / 14.0).sin(), 256.0 + 3.0 * (t / 22.0).sin(), 256.0 + 3.0 * (t / 26.0).sin());
         Camera::new(position, Vec3::new(-1.0, -1.0, -1.0), 1.2, [128, 128])
             .expect("walking camera")
@@ -1024,7 +1017,7 @@ fn gpu_origin_crossings_keep_positions() {
     let mut avatar = ObjectObservation::new(
         UpdateSource::new(fixture_region(&world), u32::try_from(order).expect("fixture sequence"), OrderEvidence::Ordered(order), 0),
         agent_id,
-        std::num::NonZeroU32::new(OBJECTS + 1).expect("avatar local ID"),
+        NonZeroU32::new(OBJECTS + 1).expect("avatar local ID"),
         Kind::Avatar,
         ParentUpdate::Root,
     );
@@ -1040,7 +1033,7 @@ fn gpu_origin_crossings_keep_positions() {
 
     let (device, queue) = vulkan_device();
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    geometry.memory = Arc::new(Accounting::default());
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     let mut random = move || {
         state ^= state << 13;
@@ -1049,7 +1042,7 @@ fn gpu_origin_crossings_keep_positions() {
         state
     };
     let live = (1..=OBJECTS).collect::<Vec<_>>();
-    let mut origins = [std::collections::BTreeSet::new(), std::collections::BTreeSet::new(), std::collections::BTreeSet::new()];
+    let mut origins = [BTreeSet::new(), BTreeSet::new(), BTreeSet::new()];
     let mut rebuild_turns = 0u32;
     let mut pending_turns = 0u32;
     let mut blended_turns = 0u32;
@@ -1120,7 +1113,7 @@ fn gpu_late_recovery_applies_changes() {
     const OBJECTS: u32 = 5_000;
     const PAGE_CHANGES: u32 = 512;
     let asset = AssetId::new(Uuid::from_u128(98_041));
-    let bytes = test_support::mesh::asset_with_lod_faces(&[(3, 1)]);
+    let bytes = mesh::asset_with_lod_faces(&[(3, 1)]);
     let objects = (1..=OBJECTS).map(|id| (id, asset, Vec3::new(10.0, 0.0, 0.0))).collect::<Vec<_>>();
     let (mut world, mut scene, mut view, camera) = ready_mesh_scene(&objects, bytes);
     let target_entity = view
@@ -1132,7 +1125,7 @@ fn gpu_late_recovery_applies_changes() {
         .entity;
     let (device, queue) = vulkan_device();
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    geometry.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     assert_eq!(geometry.cache.objects.len(), view.object_count(), "the recovery fixture starts with every object cacheable");
     let checkpoint = geometry.cache.version.clone().expect("initial geometry checkpoint");
@@ -1159,7 +1152,7 @@ fn gpu_late_recovery_applies_changes() {
     }
 
     let progress = |geometry: &GeometryRenderer| geometry.cache.rebuild.as_ref().map(|rebuild| rebuild.progress()).unwrap_or_default();
-    let deadline = Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut trace = Vec::new();
     loop {
         let state = progress(&geometry);
@@ -1190,7 +1183,7 @@ fn gpu_late_recovery_applies_changes() {
             0,
         ),
         Uuid::from_u128(200_001),
-        std::num::NonZeroU32::new(OBJECTS + 1).expect("new local ID"),
+        NonZeroU32::new(OBJECTS + 1).expect("new local ID"),
         Kind::Object,
         ParentUpdate::Root,
     );
@@ -1273,7 +1266,7 @@ fn gpu_late_recovery_applies_changes() {
     }
 
     let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    clean.memory = Arc::new(crate::geometry::Accounting::default());
+    clean.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut clean, &view, camera);
     let size = [128, 128];
     let incremental_depth = geometry.depth(&device, size).expect("incremental depth target");
@@ -1314,13 +1307,13 @@ fn gpu_agent_pose_override_patches() {
     });
     let (_scene, view, _) = scene_with_agent();
     let size = [128, 128];
-    let agent_id = uuid::Uuid::from_u128(1);
+    let agent_id = Uuid::from_u128(1);
     let agent = view.objects().find(|object| object.detail().summary.id == agent_id).expect("fixture avatar");
     let entity = agent.detail().summary.entity;
     let Placement::Ready(simulator_transform) = agent.placement() else { panic!("fixture avatar must have a pose") };
     let camera = Camera::new(DVec3::new(0.0, -2.0, 0.0), Vec3::X, 1.0, size).unwrap();
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    geometry.memory = Arc::new(Accounting::default());
     let mut encoder = device.create_command_encoder(&Default::default());
     geometry.prepare(&device, &mut encoder, &view, None, camera, size, None);
     assert_eq!(geometry.stats.layouts, 1);
@@ -1359,7 +1352,7 @@ fn gpu_agent_pose_override_patches() {
 fn gpu_large_upload_exceeds_target() {
     let asset = AssetId::new(Uuid::from_u128(810));
     let (world, mut scene, mut view, camera, requests) = mesh_scene(&[(1, asset, Vec3::new(2.0, 0.0, 0.0))], None);
-    let bytes = test_support::mesh::asset_with_lod_geometry(&[(3, 3, 65_535, 65_535)]);
+    let bytes = mesh::asset_with_lod_geometry(&[(3, 3, 65_535, 65_535)]);
     let header = requests
         .iter()
         .find(|request| matches!(request.request, Request::MeshHeader(id) if id == asset))
@@ -1369,7 +1362,7 @@ fn gpu_large_upload_exceeds_target() {
     let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
     let high = requests
         .iter()
-        .find(|request| matches!(request.request, Request::MeshLod(lod) if lod.lod() == assets::mesh::MeshLod::High))
+        .find(|request| matches!(request.request, Request::MeshLod(lod) if lod.lod() == MeshLod::High))
         .copied()
         .expect("selected high LOD request");
     scene.complete_asset(high.ticket, prepared_asset(high.request, bytes));
@@ -1400,9 +1393,9 @@ fn gpu_lod_keeps_fallback() {
     let target = AssetId::new(Uuid::from_u128(820));
     let other_a = AssetId::new(Uuid::from_u128(821));
     let other_b = AssetId::new(Uuid::from_u128(822));
-    let target_bytes = test_support::mesh::asset_with_lod_geometry(&[(2, 8, 65_535, 65_535), (3, 8, 65_535, 131_079)]);
-    let other_a_bytes = test_support::mesh::asset_with_lod_geometry(&[(2, 8, 65_535, 196_605)]);
-    let other_b_bytes = test_support::mesh::asset_with_lod_geometry(&[(2, 4, 65_535, 65_535)]);
+    let target_bytes = mesh::asset_with_lod_geometry(&[(2, 8, 65_535, 65_535), (3, 8, 65_535, 131_079)]);
+    let other_a_bytes = mesh::asset_with_lod_geometry(&[(2, 8, 65_535, 196_605)]);
+    let other_b_bytes = mesh::asset_with_lod_geometry(&[(2, 4, 65_535, 65_535)]);
     let (mut world, mut scene, mut view, camera, requests) = mesh_scene(
         &[(1, target, Vec3::new(2.0, 0.0, 0.0)), (2, other_a, Vec3::new(4.0, 0.0, 0.0)), (3, other_b, Vec3::new(6.0, 0.0, 0.0))],
         None,
@@ -1423,11 +1416,11 @@ fn gpu_lod_keeps_fallback() {
     for request in requests {
         let Request::MeshLod(lod) = request.request else { continue };
         let asset = request.request.resource().id;
-        if asset == target && lod.lod() == assets::mesh::MeshLod::High {
+        if asset == target && lod.lod() == MeshLod::High {
             high = Some(request);
             continue;
         }
-        if lod.lod() == assets::mesh::MeshLod::Medium {
+        if lod.lod() == MeshLod::Medium {
             let bytes = if asset == target {
                 target_bytes.clone()
             } else if asset == other_a {
@@ -1444,12 +1437,12 @@ fn gpu_lod_keeps_fallback() {
         view.objects()
             .find(|object| object.detail().summary.id == Uuid::from_u128(100_001))
             .and_then(|object| object.mesh().map(|(key, _)| key)),
-        Some(DrawnMeshKey::Asset { asset: target, lod: assets::mesh::MeshLod::Medium })
+        Some(DrawnMeshKey::Asset { asset: target, lod: MeshLod::Medium })
     );
 
     let (device, queue) = vulkan_device();
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    geometry.memory = Arc::new(Accounting::default());
     for _ in 0..512 {
         prepare_frame(&device, &queue, &mut geometry, &view, camera);
         if geometry.cache.rebuild.is_none()
@@ -1512,7 +1505,7 @@ fn gpu_lod_keeps_fallback() {
     assert_eq!(geometry.stats.instances, 3);
     assert_eq!(geometry.cache.visible.len(), 3);
     assert!(geometry.meshes.contains_key(&fallback_id), "the displayed fallback stays resident under pressure");
-    assert!(geometry.memory.mesh_state().bytes <= crate::geometry::MESH_BYTES);
+    assert!(geometry.memory.mesh_state().bytes <= MESH_BYTES);
     assert!(!geometry.needs_frame(Instant::now()), "a blocked replacement does not schedule repeated frames");
 
     for _ in 0..3 {
@@ -1525,14 +1518,14 @@ fn gpu_lod_keeps_fallback() {
         assert_eq!(geometry.stats.instances, 3);
         assert_eq!(geometry.cache.visible.len(), 3);
         assert!(geometry.meshes.contains_key(&fallback_id), "the displayed fallback stays resident under pressure");
-        assert!(geometry.memory.mesh_state().bytes <= crate::geometry::MESH_BYTES);
+        assert!(geometry.memory.mesh_state().bytes <= MESH_BYTES);
         assert!(!geometry.needs_frame(Instant::now()), "the blocked upload stays dormant until mesh capacity changes");
     }
 
     let _applied = world
         .remove_object(
             UpdateSource::new(fixture_region(&world), 30, OrderEvidence::Ordered(30), 0),
-            std::num::NonZeroU32::new(2).expect("capacity freeing local id"),
+            NonZeroU32::new(2).expect("capacity freeing local id"),
         )
         .expect("capacity freeing object removal applies");
     scene.notify_world_change();
@@ -1554,7 +1547,7 @@ fn gpu_lod_keeps_fallback() {
     assert_eq!(geometry.stats.mesh_budget_blocked, 0);
     assert_eq!(geometry.stats.pending_meshes, 0);
     assert_eq!(geometry.stats.instances, 2);
-    assert!(geometry.memory.mesh_state().bytes <= crate::geometry::MESH_BYTES);
+    assert!(geometry.memory.mesh_state().bytes <= MESH_BYTES);
 
     assert!(
         !geometry.cache.mesh_order.iter().any(|demand| demand.mesh == fallback_id),
@@ -1571,7 +1564,7 @@ fn complete_mesh_requests(
     world: &world::World,
     scene: &mut Reconciler,
     view: &mut SceneView,
-    assets: &std::collections::HashMap<AssetId, Vec<u8>>,
+    assets: &HashMap<AssetId, Vec<u8>>,
     mut requests: Vec<AssetRequest>,
 ) {
     for _ in 0..8 {
@@ -1593,7 +1586,7 @@ fn complete_mesh_requests_collect_textures(
     world: &world::World,
     scene: &mut Reconciler,
     view: &mut SceneView,
-    assets: &std::collections::HashMap<AssetId, Vec<u8>>,
+    assets: &HashMap<AssetId, Vec<u8>>,
     mut requests: Vec<AssetRequest>,
 ) -> Vec<AssetRequest> {
     let mut textures = Vec::new();
@@ -1621,7 +1614,7 @@ fn gpu_invisible_face_allows_mesh() {
     let asset = AssetId::new(Uuid::from_u128(864));
     let visible_texture = AssetId::new(Uuid::from_u128(865));
     let hidden_texture = AssetId::new(Uuid::from_u128(866));
-    let bytes = test_support::mesh::asset_with_lod_faces(&[(2, 2), (3, 2)]);
+    let bytes = mesh::asset_with_lod_faces(&[(2, 2), (3, 2)]);
     let (world, mut scene, mut view, _, mut requests) =
         mesh_scene_with_alpha(&[(1, asset, Vec3::new(5.0, 0.0, 0.0))], Some((visible_texture, hidden_texture)), 0);
     let camera = Camera::new(DVec3::ZERO, Vec3::X, 25_f64.to_radians(), [128, 128]).expect("fixture camera");
@@ -1633,10 +1626,10 @@ fn gpu_invisible_face_allows_mesh() {
         .copied()
         .collect();
     assert!(!visible_texture_requests.is_empty(), "the opaque face requests its texture");
-    let mesh_assets = std::collections::HashMap::from([(asset, bytes)]);
+    let mesh_assets = HashMap::from([(asset, bytes)]);
     complete_mesh_requests(&world, &mut scene, &mut view, &mesh_assets, requests);
     for request in visible_texture_requests {
-        scene.complete_asset(request.ticket, prepared_asset(request.request, test_support::texture::RGB_J2C.to_vec()));
+        scene.complete_asset(request.ticket, prepared_asset(request.request, RGB_J2C.to_vec()));
     }
     let _requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
 
@@ -1645,13 +1638,10 @@ fn gpu_invisible_face_allows_mesh() {
     let materials = object.materials().expect("mesh face materials");
     let opaque = materials.iter().find(|face| face.slot == 0).expect("opaque face material");
     let invisible = materials.iter().find(|face| face.slot == 1).expect("invisible face material");
-    assert_eq!(opaque.alpha, crate::material::AlphaBehavior::Opaque);
-    assert_eq!(invisible.alpha, crate::material::AlphaBehavior::Blend);
+    assert_eq!(opaque.alpha, AlphaBehavior::Opaque);
+    assert_eq!(invisible.alpha, AlphaBehavior::Blend);
     assert_eq!(invisible.base_color_factor()[3], 0.0);
-    std::assert_matches!(
-        invisible.base_color_texture.as_ref().expect("invisible face texture").state().resolution,
-        crate::material::Resolution::Pending
-    );
+    assert_matches!(invisible.base_color_texture.as_ref().expect("invisible face texture").state().resolution, Resolution::Pending);
     let (_, shared) = object.mesh().expect("uploaded mesh geometry");
     assert_eq!(shared.mesh().faces().len(), 2, "both authored face slots remain in the selected LOD");
 
@@ -1670,7 +1660,7 @@ fn gpu_invisible_face_allows_mesh() {
     let opaque_image = opaque.base_color_texture.as_ref().and_then(|binding| binding.image()).expect("decoded opaque texture");
     assert!(!geometry.textures.is_resident(opaque_image.id()), "the mesh object did not wait for its texture");
     let job = geometry.next_texture_job().expect("opaque face texture upload job");
-    geometry.complete_texture(job.run(crate::texture::CompressionQuality::Fast));
+    geometry.complete_texture(job.run(CompressionQuality::Fast));
     prepare_frame_at(&device, &queue, &mut geometry, &view, camera, started);
     assert!(geometry.textures.is_resident(opaque_image.id()));
     assert!(
@@ -1716,16 +1706,16 @@ fn gpu_instance_buffer_grows_at_layout_commit() {
         Camera::new(DVec3::ZERO, direction, 1.0, [128, 128]).unwrap().with_quality(draw_distance, 1.0).unwrap()
     };
     let near = camera(32.0, Vec3::X);
-    let (_world, _scene, view) = crate::geometry::fixtures::object_scene_with(16, camera(256.0, Vec3::X), |id| {
+    let (_world, _scene, view) = fixtures::object_scene_with(16, camera(256.0, Vec3::X), |id| {
         let x = if id <= 12 { 8.0 + id as f32 } else { -38.0 - id as f32 };
         (Vec3::new(x, 0.0, 0.0), world::PrimShape::default())
     });
     let mut reference = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    reference.memory = Arc::new(crate::geometry::Accounting::default());
+    reference.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut reference, &view, near);
     let near_slots = reference.draw_list.slot_count();
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    geometry.memory = Arc::new(Accounting::default());
     geometry.instances = InstanceBuffers::new(&device, &geometry.memory, near_slots);
     geometry.pipelines.set_faces(&device, &geometry.textures, &geometry.instances.instances);
     prepare_until_current(&device, &queue, &mut geometry, &view, near);
@@ -1744,12 +1734,12 @@ fn gpu_instance_buffer_grows_at_layout_commit() {
     };
     compare(&mut geometry, &mut reference, camera(256.0, Vec3::X), "objects placed before growth still draw");
     assert_eq!(geometry.stats.instance_buffer_growths, 1);
-    assert!(geometry.instances.cap() * SLOT_BYTES <= crate::geometry::INSTANCE_BUFFER_BYTES, "growth stays within the instance budget");
+    assert!(geometry.instances.cap() * SLOT_BYTES <= INSTANCE_BUFFER_BYTES, "growth stays within the instance budget");
     assert_eq!(geometry.stats.omitted_faces, 0);
     assert!(geometry.draw_list.slot_count() > near_slots, "the far objects enlarge the layout");
     assert!(geometry.stats.instance_buffer_bytes >= geometry.draw_list.slot_count() * INSTANCE_BYTES);
     assert_eq!(
-        geometry.memory.instances.load(std::sync::atomic::Ordering::Acquire),
+        geometry.memory.instances.load(atomic::Ordering::Acquire),
         geometry.stats.instance_buffer_bytes / INSTANCE_BYTES * SLOT_BYTES,
         "the grown buffers replace the initial charge"
     );
@@ -1797,7 +1787,7 @@ fn gpu_blended_rotation_uploads_instances() {
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, bytes);
         queue.submit([encoder.finish()]);
-        let (sent, received) = std::sync::mpsc::channel();
+        let (sent, received) = mpsc::channel();
         readback.slice(..).map_async(MapMode::Read, move |result| sent.send(result).unwrap());
         device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
         received.recv().unwrap().unwrap();
@@ -1829,7 +1819,7 @@ fn gpu_admission_work_bounded_ordered() {
     let (_scene, view, camera) = scene(255);
     let (device, queue) = vulkan_device();
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    geometry.memory = Arc::new(Accounting::default());
     for _ in 0..8 {
         prepare_frame(&device, &queue, &mut geometry, &view, camera);
         if geometry.draw_list.valid() && geometry.cache.visible.len() == 2 {
@@ -1840,10 +1830,10 @@ fn gpu_admission_work_bounded_ordered() {
     assert_eq!(geometry.cache.visible.len(), 2);
     let active_commands = geometry.draw_list.draws().len();
     let active_instances = geometry.draw_list.visible_items();
-    let resident_meshes = crate::scene::distinct_meshes_for_test(RESIDENT_DEMANDS);
+    let resident_meshes = distinct_meshes_for_test(RESIDENT_DEMANDS);
     geometry.cache.clear_mesh_demands();
     for mesh in &resident_meshes {
-        crate::geometry::cache::add_mesh_demand_for_test(&mut geometry.cache, &mut geometry.stats, mesh, (1.0, 0.0));
+        cache::add_mesh_demand_for_test(&mut geometry.cache, &mut geometry.stats, mesh, (1.0, 0.0));
     }
     for _ in 0..8 {
         prepare_frame(&device, &queue, &mut geometry, &view, camera);
@@ -1854,17 +1844,17 @@ fn gpu_admission_work_bounded_ordered() {
     assert!(resident_meshes.iter().all(|mesh| geometry.meshes.contains_key(&mesh.id())), "resident demands are uploaded first");
     assert!(!geometry.mesh_admission.active, "the resident demand pass completes before cold demands are added");
 
-    let extra_meshes = crate::scene::distinct_meshes_for_test(EXTRA_DEMANDS);
+    let extra_meshes = distinct_meshes_for_test(EXTRA_DEMANDS);
     geometry.cache.clear_mesh_demands();
     for object in view.objects() {
         let (_, mesh) = object.mesh().expect("fixture mesh");
-        crate::geometry::cache::add_mesh_demand_for_test(&mut geometry.cache, &mut geometry.stats, mesh, (1.0, 0.0));
+        cache::add_mesh_demand_for_test(&mut geometry.cache, &mut geometry.stats, mesh, (1.0, 0.0));
     }
     for mesh in &resident_meshes {
-        crate::geometry::cache::add_mesh_demand_for_test(&mut geometry.cache, &mut geometry.stats, mesh, (1.0, 0.0));
+        cache::add_mesh_demand_for_test(&mut geometry.cache, &mut geometry.stats, mesh, (1.0, 0.0));
     }
     for mesh in &extra_meshes {
-        crate::geometry::cache::add_mesh_demand_for_test(&mut geometry.cache, &mut geometry.stats, mesh, (0.0, 0.0));
+        cache::add_mesh_demand_for_test(&mut geometry.cache, &mut geometry.stats, mesh, (0.0, 0.0));
     }
     geometry.prepared.as_mut().expect("active drawable preparation").more_meshes = true;
     let total_demands = 2 + RESIDENT_DEMANDS + EXTRA_DEMANDS;
@@ -1872,21 +1862,16 @@ fn gpu_admission_work_bounded_ordered() {
     prepare_frame(&device, &queue, &mut geometry, &view, camera);
     assert!(geometry.mesh_admission.active, "the visible demand list continues after the per-turn admission limit");
     assert!(!geometry.mesh_admission.visible_ready, "unvisited or upload-blocked demands cannot publish partial visibility");
-    assert_eq!(geometry.mesh_admission.visits_this_frame, crate::geometry::frame::MESH_DEMANDS_PER_FRAME);
-    assert_eq!(geometry.stats.mesh_admission_items_visited, crate::geometry::frame::MESH_DEMANDS_PER_FRAME);
-    assert!(geometry.pending_meshes.len() <= crate::geometry::frame::MESH_DEMANDS_PER_FRAME);
+    assert_eq!(geometry.mesh_admission.visits_this_frame, MESH_DEMANDS_PER_FRAME);
+    assert_eq!(geometry.stats.mesh_admission_items_visited, MESH_DEMANDS_PER_FRAME);
+    assert!(geometry.pending_meshes.len() <= MESH_DEMANDS_PER_FRAME);
     assert_eq!(geometry.stats.mesh_upload_attempts, 0, "already-resident entries consume the full demand visit slice");
     assert_eq!(geometry.meshes.len(), 2 + RESIDENT_DEMANDS, "resident skips do not start uploads for lower-priority work");
     assert!(geometry.pending_meshes.is_empty(), "resident entries do not enter the blocked pending set");
     let ordered = geometry.cache.mesh_order.iter().map(|demand| demand.mesh).collect::<Vec<_>>();
+    assert!(ordered[..MESH_DEMANDS_PER_FRAME].iter().all(|mesh| geometry.meshes.contains_key(mesh)), "admission follows priority order");
     assert!(
-        ordered[..crate::geometry::frame::MESH_DEMANDS_PER_FRAME].iter().all(|mesh| geometry.meshes.contains_key(mesh)),
-        "admission follows priority order"
-    );
-    assert!(
-        !ordered[..crate::geometry::frame::MESH_DEMANDS_PER_FRAME]
-            .iter()
-            .any(|mesh| extra_meshes.iter().any(|demand| demand.id() == *mesh)),
+        !ordered[..MESH_DEMANDS_PER_FRAME].iter().any(|mesh| extra_meshes.iter().any(|demand| demand.id() == *mesh)),
         "lower-priority demands wait for their turn"
     );
     assert_eq!(geometry.draw_list.draws().len(), active_commands, "partial admissions retain active draw commands");
@@ -1895,14 +1880,14 @@ fn gpu_admission_work_bounded_ordered() {
 
     let previous_revision = geometry.cache.mesh_demand_revision;
     let changed_mesh = extra_meshes.last().expect("extra demand");
-    crate::geometry::cache::add_mesh_demand_for_test(&mut geometry.cache, &mut geometry.stats, changed_mesh, (2.0, 0.0));
+    cache::add_mesh_demand_for_test(&mut geometry.cache, &mut geometry.stats, changed_mesh, (2.0, 0.0));
     assert!(geometry.cache.mesh_demand_revision > previous_revision, "a changed priority advances the demand revision");
     assert_eq!(geometry.cache.mesh_order.first().map(|demand| demand.mesh), Some(changed_mesh.id()));
     let previous_resident = geometry.meshes.len();
     prepare_frame(&device, &queue, &mut geometry, &view, camera);
     assert!(geometry.mesh_admission.active, "a changed ordered demand keeps admission moving");
     assert_eq!(geometry.mesh_admission.revision, geometry.cache.mesh_demand_revision);
-    assert!(geometry.mesh_admission.visits_this_frame <= crate::geometry::frame::MESH_DEMANDS_PER_FRAME);
+    assert!(geometry.mesh_admission.visits_this_frame <= MESH_DEMANDS_PER_FRAME);
     assert_eq!(geometry.draw_list.draws().len(), active_commands, "changed demand order preserves active commands");
     assert_eq!(geometry.draw_list.visible_items(), active_instances, "changed demand order preserves active instances");
     assert!(geometry.meshes.len() >= previous_resident);
@@ -1911,8 +1896,8 @@ fn gpu_admission_work_bounded_ordered() {
     let mut complete = false;
     for _ in 0..32 {
         prepare_frame(&device, &queue, &mut geometry, &view, camera);
-        assert!(geometry.mesh_admission.visits_this_frame <= crate::geometry::frame::MESH_DEMANDS_PER_FRAME);
-        assert!(geometry.pending_meshes.len() <= crate::geometry::frame::MESH_DEMANDS_PER_FRAME);
+        assert!(geometry.mesh_admission.visits_this_frame <= MESH_DEMANDS_PER_FRAME);
+        assert!(geometry.pending_meshes.len() <= MESH_DEMANDS_PER_FRAME);
         assert!(geometry.meshes.len() >= resident, "the bounded continuation makes monotonic resident progress");
         resident = geometry.meshes.len();
         if !geometry.mesh_admission.active
@@ -1932,13 +1917,13 @@ fn gpu_admission_work_bounded_ordered() {
 #[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_eviction_spares_shown_meshes)'"]
 fn gpu_eviction_spares_shown_meshes() {
     let assets = [AssetId::new(Uuid::from_u128(9_921)), AssetId::new(Uuid::from_u128(9_922)), AssetId::new(Uuid::from_u128(9_923))];
-    let bytes = test_support::mesh::asset_with_lod_geometry(&[(3, 8, 65_535, 196_605)]);
-    let asset_bytes = std::collections::HashMap::from([(assets[0], bytes.clone()), (assets[1], bytes.clone()), (assets[2], bytes)]);
+    let bytes = mesh::asset_with_lod_geometry(&[(3, 8, 65_535, 196_605)]);
+    let asset_bytes = HashMap::from([(assets[0], bytes.clone()), (assets[1], bytes.clone()), (assets[2], bytes)]);
     let objects =
         [(1, assets[0], Vec3::new(-3.0, 0.0, 0.0)), (2, assets[1], Vec3::new(4.0, 0.0, 0.0)), (3, assets[2], Vec3::new(6.0, 0.0, 0.0))];
     let (world, mut scene, mut view, ahead, requests) = mesh_scene(&objects, None);
     complete_mesh_requests(&world, &mut scene, &mut view, &asset_bytes, requests);
-    let behind = Camera::new(DVec3::ZERO, Vec3::NEG_X, std::f64::consts::FRAC_PI_3, [128, 128]).expect("test camera");
+    let behind = Camera::new(DVec3::ZERO, Vec3::NEG_X, FRAC_PI_3, [128, 128]).expect("test camera");
     scene.set_camera(behind);
     let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
     complete_mesh_requests(&world, &mut scene, &mut view, &asset_bytes, requests);
@@ -1953,11 +1938,11 @@ fn gpu_eviction_spares_shown_meshes() {
 
     let (device, queue) = vulkan_device();
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    geometry.memory = Arc::new(crate::geometry::Accounting::default());
-    let settle = |geometry: &mut GeometryRenderer, camera: Camera, keep: Option<crate::scene::MeshId>| {
-        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+    geometry.memory = Arc::new(Accounting::default());
+    let settle = |geometry: &mut GeometryRenderer, camera: Camera, keep: Option<MeshId>| {
+        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
-            let resident = geometry.meshes.keys().copied().collect::<std::collections::HashSet<_>>();
+            let resident = geometry.meshes.keys().copied().collect::<HashSet<_>>();
             prepare_frame(&device, &queue, geometry, &view, camera);
             assert_draws_resident(geometry);
             for evicted in resident.iter().filter(|mesh| !geometry.meshes.contains_key(*mesh)) {
@@ -1997,8 +1982,8 @@ fn gpu_eviction_spares_shown_meshes() {
 #[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_overbudget_visible_subset)'"]
 fn gpu_overbudget_visible_subset() {
     let assets = [AssetId::new(Uuid::from_u128(9_911)), AssetId::new(Uuid::from_u128(9_912)), AssetId::new(Uuid::from_u128(9_913))];
-    let bytes = test_support::mesh::asset_with_lod_geometry(&[(3, 8, 65_535, 196_605)]);
-    let asset_bytes = std::collections::HashMap::from([(assets[0], bytes.clone()), (assets[1], bytes.clone()), (assets[2], bytes)]);
+    let bytes = mesh::asset_with_lod_geometry(&[(3, 8, 65_535, 196_605)]);
+    let asset_bytes = HashMap::from([(assets[0], bytes.clone()), (assets[1], bytes.clone()), (assets[2], bytes)]);
     let objects =
         [(1, assets[0], Vec3::new(2.0, 0.0, 0.0)), (2, assets[1], Vec3::new(4.0, 0.0, 0.0)), (3, assets[2], Vec3::new(6.0, 0.0, 0.0))];
     let (mut world, mut scene, mut view, camera, requests) = mesh_scene(&objects, None);
@@ -2007,13 +1992,13 @@ fn gpu_overbudget_visible_subset() {
         .objects()
         .map(|object| mesh_upload_bytes(object.mesh().expect("loaded mesh").1, None).expect("valid mesh upload size"))
         .collect::<Vec<_>>();
-    assert!(production_mesh_bytes[0] + production_mesh_bytes[1] < crate::geometry::MESH_BYTES);
-    assert!(production_mesh_bytes.iter().sum::<usize>() > crate::geometry::MESH_BYTES);
+    assert!(production_mesh_bytes[0] + production_mesh_bytes[1] < MESH_BYTES);
+    assert!(production_mesh_bytes.iter().sum::<usize>() > MESH_BYTES);
 
     let (device, queue) = vulkan_device();
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    geometry.memory = Arc::new(crate::geometry::Accounting::default());
-    let settle_deadline = Instant::now() + std::time::Duration::from_secs(60);
+    geometry.memory = Arc::new(Accounting::default());
+    let settle_deadline = Instant::now() + Duration::from_secs(60);
     loop {
         prepare_frame(&device, &queue, &mut geometry, &view, camera);
         assert!(
@@ -2042,8 +2027,8 @@ fn gpu_overbudget_visible_subset() {
     assert_eq!(geometry.draw_list.visible_items(), 2);
     assert_eq!(geometry.stats.mesh_budget_blocked, 1);
     assert_eq!(geometry.stats.omitted_faces, 8);
-    assert_eq!(geometry.stats.omission_reason, Some(crate::geometry::OmissionReason::MeshMemoryBudget));
-    assert!(geometry.memory.mesh_state().bytes <= crate::geometry::MESH_BYTES);
+    assert_eq!(geometry.stats.omission_reason, Some(OmissionReason::MeshMemoryBudget));
+    assert!(geometry.memory.mesh_state().bytes <= MESH_BYTES);
     assert!(!geometry.needs_frame(Instant::now()), "permanently blocked demand does not schedule a redraw loop");
 
     let visits = geometry.mesh_admission.visits_this_frame;
@@ -2056,12 +2041,12 @@ fn gpu_overbudget_visible_subset() {
     let _ = world
         .remove_object(
             UpdateSource::new(fixture_region(&world), 20, OrderEvidence::Ordered(20), 0),
-            std::num::NonZeroU32::new(1).expect("first mesh object local id"),
+            NonZeroU32::new(1).expect("first mesh object local id"),
         )
         .expect("first mesh object removal applies");
     scene.notify_world_change();
     settle_scene(&world, &mut scene, &mut view, Instant::now());
-    let retry_deadline = Instant::now() + std::time::Duration::from_secs(60);
+    let retry_deadline = Instant::now() + Duration::from_secs(60);
     let mut retry_turns = 0usize;
     let mut retry_trace = Vec::new();
     loop {
@@ -2127,7 +2112,7 @@ fn gpu_overbudget_visible_subset() {
     assert!(geometry.meshes.contains_key(&ordered[2]), "the previously omitted mesh is admitted after demand changes");
 
     let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    clean.memory = Arc::new(crate::geometry::Accounting::default());
+    clean.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut clean, &view, camera);
     let size = [128, 128];
     let actual_depth = geometry.depth(&device, size).expect("incremental depth target");
@@ -2158,7 +2143,7 @@ fn draws_during_scene_churn(overflow: bool, membership: bool) {
     const UPDATES: u64 = 120;
     let first_asset = AssetId::new(Uuid::from_u128(9_921));
     let second_asset = AssetId::new(Uuid::from_u128(9_922));
-    let bytes = test_support::mesh::asset_with_lod_faces(&[(3, 1)]);
+    let bytes = mesh::asset_with_lod_faces(&[(3, 1)]);
     let objects = (1..=OBJECTS).map(|id| (id, first_asset, Vec3::new(10.0, 0.0, 0.0))).collect::<Vec<_>>();
     let (mut world, mut scene, mut view, camera) = ready_mesh_scene(&objects, bytes.clone());
     assert_eq!(view.object_count(), OBJECTS as usize);
@@ -2166,9 +2151,9 @@ fn draws_during_scene_churn(overflow: bool, membership: bool) {
 
     let (device, queue) = vulkan_device();
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    geometry.memory = Arc::new(Accounting::default());
     let depth = geometry.depth(&device, [128, 128]).expect("fixture depth target");
-    let assets = std::collections::HashMap::from([(first_asset, bytes.clone()), (second_asset, bytes)]);
+    let assets = HashMap::from([(first_asset, bytes.clone()), (second_asset, bytes)]);
 
     for update in 0..UPDATES {
         let order = 1_000_000 + update * 100;
@@ -2180,7 +2165,7 @@ fn draws_during_scene_churn(overflow: bool, membership: bool) {
                 0,
             ),
             Uuid::from_u128(100_001),
-            std::num::NonZeroU32::new(1).expect("fixture object local ID"),
+            NonZeroU32::new(1).expect("fixture object local ID"),
             Kind::Object,
             ParentUpdate::Root,
         );
@@ -2198,7 +2183,7 @@ fn draws_during_scene_churn(overflow: bool, membership: bool) {
             let mut added = ObjectObservation::new(
                 UpdateSource::new(fixture_region(&world), (order + 1) as u32, OrderEvidence::Ordered(order + 1), 0),
                 Uuid::from_u128(200_000 + u128::from(update)),
-                std::num::NonZeroU32::new(OBJECTS + update as u32 + 1).unwrap(),
+                NonZeroU32::new(OBJECTS + update as u32 + 1).unwrap(),
                 Kind::Object,
                 ParentUpdate::Root,
             );
@@ -2244,7 +2229,7 @@ fn draws_during_scene_churn(overflow: bool, membership: bool) {
         continuation_turns += 1;
     }
     let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    clean.memory = Arc::new(crate::geometry::Accounting::default());
+    clean.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut clean, &view, camera);
     let signature = |renderer: &GeometryRenderer| {
         let mut items = renderer

@@ -7,17 +7,20 @@ use math::{DVec3, Quat, Vec3};
 use world::Region;
 
 use super::{CacheRebuild, CacheUpdate, FrameCache, ItemId, MeshInfoBuild};
-use crate::geometry::{
-    ShadingMode,
-    instance::instance_base,
-    items::{CachedItem, CachedReplacement, mesh_info},
+use crate::{
+    geometry::{
+        ShadingMode, fixtures,
+        instance::instance_base,
+        items::{CachedItem, CachedReplacement, mesh_info},
+    },
+    scene::{Camera, RANGE_MARGIN, SharedMesh},
+    test_support,
 };
-use crate::scene::{Camera, RANGE_MARGIN, SharedMesh};
 
 #[test]
 fn item_order_tracks_lifecycle() {
-    let (_region_world, region) = crate::test_support::registered_region();
-    let (_scene, view, _) = crate::geometry::fixtures::scene(255);
+    let (_region_world, region) = test_support::registered_region();
+    let (_scene, view, _) = fixtures::scene(255);
     let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
     let mut cache = FrameCache::default();
     let high = (2, 9, 0);
@@ -55,7 +58,7 @@ fn item_order_tracks_lifecycle() {
 
 #[test]
 fn camera_recovery_progresses() {
-    let (world, _scene, view) = crate::geometry::fixtures::object_scene(1_100);
+    let (world, _scene, view) = fixtures::object_scene(1_100);
     let region = world.region_page(None, 1).expect("fixture region page").regions[0].region;
     let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
     let mut cache = FrameCache::default();
@@ -108,7 +111,7 @@ fn camera_recovery_progresses() {
 
 #[test]
 fn mesh_info_resumes_within_byte_limit() {
-    let (_scene, view, _) = crate::geometry::fixtures::scene(255);
+    let (_scene, view, _) = fixtures::scene(255);
     let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
     let indices = mesh.mesh().indices().len();
     let bytes_per_index = size_of::<u32>() + size_of::<Vec3>();

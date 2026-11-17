@@ -69,8 +69,7 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
 
     use super::*;
-    use crate::texture::fixtures::loaded;
-    use crate::texture::{Accounting, STAGING_BYTES};
+    use crate::texture::{Accounting, STAGING_BYTES, fixtures::loaded};
 
     #[test]
     fn completion_retains_only_work() {

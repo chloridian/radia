@@ -11,7 +11,7 @@ use super::{
     Evaluated, Local, Schedule, SkyState, Sources, TextureBlend, Transition, WaterState, evaluate,
     property_transition::PropertyTransitions, star_brightness,
 };
-use crate::scene::{LocalChoice, LocalEnvironment, SceneView, ViewerEnvironment};
+use crate::scene::{ExperienceSetting, LocalChoice, LocalEnvironment, SceneView, ViewerEnvironment};
 
 const DEFAULT_TRANSITION: Duration = Duration::from_secs(5);
 
@@ -342,9 +342,8 @@ fn compose_sources<'a>(
 
 fn composition_identity(view: &SceneView, region: Region) -> CompositionIdentity {
     let viewer = view.viewer_environment();
-    let setting_sequence = |setting: Option<&crate::scene::ExperienceSetting>| {
-        setting.filter(|setting| setting.region() == region).map(|setting| setting.sequence())
-    };
+    let setting_sequence =
+        |setting: Option<&ExperienceSetting>| setting.filter(|setting| setting.region() == region).map(|setting| setting.sequence());
     CompositionIdentity {
         region,
         environment: view.environment(region).map(|environment| environment.identity()),

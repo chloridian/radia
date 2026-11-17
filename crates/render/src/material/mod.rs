@@ -2,11 +2,11 @@ mod gpu;
 mod legacy;
 mod pbr;
 
-pub(crate) use gpu::FaceParams;
-
 use assets::{Failure, LegacyMaterial, MaterialDescription, PbrAlphaMode, PbrMaterial, TextureHandle};
 use utils::AssetId;
 use world::{FaceAppearance, PbrMaterialOverride};
+
+pub(crate) use self::gpu::FaceParams;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AlphaBehavior {

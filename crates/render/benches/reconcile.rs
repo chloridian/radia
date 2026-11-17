@@ -1,4 +1,7 @@
+use std::hint;
+
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput};
+use render::scene::DrawnMeshKey;
 
 use crate::support;
 
@@ -13,7 +16,7 @@ pub(crate) fn bench(c: &mut Criterion) {
             || support::scene_world(OBJECTS, REGIONS),
             |(world, _)| {
                 support::first_full_view_batch(&world, OBJECTS);
-                std::hint::black_box(world.object_count());
+                hint::black_box(world.object_count());
             },
             BatchSize::LargeInput,
         );
@@ -24,7 +27,7 @@ pub(crate) fn bench(c: &mut Criterion) {
     let (mut reconciler, mut view, mut now) = support::settle(&world, OBJECTS);
     let mut diagnostic_count = c.benchmark_group("scene/diagnostic_count");
     diagnostic_count.bench_function("tracked_scene_records/10k_4_regions", |b| {
-        b.iter(|| std::hint::black_box(&view).tracked_object_count());
+        b.iter(|| hint::black_box(&view).tracked_object_count());
     });
     diagnostic_count.finish();
 
@@ -36,7 +39,7 @@ pub(crate) fn bench(c: &mut Criterion) {
             support::update_one_percent(&mut world, &rows, &mut order, generation);
             support::first_publish(&mut reconciler, &mut view, &world, &mut now);
             generation += 1;
-            std::hint::black_box(view.object_count());
+            hint::black_box(view.object_count());
         });
     });
     incremental.finish();
@@ -50,11 +53,11 @@ pub(crate) fn bench(c: &mut Criterion) {
                 || support::ready_distinct_mesh_scene(count),
                 |(mut reconciler, mut view, world, mut now)| {
                     let work = support::request_distinct_mesh_refinement(&mut reconciler, &mut view, &world, &mut now);
-                    std::hint::black_box((
+                    hint::black_box((
                         work.requested.len(),
                         work.released.len(),
                         view.objects()
-                            .filter(|object| matches!(object.mesh().map(|(key, _)| key), Some(render::scene::DrawnMeshKey::Asset { .. })))
+                            .filter(|object| matches!(object.mesh().map(|(key, _)| key), Some(DrawnMeshKey::Asset { .. })))
                             .count(),
                     ));
                 },

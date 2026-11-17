@@ -2,11 +2,6 @@ mod delivery;
 mod object;
 mod view;
 
-pub(in crate::scene) use delivery::{Delivery, DeliveryState, Receipt};
-pub use object::{Geometry, HiddenReason, Object, Placement};
-pub(crate) use view::VisibilityVersion;
-pub use view::{ApplyError, SceneView, ViewVersion};
-
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{
@@ -20,11 +15,18 @@ use assets::TextureHandle;
 use utils::AssetId;
 use world::{Entity, Region, RegionSummary, RemovalFence, TerrainPatch, TerrainPatchId, WorldRevision};
 
-use crate::scene::region_environment::RegionEnvironment;
+pub(in crate::scene) use self::delivery::{Delivery, DeliveryState, Receipt};
+pub(crate) use self::view::VisibilityVersion;
+pub use self::{
+    object::{Geometry, HiddenReason, Object, Placement},
+    view::{ApplyError, SceneView, ViewVersion},
+};
 use crate::scene::{
     DrawnMeshKey, MeshKey, PreparedMesh, Surface, SurfaceKind, ViewerEnvironment,
     asset_demand::{MaterialChange, MeshPublication},
     budget::Lease,
+    motion::MotionState,
+    region_environment::RegionEnvironment,
 };
 
 #[derive(Clone, Debug)]
@@ -336,9 +338,8 @@ impl Mirror {
                         }
                     }
                 } else {
-                    object.motion = super::motion::MotionState::new(
-                        object.detail().motion_source.and_then(world::UpdateSource::motion_received_at).unwrap_or(now),
-                    );
+                    object.motion =
+                        MotionState::new(object.detail().motion_source.and_then(world::UpdateSource::motion_received_at).unwrap_or(now));
                 }
                 self.objects.insert(object.detail().summary.entity, object);
             }
@@ -425,10 +426,11 @@ enum SceneCause {
 #[cfg(test)]
 mod tests {
     use super::RetiredRegions;
+    use crate::test_support;
 
     #[test]
     fn retired_ranges_spare_active_generations() {
-        let (_, regions) = crate::test_support::registered_regions(4);
+        let (_, regions) = test_support::registered_regions(4);
         let [first, second, third, fourth] = regions.as_slice() else { panic!("four regions are registered") };
         let mut retired = RetiredRegions::default();
 

@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    mem::size_of,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -901,7 +900,10 @@ fn clear_properties(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
+    use crate::test_support;
 
     fn requested(manager: &mut ViewerEnvironments, preset: EnvironmentPreset) -> AssetRequest {
         let Some(AssetChange::Request(request)) = manager.event() else { panic!("local preset request is queued") };
@@ -920,19 +922,19 @@ mod tests {
 
     #[test]
     fn changing_preset_releases_old_request() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let mut manager = ViewerEnvironments::new(Budget::default());
         manager.set_local(EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Midday)), region).unwrap();
         let first = requested(&mut manager, EnvironmentPreset::Midday);
         manager.set_local(EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Sunset)), region).unwrap();
-        std::assert_matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == first.ticket);
+        assert_matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == first.ticket);
         let second = requested(&mut manager, EnvironmentPreset::Sunset);
         assert_ne!(first.ticket, second.ticket);
     }
 
     #[test]
     fn clear_duration_presence_tracks_snapshots() {
-        let (_region_world, regions) = crate::test_support::registered_regions(2);
+        let (_region_world, regions) = test_support::registered_regions(2);
         let mut manager = ViewerEnvironments::new(Budget::default());
         let region = regions[0];
         manager.push_at(region, EnvironmentPush::Clear { experience: None, transition: Duration::ZERO }, Instant::now()).unwrap();

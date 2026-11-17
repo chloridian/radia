@@ -1,4 +1,4 @@
-use std::assert_matches;
+use std::{array, assert_matches};
 
 use super::support::{
     BTreeMap, BTreeSet, Budget, DVec3, Instant, Mesh, ParentUpdate, PreparedMesh, ReadFailure, ReadQuery, ReadReply, ReconcileStep,
@@ -10,7 +10,7 @@ use super::support::{
 fn surfaces_follow_region_lifetime() {
     let mut world = world();
     let region = world_region(&world, 0);
-    let first = world::TerrainPatch::new(0, 0, Box::new([7.0; 256])).unwrap();
+    let first = TerrainPatch::new(0, 0, Box::new([7.0; 256])).unwrap();
     let _ = world.observe_terrain_patch(source(&world, 0, 1), first).unwrap();
     let _ = world.observe_water_height(source(&world, 0, 2), 0.0).unwrap();
     let (mut scene, mut view) = Reconciler::new(Budget::default());
@@ -19,7 +19,7 @@ fn surfaces_follow_region_lifetime() {
     assert_eq!(view.patch_count(), 1);
     assert_eq!(view.water_height(region), Some(0.0));
     assert_eq!(view.patches().next().unwrap().1.source().heights(), &[7.0; 256]);
-    let updated = world::TerrainPatch::new(0, 0, Box::new([8.0; 256])).unwrap();
+    let updated = TerrainPatch::new(0, 0, Box::new([8.0; 256])).unwrap();
     let _ = world.observe_terrain_patch(source(&world, 0, 3), updated).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
@@ -384,7 +384,7 @@ fn terrain_samples_and_gaps() {
         TerrainPatch::new(
             x,
             y,
-            Box::new(std::array::from_fn(|index| {
+            Box::new(array::from_fn(|index| {
                 7.0 + 2.0 * (f32::from(x) * 16.0 + (index % 16) as f32) + 3.0 * (f32::from(y) * 16.0 + (index / 16) as f32)
             })),
         )
@@ -416,8 +416,7 @@ fn terrain_samples_and_gaps() {
         let [a, b, c] = triangle.map(|index| mesh.vertices()[index as usize].position);
         assert!((b - a).cross(c - a).z > 0.0);
     }
-    let extreme =
-        TerrainPatch::new(4, 4, Box::new(std::array::from_fn(|index| if index % 2 == 0 { f32::MAX } else { -f32::MAX }))).unwrap();
+    let extreme = TerrainPatch::new(4, 4, Box::new(array::from_fn(|index| if index % 2 == 0 { f32::MAX } else { -f32::MAX }))).unwrap();
     let _ = world.observe_terrain_patch(source(&world, 0, 10), extreme).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);

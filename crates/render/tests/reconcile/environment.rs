@@ -1,9 +1,12 @@
+use std::assert_matches;
+
+use render::{environment::Schedule, scene::EnvironmentPushError};
+
 use super::support::{
     AssetChange, AssetId, Budget, Duration, EnvironmentAssignment, EnvironmentProperty, EnvironmentPush, EnvironmentScope,
     EnvironmentSource, ExperienceId, Instant, ParcelLocalId, ReadFailure, ReconcileStep, Reconciler, Uuid, WorldReadError, prepared_asset,
     settle, settle_materials, source, world, world_region, world_with_region_count,
 };
-use render::environment::Schedule;
 
 #[test]
 fn bad_transition_leaves_no_work() {
@@ -21,7 +24,7 @@ fn bad_transition_leaves_no_work() {
             EnvironmentPush::Full { experience: rejected, asset: rejected_asset, transition: Duration::MAX },
             now,
         ),
-        Err(render::scene::EnvironmentPushError::Invalid),
+        Err(EnvironmentPushError::Invalid),
     );
 
     let accepted = ExperienceId::new(Uuid::from_u128(802)).unwrap();
@@ -102,14 +105,14 @@ fn assignments_publish_decoded_settings() {
     settle(&mut scene, &mut view, &world, &mut now);
     let environment = view.environment(region).unwrap();
     assert_eq!(environment.description().name, "asset");
-    std::assert_matches!(&environment.description().settings, assets::EnvironmentSettings::Water(_));
+    assert_matches!(&environment.description().settings, assets::EnvironmentSettings::Water(_));
     let inline = assignment(EnvironmentSource::Inline(b"{'type':'sky','name':'inline'}".as_slice().into()), 2, None, None, None);
     let _ = world.observe_environment(target, source(&world, 0, 2), inline).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     let environment = view.environment(region).unwrap();
     assert_eq!(environment.description().name, "inline");
-    std::assert_matches!(&environment.description().settings, assets::EnvironmentSettings::Sky(_));
+    assert_matches!(&environment.description().settings, assets::EnvironmentSettings::Sky(_));
 }
 
 #[test]
@@ -299,7 +302,7 @@ fn retirement_releases_ticket_charge() {
     let (mut world, regions) = world_with_region_count(2);
     let region = regions[0];
     let other_region = regions[1];
-    let _ = world.patch_region(other_region, ::world::RegionInfo::default()).unwrap();
+    let _ = world.patch_region(other_region, world::RegionInfo::default()).unwrap();
     let budget = Budget::default();
     let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
@@ -426,14 +429,14 @@ fn experience_properties_keep_current_owner() {
         water: vec![EnvironmentProperty { name: "".into(), source: b"r1.0".as_slice().into() }],
         transition: Duration::ZERO,
     };
-    assert_eq!(scene.push_environment(region, invalid), Err(render::scene::EnvironmentPushError::Invalid));
+    assert_eq!(scene.push_environment(region, invalid), Err(EnvironmentPushError::Invalid));
     let malformed = EnvironmentPush::Partial {
         experience: a,
         sky: vec![EnvironmentProperty { name: "gamma".into(), source: b"'bad'".as_slice().into() }],
         water: Vec::new(),
         transition: Duration::ZERO,
     };
-    assert_eq!(scene.push_environment(region, malformed), Err(render::scene::EnvironmentPushError::Invalid));
+    assert_eq!(scene.push_environment(region, malformed), Err(EnvironmentPushError::Invalid));
     settle(&mut scene, &mut view, &world, &mut now);
     let environment = view.viewer_environment().unwrap();
     assert_eq!(environment.sky_properties().len(), 1);

@@ -1,7 +1,7 @@
 use assets::mesh::{Face, Mesh, Vertex};
+use math::{Vec2, Vec3};
 
 use crate::scene::MeshBuildError;
-use math::{Vec2, Vec3};
 
 pub(super) fn mesh(height: f32) -> Result<Mesh, MeshBuildError> {
     let vertices = [(0.0, 0.0), (256.0, 0.0), (0.0, 256.0), (256.0, 256.0)]

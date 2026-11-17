@@ -1,8 +1,11 @@
-use std::{assert_matches, cmp::Ordering};
+use std::{array, assert_matches, cmp::Ordering, f64::consts::FRAC_PI_2};
 
 use assets::{TextureHandle, TextureSize};
 use math::UvTransform;
-use render::material::{AlphaBehavior, FaceMaterial, Resolution};
+use render::{
+    material::{AlphaBehavior, AssetState, FaceMaterial, Resolution},
+    scene::MEMORY_BYTES,
+};
 use test_support::texture::{GRAY_4096_J2C, RGBA_J2C};
 use world::{
     FaceAppearance, PbrAlphaMode, PbrMaterialAssignments, PbrMaterialOverride, PbrMaterialOverrides, SurfaceAppearance, TerrainSettings,
@@ -120,7 +123,7 @@ fn unseen_objects_get_baselines() {
     assert_eq!(baseline.request, Request::Texture { id: AssetId::new(Uuid::from_u128(101)), size: TextureSize::new(32) });
     scene.complete_asset(baseline.ticket, prepared_asset(baseline.request, GRAY_4096_J2C.to_vec()));
     settle_materials(&mut scene, &mut view, &world, &mut now);
-    scene.set_camera(Camera::new(DVec3::ZERO, -Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap());
+    scene.set_camera(Camera::new(DVec3::ZERO, -Vec3::X, FRAC_PI_2, [1000, 1000]).unwrap());
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(work.requested.is_empty());
     assert!(work.released.is_empty());
@@ -136,7 +139,7 @@ fn unseen_objects_get_baselines() {
 
 #[test]
 fn terrain_refines_on_origin() {
-    let textures = std::array::from_fn(|index| Uuid::from_u128(700 + index as u128));
+    let textures = array::from_fn(|index| Uuid::from_u128(700 + index as u128));
     let settings = TerrainSettings::new(textures, [0.0; 4], [64.0; 4]).unwrap();
     let mut world = world();
     let region = world.register_region().unwrap();
@@ -144,7 +147,7 @@ fn terrain_refines_on_origin() {
 
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
-    let camera = Camera::new(DVec3::new(384.0, 128.0, 32.0), Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap();
+    let camera = Camera::new(DVec3::new(384.0, 128.0, 32.0), Vec3::X, FRAC_PI_2, [1000, 1000]).unwrap();
     scene.set_camera(camera);
     let baseline = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(baseline.requested.len(), 4);
@@ -192,7 +195,7 @@ fn view_bounds_control_texture_priority() {
     let baseline = first.requested.last().unwrap();
     assert_eq!(baseline.priority, Priority::Background, "off-screen objects cannot compete with visible textures");
     assert_eq!(baseline.request, Request::Texture { id: AssetId::new(Uuid::from_u128(101)), size: TextureSize::new(32) });
-    let wide_camera = Camera::new(DVec3::ZERO, Vec3::X, std::f64::consts::FRAC_PI_2, [2000, 1000]).unwrap();
+    let wide_camera = Camera::new(DVec3::ZERO, Vec3::X, FRAC_PI_2, [2000, 1000]).unwrap();
     scene.set_camera(wide_camera);
     let wide = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(wide.released.is_empty());
@@ -214,7 +217,7 @@ fn view_bounds_control_texture_priority() {
     assert_eq!(returned.priority_updates, [(visible_ticket, Priority::Visible)]);
     assert!(returned.size_updates.is_empty(), "returning to view at the same distance keeps the retained texture size");
 
-    let far_camera = Camera::new(DVec3::new(-300.0, 0.0, 0.0), Vec3::X, std::f64::consts::FRAC_PI_2, [2000, 1000]).unwrap();
+    let far_camera = Camera::new(DVec3::new(-300.0, 0.0, 0.0), Vec3::X, FRAC_PI_2, [2000, 1000]).unwrap();
     scene.set_camera(far_camera);
     let farther = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(farther.released.is_empty());
@@ -266,14 +269,14 @@ fn background_pbr_keeps_uv_size() {
     let Request::Texture { size, .. } = visible.request else { panic!("expected PBR texture request") };
     assert!(size.edge() > 32, "the visible texture demand includes the composed UV transform");
 
-    scene.set_camera(Camera::new(DVec3::ZERO, -Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap());
+    scene.set_camera(Camera::new(DVec3::ZERO, -Vec3::X, FRAC_PI_2, [1000, 1000]).unwrap());
     let background = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(background.requested.is_empty(), "background priority retains the UV-adjusted texture size");
     assert!(background.released.is_empty(), "background priority does not replace the UV-adjusted texture request");
     assert!(background.priority_updates.contains(&(visible.ticket, Priority::Background)));
     assert!(background.size_updates.is_empty());
 
-    scene.set_camera(Camera::new(DVec3::new(1.0, 0.0, 0.0), -Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap());
+    scene.set_camera(Camera::new(DVec3::new(1.0, 0.0, 0.0), -Vec3::X, FRAC_PI_2, [1000, 1000]).unwrap());
     let rescanned = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(rescanned.requested.is_empty(), "a background rescan does not apply UV scaling to its previous result again");
     assert!(rescanned.released.is_empty(), "a background rescan keeps the active texture ticket");
@@ -297,7 +300,7 @@ fn texture_change_resets_baseline() {
     let Request::Texture { size, .. } = visible.request else { panic!("expected visible texture request") };
     assert!(size.edge() > 32);
 
-    scene.set_camera(Camera::new(DVec3::ZERO, -Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap());
+    scene.set_camera(Camera::new(DVec3::ZERO, -Vec3::X, FRAC_PI_2, [1000, 1000]).unwrap());
     let background = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(background.requested.is_empty());
     assert!(background.released.is_empty());
@@ -443,7 +446,7 @@ fn shared_refinement_preserves_binding() {
     settle_materials(&mut scene, &mut view, &world, &mut now);
     let binding = view.objects().next().unwrap().materials().unwrap()[0].base_color_texture.clone().unwrap();
     let image = binding.image().unwrap();
-    assert_eq!(binding.state(), render::material::AssetState { asset: id, resolution: Resolution::Ready });
+    assert_eq!(binding.state(), AssetState { asset: id, resolution: Resolution::Ready });
     assert_eq!(image.info().unwrap().size, [128; 2]);
     let version = view.version();
     let events = image.events();
@@ -684,7 +687,7 @@ fn regional_demands_skip_cache_cap() {
             .resolution
             == Resolution::Pending)
     );
-    assert!(budget.charged_bytes() <= render::scene::MEMORY_BYTES);
+    assert!(budget.charged_bytes() <= MEMORY_BYTES);
     let removed = *active[0];
     let local = ((removed.request.resource().id.uuid().as_u128() - 10_000) / 6) as u32;
     let _ = world.remove_object(source(&world, 0, 10_000), NonZeroU32::new(local).unwrap()).unwrap();
