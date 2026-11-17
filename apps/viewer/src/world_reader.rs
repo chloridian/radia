@@ -109,9 +109,7 @@ impl<T> ReadResponder<T> {
     }
 
     fn send(self, result: Result<T, ReadError>) {
-        if self.sender.send(ReadResponse { result, _permit: self.permit }).is_err() {
-            tracing::trace!("world read receiver closed");
-        }
+        self.sender.send(ReadResponse { result, _permit: self.permit }).ok();
     }
 }
 

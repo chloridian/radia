@@ -1,7 +1,11 @@
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    time::{Duration, Instant},
+};
 
 use network::SimulatorId;
 use protocol::messages::CacheMissType;
+use utils::Summary;
 use uuid::Uuid;
 use world::{
     Appearance, Applied, ApplyError,
@@ -29,6 +33,9 @@ const MAX_INGEST_DIAGNOSTIC_ADDRESSES: usize = 8;
 pub(super) const MAX_OBJECTS_PER_INTAKE_QUANTUM: usize = 32;
 const MAX_RELATIONSHIPS_PER_TURN: usize = 64;
 const PARCEL_REJECTION_LOG_INTERVAL: u64 = 64;
+const DEGRADED_UPDATE_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+const REJECTED_VALUE_REPORT_INTERVAL: Duration = Duration::from_secs(30);
+const OVERRIDE_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IngestStatus {
@@ -187,7 +194,7 @@ impl IngestSummary {
             })
     }
 
-    pub(super) fn log_incomplete_data(&self, simulator_id: SimulatorId, region: Option<Region>) {
+    fn rejections(&self) -> IngestRejections {
         use ApplyError::{
             AddressGenerationExhausted, EntityBudgetExhausted, EnvironmentBudgetExhausted, FrameGenerationExhausted, InvalidValue,
             KindMismatch, RegionBudgetExhausted, RegionGenerationExhausted, RegionRetired, RemovalCapacityExhausted, RevisionExhausted,
@@ -198,11 +205,8 @@ impl IngestSummary {
             StaleVersion, UntrustedSource,
         };
 
-        let simulator = simulator_id.get();
-        let region = region.map(|region| region.get());
         if let IngestStatus::RegionMetadataRejected(error) = self.status {
-            tracing::warn!(simulator, region, %error, "could not apply object batch region metadata");
-            return;
+            return IngestRejections { region_metadata: Some(error), ..IngestRejections::default() };
         }
         let region_mismatch = matches!(self.status, IngestStatus::RegionHandleMismatch | IngestStatus::RegionContextMismatch);
         let mut malformed = (self.invalid_blocks as u64).saturating_add(self.invalid_fields as u64);
@@ -263,29 +267,111 @@ impl IngestSummary {
                 rejected_address_count += 1;
             }
         }
-        if region_mismatch || malformed > 0 || resource_limits > 0 {
-            let local_ids =
-                rejected_addresses[..rejected_address_count].iter().flatten().map(|address| address.local_id().get()).collect::<Vec<_>>();
-            if region_mismatch || resource_limits > 0 {
-                tracing::warn!(
-                    simulator,
-                    region,
-                    region_mismatch,
-                    malformed,
-                    resource_limits,
-                    local_ids = ?local_ids,
-                    "world update was partially rejected; world data may be incomplete"
-                );
-            } else {
-                tracing::debug!(
-                    simulator,
-                    region,
-                    malformed,
-                    local_ids = ?local_ids,
-                    "world update contained rejected values"
-                );
-            }
-        }
+        IngestRejections { region_metadata: None, region_mismatch, malformed, resource_limits, addresses: rejected_addresses }
+    }
+}
+
+#[derive(Default)]
+struct IngestRejections {
+    region_metadata: Option<ApplyError>,
+    region_mismatch: bool,
+    malformed: u64,
+    resource_limits: u64,
+    addresses: [Option<LocalAddress>; MAX_INGEST_DIAGNOSTIC_ADDRESSES],
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ValueRejection {
+    Sit,
+    SitError,
+    Appearance,
+    AppearanceError,
+}
+
+#[derive(Clone, Copy)]
+struct RejectionSample {
+    simulator: SimulatorId,
+    region: Option<Region>,
+    addresses: [Option<LocalAddress>; MAX_INGEST_DIAGNOSTIC_ADDRESSES],
+}
+
+impl RejectionSample {
+    fn local_ids(&self) -> Vec<u32> {
+        self.addresses.iter().flatten().map(|address| address.local_id().get()).collect()
+    }
+}
+
+#[derive(Default)]
+struct DegradedUpdates {
+    region_mismatch: u64,
+    resource_limits: u64,
+    region_metadata: u64,
+    malformed: u64,
+    sample: Option<RejectionSample>,
+    last_error: Option<ApplyError>,
+}
+
+impl DegradedUpdates {
+    fn report(self) {
+        let Some(sample) = self.sample else { return };
+        tracing::warn!(
+            region_mismatch = self.region_mismatch,
+            resource_limits = self.resource_limits,
+            region_metadata = self.region_metadata,
+            malformed = self.malformed,
+            sample_simulator = sample.simulator.get(),
+            sample_region = sample.region.map(|region| region.get()),
+            sample_local_ids = ?sample.local_ids(),
+            last_error = self.last_error.map(tracing::field::display),
+            "world updates were partially rejected; world data may be incomplete"
+        );
+    }
+}
+
+#[derive(Default)]
+struct RejectedValues {
+    malformed: u64,
+    sit: u64,
+    sit_error: u64,
+    appearance: u64,
+    appearance_error: u64,
+    terrain: u64,
+    sample: Option<RejectionSample>,
+    last_error: Option<ApplyError>,
+}
+
+impl RejectedValues {
+    fn report(self) {
+        let Some(sample) = self.sample else { return };
+        tracing::debug!(
+            malformed = self.malformed,
+            sit = self.sit,
+            sit_error = self.sit_error,
+            appearance = self.appearance,
+            appearance_error = self.appearance_error,
+            terrain = self.terrain,
+            sample_simulator = sample.simulator.get(),
+            sample_region = sample.region.map(|region| region.get()),
+            sample_local_ids = ?sample.local_ids(),
+            last_error = self.last_error.map(tracing::field::display),
+            "world updates contained rejected values"
+        );
+    }
+}
+
+#[derive(Default)]
+struct OverrideFailures {
+    failed: u64,
+    last_error: Option<ApplyError>,
+}
+
+impl OverrideFailures {
+    fn report(self) {
+        tracing::warn!(
+            failed = self.failed,
+            last_error = self.last_error.map(tracing::field::display),
+            "cached PBR overrides not restored"
+        );
     }
 }
 
@@ -293,6 +379,9 @@ pub(super) struct SessionWorld {
     world: World,
     regions: HashMap<SimulatorId, Region>,
     parcel_rejections: u64,
+    degraded_updates: Summary<DegradedUpdates>,
+    rejected_values: Summary<RejectedValues>,
+    override_failures: Summary<OverrideFailures>,
 }
 
 #[derive(Clone, Copy)]
@@ -366,7 +455,82 @@ fn operation_parent(operation: &Option<ObjectOperation>) -> Option<(UpdateSource
 impl SessionWorld {
     pub(super) fn new(limits: WorldLimits) -> Self {
         let world = World::new(limits);
-        Self { world, regions: HashMap::new(), parcel_rejections: 0 }
+        Self {
+            world,
+            regions: HashMap::new(),
+            parcel_rejections: 0,
+            degraded_updates: Summary::new(DEGRADED_UPDATE_REPORT_INTERVAL),
+            rejected_values: Summary::new(REJECTED_VALUE_REPORT_INTERVAL),
+            override_failures: Summary::new(OVERRIDE_FAILURE_REPORT_INTERVAL),
+        }
+    }
+
+    pub(super) fn record_ingest(&mut self, summary: &IngestSummary, simulator_id: SimulatorId) {
+        let rejections = summary.rejections();
+        let sample = RejectionSample { simulator: simulator_id, region: self.region_for(simulator_id), addresses: rejections.addresses };
+        if rejections.region_metadata.is_some() || rejections.region_mismatch || rejections.resource_limits > 0 {
+            let due = self.degraded_updates.record(Instant::now(), |updates| {
+                updates.region_mismatch = updates.region_mismatch.saturating_add(u64::from(rejections.region_mismatch));
+                updates.resource_limits = updates.resource_limits.saturating_add(rejections.resource_limits);
+                updates.malformed = updates.malformed.saturating_add(rejections.malformed);
+                if let Some(error) = rejections.region_metadata {
+                    updates.region_metadata = updates.region_metadata.saturating_add(1);
+                    updates.last_error = Some(error);
+                }
+                updates.sample = Some(sample);
+            });
+            if let Some(due) = due {
+                due.report();
+            }
+        } else if rejections.malformed > 0 {
+            self.record_rejected_values(sample, |values| values.malformed = values.malformed.saturating_add(rejections.malformed));
+        }
+    }
+
+    pub(super) fn record_value_rejection(
+        &mut self,
+        simulator_id: SimulatorId,
+        address: Option<LocalAddress>,
+        rejection: ValueRejection,
+        error: Option<ApplyError>,
+    ) {
+        let mut addresses = [None; MAX_INGEST_DIAGNOSTIC_ADDRESSES];
+        addresses[0] = address;
+        let sample = RejectionSample { simulator: simulator_id, region: self.region_for(simulator_id), addresses };
+        self.record_rejected_values(sample, |values| {
+            let count = match rejection {
+                ValueRejection::Sit => &mut values.sit,
+                ValueRejection::SitError => &mut values.sit_error,
+                ValueRejection::Appearance => &mut values.appearance,
+                ValueRejection::AppearanceError => &mut values.appearance_error,
+            };
+            *count = count.saturating_add(1);
+            if error.is_some() {
+                values.last_error = error;
+            }
+        });
+    }
+
+    fn record_rejected_values(&mut self, sample: RejectionSample, update: impl FnOnce(&mut RejectedValues)) {
+        let due = self.rejected_values.record(Instant::now(), |values| {
+            update(values);
+            values.sample = Some(sample);
+        });
+        if let Some(due) = due {
+            due.report();
+        }
+    }
+
+    pub(super) fn flush_summaries(&mut self) {
+        if let Some(due) = self.degraded_updates.flush() {
+            due.report();
+        }
+        if let Some(due) = self.rejected_values.flush() {
+            due.report();
+        }
+        if let Some(due) = self.override_failures.flush() {
+            due.report();
+        }
     }
 
     pub(super) fn world(&self) -> &World {
@@ -545,8 +709,7 @@ impl SessionWorld {
     }
 
     pub(super) fn apply_terrain(&mut self, decoded: DecodedTerrain) -> usize {
-        let region = decoded.source.region().get();
-        let Some(simulator) = self.simulator_for_region(decoded.source.region()).map(|simulator| simulator.get()) else { return 0 };
+        let Some(simulator) = self.simulator_for_region(decoded.source.region()) else { return 0 };
         let mut rejected = decoded.rejected;
         let mut applied = 0;
         for (ordinal, patch) in decoded.patches {
@@ -559,7 +722,9 @@ impl SessionWorld {
             }
         }
         if rejected > 0 {
-            tracing::debug!(simulator, region, rejected, "terrain packet was partially rejected");
+            let sample =
+                RejectionSample { simulator, region: Some(decoded.source.region()), addresses: [None; MAX_INGEST_DIAGNOSTIC_ADDRESSES] };
+            self.record_rejected_values(sample, |values| values.terrain = values.terrain.saturating_add(rejected as u64));
         }
         applied
     }
@@ -1011,6 +1176,18 @@ impl SessionWorld {
         patch.object_media = Some(update);
         let result = self.world.patch_object(patch);
         Some(result)
+    }
+
+    pub(super) fn restore_cached_overrides(&mut self, overrides: Vec<CachedOverride>) {
+        if let Err(error) = self.retain_cached_overrides(overrides) {
+            let due = self.override_failures.record(Instant::now(), |failures| {
+                failures.failed = failures.failed.saturating_add(1);
+                failures.last_error = Some(error);
+            });
+            if let Some(due) = due {
+                due.report();
+            }
+        }
     }
 
     pub(super) fn retain_cached_overrides(&mut self, overrides: Vec<CachedOverride>) -> Result<(), ApplyError> {

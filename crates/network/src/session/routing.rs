@@ -5,6 +5,7 @@ use std::{
 
 use protocol::lludp::Message;
 use tokio::{sync::mpsc, time::Instant};
+use utils::Summary;
 
 use super::teleport::is_teleport_cancel;
 use super::{
@@ -24,10 +25,15 @@ const MAX_PENDING_LIFECYCLE_EVENTS: usize = 32;
 pub(super) const MAX_PENDING_REGION_HANDSHAKE_REPLIES: usize = MAX_SIMULATOR_CONNECTIONS;
 pub(super) const MAX_PENDING_SESSION_EVENTS: usize = SESSION_APPLICATION_EVENT_CREDIT_CAPACITY + MAX_PENDING_LIFECYCLE_EVENTS;
 
-#[derive(Default)]
 pub(super) struct PrimaryEventBacklog {
     nonempty_since: Option<Instant>,
-    last_warning: Option<Instant>,
+    warnings: Summary<()>,
+}
+
+impl Default for PrimaryEventBacklog {
+    fn default() -> Self {
+        Self { nonempty_since: None, warnings: Summary::new(EVENT_BACKLOG_WARNING_INTERVAL) }
+    }
 }
 
 impl PrimaryEventBacklog {
@@ -36,11 +42,7 @@ impl PrimaryEventBacklog {
         if pending_events < EVENT_BACKLOG_WARNING_THRESHOLD {
             return None;
         }
-        if self.last_warning.is_some_and(|last| now.saturating_duration_since(last) < EVENT_BACKLOG_WARNING_INTERVAL) {
-            return None;
-        }
-
-        self.last_warning = Some(now);
+        self.warnings.record(now.into_std(), |_| {})?;
         Some(self.duration_ms(now))
     }
 

@@ -120,7 +120,7 @@ impl LoginScreen {
             .on_click({
                 let screen = cx.entity().downgrade();
                 move |checked, window, app| {
-                    if screen
+                    screen
                         .update(app, |this, cx| {
                             this.remember_login = *checked;
                             if !*checked {
@@ -141,28 +141,22 @@ impl LoginScreen {
                                             remembered_login::clear(grid)
                                         })
                                         .await;
-                                    if let Err(error) = result
-                                        && this
-                                            .update(cx, |view, cx| {
-                                                if view.session_generation == generation {
-                                                    view.status.session_failure = None;
-                                                    view.status.credential_warning = Some(CredentialWarning::Visible(error));
-                                                    cx.notify();
-                                                }
-                                            })
-                                            .is_err()
-                                    {
-                                        tracing::trace!("login screen was already unavailable after clearing saved credentials");
+                                    if let Err(error) = result {
+                                        this.update(cx, |view, cx| {
+                                            if view.session_generation == generation {
+                                                view.status.session_failure = None;
+                                                view.status.credential_warning = Some(CredentialWarning::Visible(error));
+                                                cx.notify();
+                                            }
+                                        })
+                                        .ok();
                                     }
                                 })
                                 .detach();
                             }
                             cx.notify();
                         })
-                        .is_err()
-                    {
-                        tracing::trace!("login screen was already unavailable after changing the remember setting");
-                    }
+                        .ok();
                 }
             })
     }

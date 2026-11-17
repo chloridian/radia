@@ -369,7 +369,7 @@ impl SessionHandle {
         *admission_closed = true;
         if !*self.worker_finished.borrow() {
             if !*self.disconnect_requested.borrow() {
-                tracing::info!(lifecycle = "disconnecting", "network lifecycle changed");
+                tracing::info!("disconnect requested");
             }
             self.disconnect_requested.send_replace(true);
         }
@@ -459,10 +459,8 @@ impl SessionHandle {
     pub async fn disconnect(&self) {
         self.request_disconnect();
         let mut worker_finished = self.worker_finished.clone();
-        if !*worker_finished.borrow()
-            && let Err(error) = worker_finished.wait_for(|finished| *finished).await
-        {
-            tracing::debug!(%error, "network worker finished while disconnect was waiting");
+        if !*worker_finished.borrow() {
+            worker_finished.wait_for(|finished| *finished).await.ok();
         }
     }
 }

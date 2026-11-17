@@ -30,7 +30,7 @@ impl ObjectCacheSession {
             let page = match world.change_page(cursor, MAX_WORLD_CHANGE_PAGE_ITEMS) {
                 Ok(page) => page,
                 Err(error) => {
-                    tracing::warn!(?error, "PBR override persistence missed World changes");
+                    tracing::warn!(%error, "PBR override persistence missed world changes");
                     break;
                 }
             };

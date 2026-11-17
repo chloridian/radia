@@ -328,7 +328,9 @@ impl EnvironmentIntake {
                     self.parcel(world, region, notice, false);
                 }
                 Ok(None) => {}
-                Err(error) => tracing::debug!(?error, "invalid parcel environment notification"),
+                Err(error) => {
+                    tracing::debug!(simulator = simulator.get(), region = region.get(), ?error, "invalid parcel environment notification");
+                }
             },
             Message::RegionInfo(_) => self.queue(world, region, EnvironmentScope::Region),
             _ => {}
@@ -438,7 +440,7 @@ impl EnvironmentIntake {
     fn apply(&self, world: &mut SessionWorld, target: EnvironmentTarget, source: UpdateSource, assignment: EnvironmentAssignment) {
         match world.observe_environment(target, source, assignment) {
             Ok(applied) if matches!(applied.outcome, RegionOutcome::Patched { .. }) => {
-                tracing::info!(region = target.region().get(), scope = ?target.scope(), "environment assignment updated");
+                tracing::debug!(region = target.region().get(), scope = ?target.scope(), "environment assignment updated");
             }
             Ok(_) => {}
             Err(error) => tracing::warn!(region = target.region().get(), %error, "environment assignment rejected"),

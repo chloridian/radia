@@ -321,9 +321,6 @@ pub(crate) fn handle_keyboard_input(
     repeat: bool,
     captured: bool,
 ) -> Option<bool> {
-    if state == ElementState::Pressed && !repeat && KeyBinding::from_key(key).is_some() {
-        tracing::debug!(?key, captured, "viewport movement key received");
-    }
     let (binding, changed) = controls.keyboard_event(key, state, repeat, captured)?;
     camera_mode.on_movement_key(binding, state, repeat, captured);
     Some(changed)

@@ -21,6 +21,7 @@ use std::{
 
 use assets::{TextureHandle, TextureId};
 use math::{DVec3, Vec4, motion::RegionBounds};
+use utils::Summary;
 use uuid::Uuid;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
@@ -298,7 +299,7 @@ pub(crate) struct GeometryRenderer {
     mesh_admission: frame::MeshAdmission,
     pending_meshes: HashSet<MeshId>,
     pending_textures: HashSet<TextureId>,
-    draw_report: Option<Instant>,
+    budget_reports: Summary<()>,
     omitted_faces: usize,
     mesh_budget_blocked: HashSet<MeshId>,
     placements: HashMap<Entity, WorldTransform>,
@@ -312,7 +313,7 @@ pub(crate) struct GeometryRenderer {
     epoch: u64,
     prepared: Option<FramePreparation>,
     applied_agent: Option<Uuid>,
-    slow_report: Option<Instant>,
+    slow_prepares: Summary<frame::SlowPrepares>,
     pub(crate) stats: Stats,
 }
 
@@ -379,7 +380,7 @@ impl GeometryRenderer {
             mesh_admission: frame::MeshAdmission::default(),
             pending_meshes: HashSet::new(),
             pending_textures: HashSet::new(),
-            draw_report: None,
+            budget_reports: Summary::new(frame::BUDGET_REPORT_INTERVAL),
             omitted_faces: 0,
             mesh_budget_blocked: HashSet::new(),
             placements: HashMap::new(),
@@ -393,7 +394,7 @@ impl GeometryRenderer {
             epoch: 0,
             prepared: None,
             applied_agent: None,
-            slow_report: None,
+            slow_prepares: Summary::new(frame::SLOW_PREPARE_REPORT_INTERVAL),
             stats: Stats::default(),
         }
     }
@@ -558,6 +559,9 @@ impl GeometryRenderer {
 
 impl Drop for GeometryRenderer {
     fn drop(&mut self) {
+        if let Some(due) = self.slow_prepares.flush() {
+            due.report();
+        }
         let mut meshes: Vec<_> = self.meshes.drain().map(|(_, mesh)| mesh).collect();
         meshes.append(&mut self.retired);
         let depth = self.depth.take();

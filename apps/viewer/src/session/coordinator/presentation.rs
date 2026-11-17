@@ -82,11 +82,7 @@ impl PresentationMailbox {
 impl PresentationMailbox {
     fn wake(&self) {
         let mut wake_sender = self.wake_sender.lock().unwrap_or_else(PoisonError::into_inner);
-        match wake_sender.try_send(()) {
-            Ok(()) => {}
-            Err(error) if error.is_full() => {}
-            Err(error) => tracing::trace!(%error, "presentation receiver closed"),
-        }
+        wake_sender.try_send(()).ok();
     }
 }
 

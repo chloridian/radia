@@ -51,7 +51,7 @@ async fn redirects_are_not_followed() {
     let server = LocalServer::start(vec![redirect.as_bytes().to_vec()]);
     let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
 
-    let response = client.get("test", &server.url("/start"), 10).await.expect("return redirect response without following it");
+    let response = client.get(&server.url("/start"), 10).await.expect("return redirect response without following it");
     let requests = server.finish();
 
     assert_eq!(response.status, StatusCode::FOUND);
@@ -66,7 +66,7 @@ async fn viewer_redirect_omits_referer() {
     let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
 
     let response = client
-        .get_with_redirect_policy("test", &server.url("/asset?capability-secret"), 16, RedirectPolicy::ViewerAsset)
+        .get_with_redirect_policy(&server.url("/asset?capability-secret"), 16, RedirectPolicy::ViewerAsset)
         .await
         .expect("follow loopback ViewerAsset redirect");
     let requests = server.finish();
@@ -88,7 +88,7 @@ async fn viewer_redirects_stop_after_five() {
     let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
 
     let response = client
-        .get_with_redirect_policy("test", &server.url("/start"), 16, RedirectPolicy::ViewerAsset)
+        .get_with_redirect_policy(&server.url("/start"), 16, RedirectPolicy::ViewerAsset)
         .await
         .expect("follow up to five ViewerAsset redirects");
     let requests = server.finish();
@@ -103,7 +103,7 @@ async fn body_at_limit_is_accepted() {
     let server = LocalServer::start(vec![response(200, "OK", "text/plain", None, "12345")]);
     let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
 
-    let response = client.get("test", &server.url("/body"), 5).await.expect("body at limit");
+    let response = client.get(&server.url("/body"), 5).await.expect("body at limit");
 
     assert_eq!(response.body, b"12345");
     server.finish();
@@ -114,7 +114,7 @@ async fn declared_length_is_bounded() {
     let server = LocalServer::start(vec![response(200, "OK", "text/plain", None, "123456")]);
     let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
 
-    let error = client.get("test", &server.url("/body"), 5).await.expect_err("declared body exceeds limit");
+    let error = client.get(&server.url("/body"), 5).await.expect_err("declared body exceeds limit");
 
     assert_eq!(error.kind, ErrorKind::ResourceExhausted);
     assert_eq!(error.status, Some(StatusCode::OK));
@@ -136,7 +136,7 @@ async fn chunked_body_limit() {
     let server = LocalServer::start(vec![wire_response.as_bytes().to_vec()]);
     let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
 
-    let error = client.get("test", &server.url("/body"), 5).await.expect_err("chunked body exceeds limit");
+    let error = client.get(&server.url("/body"), 5).await.expect_err("chunked body exceeds limit");
 
     assert_eq!(error.kind, ErrorKind::ResourceExhausted);
     assert_eq!(error.status, Some(StatusCode::OK));
@@ -191,7 +191,7 @@ async fn gzip_content_encoding_remains_raw() {
     let server = LocalServer::start(vec![wire_response]);
     let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
 
-    let response = client.get("test", &server.url("/compressed"), GZIP_BODY.len()).await.expect("read raw gzip bytes");
+    let response = client.get(&server.url("/compressed"), GZIP_BODY.len()).await.expect("read raw gzip bytes");
 
     assert_eq!(response.body, GZIP_BODY);
     assert_eq!(server.finish().len(), 1);
@@ -203,7 +203,7 @@ async fn truncated_body_keeps_response_metadata() {
     let server = LocalServer::start(vec![wire_response.as_bytes().to_vec()]);
     let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
 
-    let error = client.get("test", &server.url("/body"), 6).await.expect_err("truncated Content-Length response must fail");
+    let error = client.get(&server.url("/body"), 6).await.expect_err("truncated Content-Length response must fail");
 
     assert_eq!(error.kind, ErrorKind::Transport);
     assert_eq!(error.status, Some(StatusCode::OK));
@@ -252,24 +252,22 @@ async fn held_body_response() -> (Url, tokio::sync::oneshot::Sender<()>, JoinHan
 async fn post_headers_returns_before_body() {
     let (url, release_body, server) = held_body_response().await;
     let client = Client::new(Some(Duration::from_secs(20)), false, None).expect("build HTTP client");
-    let incoming = match time::timeout(
-        Duration::from_secs(45),
-        client.post_headers("test", &url, "text/plain", Some("text/plain"), b"request".to_vec(), 16),
-    )
-    .await
-    {
-        Ok(Ok(incoming)) => incoming,
-        Ok(Err(error)) => {
-            release_body.send(()).expect("release body after request failure");
-            server.await.expect("server should finish");
-            panic!("receive response headers: {error}");
-        }
-        Err(error) => {
-            release_body.send(()).expect("release body after header timeout");
-            server.await.expect("server should finish");
-            panic!("post_headers should finish before response body: {error}");
-        }
-    };
+    let incoming =
+        match time::timeout(Duration::from_secs(45), client.post_headers(&url, "text/plain", Some("text/plain"), b"request".to_vec(), 16))
+            .await
+        {
+            Ok(Ok(incoming)) => incoming,
+            Ok(Err(error)) => {
+                release_body.send(()).expect("release body after request failure");
+                server.await.expect("server should finish");
+                panic!("receive response headers: {error}");
+            }
+            Err(error) => {
+                release_body.send(()).expect("release body after header timeout");
+                server.await.expect("server should finish");
+                panic!("post_headers should finish before response body: {error}");
+            }
+        };
     let header_timeout = incoming.timeout_error();
 
     assert_eq!(header_timeout.status, Some(StatusCode::OK));
@@ -289,8 +287,7 @@ async fn expired_headers_reject_buffered_body() {
     let server = LocalServer::start(vec![response(200, "OK", "text/plain", Some("7"), "data")]);
     let deadline = Duration::from_secs(20);
     let client = Client::new(Some(deadline), false, None).expect("build HTTP client");
-    let incoming =
-        client.post_headers("test", &server.url("/body"), "text/plain", None, Vec::new(), 16).await.expect("parsed response headers");
+    let incoming = client.post_headers(&server.url("/body"), "text/plain", None, Vec::new(), 16).await.expect("parsed response headers");
     time::pause();
     time::advance(deadline).await;
     let error = incoming.read().await.expect_err("a buffered body cannot extend an expired operation");
@@ -305,8 +302,7 @@ async fn body_deadline_preserves_response_metadata() {
     let (url, release_body, server) = held_body_response().await;
     let timeout = Duration::from_secs(20);
     let client = Client::new(Some(timeout), false, None).expect("build HTTP client");
-    let incoming = match time::timeout(Duration::from_secs(45), client.post_headers("test", &url, "text/plain", None, Vec::new(), 16)).await
-    {
+    let incoming = match time::timeout(Duration::from_secs(45), client.post_headers(&url, "text/plain", None, Vec::new(), 16)).await {
         Ok(Ok(incoming)) => incoming,
         Ok(Err(error)) => {
             release_body.send(()).expect("release body after request failure");
@@ -359,7 +355,7 @@ async fn post_limit_is_enforced() {
     let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
 
     let error = client
-        .post("login", &server.url("/login"), "text/xml", None, Vec::new(), 5)
+        .post(&server.url("/login"), "text/xml", None, Vec::new(), 5)
         .await
         .expect_err("login response exceeded the configured limit");
 
@@ -372,7 +368,7 @@ async fn transport_errors_hide_urls() {
     let url = "http://127.0.0.1:0/cap?token=secret-token";
     let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
 
-    let error = client.get("test", &Url::parse(url).expect("parse capability URL"), 10).await.expect_err("closed port should fail");
+    let error = client.get(&Url::parse(url).expect("parse capability URL"), 10).await.expect_err("closed port should fail");
 
     assert!(!error.to_string().contains("secret-token"));
     assert!(!format!("{error:?}").contains("secret-token"));

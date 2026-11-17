@@ -12,7 +12,8 @@ use network::{
 use protocol::lludp::{Message, Packet};
 use protocol::messages::{CacheMissType, ObjectRequest, RequestAgentData, RequestMultipleObjects};
 use tokio::time::Instant;
-use world::LocalAddress;
+use utils::Summary;
+use world::{LocalAddress, Region};
 
 const RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const RECOVERY_MAX_SENDS: u8 = 4;
@@ -115,8 +116,7 @@ pub(super) struct RecoveryScheduler {
     max_targets: usize,
     max_bytes: usize,
     next_token: u64,
-    dropped_since_warning: usize,
-    last_overflow_warning: Option<Instant>,
+    pressure: Summary<RecoveryPressure>,
 }
 
 impl RecoveryScheduler {
@@ -125,7 +125,7 @@ impl RecoveryScheduler {
     }
 
     fn with_limits(max_targets: usize, max_bytes: usize) -> Self {
-        Self { entries: HashMap::new(), max_targets, max_bytes, next_token: 0, dropped_since_warning: 0, last_overflow_warning: None }
+        Self { entries: HashMap::new(), max_targets, max_bytes, next_token: 0, pressure: Summary::new(RECOVERY_OVERFLOW_LOG_INTERVAL) }
     }
 
     fn has_capacity(&self) -> bool {
@@ -267,16 +267,52 @@ impl RecoveryScheduler {
         }
     }
 
-    fn record_overflow(&mut self, dropped: usize, now: Instant) -> Option<usize> {
-        self.dropped_since_warning = self.dropped_since_warning.saturating_add(dropped);
-        let should_warn = self
-            .last_overflow_warning
-            .is_none_or(|last_warning| now.saturating_duration_since(last_warning) >= RECOVERY_OVERFLOW_LOG_INTERVAL);
-        if !should_warn {
-            return None;
+    fn record_overflow(
+        &mut self,
+        dropped: usize,
+        simulator: Option<SimulatorId>,
+        region: Option<Region>,
+        now: Instant,
+    ) -> Option<RecoveryPressure> {
+        self.pressure.record(now.into_std(), |pressure| {
+            pressure.dropped = pressure.dropped.saturating_add(dropped);
+            pressure.simulator = simulator;
+            pressure.region = region;
+        })
+    }
+
+    fn record_deferred(&mut self, deferred: usize, simulator: SimulatorId, region: Region, now: Instant) -> Option<RecoveryPressure> {
+        self.pressure.record(now.into_std(), |pressure| {
+            pressure.deferred_sends = pressure.deferred_sends.saturating_add(deferred);
+            pressure.simulator = Some(simulator);
+            pressure.region = Some(region);
+        })
+    }
+}
+
+#[derive(Default)]
+struct RecoveryPressure {
+    dropped: usize,
+    deferred_sends: usize,
+    simulator: Option<SimulatorId>,
+    region: Option<Region>,
+}
+
+impl RecoveryPressure {
+    fn report(self) {
+        let simulator = self.simulator.map(SimulatorId::get);
+        let region = self.region.map(|region| region.get());
+        if self.dropped > 0 {
+            tracing::warn!(
+                simulator,
+                region,
+                dropped = self.dropped,
+                deferred_sends = self.deferred_sends,
+                "some object recovery targets could not be queued"
+            );
+        } else {
+            tracing::debug!(simulator, region, deferred_sends = self.deferred_sends, "object recovery sends deferred");
         }
-        self.last_overflow_warning = Some(now);
-        Some(std::mem::take(&mut self.dropped_since_warning))
     }
 }
 
@@ -314,8 +350,8 @@ impl RecoveryIntake {
         if targets.is_empty() && updated.is_empty() {
             return;
         }
-        let simulator = targets.first().and_then(|(simulator, _, _)| simulator.map(SimulatorId::get));
-        let region = targets.first().map(|(_, address, _)| address.region().get());
+        let simulator = targets.first().and_then(|(simulator, _, _)| *simulator);
+        let region = targets.first().map(|(_, address, _)| address.region());
         let now = Instant::now();
         let mut dropped = 0;
         for address in updated {
@@ -344,9 +380,9 @@ impl RecoveryIntake {
             }
         }
         if dropped > 0
-            && let Some(dropped) = self.scheduler.record_overflow(dropped, now)
+            && let Some(pressure) = self.scheduler.record_overflow(dropped, simulator, region, now)
         {
-            tracing::warn!(simulator, region, dropped, "some object recovery targets could not be queued");
+            pressure.report();
         }
     }
 
@@ -407,6 +443,17 @@ impl RecoveryIntake {
     pub(super) fn defer(&mut self, recoveries: &[ScheduledRecovery], now: Instant) {
         for recovery in recoveries {
             self.scheduler.defer(*recovery, now);
+        }
+        if let Some(first) = recoveries.first()
+            && let Some(pressure) = self.scheduler.record_deferred(recoveries.len(), first.simulator_id, first.key.region(), now)
+        {
+            pressure.report();
+        }
+    }
+
+    pub(super) fn flush_pressure(&mut self) {
+        if let Some(pressure) = self.scheduler.pressure.flush() {
+            pressure.report();
         }
     }
 
@@ -483,8 +530,8 @@ mod tests {
 
     use super::{
         MAX_RECOVERY_OBJECTS_PER_REQUEST, MAX_RECOVERY_REQUEST_BYTES, RECOVERY_ENTRY_BYTES, RECOVERY_IDLE_WAIT, RECOVERY_MAX_AGE,
-        RECOVERY_MAX_SENDS, RECOVERY_REQUEST_INTERVAL, RECOVERY_RETRY_INTERVAL, RecoveryCompletion, RecoveryIntake, RecoveryScheduler,
-        recovery_request,
+        RECOVERY_MAX_SENDS, RECOVERY_REQUEST_INTERVAL, RECOVERY_RETRY_INTERVAL, RecoveryCompletion, RecoveryIntake, RecoveryPressure,
+        RecoveryScheduler, recovery_request,
     };
 
     fn address(region: Region, local_id: u32) -> LocalAddress {
@@ -713,9 +760,10 @@ mod tests {
             scheduler.cancel(first);
             assert!(scheduler.schedule(simulator, agent_data(), excess, now).is_some());
 
-            assert_eq!(scheduler.record_overflow(2, now), Some(2));
-            assert_eq!(scheduler.record_overflow(3, now + Duration::from_secs(1)), None);
-            assert_eq!(scheduler.record_overflow(4, now + Duration::from_secs(5)), Some(7));
+            let dropped = |pressure: Option<RecoveryPressure>| pressure.map(|pressure| pressure.dropped);
+            assert_eq!(dropped(scheduler.record_overflow(2, None, None, now)), Some(2));
+            assert_eq!(dropped(scheduler.record_overflow(3, None, None, now + Duration::from_secs(1))), None);
+            assert_eq!(dropped(scheduler.record_overflow(4, None, None, now + Duration::from_secs(5))), Some(7));
         }
     }
 

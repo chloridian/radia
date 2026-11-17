@@ -323,17 +323,13 @@ impl LoginScreen {
         cx.spawn_in(window, async move |this, cx| {
             let (login, favorite_store) =
                 background.spawn(async move { (remembered_login::load(request.grid), load_favorites.then(favorite_store::load)) }).await;
-            if this
-                .update_in(cx, |screen, window, cx| {
-                    if let Some(favorite_store) = favorite_store {
-                        screen.favorites.load(favorite_store);
-                    }
-                    screen.finish_credential_load(request, login, window, cx);
-                })
-                .is_err()
-            {
-                tracing::trace!("login screen was already unavailable after loading saved credentials");
-            }
+            this.update_in(cx, |screen, window, cx| {
+                if let Some(favorite_store) = favorite_store {
+                    screen.favorites.load(favorite_store);
+                }
+                screen.finish_credential_load(request, login, window, cx);
+            })
+            .ok();
         })
         .detach();
     }
@@ -633,7 +629,6 @@ impl LoginScreen {
         self.login_phase = LoginPhase::Idle;
         self.status.message = None;
         self.status.reveal_credential_warning();
-        tracing::info!(grid = %session.grid.label(), simulator = %session.simulator_address, "connected to simulator");
 
         let username = self.username.read(cx).value();
         self.favorites.prepare_session(session.grid, session.agent_id, &username, Some(mailbox), cx);
@@ -675,7 +670,7 @@ impl LoginScreen {
         crate::gui::scene::end_session(self.session_generation, cx);
         match &end {
             SessionEnd::Requested => tracing::info!("viewer session ended normally"),
-            SessionEnd::Failed(error) => tracing::warn!(%error, "viewer session ended after a failure"),
+            SessionEnd::Failed(_) => tracing::warn!("viewer session ended after a failure"),
         }
         self.login_phase = LoginPhase::Idle;
         self.status.end_session(end);
