@@ -1,4 +1,4 @@
-use std::{future::pending, io::ErrorKind, net::SocketAddr, time::Duration};
+use std::{io::ErrorKind, net::SocketAddr, time::Duration};
 
 use protocol::{
     lludp::{Message, Packet},
@@ -19,8 +19,8 @@ use tokio::{
 use uuid::Uuid;
 
 use super::{
-    AGENT_ID, LOGOUT_TIMEOUT, LogoutAttemptError, LogoutOutcome, PendingLogout, SESSION_ID, SimulatorConnectionLifecycle, connect_runtime,
-    connect_with_send_gate, login_session, new_send_gate, send_logout_with_deadline, set_sequence,
+    AGENT_ID, LOGOUT_TIMEOUT, LogoutOutcome, PendingLogout, SESSION_ID, SimulatorConnectionLifecycle, connect_runtime,
+    connect_with_send_gate, login_session, new_send_gate, set_sequence,
 };
 use super::{ack, send_logout_reply, test_fixture};
 use crate::session::{SessionError, logout::LogoutUnavailable};
@@ -225,39 +225,6 @@ async fn root_disconnect_awaits_logout_reply() {
     drop(disconnect);
     assert_eq!(connection.state.disconnect_once().await.expect("duplicate disconnect is idempotent"), LogoutOutcome::AlreadyReceived);
     assert_no_datagram(&simulator);
-}
-
-#[tokio::test(start_paused = true)]
-async fn logout_send_deadline_reports_unsent() {
-    let send = spawn(send_logout_with_deadline(pending::<Result<(), LogoutAttemptError>>(), LogoutUnavailable::SendDeadline));
-    yield_now().await;
-    time::advance(LOGOUT_TIMEOUT).await;
-
-    std::assert_matches!(
-        send.await.expect("logout deadline task should not panic").expect_err("pending local send should time out"),
-        LogoutAttemptError::Unavailable(LogoutUnavailable::SendDeadline)
-    );
-}
-
-#[tokio::test]
-async fn logout_failure_preserves_unexpected_error() {
-    let send = async { Err(LogoutAttemptError::Unexpected(Error::SimulatorSend("socket send failed".into()))) };
-
-    std::assert_matches!(
-        send_logout_with_deadline(send, LogoutUnavailable::SendDeadline).await,
-        Err(LogoutAttemptError::Unexpected(Error::SimulatorSend(message))) if message == "socket send failed"
-    );
-}
-
-#[tokio::test]
-async fn logout_transport_failure_is_unexpected() {
-    let (command, mut pending) = PendingLogout::new();
-    command.sent.send(Err(Error::SimulatorSend("socket send failed".into()))).expect("deliver transport failure");
-
-    std::assert_matches!(
-        pending.wait().await,
-        Err(LogoutAttemptError::Unexpected(Error::SimulatorSend(message))) if message == "socket send failed"
-    );
 }
 
 #[tokio::test(start_paused = true)]

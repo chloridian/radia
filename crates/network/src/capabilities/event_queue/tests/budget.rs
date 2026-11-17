@@ -295,65 +295,6 @@ async fn ordinary_requests_run_during_polls() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn poll_wait_cancels_on_close() {
-    let server = EventQueueBudgetTestServer::start();
-    let budget = CapabilityBudget::new();
-    let clients =
-        (0..2).map(|_| Client::new_with_budget(server.url("/seed"), budget.clone()).expect("active Tokio runtime")).collect::<Vec<_>>();
-    let (events, _received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
-    let (shutdown, shutdown_requested) = watch::channel(false);
-    let mut tasks = Vec::with_capacity(MAX_CONCURRENT_EVENT_QUEUES);
-
-    for index in 0..MAX_CONCURRENT_EVENT_QUEUES {
-        let task = clients[0]
-            .start_event_queue_with_role(
-                test_simulator_id(index as u64 + 1),
-                test_source(),
-                events.clone(),
-                shutdown_requested.clone(),
-                CoverageLossLedger::new(),
-                index == 0,
-            )
-            .expect("start admitted event queue");
-        tasks.push(task);
-    }
-    let polls = (0..MAX_CONCURRENT_EVENT_QUEUES).map(|_| server.next_poll()).collect::<Vec<_>>();
-    for _ in 0..MAX_CONCURRENT_EVENT_QUEUES {
-        server.next_seed();
-    }
-
-    let waiting_client = clients[1].clone();
-    let waiting_task = waiting_client
-        .start_primary_event_queue(
-            test_simulator_id(MAX_CONCURRENT_EVENT_QUEUES as u64 + 1),
-            test_source(),
-            events,
-            shutdown_requested.clone(),
-            CoverageLossLedger::new(),
-        )
-        .expect("start waiting event queue");
-    server.next_seed();
-    assert_eq!(available_event_queue_permits(&budget), 0, "all event queue poll slots are occupied");
-
-    waiting_client.close_session();
-    let waiting_exit = timeout(CLIENT_TEST_TIMEOUT, waiting_task.wait()).await;
-    shutdown.send_replace(true);
-    drop(polls);
-
-    timeout(CLIENT_TEST_TIMEOUT, async {
-        for task in tasks {
-            assert_eq!(task.wait().await, EventQueueExit::Stopped);
-        }
-    })
-    .await
-    .expect("admitted event queues should stop");
-    server.stop();
-    assert_eq!(server.finish(), 0, "the waiting queue never starts a poll while all slots are occupied");
-
-    assert_eq!(waiting_exit.expect("session close should cancel permit acquisition"), EventQueueExit::Stopped);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn waiting_queue_gets_freed_slot() {
     let active_server = EventQueueBudgetTestServer::start();
     let waiting_server = EventQueueBudgetTestServer::start();

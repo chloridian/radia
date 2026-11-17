@@ -20,34 +20,22 @@ async fn terminal_after_full_queue(result: Result<(), crate::session::SessionErr
 }
 
 #[test]
-fn startup_accepts_movement_before_handshake() {
+fn early_movement_matches_session() {
     let agent_id = Uuid::from_u128(1);
     let session_id = Uuid::from_u128(2);
-    let movement = Packet::decode(&movement_complete_packet(1, agent_id, session_id, 0x1000))
-        .expect("decode matching movement completion")
-        .into_message();
     let handshake = Packet::decode(&test_fixture("region_handshake.hex")).expect("decode region handshake").into_message();
-    let mut startup = SessionStartup::default();
 
-    assert!(!startup.observe_primary_message(&movement, agent_id, session_id));
-    assert!(!startup.is_ready());
-    assert!(startup.observe_primary_message(&handshake, agent_id, session_id));
-    assert!(startup.is_ready());
-}
+    for (case, movement_session, ready) in [("matching", session_id, true), ("foreign", Uuid::from_u128(3), false)] {
+        let movement = Packet::decode(&movement_complete_packet(1, agent_id, movement_session, 0x1000))
+            .expect("decode movement completion")
+            .into_message();
+        let mut startup = SessionStartup::default();
 
-#[test]
-fn startup_ignores_foreign_movement() {
-    let agent_id = Uuid::from_u128(1);
-    let session_id = Uuid::from_u128(2);
-    let wrong_movement = Packet::decode(&movement_complete_packet(1, agent_id, Uuid::from_u128(3), 0x1000))
-        .expect("decode mismatched movement completion")
-        .into_message();
-    let handshake = Packet::decode(&test_fixture("region_handshake.hex")).expect("decode region handshake").into_message();
-    let mut startup = SessionStartup::default();
-
-    assert!(!startup.observe_primary_message(&wrong_movement, agent_id, session_id));
-    assert!(!startup.observe_primary_message(&handshake, agent_id, session_id));
-    assert!(!startup.is_ready());
+        assert!(!startup.observe_primary_message(&movement, agent_id, session_id), "{case}");
+        assert!(!startup.is_ready(), "{case}");
+        assert_eq!(startup.observe_primary_message(&handshake, agent_id, session_id), ready, "{case}");
+        assert_eq!(startup.is_ready(), ready, "{case}");
+    }
 }
 
 #[tokio::test]
@@ -264,7 +252,7 @@ async fn primary_activity_resets_keepalive() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn neighbor_fails_after_inactivity() {
+async fn inactive_neighbor_fails() {
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
     let endpoint = neighbor.local_addr().expect("read neighbor address");
     let simulator_id = SimulatorId::allocate().expect("allocate neighbor ID");
@@ -290,26 +278,23 @@ async fn neighbor_fails_after_inactivity() {
 }
 
 #[tokio::test]
-async fn primary_disconnect_survives_full_queue() {
-    let (event, simulator_id, endpoint) = terminal_after_full_queue(Ok(())).await;
-    std::assert_matches!(
-        event,
-        Event::SimulatorDisconnected { simulator_id: actual_id, region_handle: None, endpoint: actual_endpoint }
-            if actual_id == simulator_id && actual_endpoint == endpoint
-    );
-}
-
-#[tokio::test]
-async fn primary_failure_survives_full_queue() {
-    let (event, simulator_id, endpoint) = terminal_after_full_queue(Err(crate::session::SessionError::Connection(
-        crate::circuit::ConnectionError::ShutdownReason("simulator failed"),
-    )))
-    .await;
-    std::assert_matches!(
-        event,
-        Event::SimulatorFailed { simulator_id: actual_id, region_handle: None, endpoint: actual_endpoint, reason }
-            if actual_id == simulator_id && actual_endpoint == endpoint && reason == "simulator failed"
-    );
+async fn primary_end_survives_full_queue() {
+    let failure = crate::session::SessionError::Connection(crate::circuit::ConnectionError::ShutdownReason("simulator failed"));
+    for (result, expected_reason) in [(Ok(()), None), (Err(failure), Some("simulator failed"))] {
+        let (event, simulator_id, endpoint) = terminal_after_full_queue(result).await;
+        match (event, expected_reason) {
+            (Event::SimulatorDisconnected { simulator_id: actual_id, region_handle: None, endpoint: actual_endpoint }, None) => {
+                assert_eq!((actual_id, actual_endpoint), (simulator_id, endpoint), "disconnect");
+            }
+            (
+                Event::SimulatorFailed { simulator_id: actual_id, region_handle: None, endpoint: actual_endpoint, reason },
+                Some(expected_reason),
+            ) => {
+                assert_eq!((actual_id, actual_endpoint, reason.as_str()), (simulator_id, endpoint, expected_reason), "failure");
+            }
+            (event, expected_reason) => panic!("unexpected terminal event for {expected_reason:?}: {event:?}"),
+        }
+    }
 }
 
 #[tokio::test]

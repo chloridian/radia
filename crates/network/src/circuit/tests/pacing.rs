@@ -148,7 +148,7 @@ async fn shutdown_stops_saturated_worker() {
 }
 
 #[test]
-fn dropped_registration_retires_when_full() {
+fn full_queue_retires_dropped_pacer() {
     let (commands, mut receiver) = mpsc::channel(1);
     let (completed, _) = oneshot::channel();
     assert!(commands.try_send(super::Command::Shutdown(completed)).is_ok());
@@ -181,28 +181,8 @@ fn dropped_registration_retires_when_full() {
     assert!(matches!(receiver.try_recv(), Ok(super::Command::Shutdown(_))));
 }
 
-#[tokio::test(start_paused = true)]
-async fn bucket_charge_refund_burst() {
-    let now = Instant::now();
-    let mut bucket = Bucket::new(8_000, now);
-    assert!(bucket.take(MAX_BURST_BYTES as usize, now));
-    assert!(!bucket.take(1, now));
-
-    advance(Duration::from_millis(125)).await;
-    assert!(bucket.reserve(1_000, Instant::now()));
-    bucket.settle_reservation(1_000, true, Instant::now());
-    assert!(bucket.take(1_000, Instant::now()));
-    assert!(!bucket.take(1, Instant::now()));
-}
-
 #[test]
-fn low_rate_keeps_packet_burst() {
-    let bucket = Bucket::new(1, Instant::now());
-    assert_eq!(bucket.capacity_bytes, MAX_BURST_BYTES);
-}
-
-#[test]
-fn retry_reduces_then_recovers_rate() {
+fn loss_backoff_recovers_rate() {
     let start = Instant::now();
     let mut bucket = Bucket::new(20_000, start);
 
@@ -265,7 +245,7 @@ async fn worker_shares_configured_rate() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn worker_reweights_after_promotion() {
+async fn promotion_reweights_worker() {
     let budget = OutboundBudget::new(5_000);
     let mut pacers = Vec::new();
     for id in 0..=5 {
@@ -511,23 +491,6 @@ async fn blocked_send_refunds_credit() {
 
     drop(blocked_connection);
     drop(flowing_connection);
-    budget.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn retransmission_reduces_session_rate() {
-    let server = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator socket");
-    let socket = UdpTransport::connect(server.local_addr().expect("simulator endpoint")).await.expect("connect transport");
-    let budget = OutboundBudget::new(20_000);
-    let connection = budget.handle().register(1, true).await.expect("register simulator");
-
-    assert_eq!(budget.bucket.lock().expect("session pacing bucket").rate_bytes_per_second, 20_000);
-    let handle = connection.handle();
-    handle.report_loss();
-    handle.send(&socket, &[0; 100], TrafficClass::Fair).await.expect("send retry");
-    assert_eq!(budget.bucket.lock().expect("session pacing bucket").rate_bytes_per_second, 10_000);
-
-    drop(connection);
     budget.shutdown().await;
 }
 

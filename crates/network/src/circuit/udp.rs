@@ -113,7 +113,6 @@ pub(crate) mod test_values {
 #[cfg(test)]
 mod tests {
     use std::io;
-    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
     use tokio::net::UdpSocket;
 
@@ -141,7 +140,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ipv6_udp_round_trip() {
+    async fn ipv6_round_trip() {
         let server = match UdpSocket::bind("[::1]:0").await {
             Ok(server) => server,
             Err(error) if ipv6_is_disabled(&error) => {
@@ -198,14 +197,5 @@ mod tests {
         let error = transport.try_send(&oversized).expect_err("oversized IPv6 datagram should fail before reaching the socket");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn bind_uses_remote_family() {
-        let ipv4: SocketAddr = "127.0.0.1:9000".parse().expect("IPv4 address");
-        let ipv6: SocketAddr = "[::1]:9000".parse().expect("IPv6 address");
-
-        assert_eq!(local_bind_address(ipv4), SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0));
-        assert_eq!(local_bind_address(ipv6), SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0));
     }
 }

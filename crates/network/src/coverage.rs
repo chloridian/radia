@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn retired_scope_releases_after_ack() {
+    fn ack_releases_retired_scope() {
         let ledger = CoverageLossLedger::new();
         let simulator_id = test_simulator_id(2);
         let source = CoverageSource::Lludp;

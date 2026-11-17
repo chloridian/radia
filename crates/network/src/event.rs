@@ -398,7 +398,7 @@ mod redaction_tests {
     use crate::fixtures::test_simulator_id;
 
     #[test]
-    fn debug_hides_errors_and_endpoints() {
+    fn debug_hides_event_details() {
         let event = Event::Failed("server-session-secret".into());
         assert!(!format!("{event:?}").contains("server-session-secret"));
 

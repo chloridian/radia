@@ -203,7 +203,7 @@ mod memory {
     }
 
     #[test]
-    fn decode_trims_after_promotion() {
+    fn promotion_trims_decode() {
         let root = SimulatorMemoryBudget::with_test_limits(1_000_000, 500_000, 250_000);
         let former_primary = root.clone();
         let promoted = root.for_neighbor();

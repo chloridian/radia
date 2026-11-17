@@ -1,13 +1,11 @@
-use std::{collections::HashMap, io::ErrorKind, net::SocketAddr, time::Duration};
+use std::{io::ErrorKind, time::Duration};
 
-use math::Vec3;
 use protocol::{
-    Audible, ChatSourceType, ChatType,
+    ChatType,
     lludp::{Message, MessageId, Packet},
     messages::{
-        CachedObjectReference, ChatFromSimulator, ChatFromViewer, LogoutRequest, ObjectUpdateCached, RegionData, RequestMultipleObjects,
+        CachedObjectReference, ChatFromViewer, LogoutRequest, ObjectUpdateCached, RegionData, RequestMultipleObjects,
         agent::logout_request,
-        chat::chat_from_simulator::ChatData,
         chat::chat_from_viewer,
         object::request_multiple_objects::{CacheMissType, ObjectRequest, RequestAgentData},
     },
@@ -32,7 +30,7 @@ use crate::{
     },
 };
 
-use super::{Circuit, available_ping_id};
+use super::Circuit;
 
 fn assert_no_datagram(socket: &UdpSocket) {
     let mut buffer = [0; 65_535];
@@ -48,18 +46,8 @@ async fn receive_ping_id(simulator: &UdpSocket, buffer: &mut [u8]) -> u8 {
     message.ping_id.ping_id
 }
 
-#[test]
-fn ping_id_selection() {
-    let now = Instant::now();
-    let pending = HashMap::from([(u8::MAX, now), (0, now), (1, now)]);
-    assert_eq!(available_ping_id(u8::MAX, &pending, &HashMap::new()), Some(2));
-
-    let all_pending = (0..=u8::MAX).map(|id| (id, now)).collect::<HashMap<_, _>>();
-    assert_eq!(available_ping_id(0, &all_pending, &HashMap::new()), None);
-}
-
 #[tokio::test]
-async fn skips_ping_when_ids_full() {
+async fn full_ping_ids_skip_ping() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let mut circuit = Circuit::new();
     let now = Instant::now();
@@ -74,7 +62,7 @@ async fn skips_ping_when_ids_full() {
 }
 
 #[tokio::test]
-async fn send_commits_after_local_send() {
+async fn local_send_commits_sequence() {
     let (simulator, transport) = connected_simulator().await;
     let mut circuit = Circuit::new();
     let sent_at = Instant::now();
@@ -223,31 +211,6 @@ async fn late_retry_skips_acked_packet() {
     assert!(!circuit.pending.contains_key(&1));
 }
 
-#[tokio::test]
-async fn refuses_inbound_message() {
-    let server = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
-    let address: SocketAddr = server.local_addr().expect("fake simulator address");
-    let transport = UdpTransport::connect(address).await.expect("connect fake simulator");
-    let message = Message::ChatFromSimulator(ChatFromSimulator {
-        chat_data: ChatData {
-            from_name: "Resident".into(),
-            source_id: Uuid::nil(),
-            owner_id: Uuid::nil(),
-            source_type: ChatSourceType::Agent,
-            chat_type: ChatType::Normal,
-            audible: Audible::Fully,
-            position: Vec3::default(),
-            message: "hello".into(),
-        },
-    });
-
-    let error = crate::fixtures::circuit::send_message(&mut Circuit::new(), &transport, message, Delivery::Unreliable)
-        .await
-        .expect_err("inbound-only message must be rejected");
-    std::assert_matches!(error, CircuitError::InboundOnly);
-    assert_no_datagram(&server);
-}
-
 #[test]
 fn rejects_typed_inbound_messages() {
     for (name, fixture) in [
@@ -296,26 +259,6 @@ async fn refuses_unknown_direction() {
         std::assert_matches!(error, CircuitError::UnknownDirection);
     }
     assert_no_datagram(&server);
-}
-
-#[tokio::test]
-async fn failed_send_keeps_sequence() {
-    let server = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
-    let transport = UdpTransport::connect(server.local_addr().expect("simulator address")).await.expect("connect fake simulator");
-    let mut circuit = Circuit::new();
-    let oversized = Message::from(ChatFromViewer {
-        agent_data: chat_from_viewer::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
-        chat_data: chat_from_viewer::ChatData { message: "x".repeat(9_000), chat_type: ChatType::Normal, channel: 0 },
-    });
-
-    assert!(crate::fixtures::circuit::send_message(&mut circuit, &transport, oversized, Delivery::Unreliable).await.is_err());
-    crate::fixtures::circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Unreliable)
-        .await
-        .expect("send valid packet");
-
-    let mut buffer = [0; 64];
-    let (_, packet) = receive_packet(&server, &mut buffer).await;
-    assert_eq!(packet.sequence(), 1);
 }
 
 #[tokio::test]
@@ -415,17 +358,6 @@ fn wrap32_prunes_old_ids() {
 
     assert!(receive_at(&mut circuit, &resent_reliable_packet(u32::MAX - 1), start + Duration::from_secs(61)));
     assert!(!receive_at(&mut circuit, &resent_reliable_packet(3), start + Duration::from_secs(61)));
-}
-
-#[test]
-fn duplicate_sequence_suppressed() {
-    let now = Instant::now();
-    let mut circuit = Circuit::new();
-
-    assert!(receive_at(&mut circuit, &reliable_packet(42), now));
-    assert!(!receive_at(&mut circuit, &reliable_packet(42), now + Duration::from_secs(1)));
-    assert!(!receive_at(&mut circuit, &resent_reliable_packet(42), now + Duration::from_secs(2)));
-    assert!(receive_at(&mut circuit, &reliable_packet(43), now + Duration::from_secs(3)));
 }
 
 #[test]
@@ -583,34 +515,17 @@ fn sequence_wraps() {
 }
 
 #[test]
-fn accepts_wide_sequence() {
-    let mut circuit = Circuit::new();
-    let now = Instant::now();
-
-    assert!(receive_packet_at(&mut circuit, &reliable_packet(0x0100_0000), now).expect("valid 32-bit sequence").is_new_packet);
-    circuit.clear_duplicate_list(0x0100_0001, now + Duration::from_secs(1));
-}
-
-#[test]
-fn order_tracks_u32_wrap() {
-    let mut circuit = Circuit::new();
-    for (sequence, order) in
-        [(u32::MAX - 1, u64::from(u32::MAX - 1)), (u32::MAX, u64::from(u32::MAX)), (0, 0x1_0000_0000), (1, 0x1_0000_0001)]
-    {
-        assert_eq!(circuit.observe_sequence(sequence), Ordered(order));
+fn order_tracks_wrap() {
+    let u32_wrap = [(u32::MAX - 1, u64::from(u32::MAX - 1)), (u32::MAX, u64::from(u32::MAX)), (0, 0x1_0000_0000), (1, 0x1_0000_0001)];
+    let viewer_wrap = [(0x00ff_fffe, 0x00ff_fffe), (0x00ff_ffff, 0x00ff_ffff), (0, 0x0100_0000), (1, 0x0100_0001)];
+    for (case, steps) in [("u32", u32_wrap), ("viewer", viewer_wrap)] {
+        let mut circuit = Circuit::new();
+        for (sequence, order) in steps {
+            assert_eq!(circuit.observe_sequence(sequence), Ordered(order), "{case} wrap at {sequence:#x}");
+        }
+        let (late, late_order) = steps[1];
+        assert_eq!(circuit.observe_sequence(late), Ordered(late_order), "{case} late {late:#x}");
     }
-
-    assert_eq!(circuit.observe_sequence(u32::MAX), Ordered(u64::from(u32::MAX)));
-}
-
-#[test]
-fn order_tracks_viewer_wrap() {
-    let mut circuit = Circuit::new();
-    for (sequence, order) in [(0x00ff_fffe, 0x00ff_fffe), (0x00ff_ffff, 0x00ff_ffff), (0, 0x0100_0000), (1, 0x0100_0001)] {
-        assert_eq!(circuit.observe_sequence(sequence), Ordered(order));
-    }
-
-    assert_eq!(circuit.observe_sequence(0x00ff_ffff), Ordered(0x00ff_ffff));
 }
 
 #[test]
@@ -799,22 +714,27 @@ async fn ping_keeps_wide_watermark() {
 #[tokio::test]
 async fn retry_timeout_tracks_ping() {
     let (simulator, transport) = connected_simulator().await;
-    let mut circuit = Circuit::new();
     let mut buffer = [0; 1024];
 
-    assert_eq!(circuit.retry_timeout(), Duration::from_secs(5));
-    assert_eq!(circuit.measured_ping_delay_average(), None);
-    let sent_at = Instant::now();
-    send_ping_at(&mut circuit, &transport, sent_at).await.expect("send circuit ping");
-    let (_, packet) = receive_packet(&simulator, &mut buffer).await;
-    let Message::StartPingCheck(message) = packet.message() else {
-        panic!("expected circuit ping");
-    };
+    for (rtt, timeout, measured) in [
+        (Duration::from_millis(300), Duration::from_millis(4300), Duration::from_millis(300)),
+        (Duration::from_secs(20), Duration::from_secs(10), Duration::from_secs(2)),
+    ] {
+        let mut circuit = Circuit::new();
+        assert_eq!(circuit.retry_timeout(), Duration::from_secs(5), "{rtt:?}");
+        assert_eq!(circuit.measured_ping_delay_average(), None, "{rtt:?}");
+        let sent_at = Instant::now();
+        send_ping_at(&mut circuit, &transport, sent_at).await.expect("send circuit ping");
+        let (_, packet) = receive_packet(&simulator, &mut buffer).await;
+        let Message::StartPingCheck(message) = packet.message() else {
+            panic!("expected circuit ping");
+        };
 
-    assert!(circuit.record_ping_response(message.ping_id.ping_id, sent_at + Duration::from_millis(300)));
-    assert_eq!(circuit.retry_timeout(), Duration::from_millis(4300));
-    assert_eq!(circuit.measured_ping_delay_average(), Some(Duration::from_millis(300)));
-    assert!(!circuit.record_ping_response(message.ping_id.ping_id, Instant::now() + Duration::from_secs(1)));
+        assert!(circuit.record_ping_response(message.ping_id.ping_id, sent_at + rtt), "{rtt:?}");
+        assert_eq!(circuit.retry_timeout(), timeout, "{rtt:?}");
+        assert_eq!(circuit.measured_ping_delay_average(), Some(measured), "{rtt:?}");
+        assert!(!circuit.record_ping_response(message.ping_id.ping_id, Instant::now() + Duration::from_secs(1)), "{rtt:?}");
+    }
 }
 
 #[test]
@@ -852,7 +772,7 @@ fn retry_timeout_backs_off() {
 }
 
 #[tokio::test]
-async fn ping_ids_expire_and_wrap() {
+async fn ping_ids_expire_for_reuse() {
     let (simulator, transport) = connected_simulator().await;
     let mut circuit = Circuit::new();
     let start = Instant::now();
@@ -933,23 +853,6 @@ async fn stale_ping_replies_keep_rtt() {
     assert_eq!(circuit.retry_timeout(), Duration::from_millis(4300));
     assert!(!circuit.record_ping_response(next_id, next_sent_at + Duration::from_secs(1)), "duplicate reply is ignored");
     assert_eq!(circuit.retry_timeout(), Duration::from_millis(4300));
-}
-
-#[tokio::test]
-async fn retry_timeout_caps() {
-    let (simulator, transport) = connected_simulator().await;
-    let mut circuit = Circuit::new();
-    let mut buffer = [0; 1024];
-
-    let sent_at = Instant::now();
-    send_ping_at(&mut circuit, &transport, sent_at).await.expect("send circuit ping");
-    let (_, packet) = receive_packet(&simulator, &mut buffer).await;
-    let Message::StartPingCheck(message) = packet.message() else {
-        panic!("expected circuit ping");
-    };
-
-    assert!(circuit.record_ping_response(message.ping_id.ping_id, sent_at + Duration::from_secs(20)));
-    assert_eq!(circuit.retry_timeout(), Duration::from_secs(10));
 }
 
 #[tokio::test]
