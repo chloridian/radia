@@ -1,9 +1,9 @@
 use super::{
     BindGroupDescriptor, BindGroupEntry, BindingResource, BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, Color,
-    CommandEncoder, Device, Extent3d, GpuCharge, GpuTexture, HashMap, LoadOp, Operations, Origin3d, RenderPassColorAttachment,
-    RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureDescriptor, TextureDimension,
-    TextureEntry, TextureFormat, TextureUploadState, TextureUsages, TextureViewDescriptor, Textures, UPLOAD_BYTES, Upload, UploadData,
-    mip_count, raw_channel_view_format, raw_channel_view_formats,
+    CommandEncoder, Device, Extent3d, GpuCharge, GpuTexture, LoadOp, Operations, Origin3d, RenderPassColorAttachment, RenderPassDescriptor,
+    StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureDescriptor, TextureDimension, TextureEntry,
+    TextureFormat, TextureUploadState, TextureUsages, TextureViewDescriptor, Textures, UPLOAD_BYTES, Upload, UploadData, mip_count,
+    raw_channel_view_format, raw_channel_view_formats,
 };
 
 impl Textures {
@@ -58,12 +58,7 @@ impl Textures {
                     state_revision: entry.state_revision,
                     evicted: false,
                     geometry: entry.geometry,
-                    state: TextureUploadState::Uploading {
-                        gpu: GpuTexture { texture, view, raw_view, bindings: HashMap::new(), charge },
-                        pixels,
-                        row: 0,
-                        mip: 0,
-                    },
+                    state: TextureUploadState::Uploading { gpu: GpuTexture { texture, view, raw_view, charge }, pixels, row: 0, mip: 0 },
                 },
             );
         }
@@ -205,7 +200,7 @@ mod tests {
 
     use super::*;
     use crate::texture::fixtures::{descriptor, loaded, loaded_fixture};
-    use crate::texture::{CompressionQuality, Conversion, PixelSource, Sampler, TextureKey, allocation_bytes};
+    use crate::texture::{CompressionQuality, Conversion, PixelSource, allocation_bytes};
     use assets::TextureUsage;
     use futures::executor::block_on;
     use test_support::texture::{GRAY_4096_J2C, RGB_J2C, RGBA_J2C};
@@ -281,10 +276,10 @@ mod tests {
         textures.request(&handles[2], 5, Priority::Visible);
         let job = textures.next_conversion_job().unwrap();
         assert!(matches!(job.input, PixelSource::Decode(_)), "an evicted render-only handle reloads from its encoded source");
-        assert!(textures.resident(&device, TextureKey { id: handles[2].id(), sampler: Sampler::default() }).is_none());
+        assert!(!textures.is_resident(handles[2].id()));
         textures.complete(job.run(CompressionQuality::Fast));
         submit(&mut textures, &device, &queue, 5);
-        assert!(textures.resident(&device, TextureKey { id: handles[2].id(), sampler: Sampler::default() }).is_some());
+        assert!(textures.is_resident(handles[2].id()));
         textures.soft_cap = 0;
         textures.request(&handles[2], 6, Priority::Visible);
         submit(&mut textures, &device, &queue, 6);

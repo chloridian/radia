@@ -1,17 +1,22 @@
-use assets::{MaterialDescription, Sampler, TextureMapping};
+use assets::{MaterialDescription, MaterialTexture, Sampler, TextureMapping};
 use math::UvTransform;
 
 use super::{AlphaBehavior, FaceMaterial};
-use crate::texture::TextureKey;
+use crate::texture::{EmissiveImage, MaterialTextures, TextureKey};
+
+const UNTRANSFORMED_UV: [[f32; 4]; 2] = [[1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 1.0, 0.0]];
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct FaceParams {
     pub(crate) color: [f32; 4],
     pub(crate) uv: [[f32; 4]; 2],
     pub(crate) params: [f32; 4],
-    pub(crate) texture: Option<TextureKey>,
+    pub(crate) emissive: [f32; 3],
+    pub(crate) emissive_uv: [[f32; 4]; 2],
+    pub(crate) textures: MaterialTextures,
     pub(crate) blend: bool,
     pub(crate) double_sided: bool,
+    pub(crate) fullbright: bool,
 }
 
 impl FaceParams {
@@ -26,11 +31,14 @@ impl FaceParams {
     pub(crate) fn with_texture_entry_transform(face: Option<&FaceMaterial>, transform: Option<UvTransform>) -> Self {
         let mut result = Self {
             color: [0.38, 0.38, 0.38, 1.0],
-            uv: [[1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 1.0, 0.0]],
+            uv: UNTRANSFORMED_UV,
             params: [0.0; 4],
-            texture: None,
+            emissive: [0.0; 3],
+            emissive_uv: UNTRANSFORMED_UV,
+            textures: MaterialTextures::default(),
             blend: false,
             double_sided: false,
+            fullbright: false,
         };
         let Some(face) = face else { return result };
         result.color = face.base_color_factor();
@@ -49,6 +57,7 @@ impl FaceParams {
         let (matrix, sampler, supported) = match face.material {
             MaterialDescription::Legacy(material) => {
                 result.params[0] = f32::from(u8::from(material.fullbright));
+                result.fullbright = material.fullbright;
                 result.params[3] = f32::from(u8::from(material.mapping == TextureMapping::Planar));
                 (
                     legacy_uv(transform.unwrap_or(material.diffuse.transform)),
@@ -57,22 +66,39 @@ impl FaceParams {
                 )
             }
             MaterialDescription::Pbr(material) => {
-                result.params[0] = f32::from(u8::from(material.unlit));
-                let matrix = transform.map_or_else(
-                    || pbr_uv(material.base_color.transform),
-                    |transform| pbr_with_texture_entry(material.base_color.transform, transform),
-                );
-                (matrix, material.base_color.sampler, material.base_color.tex_coord == 0)
+                result.emissive = material.emissive_factor;
+                if let Some(uv) = pbr_texture_uv(material.emissive, transform) {
+                    result.emissive_uv = uv;
+                    result.textures.emissive = face.emissive_texture.as_ref().map_or(EmissiveImage::Absent, |binding| {
+                        binding.image().map_or(EmissiveImage::Pending, |image| {
+                            EmissiveImage::Ready(TextureKey { id: image.id(), sampler: material.emissive.sampler })
+                        })
+                    });
+                }
+                (pbr_matrix(material.base_color.transform, transform), material.base_color.sampler, material.base_color.tex_coord == 0)
             }
         };
-        if supported && matrix.iter().flatten().all(|value| value.is_finite()) {
+        if supported && finite(&matrix) {
             result.uv = matrix;
             if let Some(texture) = face.base_color_texture.as_ref().and_then(|binding| binding.image()) {
-                result.texture = Some(TextureKey { id: texture.id(), sampler });
+                result.textures.base = Some(TextureKey { id: texture.id(), sampler });
             }
         }
         result
     }
+}
+
+fn pbr_texture_uv(texture: MaterialTexture, texture_entry: Option<UvTransform>) -> Option<[[f32; 4]; 2]> {
+    let matrix = pbr_matrix(texture.transform, texture_entry);
+    (texture.tex_coord == 0 && finite(&matrix)).then_some(matrix)
+}
+
+fn pbr_matrix(material: UvTransform, texture_entry: Option<UvTransform>) -> [[f32; 4]; 2] {
+    texture_entry.map_or_else(|| pbr_uv(material), |texture_entry| pbr_with_texture_entry(material, texture_entry))
+}
+
+fn finite(matrix: &[[f32; 4]; 2]) -> bool {
+    matrix.iter().flatten().all(|value| value.is_finite())
 }
 
 fn legacy_uv(transform: UvTransform) -> [[f32; 4]; 2] {
@@ -113,7 +139,7 @@ fn compose_uv(first: [[f32; 4]; 2], second: [[f32; 4]; 2]) -> [[f32; 4]; 2] {
 mod tests {
     use std::f32::consts::FRAC_PI_2;
 
-    use assets::{MaterialTexture, PbrMaterial};
+    use assets::{LegacyMaterial, MaterialTexture, PbrMaterial};
     use utils::AssetId;
     use uuid::Uuid;
 
@@ -158,6 +184,7 @@ mod tests {
             pbr_state: None,
             alpha: AlphaBehavior::Opaque,
             base_color_texture: None,
+            emissive_texture: None,
         };
 
         let params = FaceParams::with_texture_entry_transform(Some(&face), Some(texture_entry_transform));
@@ -168,12 +195,33 @@ mod tests {
     }
 
     #[test]
+    fn fullbright_comes_from_legacy_only() {
+        let face = |material| FaceMaterial {
+            slot: 0,
+            material,
+            legacy_state: None,
+            pbr_state: None,
+            alpha: AlphaBehavior::Opaque,
+            base_color_texture: None,
+            emissive_texture: None,
+        };
+        for (material, fullbright, unlit_shading) in [
+            (MaterialDescription::Legacy(LegacyMaterial { fullbright: true, ..LegacyMaterial::default() }), true, 1.0),
+            (MaterialDescription::Legacy(LegacyMaterial::default()), false, 0.0),
+            (MaterialDescription::Pbr(PbrMaterial::default()), false, 0.0),
+        ] {
+            let params = FaceParams::new(Some(&face(material)));
+            assert_eq!(params.fullbright, fullbright, "{material:?} metering class");
+            assert_eq!(params.params[0], unlit_shading, "{material:?} unlit shading");
+        }
+    }
+
+    #[test]
     fn fallback_preserves_material() {
         let id = AssetId::new(Uuid::from_u128(42));
         let mut material = PbrMaterial {
             base_color_factor: [0.2, 0.3, 0.4, 0.5],
             double_sided: true,
-            unlit: true,
             base_color: MaterialTexture { tex_coord: 1, ..Default::default() },
             ..Default::default()
         };
@@ -184,19 +232,20 @@ mod tests {
             pbr_state: None,
             alpha: AlphaBehavior::Mask(0.7),
             base_color_texture: None,
+            emissive_texture: None,
         };
         face.resolve_base_color(AssetState { asset: id, resolution: Resolution::Pending }, None);
         let params = FaceParams::new(Some(&face));
         assert_eq!(params.color, material.base_color_factor);
-        assert_eq!(params.params, [1.0, 1.0, 0.7, 0.0]);
+        assert_eq!(params.params, [0.0, 1.0, 0.7, 0.0]);
         assert!(params.double_sided);
         assert!(!params.blend);
-        assert_eq!(params.texture, None, "unsupported UV sets use a neutral image");
+        assert_eq!(params.textures.base, None, "unsupported UV sets use a neutral image");
         material.base_color.tex_coord = 0;
         face.material = MaterialDescription::Pbr(material);
         face.alpha = AlphaBehavior::Blend;
         let params = FaceParams::new(Some(&face));
-        assert_eq!(params.texture, None, "pending assets do not own a GPU texture");
+        assert_eq!(params.textures.base, None, "pending assets do not own a GPU texture");
         assert!(params.blend);
         assert_eq!(params.params[1], 2.0);
     }

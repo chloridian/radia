@@ -11,16 +11,16 @@ use egui::{ClippedPrimitive, TexturesDelta};
 use egui_wgpu::{RendererOptions, ScreenDescriptor};
 use math::DVec3;
 use wgpu::{
-    AdapterInfo, Backends, Color, CommandEncoderDescriptor, CreateSurfaceError, CurrentSurfaceTexture, Device, DeviceDescriptor,
-    ErrorFilter, Instance, InstanceDescriptor, LoadOp, Operations, PollError, PollType, PowerPreference, PresentMode, Queue,
-    RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPassTimestampWrites, RequestAdapterError,
-    RequestAdapterOptions, RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureFormat, TextureViewDescriptor,
+    AdapterInfo, Backends, CommandEncoderDescriptor, CreateSurfaceError, CurrentSurfaceTexture, Device, DeviceDescriptor, ErrorFilter,
+    Instance, InstanceDescriptor, LoadOp, Operations, PollError, PollType, PowerPreference, PresentMode, Queue, RenderPassColorAttachment,
+    RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPassTimestampWrites, RequestAdapterError, RequestAdapterOptions,
+    RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureFormat, TextureViewDescriptor,
 };
 
 use crate::environment::Evaluated;
 use crate::geometry::{GeometryRenderer, PickError, Stats};
 use crate::gpu_timing::GpuTimings;
-use crate::pipeline::{PostProcess, camera_view, projection};
+use crate::pipeline::{PostProcess, SCENE_CLEAR, camera_view, projection};
 use crate::scene::{AgentPose, Camera, SceneView};
 use crate::texture::{TextureCompletion, TextureJob};
 
@@ -241,7 +241,7 @@ impl Renderer {
                     view: self.postprocess.scene_view(),
                     depth_slice: None,
                     resolve_target: None,
-                    ops: Operations { load: LoadOp::Clear(Color { r: 0.012, g: 0.012, b: 0.012, a: 1.0 }), store: StoreOp::Store },
+                    ops: Operations { load: LoadOp::Clear(SCENE_CLEAR), store: StoreOp::Store },
                 })],
                 depth_stencil_attachment: depth.as_ref().map(|view| RenderPassDepthStencilAttachment {
                     view,

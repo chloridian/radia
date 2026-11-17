@@ -9,8 +9,10 @@ use std::{
     },
 };
 
-use assets::{Content, Failure, Kind, MaterialDescription, Priority, Request, Resource, Status, TextureRef, TextureSize, mesh::MeshLod};
-use math::{DVec3, UvTransform};
+use assets::{
+    Content, Failure, Kind, MaterialDescription, Priority, Request, Resource, Status, TextureHandle, TextureRef, TextureSize, mesh::MeshLod,
+};
+use math::DVec3;
 use utils::AssetId;
 use uuid::Uuid;
 use world::{Entity, FaceAppearance, Region};
@@ -895,32 +897,55 @@ impl AssetDemand {
         };
         let overrides = source.pbr_material_overrides.as_ref().and_then(|overrides| overrides.face(slot));
         let (material, alpha) = material::resolve(authored, legacy, pbr, overrides);
-        let mut face = FaceMaterial { slot, material, legacy_state, pbr_state, alpha, base_color_texture: None };
+        let mut face = FaceMaterial { slot, material, legacy_state, pbr_state, alpha, base_color_texture: None, emissive_texture: None };
+        let params = FaceParams::with_texture_entry_transform(Some(&face), Some(authored.transform));
         if let TextureRef::Asset(id) = material.base_color_texture().source {
             let repeats = match face.material {
-                MaterialDescription::Pbr(_) => pbr_texture_repeats(&face, authored.transform),
+                MaterialDescription::Pbr(_) => texture_repeats(params.uv),
                 MaterialDescription::Legacy(_) => {
                     let scale = face.material.base_color_texture().transform.scale;
                     f64::from(scale[0].abs().min(scale[1].abs()))
                 }
-            }
-            .max(1.0 / 64.0);
-            let size = if priority == Priority::Background {
-                previous_texture_sizes
-                    .get(&id)
-                    .copied()
-                    .unwrap_or_else(|| TextureSize::new((f64::from(TextureSize::new(32).edge()) / repeats).ceil() as u32))
-            } else {
-                TextureSize::new((f64::from(size.edge()) / repeats).ceil() as u32)
             };
-            let (resolution, content) = self.observe(entity, region, Request::Texture { id, size }, size, priority, 0, keys);
-            let image = match content {
-                Some(Content::Texture(image)) => Some(image),
-                _ => None,
-            };
-            face.resolve_base_color(AssetState { asset: id, resolution }, image);
+            let (state, image) = self.texture(entity, region, id, repeats, size, previous_texture_sizes, priority, keys);
+            face.resolve_base_color(state, image);
+        }
+        if let MaterialDescription::Pbr(material) = material
+            && let TextureRef::Asset(id) = material.emissive.source
+        {
+            let repeats = texture_repeats(params.emissive_uv);
+            let (state, image) = self.texture(entity, region, id, repeats, size, previous_texture_sizes, priority, keys);
+            face.resolve_emissive(state, image);
         }
         face
+    }
+
+    fn texture(
+        &mut self,
+        entity: Entity,
+        region: Region,
+        id: AssetId,
+        repeats: f64,
+        size: TextureSize,
+        previous_texture_sizes: &HashMap<AssetId, TextureSize>,
+        priority: Priority,
+        keys: &mut HashSet<AssetKey>,
+    ) -> (AssetState, Option<TextureHandle>) {
+        let repeats = repeats.max(1.0 / 64.0);
+        let size = if priority == Priority::Background {
+            previous_texture_sizes
+                .get(&id)
+                .copied()
+                .unwrap_or_else(|| TextureSize::new((f64::from(TextureSize::new(32).edge()) / repeats).ceil() as u32))
+        } else {
+            TextureSize::new((f64::from(size.edge()) / repeats).ceil() as u32)
+        };
+        let (resolution, content) = self.observe(entity, region, Request::Texture { id, size }, size, priority, 0, keys);
+        let image = match content {
+            Some(Content::Texture(image)) => Some(image),
+            _ => None,
+        };
+        (AssetState { asset: id, resolution }, image)
     }
 }
 
@@ -947,8 +972,7 @@ fn remove_entry_user(entry: &mut Entry, user: AssetUser) {
     }
 }
 
-fn pbr_texture_repeats(face: &FaceMaterial, texture_entry: UvTransform) -> f64 {
-    let uv = FaceParams::with_texture_entry_transform(Some(face), Some(texture_entry)).uv;
+fn texture_repeats(uv: [[f32; 4]; 2]) -> f64 {
     let [a, b, c, d] = [uv[0][0], uv[0][1], uv[1][0], uv[1][1]].map(f64::from);
     let squared_sum = a * a + b * b + c * c + d * d;
     let determinant = (a * d - b * c).abs();

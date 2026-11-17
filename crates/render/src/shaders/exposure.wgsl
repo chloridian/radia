@@ -28,7 +28,7 @@ fn scene_color(color_uv: vec2<f32>, coordinate: vec2<i32>, size: vec2<u32>) -> v
     let nearest_scene = textureLoad(scene_image, coordinate, 0);
     var color = scene.rgb;
     let depth = textureLoad(depth_image, coordinate, 0);
-    let is_water_surface = nearest_scene.a < 0.5;
+    let is_water_surface = nearest_scene.a < 0.25;
     if depth == 0.0 {
         if settings.fog.color.w > 0.5 {
             let clip = vec4<f32>(color_uv.x * 2.0 - 1.0, 1.0 - color_uv.y * 2.0, 1.0, 1.0);
@@ -42,7 +42,9 @@ fn scene_color(color_uv: vec2<f32>, coordinate: vec2<i32>, size: vec2<u32>) -> v
     if is_water_surface {
         return color;
     }
-    color *= settings.timing.w;
+    if nearest_scene.a >= 0.75 {
+        color *= settings.timing.w;
+    }
     if settings.fog.color.w < 0.5 {
         return color;
     }

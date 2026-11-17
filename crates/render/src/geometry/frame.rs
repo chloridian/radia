@@ -179,7 +179,7 @@ impl GeometryRenderer {
                 !motion_was_active && prepared.reusable(&key, self.textures.geometry_state(), self.memory.mesh_state(), started)
             }) {
                 let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, self.active_origin);
-                let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
+                let pairs = environment_pairs(view, &self.textures, frame_input.environment);
                 self.update_region_water_bounds(camera.position());
                 self.update_environment_uniforms(device, camera, projection, size, frame_input, pairs);
                 if let Some(prepared) = self.prepared.as_mut() {
@@ -607,7 +607,7 @@ impl GeometryRenderer {
             self.cache.camera = Some(camera);
             self.cache.size = size;
         }
-        let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
+        let pairs = environment_pairs(view, &self.textures, frame_input.environment);
         if !rebuilding || camera_changed || update.immediate_visibility_change {
             self.update_region_water_bounds(camera.position());
         }
@@ -1104,7 +1104,7 @@ impl GeometryRenderer {
                 let face_index = if full_faces { cursor } else { animated_faces.get(cursor).copied().unwrap_or(usize::MAX) };
                 let Some(face) = faces.get_mut(face_index) else { continue };
                 let animated = animation_due
-                    && face.base_params.texture.is_some()
+                    && face.base_params.textures.has_images()
                     && animation.is_some_and(|animation| animation.targets_face(face.order.3));
                 let refresh_params = parameters_dirty || animated;
                 let params_changed = if refresh_params {
@@ -1246,16 +1246,16 @@ fn request_environment_textures(view: &SceneView, environment: &Evaluated, textu
     }
 }
 
-fn environment_pairs(device: &Device, view: &SceneView, textures: &mut Textures, environment: Option<&Evaluated>) -> EnvironmentPairs {
+fn environment_pairs(view: &SceneView, textures: &Textures, environment: Option<&Evaluated>) -> EnvironmentPairs {
     let Some(environment) = environment else { return EnvironmentPairs::default() };
     EnvironmentPairs {
-        sun: blend_keys(device, environment.sky.sun.texture, view, textures),
-        moon: blend_keys(device, environment.sky.moon.texture, view, textures),
-        cloud: blend_keys(device, environment.sky.clouds.texture, view, textures),
-        bloom: blend_keys(device, environment.sky.bloom, view, textures),
-        rainbow: blend_keys(device, environment.sky.rainbow, view, textures),
-        halo: blend_keys(device, environment.sky.halo, view, textures),
-        water_normal: blend_keys(device, environment.water.normal_map, view, textures),
+        sun: blend_keys(environment.sky.sun.texture, view, textures),
+        moon: blend_keys(environment.sky.moon.texture, view, textures),
+        cloud: blend_keys(environment.sky.clouds.texture, view, textures),
+        bloom: blend_keys(environment.sky.bloom, view, textures),
+        rainbow: blend_keys(environment.sky.rainbow, view, textures),
+        halo: blend_keys(environment.sky.halo, view, textures),
+        water_normal: blend_keys(environment.water.normal_map, view, textures),
     }
 }
 
@@ -1446,7 +1446,7 @@ mod tests {
         assert!(draw_list.refresh_winding(&mut faces, transform.scale, false, flipped, false));
         let key = draw_list.face_key(faces[0].group).expect("flipped draw group");
         assert_ne!(key.pipeline, original);
-        assert_eq!(key.pipeline, surface_pipeline(faces[0].base_params.blend, faces[0].base_params.double_sided, flipped, false));
+        assert_eq!(key.pipeline, surface_pipeline(&faces[0].base_params, flipped, false));
         assert!(!draw_list.refresh_winding(&mut faces, flipped, false, flipped, false));
     }
 }

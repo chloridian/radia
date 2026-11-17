@@ -37,7 +37,14 @@ pub(super) fn packed_instance(base: &[u8; TRANSFORM_BYTES], params: &FaceParams,
 
 pub(super) fn parameter_part(params: &FaceParams, scale: Vec3) -> [u8; PARAMETER_BYTES] {
     let mut bytes = [0; PARAMETER_BYTES];
-    let values = params.color.into_iter().chain(params.uv.into_iter().flatten()).chain(params.params).chain(scale.extend(0.0).to_array());
+    let values = params
+        .color
+        .into_iter()
+        .chain(params.uv.into_iter().flatten())
+        .chain(params.params)
+        .chain(scale.extend(0.0).to_array())
+        .chain(params.emissive.into_iter().chain([0.0]))
+        .chain(params.emissive_uv.into_iter().flatten());
     for (dest, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         *dest = value.to_le_bytes();
     }
@@ -47,6 +54,7 @@ pub(super) fn parameter_part(params: &FaceParams, scale: Vec3) -> [u8; PARAMETER
 #[cfg(test)]
 mod tests {
     use math::Mat3;
+    use wgpu::naga::{TypeInner, front::wgsl, proc::Layouter};
 
     use super::*;
 
@@ -57,15 +65,37 @@ mod tests {
         params.color = [0.125, 0.25, 0.5, 0.75];
         params.uv = [[2.0, 3.0, 4.0, 0.0], [5.0, 6.0, 7.0, 0.0]];
         params.params = [1.0, 2.0, 0.7, 1.0];
+        params.emissive = [f32::MAX, 0.5, 1e30];
+        params.emissive_uv = [[11.0, 12.0, 13.0, 0.0], [14.0, 15.0, 16.0, 0.0]];
         let bytes = packed_instance(&base, &params, Vec3::new(8.0, 9.0, 10.0));
-        assert_eq!(&bytes[..112], &base, "model and normal attributes retain their offsets");
+        assert_eq!(&bytes[..112], &base, "model and normal matrices lead the face record");
         let attributes: Vec<_> = bytes[112..].as_chunks::<4>().0.iter().map(|word| f32::from_le_bytes(*word)).collect();
         assert_eq!(
-            attributes,
+            attributes[..20],
             [0.125, 0.25, 0.5, 0.75, 2.0, 3.0, 4.0, 0.0, 5.0, 6.0, 7.0, 0.0, 1.0, 2.0, 0.7, 1.0, 8.0, 9.0, 10.0, 0.0],
-            "surface shader locations 10 through 14 consume five vec4 attributes"
+            "material vectors follow the transform"
         );
-        assert_eq!(bytes.len(), 192, "GPU instance stride");
+        assert_eq!(
+            attributes[20..],
+            [f32::MAX, 0.5, 1e30, 0.0, 11.0, 12.0, 13.0, 0.0, 14.0, 15.0, 16.0, 0.0],
+            "finite emissive passes through unclamped"
+        );
+
+        let source = concat!(
+            include_str!("../shaders/atmosphere.wgsl"),
+            include_str!("../shaders/water.wgsl"),
+            include_str!("../shaders/surface.wgsl")
+        );
+        let module = wgsl::parse_str(source).expect("surface shader parses");
+        let mut layouter = Layouter::default();
+        layouter.update(module.to_ctx()).expect("surface shader types lay out");
+        let (face, ty) = module.types.iter().find(|(_, ty)| ty.name.as_deref() == Some("Face")).expect("surface shader declares Face");
+        let TypeInner::Struct { members, .. } = &ty.inner else { panic!("Face is a struct") };
+        let offsets: Vec<_> = members.iter().map(|member| (member.name.as_deref().unwrap_or_default(), member.offset)).collect();
+        assert_eq!(offsets[..7], [("model", 0), ("normal", 64), ("color", 112), ("u", 128), ("v", 144), ("params", 160), ("scale", 176)]);
+        assert_eq!(offsets[7..], [("emissive", 192), ("emissive_u", 208), ("emissive_v", 224)]);
+        assert_eq!(layouter[face].to_stride() as usize, INSTANCE_BYTES, "storage array stride matches the packed record");
+        assert_eq!(bytes.len(), INSTANCE_BYTES);
     }
     #[test]
     fn nonuniform_normals_upload() {
