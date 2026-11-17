@@ -1,7 +1,11 @@
-use super::*;
-use crate::fixtures::event_with_retained_bytes;
+use std::assert_matches;
 
-async fn terminal_after_full_queue(result: Result<(), crate::session::SessionError>) -> (Event, SimulatorId, SocketAddr) {
+use tokio::time::Instant;
+
+use super::*;
+use crate::{circuit::MAX_SIMULATOR_CONNECTIONS, fixtures::event_with_retained_bytes};
+
+async fn terminal_after_full_queue(result: Result<(), SessionError>) -> (Event, SimulatorId, SocketAddr) {
     let (events, mut received) = mpsc::channel(2);
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
     let endpoint = "127.0.0.1:9000".parse().expect("parse simulator endpoint");
@@ -11,7 +15,7 @@ async fn terminal_after_full_queue(result: Result<(), crate::session::SessionErr
 
     publish_primary_terminal_event(terminal_slot, simulator_id, None, endpoint, &result);
 
-    std::assert_matches!(
+    assert_matches!(
         timeout(WAIT, received.recv()).await.expect("queued event should remain observable").map(EventEnvelope::into_event),
         Some(Event::Failed(message)) if message == "queued before disconnect"
     );
@@ -49,14 +53,14 @@ async fn cancelled_queues_release_packet_memory() {
     events.try_send(EventEnvelope::new(Event::Failed("occupy intake".into()))).expect("fill intake");
     let mut primary_queue = VecDeque::new();
     let mut pending_lifecycle_events = 0;
-    std::assert_matches!(
+    assert_matches!(
         queue_simulator_event(
             &events,
             &mut primary_queue,
             &mut pending_lifecycle_events,
             retained_packet_event(&budget, primary_id, endpoint, &wire),
         ),
-        crate::session::EventQueueOutcome::Queued
+        EventQueueOutcome::Queued
     );
     let mut neighbor_queues = Vec::new();
     let mut receivers = Vec::new();
@@ -123,13 +127,13 @@ async fn retired_capability_requests_awaited() {
     let mut bytes = [0; 1024];
     assert!(timeout(WAIT, socket.read(&mut bytes)).await.expect("read held request").expect("HTTP request bytes") > 0);
     assert_eq!(connection.state.capability_request_waiters.len(), 2, "root and neighbor capability requests stay tracked");
-    crate::session::remove_simulator_capability(&mut connection.state.simulators, id);
+    remove_simulator_capability(&mut connection.state.simulators, id);
     assert!(connection.state.simulators.get(&id).is_some_and(|simulator| simulator.capabilities.is_none()));
     timeout(WAIT, connection.state.finish_capability_request_waiters()).await.expect("wait for retired and root capability requests");
     assert!(connection.state.capability_request_waiters.is_empty());
     let result = timeout(WAIT, request).await.expect("closed request resolves").expect("request task");
-    std::assert_matches!(result, Err(Error::CapabilitySessionClosed));
-    std::assert_matches!(client.request_capabilities(&["TestCapability"]).await, Err(Error::CapabilitySessionClosed));
+    assert_matches!(result, Err(Error::CapabilitySessionClosed));
+    assert_matches!(client.request_capabilities(&["TestCapability"]).await, Err(Error::CapabilitySessionClosed));
 }
 
 #[tokio::test]
@@ -140,11 +144,11 @@ async fn capability_client_count_is_bounded() {
         .expect("connect runtime");
     let seed = connection.state.session.seed_capability.clone();
     let mut clients = Vec::new();
-    for _ in 1..crate::circuit::MAX_SIMULATOR_CONNECTIONS {
+    for _ in 1..MAX_SIMULATOR_CONNECTIONS {
         clients.push(connection.state.new_capability_client(seed.clone()).expect("admit client within limit"));
     }
     assert!(connection.state.new_capability_client(seed).is_err());
-    assert_eq!(connection.state.capability_request_waiters.len(), crate::circuit::MAX_SIMULATOR_CONNECTIONS);
+    assert_eq!(connection.state.capability_request_waiters.len(), MAX_SIMULATOR_CONNECTIONS);
     for client in &clients {
         client.close_session();
     }
@@ -173,13 +177,13 @@ async fn full_decode_keeps_retry_timers() {
     let client = spawn(connection.run(command_receiver, events, disconnect_requested, terminal_event_permit));
 
     let (initial, peer) = receive(&simulator).await;
-    std::assert_matches!(Packet::decode(&initial).expect("decode initial circuit packet").message(), Message::UseCircuitCode(_));
+    assert_matches!(Packet::decode(&initial).expect("decode initial circuit packet").message(), Message::UseCircuitCode(_));
     let dropped_packet = Packet::new(40, Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 1 } }))
         .encode()
         .expect("encode packet rejected by unavailable decoder");
     simulator.send_to(&dropped_packet, peer).await.expect("send packet while decode slots are full");
 
-    let started = tokio::time::Instant::now();
+    let started = Instant::now();
     loop {
         if coverage_losses.snapshot().losses.iter().any(|loss| {
             matches!(
@@ -247,7 +251,7 @@ async fn primary_activity_resets_keepalive() {
 
     advance(Duration::from_secs(2)).await;
     let result = client.await.expect("primary session task");
-    std::assert_matches!(result, Err(crate::session::SessionError::Connection(crate::circuit::ConnectionError::KeepaliveTimeout)));
+    assert_matches!(result, Err(SessionError::Connection(ConnectionError::KeepaliveTimeout)));
     drop(commands);
 }
 
@@ -265,21 +269,21 @@ async fn inactive_neighbor_fails() {
     let worker = spawn(connection.run(events, shutdown, neighbor_requests, commands, mpsc::channel(1).1, SimulatorMemoryBudget::new()));
 
     let (use_circuit, peer) = receive(&neighbor).await;
-    std::assert_matches!(Packet::decode(&use_circuit).expect("decode UseCircuitCode").message(), Message::UseCircuitCode(_));
+    assert_matches!(Packet::decode(&use_circuit).expect("decode UseCircuitCode").message(), Message::UseCircuitCode(_));
     let acknowledgement = Packet::new(40, Message::PacketAck(PacketAck { packets: vec![Packets { id: 1 }] }))
         .encode()
         .expect("encode circuit acknowledgement");
     neighbor.send_to(&acknowledgement, peer).await.expect("ack neighbor circuit");
-    std::assert_matches!(next_neighbor_event(&mut event_receiver).await, Event::SimulatorConnected { region_handle: Some(_), .. });
+    assert_matches!(next_neighbor_event(&mut event_receiver).await, Event::SimulatorConnected { region_handle: Some(_), .. });
 
     advance(KEEPALIVE_TIMEOUT).await;
     let result = worker.await.expect("neighbor task");
-    std::assert_matches!(result, Err(crate::circuit::ConnectionError::KeepaliveTimeout));
+    assert_matches!(result, Err(ConnectionError::KeepaliveTimeout));
 }
 
 #[tokio::test]
 async fn primary_end_survives_full_queue() {
-    let failure = crate::session::SessionError::Connection(crate::circuit::ConnectionError::ShutdownReason("simulator failed"));
+    let failure = SessionError::Connection(ConnectionError::ShutdownReason("simulator failed"));
     for (result, expected_reason) in [(Ok(()), None), (Err(failure), Some("simulator failed"))] {
         let (event, simulator_id, endpoint) = terminal_after_full_queue(result).await;
         match (event, expected_reason) {
@@ -334,8 +338,8 @@ async fn full_queue_keeps_control_responsive() {
     let logout = receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
     send_logout_reply(&simulator, peer, &logout, 3).await;
     assert!(timeout(WAIT, run).await.expect("shutdown should finish with a full event queue").expect("simulator task").is_ok());
-    std::assert_matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::Failed(message)) if message == "fill event queue");
-    std::assert_matches!(
+    assert_matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::Failed(message)) if message == "fill event queue");
+    assert_matches!(
         received.recv().await.map(EventEnvelope::into_event),
         Some(Event::SimulatorDisconnected { region_handle: None, endpoint: actual_endpoint, .. }) if actual_endpoint == endpoint
     );
@@ -381,11 +385,11 @@ async fn capability_events_wait_for_connection() {
         .expect("publish connection before buffered events");
     assert_eq!(queued_bytes.available_permits(), 3, "publishing must transfer the permit with its event");
 
-    std::assert_matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::SimulatorConnected { simulator_id: id, .. }) if id == simulator_id
+    assert_matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::SimulatorConnected { simulator_id: id, .. }) if id == simulator_id
     );
     assert_eq!(queued_bytes.available_permits(), 3);
     for expected in ["First", "Second"] {
-        std::assert_matches!(
+        assert_matches!(
             received.recv().await.map(EventEnvelope::into_event),
             Some(Event::CapabilityEvent { simulator_id: id, message, .. }) if id == simulator_id && message == expected
         );

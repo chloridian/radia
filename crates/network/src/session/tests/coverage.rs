@@ -1,6 +1,13 @@
-use super::*;
-use crate::fixtures::event_with_coverage_watermark;
+use std::assert_matches;
+
 use tokio::time;
+
+use super::*;
+use crate::{
+    circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY,
+    coverage::{CoverageLoss, CoverageLossReason, CoverageSource},
+    fixtures::event_with_coverage_watermark,
+};
 
 #[tokio::test]
 async fn primary_queue_exit_keeps_session() {
@@ -30,7 +37,7 @@ fn former_primary_failure_keeps_identity() {
         endpoint,
         &SimulatorTaskOutcome::Finished(Err(ConnectionError::ShutdownReason("retry limit reached"))),
     );
-    std::assert_matches!(
+    assert_matches!(
         event,
         Event::SimulatorFailed { simulator_id: failed_id, region_handle: None, endpoint: failed_endpoint, reason }
             if failed_id == simulator_id && failed_endpoint == endpoint && reason == "retry limit reached"
@@ -39,8 +46,6 @@ fn former_primary_failure_keeps_identity() {
 
 #[tokio::test]
 async fn credit_exhaustion_reports_coverage() {
-    use crate::coverage::{CoverageLoss, CoverageLossReason, CoverageSource};
-
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
     let coverage_losses = CoverageLossLedger::new();
@@ -51,14 +56,14 @@ async fn credit_exhaustion_reports_coverage() {
 
     let (events, mut received_events) = mpsc::channel(2);
     let mut run_state = RunState::new();
-    for index in 0..crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY {
+    for index in 0..SESSION_APPLICATION_EVENT_CREDIT_CAPACITY {
         let permit =
             connection.state.packet_memory.application_events().try_acquire().expect("test backlog fits the session application capacity");
         let mut event = EventEnvelope::new(Event::CapabilityEvent {
             simulator_id: connection.state.primary_id,
             source: endpoint,
             message: "pending event".into(),
-            body: llsd::Value::Integer(i32::try_from(index).expect("test event index fits")),
+            body: Value::Integer(i32::try_from(index).expect("test event index fits")),
         });
         event.attach_application_credit(permit);
         run_state.pending_events.push_back(event);
@@ -73,7 +78,7 @@ async fn credit_exhaustion_reports_coverage() {
             &events,
             &mut run_state,
             event_with_coverage_watermark(
-                Event::CapabilityEvent { simulator_id, source: endpoint, message: "CrossedRegion".into(), body: llsd::Value::Undefined },
+                Event::CapabilityEvent { simulator_id, source: endpoint, message: "CrossedRegion".into(), body: Value::Undefined },
                 watermark,
             ),
         )
@@ -82,7 +87,7 @@ async fn credit_exhaustion_reports_coverage() {
 
     assert!(received_events.try_recv().is_err(), "the full queue must not admit an extra event");
     assert!(connection.state.logout.deadline().is_none(), "queue pressure must not start simulator logout");
-    std::assert_matches!(
+    assert_matches!(
         coverage_losses.snapshot().losses.as_slice(),
         [CoverageLoss::Source(record)]
             if record.watermark.simulator_id == simulator_id
@@ -96,7 +101,7 @@ async fn credit_exhaustion_reports_coverage() {
         .publish_event(&events, &mut run_state, Event::SimulatorDisconnected { simulator_id, region_handle: None, endpoint })
         .await
         .expect("events should flow again after the consumer drains the backlog");
-    std::assert_matches!(received_events.try_recv().map(|event| event.event), Ok(Event::SimulatorDisconnected { .. }));
+    assert_matches!(received_events.try_recv().map(|event| event.event), Ok(Event::SimulatorDisconnected { .. }));
     assert!(connection.state.logout.deadline().is_none());
 }
 

@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    error::Error as StdError,
-    fmt,
+    error, fmt,
     time::Duration,
 };
 
@@ -66,8 +65,8 @@ impl fmt::Display for CircuitError {
     }
 }
 
-impl StdError for CircuitError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+impl error::Error for CircuitError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::EncodeMessage(error) | Self::EncodeAcknowledgements(error) => Some(error),
             _ => None,

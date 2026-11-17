@@ -1,10 +1,15 @@
-use super::disconnect::{
-    SIMULATOR_TIMEOUT, assert_no_datagram, client_ack, expected_chat, expected_complete_movement, expected_fixture,
-    expected_zerocoded_reply, packet_ack_contains, receive_primary_connected, server_ack_many, with_appended_ack,
+use std::assert_matches;
+
+use tokio::{sync::mpsc::error::TryRecvError, task::yield_now};
+
+use super::{
+    disconnect::{
+        SIMULATOR_TIMEOUT, assert_no_datagram, client_ack, expected_chat, expected_complete_movement, expected_fixture,
+        expected_zerocoded_reply, packet_ack_contains, receive_primary_connected, server_ack_many, with_appended_ack,
+    },
+    *,
 };
-use super::*;
 use crate::session::SessionHandle;
-use tokio::task::yield_now;
 
 #[tokio::test]
 async fn handshake_chat_logout() {
@@ -44,7 +49,7 @@ async fn handshake_chat_logout() {
     };
     assert_eq!(source, simulator.local_addr().expect("simulator address"));
     assert_eq!(sequence, 24);
-    std::assert_matches!(message, Message::RegionHandshake(message) if message.region_info1.sim_name == "Test Region");
+    assert_matches!(message, Message::RegionHandshake(message) if message.region_info1.sim_name == "Test Region");
 
     let mut movement_complete = test_fixture("agent_movement_complete.hex");
     movement_complete[0] |= 0x40;
@@ -54,10 +59,10 @@ async fn handshake_chat_logout() {
         panic!("expected the simulator session to become ready");
     };
     let movement_event = next_event(&mut events).await;
-    std::assert_matches!(movement_event, Event::SimulatorMessage { sequence: 23, message: Message::AgentMovementComplete(_), .. });
+    assert_matches!(movement_event, Event::SimulatorMessage { sequence: 23, message: Message::AgentMovementComplete(_), .. });
 
     let throttle = Packet::decode(&receive(&simulator).await.0).expect("decode AgentThrottle");
-    std::assert_matches!(throttle.message(), Message::AgentThrottle(_));
+    assert_matches!(throttle.message(), Message::AgentThrottle(_));
     assert!(throttle.is_reliable());
     assert!(throttle.appended_acks().contains(&23), "AgentThrottle carries the pending movement ACK");
     simulator.send_to(&server_ack_many(26, &[throttle.sequence()]), peer).await.expect("ack AgentThrottle");
@@ -98,7 +103,7 @@ async fn handshake_chat_logout() {
     assert_eq!(message.chat_data.message, "Hi");
     yield_now().await;
     match events.try_recv() {
-        Err(mpsc::error::TryRecvError::Empty) => {}
+        Err(TryRecvError::Empty) => {}
         _ => panic!("event queue should be empty"),
     }
 
@@ -116,7 +121,7 @@ async fn handshake_chat_logout() {
             .is_ok()
     );
     let error = capabilities.request_capabilities(&["TestCapability"]).await.expect_err("session teardown closes retained capabilities");
-    std::assert_matches!(error, Error::CapabilitySessionClosed);
+    assert_matches!(error, Error::CapabilitySessionClosed);
 }
 
 #[tokio::test]
@@ -130,7 +135,7 @@ async fn handshake_reply_preserves_flags() {
     let handle = SessionHandle {
         commands: commands.clone(),
         disconnect_requested: disconnect_signal.clone(),
-        command_admission_closed: Arc::new(std::sync::Mutex::new(false)),
+        command_admission_closed: Arc::new(Mutex::new(false)),
         worker_finished,
     };
     let connection = connect_runtime(session, ResponseData::default()).await.expect("connect simulator runtime");
@@ -158,7 +163,7 @@ async fn handshake_reply_preserves_flags() {
         let response = handle.try_reply_region_handshake(simulator_id, flags).expect("queue explicit handshake reply");
         response.await.expect("network completion remains connected").expect("handshake reply is transmitted");
         let reply = receive_message(&simulator, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
-        std::assert_matches!(reply.message(), Message::RegionHandshakeReply(reply) if reply.region_info.flags == flags);
+        assert_matches!(reply.message(), Message::RegionHandshakeReply(reply) if reply.region_info.flags == flags);
         simulator.send_to(&server_ack_many(server_ack, &[reply.sequence()]), peer).await.expect("ack explicit handshake reply");
     }
 
@@ -174,10 +179,9 @@ fn handshake_reply_reports_full_queue() {
     commands.try_send(Command::SubmitMfaCode("123456".into())).expect("fill command queue");
     let (disconnect_requested, _) = watch::channel(false);
     let (_, worker_finished) = watch::channel(false);
-    let handle =
-        SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(std::sync::Mutex::new(false)), worker_finished };
+    let handle = SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(Mutex::new(false)), worker_finished };
 
-    std::assert_matches!(handle.try_reply_region_handshake(SimulatorId::new(1), 7), Err(Error::CommandQueueFull));
+    assert_matches!(handle.try_reply_region_handshake(SimulatorId::new(1), 7), Err(Error::CommandQueueFull));
 }
 
 #[tokio::test]
@@ -203,7 +207,7 @@ async fn handshake_survives_application_backlog() {
     simulator.send_to(&handshake, peer).await.expect("send region handshake");
     assert_eq!(receive(&simulator).await.0, with_appended_ack(expected_zerocoded_reply(3), 22));
     simulator.send_to(&server_ack_many(26, &[3]), peer).await.expect("ack region handshake reply");
-    std::assert_matches!(next_event(&mut events).await, Event::SimulatorMessage { sequence: 22, .. });
+    assert_matches!(next_event(&mut events).await, Event::SimulatorMessage { sequence: 22, .. });
 
     for sequence in 23..=38 {
         let mut chat = test_fixture("chat_from_simulator.hex");
@@ -274,7 +278,7 @@ async fn closed_receiver_logs_out() {
     set_sequence(&mut handshake, 22);
     simulator.send_to(&handshake, peer).await.expect("send region handshake");
     assert_eq!(receive(&simulator).await.0, with_appended_ack(expected_zerocoded_reply(3), 22));
-    std::assert_matches!(next_event(&mut events).await, Event::SimulatorMessage { message: Message::RegionHandshake(_), .. });
+    assert_matches!(next_event(&mut events).await, Event::SimulatorMessage { message: Message::RegionHandshake(_), .. });
 
     let mut movement_complete = test_fixture("agent_movement_complete.hex");
     movement_complete[0] |= 0x40;
@@ -283,12 +287,12 @@ async fn closed_receiver_logs_out() {
     simulator.send_to(&movement_complete, peer).await.expect("send packet as receiver closes");
     let throttle = Packet::decode(&receive(&simulator).await.0).expect("decode agent throttle");
     assert_eq!(throttle.sequence(), 4);
-    std::assert_matches!(throttle.message(), Message::AgentThrottle(_));
+    assert_matches!(throttle.message(), Message::AgentThrottle(_));
     assert!(throttle.appended_acks().contains(&23));
     let logout = Packet::decode(&receive(&simulator).await.0).expect("decode logout request");
     assert_eq!(logout.sequence(), 5);
     assert!(logout.is_reliable());
-    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+    assert_matches!(logout.message(), Message::LogoutRequest(_));
     send_logout_reply(&simulator, peer, &logout, 24).await;
 
     assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("session should stop").expect("session task should not panic").is_ok());

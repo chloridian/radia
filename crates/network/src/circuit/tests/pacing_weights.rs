@@ -1,13 +1,14 @@
-use super::*;
 use tokio::time::advance;
+
+use super::*;
 
 async fn dispatch_one_under_pressure(
     active: &[u64],
     bucket: &Arc<Mutex<Bucket>>,
-    connections: &mut HashMap<u64, super::ConnectionState>,
+    connections: &mut HashMap<u64, ConnectionState>,
     order: &[u64],
     pending: &mut HashMap<u64, PendingRequest>,
-    receivers: &mut HashMap<u64, oneshot::Receiver<super::BudgetLease>>,
+    receivers: &mut HashMap<u64, oneshot::Receiver<BudgetLease>>,
     class_cursor: &mut usize,
     connection_cursor: &mut [usize; 3],
     virtual_time: &mut [u128; 3],
@@ -38,10 +39,10 @@ async fn dispatch_one_under_pressure(
 async fn assert_service_window(
     active: &[u64],
     bucket: &Arc<Mutex<Bucket>>,
-    connections: &mut HashMap<u64, super::ConnectionState>,
+    connections: &mut HashMap<u64, ConnectionState>,
     order: &[u64],
     pending: &mut HashMap<u64, PendingRequest>,
-    receivers: &mut HashMap<u64, oneshot::Receiver<super::BudgetLease>>,
+    receivers: &mut HashMap<u64, oneshot::Receiver<BudgetLease>>,
     class_cursor: &mut usize,
     connection_cursor: &mut [usize; 3],
     virtual_time: &mut [u128; 3],
@@ -130,7 +131,7 @@ async fn shared_pressure_services_limit() {
     order.push(joining_id);
     connections.insert(
         joining_id,
-        super::ConnectionState { role: ConnectionRole::Neighbor, finish: virtual_time, active: Arc::new(AtomicBool::new(true)) },
+        ConnectionState { role: ConnectionRole::Neighbor, finish: virtual_time, active: Arc::new(AtomicBool::new(true)) },
     );
     let (completed, receiver) = oneshot::channel();
     receivers.insert(joining_id, receiver);

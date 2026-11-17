@@ -1,11 +1,12 @@
 use std::{net::SocketAddr, time::Duration};
 
 use protocol::lludp::{Message, Packet};
+use test_support::lludp;
 use tokio::{net::UdpSocket, time::timeout};
 
 pub(crate) use crate::session::{
     HandoffEvidence, HandoffState, PendingPromotion, connect_test_connection, connect_test_primary_with_state, handoff_cancellation,
-    matches_handoff_cancellation, run_test_session as run_session,
+    matches_handoff_cancellation, run_session,
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(3);
@@ -92,7 +93,7 @@ pub(crate) fn server_ack(sequence: u32, acknowledged: u32) -> Vec<u8> {
 }
 
 pub(crate) fn test_fixture(source: &str) -> Vec<u8> {
-    test_support::lludp::fixture(source)
+    lludp::fixture(source)
 }
 
 pub(crate) fn set_sequence(bytes: &mut [u8], sequence: u32) {

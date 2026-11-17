@@ -6,13 +6,15 @@ use std::{
 };
 
 use llsd::Value;
-use protocol::lludp::Message;
-use protocol::login::ResponseData;
-use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::{mpsc, watch};
+use protocol::{lludp::Message, login::ResponseData};
+use tokio::sync::{OwnedSemaphorePermit, mpsc, watch};
 
 use crate::{
-    AgentSession, capabilities::Client, circuit::admission::PacketMemoryReservation, coverage::CoverageWatermark, session::MfaChallenge,
+    AgentSession,
+    capabilities::Client,
+    circuit::admission::PacketMemoryReservation,
+    coverage::{CoverageLoss, CoverageWatermark},
+    session::MfaChallenge,
 };
 
 pub(crate) const CLIENT_EVENT_CAPACITY: usize = 32;
@@ -209,7 +211,7 @@ pub enum Event {
         reason: String,
     },
     CoverageLost {
-        loss: crate::coverage::CoverageLoss,
+        loss: CoverageLoss,
     },
     SimulatorConnected {
         simulator_id: SimulatorId,
@@ -393,6 +395,8 @@ pub(crate) async fn send_failure_event(
 #[cfg(test)]
 mod redaction_tests {
 
+    use std::assert_matches;
+
     use llsd::Value;
 
     use super::Event;
@@ -424,7 +428,7 @@ mod redaction_tests {
         for secret in ["192.0.2.91", "private-capability-name", "origin-error-secret"] {
             assert!(!debug.contains(secret));
         }
-        std::assert_matches!(&event, Event::CapabilityError { reason, .. } if reason == "origin-error-secret");
+        assert_matches!(&event, Event::CapabilityError { reason, .. } if reason == "origin-error-secret");
 
         let event = Event::SimulatorFailed {
             simulator_id: test_simulator_id(3),

@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{assert_matches, net::SocketAddr, time::Instant};
 
 use math::Vec3;
 use protocol::{
@@ -9,12 +9,17 @@ use protocol::{
 };
 use url::Url;
 
-use crate::fixtures::{
-    http::{LocalServer, response},
-    test_simulator_id,
+use crate::{
+    AgentSession, Event, Grid, LoginCredentials,
+    PacketOrder::Ordered,
+    StartLocation,
+    fixtures::{
+        allocation,
+        http::{LocalServer, response},
+        test_simulator_id,
+    },
+    login::{LoginResponse, login_request},
 };
-use crate::login::{LoginResponse, login_request};
-use crate::{AgentSession, Event, Grid, LoginCredentials, PacketOrder::Ordered, StartLocation};
 
 const AGENT_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
 const SESSION_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
@@ -164,7 +169,7 @@ async fn login_reports_rejection() {
     let error = login_at(&credentials(), "", "", &url).await.expect_err("local grid should reject this login");
     server.finish();
 
-    std::assert_matches!(&error, super::LoginError::Rejected { .. });
+    assert_matches!(&error, super::LoginError::Rejected { .. });
     assert_eq!(error.to_string(), "Credentials were rejected (login)");
 }
 
@@ -232,7 +237,7 @@ async fn crowded_login_memory() {
     ]);
 
     let (parsed, retained_bytes, peak_bytes, elapsed_ns): (Result<login::Response, super::LoginError>, i128, i128, u128) =
-        crate::fixtures::allocation::measure(|| super::parse_login_response(&body, reqwest::StatusCode::OK, "text/xml"));
+        allocation::measure(|| super::parse_login_response(&body, reqwest::StatusCode::OK, "text/xml"));
     let parsed = parsed.expect("crowded login response should decode");
     let login::Response::Authenticated(parsed) = parsed else { panic!("expected authenticated response") };
     let login::Value::Array(parsed_inventory) = parsed.data.get("inventory-skeleton").expect("inventory should be retained") else {
@@ -267,7 +272,7 @@ async fn invalid_simulator_ips() {
         let error = login_at(&credentials(), "", "", &url).await.expect_err("simulator IP must be unicast");
         server.finish();
 
-        std::assert_matches!(&error, super::LoginError::InvalidAuthenticatedData(super::AuthenticatedDataError::SimulatorIp));
+        assert_matches!(&error, super::LoginError::InvalidAuthenticatedData(super::AuthenticatedDataError::SimulatorIp));
         assert_eq!(error.to_string(), "Second Life returned an invalid sim_ip address.");
     }
 }
@@ -289,7 +294,7 @@ async fn zero_sim_port_is_rejected() {
     let error = login_at(&credentials(), "", "", &url).await.expect_err("port zero cannot identify a simulator endpoint");
     server.finish();
 
-    std::assert_matches!(&error, super::LoginError::InvalidAuthenticatedData(super::AuthenticatedDataError::SimulatorPort));
+    assert_matches!(&error, super::LoginError::InvalidAuthenticatedData(super::AuthenticatedDataError::SimulatorPort));
     assert_eq!(error.to_string(), "Second Life returned an invalid simulator port.");
 }
 
@@ -400,7 +405,7 @@ fn debug_redacts_private_data() {
         source: "192.0.2.123:13000".parse().expect("valid simulator address"),
         sequence: 7,
         packet_order: Ordered(7),
-        received_at: std::time::Instant::now(),
+        received_at: Instant::now(),
         ping_delay: None,
         message: Message::ChatFromSimulator(ChatFromSimulator {
             chat_data: ChatData {

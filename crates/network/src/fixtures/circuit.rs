@@ -10,13 +10,12 @@ use tokio::{
     time::Instant,
 };
 
+pub(crate) use crate::circuit::{NEW_RELIABLE_ACK_CAPACITY, pacer_rate, set_send_gate, with_sequence};
 use crate::circuit::{
     UdpTransport,
-    admission::{PacketMemoryError, PacketMemoryReservation, SimulatorMemoryBudget},
+    admission::{PacketMemoryError, PacketMemoryReservation, SimulatorMemoryBudget, test_values},
     lludp::{Circuit, CircuitError, Delivery, PreparedDatagram, ReceiveError, ReceiveOutcome},
 };
-
-pub(crate) use crate::circuit::{NEW_RELIABLE_ACK_CAPACITY, pacer_rate, set_send_gate, with_sequence};
 
 pub(crate) trait SimulatorMemoryBudgetTestExt {
     fn with_test_limits(global: usize, neighbors: usize, neighbor_connection: usize) -> Self
@@ -35,15 +34,15 @@ pub(crate) trait SimulatorMemoryBudgetTestExt {
 
 impl SimulatorMemoryBudgetTestExt for SimulatorMemoryBudget {
     fn with_test_limits(global: usize, neighbors: usize, neighbor_connection: usize) -> Self {
-        crate::circuit::admission::test_values::with_test_limits(global, neighbors, neighbor_connection)
+        test_values::with_test_limits(global, neighbors, neighbor_connection)
     }
 
     fn reserve_bytes_for_test(&self, bytes: usize) -> Result<PacketMemoryReservation, PacketMemoryError> {
-        crate::circuit::admission::test_values::reserve_bytes_for_test(self, bytes)
+        test_values::reserve_bytes_for_test(self, bytes)
     }
 
     fn reserve_packet_for_test(&self, preflight: PacketPreflight) -> Result<PacketMemoryReservation, PacketMemoryError> {
-        crate::circuit::admission::test_values::reserve_packet_for_test(self, preflight)
+        test_values::reserve_packet_for_test(self, preflight)
     }
 
     fn trim_packet_reservation_for_test(
@@ -51,27 +50,27 @@ impl SimulatorMemoryBudgetTestExt for SimulatorMemoryBudget {
         reservation: &mut PacketMemoryReservation,
         packet: &Packet,
     ) -> Result<(), PacketMemoryError> {
-        crate::circuit::admission::test_values::trim_packet_reservation_for_test(self, reservation, packet)
+        test_values::trim_packet_reservation_for_test(self, reservation, packet)
     }
 
     fn decode_slots_available(&self) -> usize {
-        crate::circuit::admission::test_values::decode_slots_available_for_test(self)
+        test_values::decode_slots_available_for_test(self)
     }
 
     async fn hold_all_decode_slots(&self) -> OwnedSemaphorePermit {
-        crate::circuit::admission::test_values::hold_all_decode_slots_for_test(self).await
+        test_values::hold_all_decode_slots_for_test(self).await
     }
 
     fn global_available_bytes(&self) -> usize {
-        crate::circuit::admission::test_values::global_available_bytes(self)
+        test_values::global_available_bytes(self)
     }
 
     fn neighbor_available_bytes(&self) -> usize {
-        crate::circuit::admission::test_values::neighbor_available_bytes(self)
+        test_values::neighbor_available_bytes(self)
     }
 
     fn connection_available_bytes(&self) -> usize {
-        crate::circuit::admission::test_values::connection_available_bytes(self)
+        test_values::connection_available_bytes(self)
     }
 }
 

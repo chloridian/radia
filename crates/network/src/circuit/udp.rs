@@ -1,14 +1,14 @@
 use std::{
-    error::Error as StdError,
-    fmt,
+    error, fmt,
     io::{self, ErrorKind},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
 };
 
+use tokio::net::UdpSocket;
+
 #[cfg(test)]
 use crate::fixtures::circuit::SendGate;
-use tokio::net::UdpSocket;
 
 const MAX_IPV4_UDP_PAYLOAD: usize = u16::MAX as usize - 20 - 8;
 const MAX_IPV6_UDP_PAYLOAD: usize = u16::MAX as usize - 8;
@@ -28,8 +28,8 @@ impl fmt::Display for UdpError {
     }
 }
 
-impl StdError for UdpError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+impl error::Error for UdpError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Bind(error) | Self::Connect(error) => Some(error.as_ref()),
         }
@@ -101,9 +101,8 @@ fn local_bind_address(remote: SocketAddr) -> SocketAddr {
 
 #[cfg(test)]
 pub(crate) mod test_values {
-    use crate::fixtures::circuit::SendGate;
-
     use super::UdpTransport;
+    use crate::fixtures::circuit::SendGate;
 
     pub(crate) fn set_send_gate(transport: &mut UdpTransport, send_gate: SendGate) {
         transport.send_gate = Some(send_gate);

@@ -1,4 +1,6 @@
-use std::{fmt, io};
+use std::{error, fmt, io};
+
+use crate::capabilities::HttpError;
 
 #[non_exhaustive]
 pub enum Error {
@@ -17,7 +19,7 @@ pub enum Error {
     SimulatorConnectionClosed,
     CapabilityRequestCanceled,
     CapabilitySessionClosed,
-    CapabilityHttp(crate::capabilities::HttpError),
+    CapabilityHttp(HttpError),
     Capability(String),
 }
 
@@ -69,8 +71,8 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for Error {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::WorkerStart(error) => Some(error),
             Self::CapabilityHttp(error) => Some(error),

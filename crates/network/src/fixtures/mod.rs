@@ -5,5 +5,7 @@ pub(crate) mod http;
 pub(crate) mod session;
 pub(crate) mod simulator;
 
-pub(crate) use event_queue::{event_with_coverage_watermark, event_with_retained_bytes, event_with_retention};
-pub(crate) use simulator::test_simulator_id;
+pub(crate) use self::{
+    event_queue::{event_with_coverage_watermark, event_with_retained_bytes, event_with_retention},
+    simulator::test_simulator_id,
+};

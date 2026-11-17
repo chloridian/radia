@@ -1,18 +1,21 @@
 mod memory {
-    use super::*;
+    use std::{assert_matches, net::SocketAddr, time::Instant};
 
-    use crate::circuit::admission::{
-        MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_PACKET_ACK_DECODE_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES,
-        MAX_QUEUED_SIMULATOR_EVENT_BYTES, PacketMemoryError, SimulatorMemoryBudget, packet_event_overhead_bytes,
-    };
-    use crate::event::{Event, EventEnvelope, PacketOrder::Ordered, SimulatorId};
-    use crate::fixtures::circuit::SimulatorMemoryBudgetTestExt;
     use protocol::{
         lludp::{Message, MessageId, Packet},
-        messages::{PacketAck, circuit::packet_ack::Packets},
+        messages::{CompletePingCheck, PacketAck, PingId, circuit::packet_ack::Packets},
     };
-    use std::net::SocketAddr;
     use test_support::{lludp::vectors, parse_hex_fixture};
+
+    use super::*;
+    use crate::{
+        circuit::admission::{
+            MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_PACKET_ACK_DECODE_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES,
+            MAX_QUEUED_SIMULATOR_EVENT_BYTES, PacketMemoryError, SimulatorMemoryBudget, packet_event_overhead_bytes,
+        },
+        event::{Event, EventEnvelope, PacketOrder::Ordered, SimulatorId},
+        fixtures::circuit::SimulatorMemoryBudgetTestExt,
+    };
 
     fn fixture() -> Vec<u8> {
         parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("valid simulator chat fixture")
@@ -36,7 +39,7 @@ mod memory {
         let preflight = Packet::preflight(&ack).expect("preflight maximum-sized ACK control packet");
         assert!(preflight.peak_decode_allocation_bytes() <= MAX_PACKET_ACK_DECODE_BYTES);
 
-        let mut permits = (0..crate::circuit::MAX_SIMULATOR_CONNECTIONS)
+        let mut permits = (0..MAX_SIMULATOR_CONNECTIONS)
             .map(|_| budget.try_acquire_ack_decode_slot(preflight).expect("each active simulator has one control decode slot"))
             .collect::<Vec<_>>();
         assert!(budget.try_acquire_ack_decode_slot(preflight).is_none(), "the control decode budget has no extra slot");
@@ -63,7 +66,7 @@ mod memory {
                 source: simulator_address(),
                 sequence: packet.sequence(),
                 packet_order: Ordered(1),
-                received_at: std::time::Instant::now(),
+                received_at: Instant::now(),
                 ping_delay: None,
                 message: packet.into_message(),
             },
@@ -74,7 +77,7 @@ mod memory {
         events.send(event).await.expect("queue simulator event");
         assert_eq!(budget.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES - retained_bytes);
 
-        std::assert_matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::SimulatorMessage { .. }));
+        assert_matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::SimulatorMessage { .. }));
         assert_eq!(budget.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
     }
 
@@ -276,7 +279,6 @@ mod memory {
     #[test]
     fn underestimated_packet_releases_memory() {
         let budget = SimulatorMemoryBudget::new().for_neighbor();
-        use protocol::messages::{CompletePingCheck, PingId};
 
         let small = Packet::new(1, Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 1 } }))
             .encode()
@@ -322,17 +324,22 @@ mod memory {
     }
 }
 
-use super::*;
-use crate::circuit::tests::*;
-use crate::event::{Event, SimulatorId};
-use crate::fixtures::{circuit::SimulatorMemoryBudgetTestExt, event_with_retention};
+use std::{assert_matches, sync::mpsc as std_mpsc, time::Duration};
+
 use protocol::{
     lludp::{Message, MessageId, Packet},
     messages::{PacketAck, circuit::packet_ack::Packets},
+    schema::ids::OBJECT_UPDATE,
 };
-use std::time::Duration;
 use test_support::{lludp::vectors, parse_hex_fixture};
 use tokio::{sync::mpsc, task::spawn_blocking};
+
+use super::*;
+use crate::{
+    circuit::tests::*,
+    event::{Event, SimulatorId},
+    fixtures::{circuit::SimulatorMemoryBudgetTestExt, event_with_retention},
+};
 
 const WAIT: Duration = Duration::from_secs(2);
 
@@ -361,20 +368,17 @@ async fn wait_for_coverage_loss(
 #[test]
 fn preflight_resource_classification() {
     for error in [LLUdpError::DecodedPacketTooLarge, LLUdpError::AllocationBoundOverflow] {
-        assert_eq!(crate::circuit::preflight_loss_reason(error, protocol::schema::ids::OBJECT_UPDATE), CoverageLossReason::DecodeLimit);
+        assert_eq!(preflight_loss_reason(error, OBJECT_UPDATE), CoverageLossReason::DecodeLimit);
     }
     for error in [LLUdpError::TruncatedPacket, LLUdpError::InvalidMessage, LLUdpError::InvalidZeroCode] {
-        assert_eq!(crate::circuit::preflight_loss_reason(error, MessageId::high(0x71)), CoverageLossReason::PreflightRejected);
+        assert_eq!(preflight_loss_reason(error, MessageId::high(0x71)), CoverageLossReason::PreflightRejected);
     }
     assert_eq!(
-        crate::circuit::preflight_loss_reason(LLUdpError::InvalidMessageId, protocol::schema::ids::OBJECT_UPDATE),
+        preflight_loss_reason(LLUdpError::InvalidMessageId, OBJECT_UPDATE),
         CoverageLossReason::AllocationEstimateMismatch,
         "an unsupported specialized route is an internal preflight defect"
     );
-    assert_eq!(
-        crate::circuit::preflight_loss_reason(LLUdpError::InvalidMessageId, MessageId::high(0x71)),
-        CoverageLossReason::PreflightRejected
-    );
+    assert_eq!(preflight_loss_reason(LLUdpError::InvalidMessageId, MessageId::high(0x71)), CoverageLossReason::PreflightRejected);
 }
 
 #[tokio::test]
@@ -413,7 +417,7 @@ async fn rejected_packet_retries() {
     malformed[1..5].copy_from_slice(&sequence.to_be_bytes());
     malformed[18] = u8::MAX;
     assert_eq!(
-        protocol::lludp::Packet::preflight(&malformed),
+        Packet::preflight(&malformed),
         Err(LLUdpError::TruncatedPacket),
         "preflight rejects an object field that exceeds its packet frame"
     );
@@ -422,7 +426,7 @@ async fn rejected_packet_retries() {
 
     wait_for_coverage_loss(&mut coverage_changed, &coverage, simulator_id, CoverageLossReason::PreflightRejected).await;
     let mut buffer = [0; 2048];
-    std::assert_matches!(simulator.try_recv_from(&mut buffer), Err(error) if error.kind() == io::ErrorKind::WouldBlock,
+    assert_matches!(simulator.try_recv_from(&mut buffer), Err(error) if error.kind() == io::ErrorKind::WouldBlock,
         "preflight-rejected packet must not be acknowledged"
     );
     assert_eq!(budget_view.decode_slots_available(), MAX_CONCURRENT_PACKET_DECODES);
@@ -435,7 +439,7 @@ async fn rejected_packet_retries() {
     retry[1..5].copy_from_slice(&sequence.to_be_bytes());
     simulator.send_to(&retry, peer).await.expect("retry reliable update");
     receive_ack(&simulator, sequence).await;
-    std::assert_matches!(receive_message_event(&mut received_events, sequence).await, Event::SimulatorMessage { .. });
+    assert_matches!(receive_message_event(&mut received_events, sequence).await, Event::SimulatorMessage { .. });
 
     shutdown.send_replace(true);
     assert!(timeout(WAIT, task).await.expect("join simulator task").expect("join task").is_ok());
@@ -484,7 +488,7 @@ async fn typed_decode_retries() {
 
     wait_for_coverage_loss(&mut coverage_changed, &coverage, simulator_id, CoverageLossReason::DecodeRejected).await;
     let mut buffer = [0; 2048];
-    std::assert_matches!(simulator.try_recv_from(&mut buffer), Err(error) if error.kind() == io::ErrorKind::WouldBlock,
+    assert_matches!(simulator.try_recv_from(&mut buffer), Err(error) if error.kind() == io::ErrorKind::WouldBlock,
         "packet rejected by typed decode must not be acknowledged or answered"
     );
     assert_eq!(budget_view.decode_slots_available(), MAX_CONCURRENT_PACKET_DECODES);
@@ -551,7 +555,7 @@ async fn ack_queue_full_retries() {
         }
     };
 
-    let (release_clock, clock_released) = std::sync::mpsc::channel();
+    let (release_clock, clock_released) = std_mpsc::channel();
     let clock_hold = spawn_blocking(move || clock_released.recv());
     let first_sequence = 10_000;
     let rejected_sequence = first_sequence + NEW_RELIABLE_ACK_CAPACITY as u32;
@@ -587,7 +591,7 @@ async fn ack_queue_full_retries() {
     simulator.send_to(&duplicate, peer).await.expect("resend accepted chat while both budgets are full");
 
     let mut buffer = [0; 2048];
-    std::assert_matches!(simulator.try_recv_from(&mut buffer), Err(error) if error.kind() == io::ErrorKind::WouldBlock,
+    assert_matches!(simulator.try_recv_from(&mut buffer), Err(error) if error.kind() == io::ErrorKind::WouldBlock,
         "no queued ACK should be sent before its timer or another outbound packet"
     );
 
@@ -630,7 +634,7 @@ async fn ack_queue_full_retries() {
     simulator.send_to(&rejected, peer).await.expect("retry after ACK capacity drains");
     advance(ACK_INTERVAL).await;
     receive_ack(&simulator, rejected_sequence).await;
-    std::assert_matches!(receive_message_event(&mut received_events, rejected_sequence).await, Event::SimulatorMessage { .. });
+    assert_matches!(receive_message_event(&mut received_events, rejected_sequence).await, Event::SimulatorMessage { .. });
 
     shutdown.send_replace(true);
     assert!(task.await.expect("join task").is_ok());

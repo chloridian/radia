@@ -1,6 +1,8 @@
 use std::{
     collections::HashMap,
+    io,
     io::{Read, Write},
+    mem,
     net::{SocketAddr, TcpListener, TcpStream},
     str::{self, from_utf8},
     sync::{
@@ -104,9 +106,7 @@ impl ConcurrentCapabilityTestServer {
                         Err(error)
                             if matches!(
                                 error.kind(),
-                                std::io::ErrorKind::BrokenPipe
-                                    | std::io::ErrorKind::ConnectionReset
-                                    | std::io::ErrorKind::ConnectionAborted
+                                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
                             ) => {}
                         Err(error) => panic!("write capability response: {error}"),
                     }
@@ -147,7 +147,7 @@ impl ConcurrentCapabilityTestServer {
     pub(crate) fn finish(mut self) -> usize {
         let response_releases = {
             let mut response_releases = self.response_releases.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            std::mem::take(&mut *response_releases)
+            mem::take(&mut *response_releases)
         };
         for response_release in response_releases.into_values() {
             response_release.send(()).unwrap_or(());
@@ -327,7 +327,7 @@ pub(crate) fn response(status: u16, reason: &str, content_type: &str, retry_afte
 }
 
 pub(crate) fn request_line(request: &[u8]) -> &str {
-    str::from_utf8(request).expect("request should be UTF-8").split("\r\n").next().expect("request line")
+    from_utf8(request).expect("request should be UTF-8").split("\r\n").next().expect("request line")
 }
 
 pub(crate) fn seed_response(event_url: &Url) -> String {

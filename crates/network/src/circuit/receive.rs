@@ -7,7 +7,7 @@ use protocol::{
     schema::ids::PACKET_ACK,
 };
 use tokio::{
-    sync::{OwnedSemaphorePermit, mpsc},
+    sync::{OwnedSemaphorePermit, mpsc, mpsc::error::TrySendError},
     time::Instant,
 };
 use utils::Summary;
@@ -18,13 +18,13 @@ use super::{
     preempt_deferred_send, preflight_loss_reason, queue_internal,
 };
 use crate::{
-    circuit::admission::PacketMemoryReservation,
     circuit::{
+        admission::PacketMemoryReservation,
         lludp::{Delivery, ReceiveAdmission},
         pacing::TrafficClass,
     },
     coverage::{CoverageLossReason, CoverageSource, record_coverage_loss, record_event_envelope_loss},
-    event::{Event, EventEnvelope},
+    event::{Event, EventEnvelope, PacketOrder},
 };
 
 const PACKET_REJECTION_SUMMARY_INTERVAL: Duration = Duration::from_secs(10);
@@ -432,7 +432,7 @@ impl ConnectionTask {
     fn dispatch_new_packet(
         &mut self,
         packet: Packet,
-        packet_order: crate::event::PacketOrder,
+        packet_order: PacketOrder,
         received_at: Instant,
         dispatch_message: bool,
         dispatch_allowed: bool,
@@ -546,8 +546,8 @@ impl ConnectionTask {
                     endpoint,
                 }) {
                     let reason = match error {
-                        mpsc::error::TrySendError::Full(_) => ConnectionError::NeighborRequestQueueFull,
-                        mpsc::error::TrySendError::Closed(_) => ConnectionError::SimulatorManagerClosed,
+                        TrySendError::Full(_) => ConnectionError::NeighborRequestQueueFull,
+                        TrySendError::Closed(_) => ConnectionError::SimulatorManagerClosed,
                     };
                     return Err(reason);
                 }
@@ -624,7 +624,7 @@ impl ConnectionTask {
     }
 
     fn queue_event(&mut self, event: impl Into<EventEnvelope>) -> NeighborEventQueueOutcome {
-        super::queue_neighbor_event(&self.events, &mut self.pending_events, event)
+        queue_neighbor_event(&self.events, &mut self.pending_events, event)
     }
 
     fn reject(&mut self, kind: RejectionKind, reason: CoverageLossReason) {
@@ -671,12 +671,12 @@ fn queue_neighbor_channel_event(
 
     match events.try_send(SimulatorEvent::Simulator(event)) {
         Ok(()) => EventQueueOutcome::Queued,
-        Err(mpsc::error::TrySendError::Closed(_)) => EventQueueOutcome::ReceiverClosed,
-        Err(mpsc::error::TrySendError::Full(SimulatorEvent::Simulator(event))) => {
+        Err(TrySendError::Closed(_)) => EventQueueOutcome::ReceiverClosed,
+        Err(TrySendError::Full(SimulatorEvent::Simulator(event))) => {
             pending_events.push_back(event);
             EventQueueOutcome::Queued
         }
-        Err(mpsc::error::TrySendError::Full(SimulatorEvent::SendCompleted { .. } | SimulatorEvent::Finished { .. })) => {
+        Err(TrySendError::Full(SimulatorEvent::SendCompleted { .. } | SimulatorEvent::Finished { .. })) => {
             unreachable!("only simulator events enter the neighbor event backlog")
         }
     }
