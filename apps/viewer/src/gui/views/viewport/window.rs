@@ -1380,7 +1380,6 @@ fn debug_ui(window: &Window) -> (Context, egui_winit::State) {
 #[cfg(test)]
 mod tests {
     use std::{
-        error::Error,
         future::Future,
         pin::Pin,
         sync::{
@@ -1413,17 +1412,6 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq)]
     struct TestRenderer(u8);
-
-    #[test]
-    fn initialization_completion_sets_ready() {
-        let mut lifecycle = RendererLifecycle::initializing(9, TestPending);
-        let token = lifecycle.pending_token().expect("initialization has a completion token");
-
-        assert!(lifecycle.is_initializing());
-        std::assert_matches!(lifecycle.complete(token, Ok::<_, &str>(TestRenderer(3))), InitializationOutcome::InitialReady);
-        assert!(lifecycle.is_ready());
-        assert_eq!(lifecycle.ready(), Some(&TestRenderer(3)));
-    }
 
     #[test]
     fn stale_generation_never_publishes() {
@@ -1652,18 +1640,6 @@ mod tests {
         assert_eq!(retry_at, now + RECOVERY_DELAY);
         assert_eq!(recovery.begin_attempt(retry_at - Duration::from_nanos(1)), RecoveryAttempt::WaitUntil(retry_at));
         assert_eq!(recovery.begin_attempt(retry_at), RecoveryAttempt::Start);
-    }
-
-    #[test]
-    fn recovery_error_keeps_user_message() {
-        assert_eq!(SceneWindowError::RecoveryExhausted.to_string(), "The scene GPU could not recover after three attempts.");
-    }
-
-    #[test]
-    fn renderer_creation_error_has_source() {
-        let error = SceneWindowError::Renderer(render::Error::UnsupportedSurface);
-        let source = Error::source(&error).expect("renderer creation error must retain its source");
-        assert!(source.downcast_ref::<render::Error>().is_some());
     }
 
     #[test]

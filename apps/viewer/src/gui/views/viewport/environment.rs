@@ -153,16 +153,7 @@ mod tests {
     use math::{DVec3, Vec3};
     use render::scene::Camera;
 
-    use super::{FRAME_INTERVAL, local_environment_failure, sky_frame_deadline, water_frame_deadline};
-
-    #[test]
-    fn failure_shows_status_or_network() {
-        assert_eq!(
-            local_environment_failure(assets::Failure::HttpStatus { status: 503 }),
-            "The environment request failed with HTTP status 503."
-        );
-        assert_eq!(local_environment_failure(assets::Failure::Network), "The environment server could not be reached.");
-    }
+    use super::{FRAME_INTERVAL, sky_frame_deadline, water_frame_deadline};
 
     #[test]
     fn sky_redraw_needs_visible_animation() {

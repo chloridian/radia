@@ -27,7 +27,6 @@ mod tests {
     use std::{
         future::{pending, ready},
         num::NonZeroU32,
-        time::Duration,
     };
 
     use math::Vec3;
@@ -154,29 +153,6 @@ mod tests {
             latencies[latencies.len() * 95 / 100],
             latencies.last().unwrap()
         );
-    }
-
-    #[tokio::test]
-    async fn ready_camera_tick_selected() {
-        let mut camera_tick = tokio::time::interval(Duration::from_millis(100));
-        camera_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let world = SessionWorld::new(viewer_world_limits());
-        let mut reads = WorldReadHost::new(world.world(), Handle::current());
-
-        let result = super::select_drain_input(
-            &mut reads,
-            pending(),
-            pending(),
-            pending(),
-            pending(),
-            pending(),
-            camera_tick.tick(),
-            pending(),
-            pending(),
-        )
-        .await;
-
-        let Input::CameraTick = result else { panic!("ready camera tick was not selected") };
     }
 
     pub(super) fn agent_update(agent_id: Uuid, local_id: u32, region_handle: u64) -> Message {

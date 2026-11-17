@@ -624,22 +624,41 @@ mod tests {
     use super::*;
     use crate::session::object_cache::test_support::*;
     #[test]
-    fn other_schema_versions_recreate_database() {
-        for version in [2, 7] {
+    fn damaged_schema_recreates_database() {
+        for (case, foreign_version, damage) in [
+            ("version 2", Some(2), ""),
+            ("version 7", Some(7), ""),
+            ("missing totals trigger", None, "DROP TRIGGER object_entries_totals_insert;"),
+            (
+                "no-op totals trigger",
+                None,
+                "DROP TRIGGER object_entries_totals_insert;
+                 CREATE TRIGGER object_entries_totals_insert AFTER INSERT ON object_entries BEGIN SELECT 1; END;",
+            ),
+            ("stale totals", None, "UPDATE object_cache_totals SET entry_count = 1, payload_bytes = 64 WHERE singleton = 1;"),
+        ] {
             let directory = tempfile::tempdir().expect("create isolated cache directory");
             let path = directory.path().join("objects.sqlite");
-            let connection = Connection::open(&path).expect("create isolated SQLite database");
-            connection.execute_batch("CREATE TABLE object_entries (local_id INTEGER);").expect("create foreign schema");
-            connection.pragma_update(None, "user_version", version).expect("set foreign schema version");
-            drop(connection);
+            if let Some(version) = foreign_version {
+                let connection = Connection::open(&path).expect("create isolated SQLite database");
+                connection.execute_batch("CREATE TABLE object_entries (local_id INTEGER);").expect("create foreign schema");
+                connection.pragma_update(None, "user_version", version).expect("set foreign schema version");
+            } else {
+                let (db, _) = open_at(&path).expect("create current cache schema");
+                db.shutdown().expect("close initial database");
+                let (db, status) = open_at(&path).expect("reopen current cache schema");
+                assert_eq!(status, OpenStatus::Existing, "{case}");
+                db.shutdown().expect("close reopened database");
+                Connection::open(&path).expect("open current cache schema").execute_batch(damage).expect("damage current schema");
+            }
 
-            let (db, status) = open_at(&path).expect("recreate foreign schema");
+            let (db, status) = open_at(&path).expect("recreate damaged database");
 
-            std::assert_matches!(status, OpenStatus::Recreated(::storage::sqlite::RecoveryReason::SchemaMismatch));
+            std::assert_matches!(status, OpenStatus::Recreated(::storage::sqlite::RecoveryReason::SchemaMismatch), "{case}");
             db.shutdown().expect("close recreated database");
             let connection = Connection::open(&path).expect("reopen recreated database");
             let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).expect("read schema version");
-            assert_eq!(version, SCHEMA_VERSION);
+            assert_eq!(version, SCHEMA_VERSION, "{case}");
         }
     }
 
@@ -670,63 +689,6 @@ mod tests {
         assert!(bytes > i64::try_from(MAX_REGION_OVERRIDE_BYTES).expect("byte limit fits i64") - 7_168 - 8 * 2_048);
         assert_eq!((rows, bytes), (total_rows, total_bytes));
         cache.close().await;
-    }
-
-    #[test]
-    fn missing_totals_trigger_recreates_database() {
-        let directory = tempfile::tempdir().expect("create isolated cache directory");
-        let path = directory.path().join("objects.sqlite");
-        let (db, _) = open_at(&path).expect("create current cache schema");
-        db.shutdown().expect("close initial database");
-        let (db, status) = open_at(&path).expect("reopen current cache schema");
-        assert_eq!(status, OpenStatus::Existing);
-        db.shutdown().expect("close reopened database");
-        Connection::open(&path)
-            .expect("open current cache schema")
-            .execute_batch("DROP TRIGGER object_entries_totals_insert;")
-            .expect("remove a required trigger");
-
-        let (db, status) = open_at(&path).expect("recreate damaged database");
-
-        std::assert_matches!(status, OpenStatus::Recreated(::storage::sqlite::RecoveryReason::SchemaMismatch));
-        db.shutdown().expect("close recreated database");
-    }
-
-    #[test]
-    fn noop_trigger_recreates_database() {
-        let directory = tempfile::tempdir().expect("create isolated cache directory");
-        let path = directory.path().join("objects.sqlite");
-        let (db, _) = open_at(&path).expect("create current cache schema");
-        db.shutdown().expect("close initial database");
-        Connection::open(&path)
-            .expect("open current cache schema")
-            .execute_batch(
-                "DROP TRIGGER object_entries_totals_insert;
-                 CREATE TRIGGER object_entries_totals_insert AFTER INSERT ON object_entries BEGIN SELECT 1; END;",
-            )
-            .expect("replace totals trigger with a no-op");
-
-        let (db, status) = open_at(&path).expect("recreate damaged database");
-
-        std::assert_matches!(status, OpenStatus::Recreated(::storage::sqlite::RecoveryReason::SchemaMismatch));
-        db.shutdown().expect("close recreated database");
-    }
-
-    #[test]
-    fn stale_totals_recreate_database() {
-        let directory = tempfile::tempdir().expect("create isolated cache directory");
-        let path = directory.path().join("objects.sqlite");
-        let (db, _) = open_at(&path).expect("create current cache schema");
-        db.shutdown().expect("close initial database");
-        Connection::open(&path)
-            .expect("open current cache schema")
-            .execute_batch("UPDATE object_cache_totals SET entry_count = 1, payload_bytes = 64 WHERE singleton = 1;")
-            .expect("corrupt cached totals");
-
-        let (db, status) = open_at(&path).expect("recreate damaged database");
-
-        std::assert_matches!(status, OpenStatus::Recreated(::storage::sqlite::RecoveryReason::SchemaMismatch));
-        db.shutdown().expect("close recreated database");
     }
 
     #[tokio::test]

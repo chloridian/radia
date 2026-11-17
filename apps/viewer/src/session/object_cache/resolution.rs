@@ -454,18 +454,13 @@ impl ObjectCacheSession {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use network::Grid;
     use protocol::{lludp::Message, messages::CachedObjectReference};
     use rusqlite::params;
     use storage::sqlite::SqliteBatch;
-    use tokio::runtime::Builder;
     use uuid::Uuid;
 
     use super::*;
-    use crate::session::inbound::decode_object_message;
-    use crate::session::object_cache::ObjectCacheEvent;
     use crate::session::object_cache::test_support::*;
     #[tokio::test(start_paused = true)]
     async fn payloads_survive_restart_as_hits() {
@@ -774,151 +769,5 @@ mod tests {
             Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. })
         );
         cache.close().await;
-    }
-
-    #[test]
-    #[ignore = "manual release-mode synthetic region intake measurement"]
-    fn warm_resolution_five_thousand_objects() {
-        let runtime = Builder::new_current_thread().enable_all().build().expect("create benchmark runtime");
-        runtime.block_on(async {
-        let directory = tempfile::tempdir().expect("create isolated cache directory");
-        let (region_data, updates, references) = synthetic_region_updates();
-        let mut warm_cache = open_cache(directory.path().join("warm.sqlite"));
-        for update in &updates {
-            warm_cache.record_update(SIMULATOR, update.clone());
-            flush(&mut warm_cache).await;
-        }
-        let handshake_started = Instant::now();
-        let warm_handshake_flags = load_region(&mut warm_cache).await;
-        let warm_handshake_us = handshake_started.elapsed().as_micros();
-
-        let mut warm_world = region_world();
-        let warm_region = warm_world.region_for(SIMULATOR).expect("warm simulator has a registered region");
-        let mut decode_us = 0_u128;
-        let mut resolve_us = 0_u128;
-        let mut world_apply_us = 0_u128;
-        let mut warm_misses = 0_usize;
-        let mut warm_requests = 0_usize;
-        for (index, chunk) in references.chunks(255).enumerate() {
-            let sequence = 100 + u32::try_from(index).expect("synthetic sequence fits u32");
-            let update = cached_message(region_data, chunk.to_vec());
-            let message = Message::ObjectUpdateCached(update.clone());
-            let started = Instant::now();
-            let batch = decode_object_message(warm_region, sequence, OrderEvidence::Ordered(u64::from(sequence)), &message)
-                .expect("cached update decodes into World operations");
-            decode_us += started.elapsed().as_micros();
-            let started = Instant::now();
-            let (batch, _, _) = warm_cache.resolve_cached(
-                SIMULATOR,
-                warm_region,
-                sequence,
-                OrderEvidence::Ordered(u64::from(sequence)),
-                &mut warm_world,
-                &update,
-                batch,
-            ).await;
-            resolve_us += started.elapsed().as_micros();
-            warm_misses += batch.blocks.iter().filter(|operation| matches!(operation, Some(super::ObjectOperation::Cached { .. }))).count();
-            let started = Instant::now();
-            let summary = warm_world
-                .apply_object_batch_cooperatively(SIMULATOR, batch, |targets, _| warm_requests += targets.len())
-                .await;
-            world_apply_us += started.elapsed().as_micros();
-            assert!(summary.is_some(), "cached objects apply to the registered region");
-        }
-        assert_eq!(warm_world.world().object_count(), 5_000);
-
-        let mut full_world = region_world();
-        let full_region = full_world.region_for(SIMULATOR).expect("full simulator has a registered region");
-        let mut full_world_apply_us = 0_u128;
-        let mut full_recovery_targets = 0_usize;
-        for (index, message) in updates.iter().enumerate() {
-            let sequence = u32::try_from(index + 1).expect("synthetic packet sequence fits u32");
-            let batch = decode_object_message(full_region, sequence, OrderEvidence::Ordered(u64::from(sequence)), message)
-                .expect("full update decodes into World operations");
-            let started = Instant::now();
-            let summary = full_world
-                .apply_object_batch_cooperatively(SIMULATOR, batch, |targets, _| full_recovery_targets += targets.len())
-                .await;
-            full_world_apply_us += started.elapsed().as_micros();
-            assert!(summary.is_some(), "synthetic update applies to the registered region");
-        }
-        assert_eq!(full_world.world().object_count(), 5_000);
-
-        let mut cold_cache = open_cache(directory.path().join("cold.sqlite"));
-        let handshake_started = Instant::now();
-        let cold_handshake_flags = load_region(&mut cold_cache).await;
-        let cold_handshake_us = handshake_started.elapsed().as_micros();
-        let mut cold_misses = 0_usize;
-        for (index, chunk) in references.chunks(255).enumerate() {
-            let sequence = 200 + u32::try_from(index).expect("synthetic sequence fits u32");
-            let resolved = resolve(&mut cold_cache, &cached_message(region_data, chunk.to_vec()), sequence).await;
-            cold_misses += resolved.blocks.iter().filter(|operation| matches!(operation, Some(super::ObjectOperation::Cached { .. }))).count();
-        }
-
-        let mut disabled_times = Vec::with_capacity(3);
-        let mut enabled_times = Vec::with_capacity(3);
-        let mut dropped_writes = 0_u64;
-        for trial in 0..3 {
-            let mut disabled_cache = ObjectCacheSession::new(Grid::Agni);
-            assert!(disabled_cache.handle_event(ObjectCacheEvent::OpenFailed("disabled for measurement".into())).is_none());
-            disabled_cache.set_region_identity(SIMULATOR, &region_handshake(CACHE_ID));
-            let mut enabled_cache = open_cache(directory.path().join(format!("enabled-{trial}.sqlite")));
-            if trial % 2 == 0 {
-                let (elapsed, _) = measure_full_update_intake(&mut disabled_cache, updates.clone()).await;
-                disabled_times.push(elapsed);
-                let (elapsed, _) = measure_full_update_intake(&mut enabled_cache, updates.clone()).await;
-                enabled_times.push(elapsed);
-            } else {
-                let (elapsed, _) = measure_full_update_intake(&mut enabled_cache, updates.clone()).await;
-                enabled_times.push(elapsed);
-                let (elapsed, _) = measure_full_update_intake(&mut disabled_cache, updates.clone()).await;
-                disabled_times.push(elapsed);
-            }
-            flush(&mut enabled_cache).await;
-            dropped_writes = dropped_writes.saturating_add(enabled_cache.dropped_writes);
-            disabled_cache.close().await;
-            enabled_cache.close().await;
-        }
-        disabled_times.sort_unstable();
-        enabled_times.sort_unstable();
-        let disabled_median = disabled_times[1].as_micros();
-        let enabled_median = enabled_times[1].as_micros();
-        let intake_delta = (enabled_median as f64 - disabled_median as f64) * 100.0 / disabled_median.max(1) as f64;
-        let cache_overhead_us = decode_us + resolve_us;
-        let warm_total_us = cache_overhead_us + world_apply_us;
-        let packet_count = references.len().div_ceil(255);
-        println!(
-            "warm 5,000-object arrival: handshake load {warm_handshake_us}us flags={warm_handshake_flags}; {warm_misses} cache misses, {} RequestMultipleObjects packets, {warm_requests} World recovery targets",
-            warm_misses.div_ceil(255)
-        );
-        println!(
-            "warm cached packets: decode {decode_per_packet}us, cache resolve {resolve_per_packet}us, World apply {world_per_packet}us; cache overhead {cache_share:.1}% / World {world_share:.1}% of {total_per_packet}us total",
-            decode_per_packet = decode_us / u128::try_from(packet_count).unwrap_or(1),
-            resolve_per_packet = resolve_us / u128::try_from(packet_count).unwrap_or(1),
-            world_per_packet = world_apply_us / u128::try_from(packet_count).unwrap_or(1),
-            total_per_packet = warm_total_us / u128::try_from(packet_count).unwrap_or(1),
-            cache_share = (cache_overhead_us as f64 * 100.0) / warm_total_us.max(1) as f64,
-            world_share = (world_apply_us as f64 * 100.0) / warm_total_us.max(1) as f64,
-        );
-        println!(
-            "World apply per packet: cached {cached_world_per_packet}us ({warm_requests} recovery targets); normal full update {full_world_per_packet}us ({full_recovery_targets} recovery targets); signed delta {world_apply_delta:.1}%",
-            cached_world_per_packet = world_apply_us / u128::try_from(packet_count).unwrap_or(1),
-            full_world_per_packet = full_world_apply_us / u128::try_from(updates.len()).unwrap_or(1),
-            world_apply_delta = (world_apply_us as f64 - full_world_apply_us as f64) * 100.0 / full_world_apply_us.max(1) as f64,
-        );
-        println!(
-            "cold 5,000-object arrival: handshake load {cold_handshake_us}us flags={cold_handshake_flags}; {cold_misses} misses, {} RequestMultipleObjects packets",
-            cold_misses.div_ceil(255)
-        );
-        println!(
-            "full-update intake median over three 5,000-object bursts: cache disabled {disabled_median}us; cache enabled {enabled_median}us; signed delta {delta:.1}%; {} of {} cache write packets dropped",
-            dropped_writes,
-            updates.len() * 3,
-            delta = intake_delta,
-        );
-        cold_cache.close().await;
-        warm_cache.close().await;
-    });
     }
 }
