@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use super::support::{
     Ambiguous, AmbiguousOrder, AngularVelocity, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, FieldRejectionReason, IgnoredStale,
     Introduced, InvalidRotation, KindMismatch, LinearMotion, MotionUpdateKind, Object, ObjectObservation, ObjectPatch, Pose, Quat, Removed,
@@ -378,7 +380,7 @@ fn equal_packet_blocks_keep_order() {
         pose: Some(Pose { position: Some(Vec3::Y), rotation: None }),
         ..ObjectPatch::new(ordered(region, 2, 0), local_id(1))
     };
-    std::assert_matches!(world.patch_object(later_block).unwrap().outcome, Updated(_));
+    assert_matches!(world.patch_object(later_block).unwrap().outcome, Updated(_));
     assert_eq!(world.patch_object(earlier_block).unwrap().outcome, Unchanged);
     assert_eq!(world.object(entity).unwrap().position(), Some(Vec3::Z));
 }
@@ -401,10 +403,7 @@ fn untracked_updates_respect_field_authority() {
     assert_eq!(applied.outcome, Updated(entity));
     assert_eq!(
         applied.rejections.iter().copied().collect::<Vec<_>>(),
-        [
-            FieldRejection { group: FieldGroup::Pose, reason: UntrustedSource },
-            FieldRejection { group: FieldGroup::Scale, reason: UntrustedSource },
-        ]
+        [FieldRejection { group: FieldGroup::Pose, reason: UntrustedSource }, FieldRejection { group: Scale, reason: UntrustedSource },]
     );
     let current = world.object(entity).unwrap();
     assert_eq!(current.position(), Some(Vec3::X));
@@ -419,7 +418,7 @@ fn untracked_updates_respect_field_authority() {
         rejected.rejections.iter().copied().collect::<Vec<_>>(),
         [
             FieldRejection { group: FieldGroup::Pose, reason: UntrustedSource },
-            FieldRejection { group: FieldGroup::Scale, reason: UntrustedSource },
+            FieldRejection { group: Scale, reason: UntrustedSource },
             FieldRejection { group: FieldGroup::Parent, reason: UntrustedSource },
         ]
     );

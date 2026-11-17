@@ -6,11 +6,11 @@ mod patch;
 mod region;
 
 use super::World;
-use crate::object::components::{RegionalStamp, newer_field, newer_region_field};
-use crate::update::{FieldStamp, Stamp};
 use crate::{
     Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, Parent, PoseState, Recovery, RecoveryCancellation,
     RegionApplied, RegionOutcome, UpdateSource, WorldChange, WorldPose, WorldRevision,
+    object::components::{RegionalStamp, newer_field, newer_region_field},
+    update::{FieldStamp, Stamp},
 };
 
 #[derive(Clone, Copy)]
@@ -100,8 +100,6 @@ mod tests {
 
     use uuid::Uuid;
 
-    use crate::World;
-    use crate::update::Stamp;
     use crate::{
         ApplyOutcome,
         ApplyOutcome::{Deferred, TombstoneRecorded},
@@ -110,7 +108,8 @@ mod tests {
         Kind, LocalAddress, ObjectObservation, ObjectPatch,
         OrderEvidence::Ordered,
         ParentUpdate::Root,
-        Region, UpdateSource, WorldLimits,
+        Region, UpdateSource, World, WorldLimits,
+        update::Stamp,
     };
 
     pub(super) fn test_world(region_count: usize) -> (World, Vec<Region>) {
@@ -223,12 +222,12 @@ mod tests {
         world.floors.insert(region, Stamp { order: 200, block_ordinal: 0 });
 
         let killed = world.remove_object(UpdateSource::new(region, 150, Ordered(150), 0), killed_address.local_id()).unwrap();
-        assert_eq!(killed.outcome, ApplyOutcome::TombstoneRecorded(killed_address));
+        assert_eq!(killed.outcome, TombstoneRecorded(killed_address));
         assert_eq!(world.tombstones.get(&killed_address), Some(&Stamp { order: 150, block_ordinal: 0 }));
 
         let patched =
             world.patch_object(ObjectPatch::new(UpdateSource::new(region, 150, Ordered(150), 0), patched_address.local_id())).unwrap();
-        assert_eq!(patched.outcome, ApplyOutcome::Deferred(DeferredReason::UnknownObject));
+        assert_eq!(patched.outcome, Deferred(DeferredReason::UnknownObject));
         assert_eq!(patched.recovery.requests, [patched_address]);
     }
 }

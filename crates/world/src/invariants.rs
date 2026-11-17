@@ -1,9 +1,15 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
 use uuid::Uuid;
 
-use crate::{Entity, LocalAddress, ObjectMedia, Parent, WorldRevision};
-use crate::{MAX_ENVIRONMENT_BYTES, MAX_PARCEL_BYTES, MAX_TERRAIN_PATCHES, World};
+use crate::{
+    Entity, LocalAddress, MAX_ENVIRONMENT_BYTES, MAX_PARCEL_BYTES, MAX_TERRAIN_PATCHES, ObjectMedia, Parent, World, WorldRevision, history,
+    history::{address, retained},
+    object::{components::Fenced, storage},
+};
 
 #[cfg(test)]
 impl World {
@@ -26,7 +32,7 @@ impl World {
         if terrain_patches != self.terrain_patches || terrain_patches > MAX_TERRAIN_PATCHES {
             return Err("terrain patch accounting is inconsistent");
         }
-        crate::object::storage::object_store_invariants_hold(&self.store)?;
+        storage::object_store_invariants_hold(&self.store)?;
         let mut invalidated_region_counts = HashMap::<crate::Region, usize>::new();
         for entity in self.invalidations.keys() {
             if self.store.object_record(*entity).is_none() {
@@ -86,7 +92,7 @@ impl World {
             }
             object_media_bytes = object_media_bytes.saturating_add(
                 self.store
-                    .component::<crate::object::components::Fenced<std::sync::Arc<ObjectMedia>>>(raw_entity)
+                    .component::<Fenced<Arc<ObjectMedia>>>(raw_entity)
                     .and_then(|component| component.value.as_deref())
                     .map_or(0, ObjectMedia::retained_bytes),
             );
@@ -155,13 +161,13 @@ impl World {
         if self.object_media_bytes != object_media_bytes {
             return Err("ObjectMedia byte accounting is inconsistent");
         }
-        if !crate::history::address::tombstones_invariants_hold(self) {
+        if !address::tombstones_invariants_hold(self) {
             return Err("tombstone indexes are inconsistent");
         }
-        if !crate::history::retained::retained_invariants_hold(self) {
+        if !retained::retained_invariants_hold(self) {
             return Err("retained override indexes are inconsistent");
         }
-        if !crate::history::journal_invariants_hold(&self.journal) {
+        if !history::journal_invariants_hold(&self.journal) {
             return Err("change journal accounting is inconsistent");
         }
         Ok(())

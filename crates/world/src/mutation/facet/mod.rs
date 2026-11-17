@@ -6,14 +6,12 @@ use std::sync::Arc;
 
 use hecs::{EntityBuilder, EntityRef, World};
 
-use crate::history::WorldChangeClasses;
-use crate::object::components::Fenced;
+use super::Origin;
 use crate::{
     Appearance, AvatarAppearance, FieldGroup, FieldRejectionReason, Kind, ObjectMedia, PbrMaterialAssignments, PbrMaterialOverrides,
-    Rejections, Shape, SitTarget, SurfaceAppearance, TextureAnimation, UpdateAuthority,
+    Rejections, Shape, SitTarget, SurfaceAppearance, TextureAnimation, UpdateAuthority, history::WorldChangeClasses,
+    object::components::Fenced,
 };
-
-use super::Origin;
 
 #[derive(Clone, Copy)]
 pub(crate) struct FacetContext {

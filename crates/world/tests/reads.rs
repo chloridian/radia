@@ -1,4 +1,5 @@
 use std::{
+    assert_matches,
     collections::HashSet,
     num::{NonZeroU8, NonZeroU32},
 };
@@ -170,7 +171,7 @@ fn borrowed_reads_expose_current_state() {
         name: Some("First".to_owned()),
         origin: None,
     };
-    std::assert_matches!(world.patch_region(first, first_info.clone()).unwrap().outcome, world::RegionOutcome::Patched { .. });
+    assert_matches!(world.patch_region(first, first_info.clone()).unwrap().outcome, world::RegionOutcome::Patched { .. });
     assert_eq!(world.region(first), Some(&first_info));
     assert_eq!(first_info.handle.unwrap().origin(), DVec3::new(256.0, 512.0, 0.0));
     let mut foreign_world = World::new(world_limits());
@@ -557,7 +558,7 @@ fn summary_tracks_parent_pose() {
     let barrier = world.read_barrier();
     apply_ok(world.patch_region(region, RegionInfo { origin: Some(DVec3::new(256.0, 512.0, 0.0)), ..RegionInfo::default() }));
     let page = world.change_page(barrier.changes, 1).unwrap();
-    std::assert_matches!(page.records[0].change, WorldChange::RegionUpdated(updated) if updated == region);
+    assert_matches!(page.records[0].change, WorldChange::RegionUpdated(updated) if updated == region);
     assert_eq!(page.completed_revision, world.revision());
     let expected = WorldPose { position: DVec3::new(259.0, 515.0, 4.0), rotation: Quat::IDENTITY };
     assert_eq!(world.object(child).unwrap().world_pose(), Ok(PoseState::Resolved(expected)));
@@ -586,7 +587,7 @@ fn detail_batches_preserve_order() {
     let batch = world.object_detail_batch(&[other, original, replacement]).unwrap();
 
     assert_eq!(batch.hydration_revision, world.revision());
-    std::assert_matches!(
+    assert_matches!(
         batch.details.as_slice(),
         [
             ObjectDetailResult::Found(first),
@@ -601,7 +602,7 @@ fn detail_batches_preserve_order() {
 fn detail_pose_matches_transform() {
     let mut world = World::new(world_limits());
     let region = world.register_region().unwrap();
-    std::assert_matches!(
+    assert_matches!(
         world.patch_region(region, RegionInfo { origin: Some(DVec3::new(256.0, 512.0, 0.0)), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
     );
@@ -657,13 +658,13 @@ fn media_reads_leave_details_bounded() {
     );
 
     let changes = world.change_page(barrier.changes, 1).unwrap();
-    std::assert_matches!(changes.records[0].change, WorldChange::EntityUpdated { entity: changed, classes, .. }
+    assert_matches!(changes.records[0].change, WorldChange::EntityUpdated { entity: changed, classes, .. }
         if changed == entity && classes == WorldChangeClasses::MEDIA);
     let current = world.object_detail(entity).unwrap();
     assert_eq!(current.summary, detail.summary);
     assert_eq!(current.appearance, detail.appearance);
     assert!(current.hydration_revision > detail.hydration_revision);
-    std::assert_matches!(
+    assert_matches!(
         world.object_detail_batch(&[entity]).unwrap().details.as_slice(),
         [ObjectDetailResult::Found(value)] if value == &current
     );
@@ -699,7 +700,7 @@ fn change_pages_resume_mid_revision() {
     assert_eq!(retired_page.observed_revision, revision);
     assert_eq!(retired_page.completed_revision, revision);
     assert!(!retired_page.has_more);
-    std::assert_matches!(retired_page.records.as_slice(), [record]
+    assert_matches!(retired_page.records.as_slice(), [record]
         if record.revision == revision && matches!(record.change, WorldChange::RegionRetired { region: retired, .. } if retired == region));
 
     while world.has_pending_removals() {
@@ -726,14 +727,14 @@ fn journal_eviction_requires_resync() {
     let before_registration = world.read_barrier();
     let region = world.register_region().unwrap();
     let after_registration = world.read_barrier();
-    std::assert_matches!(
+    assert_matches!(
         world.patch_region(region, RegionInfo { name: Some("region".to_owned()), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
     );
 
     assert_eq!(world.change_page(before_registration.changes, 8), Err(WorldReadError::ResyncRequired));
     let changes = world.change_page(after_registration.changes, 8).unwrap();
-    std::assert_matches!(changes.records.as_slice(), [record] if record.change == WorldChange::RegionUpdated(region));
+    assert_matches!(changes.records.as_slice(), [record] if record.change == WorldChange::RegionUpdated(region));
 }
 
 #[test]
@@ -768,7 +769,7 @@ fn region_pages_follow_active_regions() {
     let page = world.region_page(None, 1).unwrap();
     assert_eq!(page.regions.iter().map(|summary| summary.region).collect::<Vec<_>>(), [first]);
     let cursor = page.next.expect("second region remains");
-    std::assert_matches!(world.retire_region(first).unwrap().outcome, world::RegionOutcome::Retired { entities_removed: 0, .. });
+    assert_matches!(world.retire_region(first).unwrap().outcome, world::RegionOutcome::Retired { entities_removed: 0, .. });
 
     let page = world.region_page(Some(cursor), 1).unwrap();
     assert_eq!(page.regions.iter().map(|summary| summary.region).collect::<Vec<_>>(), [second]);
@@ -782,7 +783,7 @@ fn large_region_name_is_rejected() {
     let mut world = World::new(limits);
     let region = world.register_region().unwrap();
     let name = "r".repeat(MAX_REGION_PAGE_BYTES);
-    std::assert_matches!(
+    assert_matches!(
         world.patch_region(region, RegionInfo { name: Some(name), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
     );
@@ -818,10 +819,10 @@ fn evicted_partial_revision_requires_resync() {
     entity(world.observe_object(object(first, 1, 140, 1, Object, Root)).unwrap());
     entity(world.observe_object(object(first, 2, 141, 2, Object, Root)).unwrap());
     let barrier = world.read_barrier();
-    std::assert_matches!(world.retire_region(first).unwrap().outcome, world::RegionOutcome::Retired { entities_removed: 2, .. });
+    assert_matches!(world.retire_region(first).unwrap().outcome, world::RegionOutcome::Retired { entities_removed: 2, .. });
     let partial = world.change_page(barrier.changes, 1).unwrap();
     assert!(!partial.has_more);
-    std::assert_matches!(
+    assert_matches!(
         world.patch_region(second, RegionInfo { name: Some("second".to_owned()), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
     );

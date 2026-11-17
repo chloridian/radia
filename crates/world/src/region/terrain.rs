@@ -1,12 +1,17 @@
-use std::collections::{
-    BTreeMap,
-    Bound::{Excluded, Unbounded},
+use std::{
+    array,
+    collections::{
+        BTreeMap,
+        Bound::{Excluded, Unbounded},
+    },
 };
 
 use uuid::Uuid;
 
-use crate::{ApplyError, Region, RegionApplied, UpdateSource, WorldReadError, WorldRevision, update::FieldStamp};
-use crate::{World, WorldChange, WorldId, newer_field};
+use crate::{
+    ApplyError, Region, RegionApplied, UpdateSource, World, WorldChange, WorldId, WorldReadError, WorldRevision, newer_field,
+    update::FieldStamp,
+};
 
 pub const TERRAIN_PATCH_SIZE: usize = 16;
 pub const TERRAIN_PATCH_SAMPLES: usize = TERRAIN_PATCH_SIZE * TERRAIN_PATCH_SIZE;
@@ -37,7 +42,7 @@ impl TerrainSettings {
             return Err(TerrainSettingsError::InvalidHeightRange);
         }
         Ok(Self {
-            detail_textures: std::array::from_fn(|index| {
+            detail_textures: array::from_fn(|index| {
                 if detail_textures[index].is_nil() { DEFAULT_DETAIL_TEXTURES[index] } else { detail_textures[index] }
             }),
             start_heights,
@@ -251,6 +256,10 @@ impl World {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
+    use proptest::collection;
+
     use super::*;
     use crate::{OrderEvidence, RegionInfo, UpdateAuthority, WorldLimits};
     fn world() -> (World, Region) {
@@ -271,7 +280,7 @@ mod tests {
         (world, region)
     }
     fn source(region: Region, order: u32) -> UpdateSource {
-        UpdateSource::new(region, order, crate::OrderEvidence::Ordered(u64::from(order)), 0)
+        UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0)
     }
     fn patch(x: u8, y: u8, height: f32) -> TerrainPatch {
         TerrainPatch::new(x, y, Box::new([height; TERRAIN_PATCH_SAMPLES])).unwrap()
@@ -396,7 +405,7 @@ mod tests {
         assert_eq!(world.revision(), revision);
         let _ = world.observe_terrain_settings(source(region, 3), second).unwrap();
         assert_eq!(world.region_page(None, 8).unwrap().regions[0].terrain_settings, Some(second));
-        std::assert_matches!(
+        assert_matches!(
             world.change_page(barrier.changes, 8).unwrap().records.last().unwrap().change,
             WorldChange::RegionUpdated(updated) if updated == region
         );
@@ -438,7 +447,7 @@ mod tests {
     proptest::proptest! {
         #[test]
         fn reordered_patches_keep_newest(
-            updates in proptest::collection::vec((0u32..200, 0u8..16, -100i16..100), 0..100)
+            updates in collection::vec((0u32..200, 0u8..16, -100i16..100), 0..100)
         ) {
             let (mut world, region) = world();
             let mut expected = BTreeMap::<u8, (u32, f32)>::new();

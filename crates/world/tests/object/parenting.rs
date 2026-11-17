@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use super::support::{
     AmbiguousOrder, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, FieldRejectionReason, HashSet, IgnoredStale, Introduced,
     InvalidValue, Local, Object, ObjectPatch, Parent, ParentCycle, ParentDependsOnRejectedParent, Pending, Pose, Quat, Region, Removed,
@@ -210,7 +212,7 @@ fn queued_resolution_progresses_under_churn() {
     for order in 301..=504 {
         let _ = world.resolve_relationships(7).unwrap();
         let applied = world.observe_object(object(source(region, order), 1000, 1, Object, Root)).unwrap();
-        std::assert_matches!(applied.outcome, Updated(_) | Unchanged);
+        assert_matches!(applied.outcome, Updated(_) | Unchanged);
         if world.children(parent).count() == 74 {
             break;
         }
@@ -651,7 +653,7 @@ fn transfer_pends_old_region_children() {
     assert!(progress.iter().flat_map(|turn| &turn.recovery.requests).any(|target| *target == child_address));
 
     let replacement = world.observe_object(object(source(source_region, 10), 332, 10, Object, Root)).unwrap();
-    std::assert_matches!(replacement.outcome, Introduced(_));
+    assert_matches!(replacement.outcome, Introduced(_));
     assert_eq!(world.object(child_entity).unwrap().parent(), Pending { address: parent_address, expected_uuid: Some(uuid(330)) });
 }
 
@@ -790,7 +792,7 @@ fn pending_ancestor_uses_own_fence() {
         panic!("expected parent introduction")
     };
     let child = world.entity(uuid(70)).unwrap();
-    std::assert_matches!(world.object(child).unwrap().parent(), Pending { .. });
+    assert_matches!(world.object(child).unwrap().parent(), Pending { .. });
     let descendant_id = uuid(65);
     let descendant = world.entity(descendant_id).unwrap();
     assert_eq!(
@@ -908,7 +910,7 @@ fn fresh_declaration_rebinds_pending_parent() {
     assert_eq!(world.object(child_entity).unwrap().parent(), Resolved(unrelated_entity));
 
     let replacement = world.observe_object(object(source(region, 30), 140, 1, Object, Root)).unwrap();
-    std::assert_matches!(replacement.outcome, Introduced(_));
+    assert_matches!(replacement.outcome, Introduced(_));
     assert_eq!(world.entity(uuid(143)), None);
     assert_eq!(world.object(child_entity).unwrap().parent(), Pending { address: parent_address, expected_uuid: Some(uuid(143)) });
 }
@@ -920,7 +922,7 @@ fn delayed_declaration_keeps_pending_parent() {
     let parent_id = uuid(170);
 
     let parent = world.observe_object(object(source(region, 10), 170, 1, Object, Root)).unwrap();
-    std::assert_matches!(parent.outcome, Introduced(_));
+    assert_matches!(parent.outcome, Introduced(_));
     let child = world.observe_object(object(source(region, 11), 171, 2, Object, Local(local_id(1)))).unwrap();
     let Introduced(child_entity) = child.outcome else { panic!("expected child introduction") };
     assert_eq!(
@@ -944,7 +946,7 @@ fn parent_address_reuse_needs_declaration() {
     let parent_address = address(region, 1);
 
     let parent = world.observe_object(object(source(region, 10), 190, 1, Object, Root)).unwrap();
-    std::assert_matches!(parent.outcome, Introduced(_));
+    assert_matches!(parent.outcome, Introduced(_));
     assert_eq!(world.remove_object(source(region, 12), local_id(1)).unwrap().outcome, Removed(uuid(190)));
 
     let reused_parent = world.observe_object(object(source(region, 20), 191, 1, Object, Root)).unwrap();

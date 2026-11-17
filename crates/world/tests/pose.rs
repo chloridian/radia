@@ -1,4 +1,8 @@
-use std::num::{NonZeroU8, NonZeroU32};
+use std::{
+    assert_matches,
+    f32::consts::{FRAC_PI_2, PI},
+    num::{NonZeroU8, NonZeroU32},
+};
 
 use math::{DVec3, Quat, Vec3};
 use uuid::Uuid;
@@ -59,7 +63,7 @@ fn with_pose(mut object: ObjectObservation, position: Vec3, rotation: Quat) -> O
 fn world_with_origin(origin: DVec3, entities: usize) -> (World, Region) {
     let mut world = World::new(limits(entities));
     let region = world.register_region().unwrap();
-    std::assert_matches!(
+    assert_matches!(
         world.patch_region(region, RegionInfo { origin: Some(origin), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
     );
@@ -96,8 +100,8 @@ fn root_pose_uses_region_origin() {
 fn nested_rotations_keep_f64_origin() {
     let origin = DVec3::new(2_f64.powi(45), -2_f64.powi(45), 4.0e12);
     let (mut world, region) = world_with_origin(origin, 4);
-    let quarter_turn = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
-    let half_turn = Quat::from_rotation_z(std::f32::consts::PI);
+    let quarter_turn = Quat::from_rotation_z(FRAC_PI_2);
+    let half_turn = Quat::from_rotation_z(PI);
     let root = with_pose(observation(region, 1, 45, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), quarter_turn);
     let root = introduced(world.observe_object(root).unwrap());
     let child = with_pose(observation(region, 2, 46, 2, Object, Local(local_id(1))), Vec3::new(2.0, 0.0, 0.0), quarter_turn);
@@ -154,7 +158,7 @@ fn late_origin_resolves_existing_pose() {
     let entity = introduced(world.observe_object(with_pose(observation(region, 1, 16, 1, Object, Root), Vec3::X, Quat::IDENTITY)).unwrap());
     assert_eq!(world.object(entity).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::MissingRegionOrigin));
 
-    std::assert_matches!(
+    assert_matches!(
         world.patch_region(region, RegionInfo { origin: Some(DVec3::new(20.0, 30.0, 0.0)), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
     );
@@ -167,7 +171,7 @@ fn handle_origin_resolves_pose() {
     let handle = RegionHandle::new((1024_u64 << 32) | 2048);
     let mut world = World::new(limits(1));
     let region = world.register_region().unwrap();
-    std::assert_matches!(
+    assert_matches!(
         world.patch_region(region, RegionInfo { handle: Some(handle), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
     );
@@ -192,7 +196,7 @@ fn pending_parent_is_first() {
 fn linkset_rotation_ignores_parent_scale() {
     let origin = DVec3::new(100.0, 200.0, 0.0);
     let (mut world, region) = world_with_origin(origin, 4);
-    let parent_rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    let parent_rotation = Quat::from_rotation_z(FRAC_PI_2);
     let parent = with_pose(observation(region, 1, 2, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), parent_rotation);
     let mut parent = parent;
     parent.scale = Some(Vec3::splat(4.0));
@@ -247,11 +251,7 @@ fn avatar_transform_uses_accepted_scale() {
 #[test]
 fn sit_target_keeps_pose() {
     let (mut world, region) = world_with_origin(DVec3::new(100.0, 200.0, 0.0), 3);
-    let seat = with_pose(
-        observation(region, 1, 48, 1, Object, Root),
-        Vec3::new(10.0, 0.0, 0.0),
-        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
-    );
+    let seat = with_pose(observation(region, 1, 48, 1, Object, Root), Vec3::new(10.0, 0.0, 0.0), Quat::from_rotation_z(FRAC_PI_2));
     introduced(world.observe_object(seat).unwrap());
     let avatar = with_pose(observation(region, 2, 49, 2, Avatar, Local(local_id(1))), Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY);
     let avatar = introduced(world.observe_object(avatar).unwrap());
@@ -259,7 +259,7 @@ fn sit_target_keeps_pose() {
     let PoseState::Resolved(before_pose) = before else { panic!("expected resolved pose") };
     assert!((before_pose.position.x - 110.0).abs() < 1e-5);
     assert!((before_pose.position.y - 202.0).abs() < 1e-5);
-    assert!(before_pose.rotation.dot(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)).abs() > 0.99999);
+    assert!(before_pose.rotation.dot(Quat::from_rotation_z(FRAC_PI_2)).abs() > 0.99999);
 
     assert_eq!(
         world
@@ -483,7 +483,7 @@ fn partial_pose_replaces_detach_snapshot() {
     let mut detach = ObjectPatch::new(source(region, 3), local_id(2));
     detach.parent = Some(Root);
     assert_eq!(world.patch_object(detach).unwrap().outcome, Updated(avatar));
-    std::assert_matches!(world.object(avatar).unwrap().world_pose().unwrap(), PoseState::Provisional { .. });
+    assert_matches!(world.object(avatar).unwrap().world_pose().unwrap(), PoseState::Provisional { .. });
 
     let mut position = ObjectPatch::new(source(region, 4), local_id(2));
     position.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
@@ -564,11 +564,11 @@ fn transfer_accepts_destination_pose() {
     let mut world = World::new(limits(4));
     let first = world.register_region().unwrap();
     let second = world.register_region().unwrap();
-    std::assert_matches!(
+    assert_matches!(
         world.patch_region(first, RegionInfo { origin: Some(DVec3::new(100.0, 0.0, 0.0)), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
     );
-    std::assert_matches!(
+    assert_matches!(
         world.patch_region(second, RegionInfo { origin: Some(DVec3::new(900.0, 0.0, 0.0)), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
     );
@@ -739,7 +739,7 @@ fn parent_depth_limit_is_enforced() {
         last = Some(entity);
     }
     let last = last.expect("last entity");
-    std::assert_matches!(world.object(last).unwrap().world_pose(), Ok(PoseState::Resolved(_)));
+    assert_matches!(world.object(last).unwrap().world_pose(), Ok(PoseState::Resolved(_)));
     assert_eq!(world.object(last).unwrap().coordinate_frame(), Ok(CoordinateFrame::LinksetRoot { root: root.unwrap() }));
 
     let last = introduced(

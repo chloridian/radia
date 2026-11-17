@@ -6,8 +6,8 @@ use world::{
     Appearance,
     ApplyOutcome::{Deferred, Introduced, TombstoneRecorded, Unchanged, Updated},
     DeferredReason, FieldGroup, FieldRejectionReason, FieldUpdate, Kind, LocalAddress, ObjectObservation, ObjectPatch, OrderEvidence,
-    ParentUpdate, PbrMaterialAssignments, PbrMaterialOverride, PbrMaterialOverrides, Region, UpdateAuthority, UpdateSource, World,
-    WorldLimits,
+    ParentUpdate, PbrMaterialAssignments, PbrMaterialOverride, PbrMaterialOverrides, PbrMaterialOverridesError, PbrTextureOverride,
+    PbrTextureTransformOverride, Region, UpdateAuthority, UpdateSource, World, WorldLimits,
 };
 
 fn source(region: Region, order: u64) -> UpdateSource {
@@ -165,8 +165,6 @@ fn local_id_is_region_scoped() {
 
 #[test]
 fn texture_overrides_validate_each_slot() {
-    use world::{PbrMaterialOverridesError, PbrTextureOverride, PbrTextureTransformOverride};
-
     for (texture, error) in [
         (
             PbrTextureOverride { texture: FieldUpdate::Set(AssetId::new(Uuid::nil())), ..Default::default() },

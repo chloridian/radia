@@ -4,16 +4,14 @@ use hecs::{QueryBorrow, Ref};
 use math::{Quat, Vec3};
 use uuid::Uuid;
 
-use crate::mutation::facet::Facet;
-use crate::object::components::Fenced;
-use crate::object::storage::ComponentView;
-use crate::removal::VisibilityCache;
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, CoordinateFrame, Entity, Kind, LinearMotion, LocalAddress, LocalTransform, ObjectMedia,
-    Parent, PbrMaterialAssignments, PbrMaterialOverrides, PoseError, PoseState, Shape, SitTarget, SurfaceAppearance, TextureAnimation,
-    Transform, UpdateSource, WorldTransformState,
+    ObjectOrdering, ObjectRecord, Parent, PbrMaterialAssignments, PbrMaterialOverrides, PoseError, PoseState, Shape, SitTarget,
+    SurfaceAppearance, TextureAnimation, Transform, UpdateSource, World, WorldTransformState,
+    mutation::facet::Facet,
+    object::{components::Fenced, storage::ComponentView},
+    removal::VisibilityCache,
 };
-use crate::{ObjectOrdering, ObjectRecord, World};
 
 #[derive(Clone, Copy)]
 pub struct Object<'a> {

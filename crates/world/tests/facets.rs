@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 
-use proptest::prelude::*;
+use proptest::{collection, prelude::*, test_runner::Config};
 use utils::AssetId;
 use uuid::Uuid;
 use world::{
@@ -75,15 +75,15 @@ fn materials(value: u128) -> PbrMaterialAssignments {
 }
 
 proptest! {
-    #![proptest_config(proptest::test_runner::Config {
+    #![proptest_config(Config {
         cases: 64,
         max_shrink_iters: 128,
-        ..proptest::test_runner::Config::default()
+        ..Config::default()
     })]
 
     #[test]
     fn facet_fences_match_model(
-        operations in prop::collection::vec((0_u8..2, 0_u8..3, 0_u8..2, 0_u64..24, 0_u32..8, 0_u8..2, 1_u128..128), 1..80)
+        operations in collection::vec((0_u8..2, 0_u8..3, 0_u8..2, 0_u64..24, 0_u32..8, 0_u8..2, 1_u128..128), 1..80)
     ) {
         let id = Uuid::from_u128(900);
         let local_id = NonZeroU32::new(1).unwrap();
