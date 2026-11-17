@@ -13,6 +13,11 @@ use utils::{AssetId, ExperienceId};
 use uuid::Uuid;
 use world::Region;
 
+pub(crate) enum PushOutcome {
+    Accepted,
+    Invalid,
+}
+
 pub(crate) struct EnvironmentCommand {
     pub(crate) region: Region,
     pub(crate) received_at: Instant,
@@ -62,16 +67,12 @@ impl EnvironmentSender {
         message: &Message,
         agent: Uuid,
         region: Region,
-        simulator: network::SimulatorId,
         received_at: Instant,
-    ) -> Result<(), EnvironmentQueueError> {
+    ) -> Result<PushOutcome, EnvironmentQueueError> {
         match decode_at(message, agent, received_at) {
-            Ok(Some(push)) => self.try_send(EnvironmentCommand { region, received_at, push }),
-            Ok(None) => Ok(()),
-            Err(_) => {
-                tracing::debug!(simulator = simulator.get(), region = region.get(), "invalid experience environment push");
-                Ok(())
-            }
+            Ok(Some(push)) => self.try_send(EnvironmentCommand { region, received_at, push }).map(|()| PushOutcome::Accepted),
+            Ok(None) => Ok(PushOutcome::Accepted),
+            Err(_) => Ok(PushOutcome::Invalid),
         }
     }
 }
@@ -279,7 +280,7 @@ mod tests {
         assert!(decode(&message, agent).is_err());
 
         let (sender, inbox) = EnvironmentInbox::channel();
-        sender.publish(&message, agent, region, network::SimulatorId::new(1), received_at).unwrap();
+        sender.publish(&message, agent, region, received_at).unwrap();
         let mut receiver = inbox.take().unwrap();
         assert!(matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
     }

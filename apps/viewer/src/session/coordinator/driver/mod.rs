@@ -5,6 +5,7 @@ use std::{
     future::pending,
     ops::ControlFlow,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use ::inventory::{CategoryKey, Inventory, InventoryChild, InventoryNodeKey, InventoryPreparationCancellation, InventorySnapshot};
@@ -20,6 +21,7 @@ use network::{
 };
 use protocol::{lludp::Message, login::ResponseData, messages::RequestAgentData};
 use tokio::{runtime::Handle, sync::watch};
+use utils::Summary;
 use uuid::Uuid;
 use world::{MAX_OBJECT_LOOKUP_WORK_ITEMS, ObjectLookupCursor, ObjectLookupProgress, UpdateSource};
 
@@ -60,7 +62,7 @@ use crate::{
 };
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-use crate::session::experience_environment::{EnvironmentInbox, EnvironmentSender};
+use crate::session::experience_environment::{EnvironmentInbox, EnvironmentQueueError, EnvironmentSender, PushOutcome};
 
 type Cancellation = Shared<BoxFuture<'static, ()>>;
 
@@ -138,12 +140,12 @@ enum ObjectMessageFinalizationProgress {
 }
 
 impl ObjectMessageFinalization {
-    fn new(world: &SessionWorld, mut outcome: SimulatorMessageOutcome, media_requests: Vec<ObjectMediaRequest>) -> Self {
+    fn new(world: &mut SessionWorld, mut outcome: SimulatorMessageOutcome, media_requests: Vec<ObjectMediaRequest>) -> Self {
         let has_summary = outcome.summary.is_some();
         let mut recovery_targets = Vec::new();
         let mut cancellations = Vec::new();
         if let Some((simulator_id, summary)) = outcome.summary.take() {
-            summary.log_incomplete_data(simulator_id, world.region_for(simulator_id));
+            world.record_ingest(&summary, simulator_id);
             recovery_targets = route_recovery_targets(world, summary.recovery_requests());
             cancellations.extend(summary.recovery_cancellations());
         }
@@ -211,6 +213,57 @@ async fn serve_owner_turn_with_advance<T>(
 pub(super) const MAX_DEFERRED_INVENTORY_EVENTS: usize = 128;
 const MAX_DEFERRED_INVENTORY_BYTES: usize = 96 * 1024 * 1024;
 pub(super) const MAX_DEFERRED_NETWORK_EVENT_BYTES: usize = 9 * 1024 * 1024;
+const SEND_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const DROPPED_PUSH_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
+#[derive(Default)]
+struct SendFailures {
+    failed: u64,
+    last_error: Option<String>,
+}
+
+impl SendFailures {
+    fn report(self) {
+        tracing::warn!(failed = self.failed, last_error = self.last_error.as_deref(), "simulator sends failed");
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[derive(Default)]
+struct DroppedPushes {
+    dropped: u64,
+    invalid: u64,
+    sample: Option<(SimulatorId, world::Region)>,
+    last_error: Option<EnvironmentQueueError>,
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+impl DroppedPushes {
+    fn record(&mut self, simulator_id: SimulatorId, region: world::Region, outcome: Result<PushOutcome, EnvironmentQueueError>) {
+        match outcome {
+            Ok(PushOutcome::Accepted) => return,
+            Ok(PushOutcome::Invalid) => self.invalid = self.invalid.saturating_add(1),
+            Err(error) => {
+                self.dropped = self.dropped.saturating_add(1);
+                self.last_error = Some(error);
+            }
+        }
+        self.sample = Some((simulator_id, region));
+    }
+
+    fn report(self) {
+        let Some((simulator, region)) = self.sample else { return };
+        tracing::warn!(
+            dropped = self.dropped,
+            invalid = self.invalid,
+            sample_simulator = simulator.get(),
+            sample_region = region.get(),
+            last_error = self.last_error.as_ref().map(tracing::field::display),
+            "experience environment pushes dropped"
+        );
+    }
+}
 
 pub(super) fn inventory_queue_is_full(count: usize, bytes: usize) -> bool {
     count >= MAX_DEFERRED_INVENTORY_EVENTS || bytes > 0
@@ -302,6 +355,9 @@ struct SessionDriver {
     environment_pushes: EnvironmentSender,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     environment_inbox: EnvironmentInbox,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    dropped_pushes: Summary<DroppedPushes>,
+    send_failures: Summary<SendFailures>,
     assets: AssetCoordinator,
     terrain_received: bool,
     primary_simulator: Option<SimulatorId>,
@@ -318,7 +374,8 @@ struct SessionDriver {
     object_cache: ObjectCacheSession,
     pending_handshake_replies: Arc<Mutex<PendingHandshakeReplies>>,
     inventory_changes: watch::Sender<Option<InventorySnapshot>>,
-    rejected_inventory_blocks: u64,
+    rejected_inventory_blocks: Summary<self::inventory::InventoryRejections>,
+    inventory_fetch_failures: Summary<self::inventory::InventoryFetchFailures>,
     inventory_fetch: InventoryFetchController,
     inventory_edits: InventoryEditController,
     inventory_pending_moves: HashMap<InventoryNodeKey, (MoveExpectation, tokio::sync::oneshot::Sender<()>)>,
@@ -402,32 +459,22 @@ impl SessionDriver {
         for (event, _) in deferred_inventory {
             match event {
                 DeferredInventoryEvent::Fetch(InventoryFetchEvent::Folder { fetch, applied }) => {
-                    if applied.send(FolderApplyOutcome::Rejected).is_err() {
-                        tracing::trace!(folder = %fetch.folder.id().uuid(), "inventory fetch worker stopped before shutdown acknowledgement");
-                    }
+                    applied.send(FolderApplyOutcome::Rejected).ok();
                     payloads.push(Box::new(fetch));
                 }
                 DeferredInventoryEvent::Edit(InventoryEditEvent::Apply { confirmation, applied }) => {
-                    if applied.send(false).is_err() {
-                        tracing::trace!("inventory edit worker stopped before shutdown acknowledgement");
-                    }
+                    applied.send(false).ok();
                     payloads.push(Box::new(confirmation));
                 }
                 DeferredInventoryEvent::Edit(InventoryEditEvent::RefreshFolders { folders, refreshed }) => {
-                    if refreshed.send(false).is_err() {
-                        tracing::trace!("inventory refresh worker stopped before shutdown acknowledgement");
-                    }
+                    refreshed.send(false).ok();
                     payloads.push(Box::new(folders));
                 }
                 DeferredInventoryEvent::Edit(InventoryEditEvent::MoveTimedOut { refreshed, .. }) => {
-                    if refreshed.send(false).is_err() {
-                        tracing::trace!("inventory move worker stopped before shutdown acknowledgement");
-                    }
+                    refreshed.send(false).ok();
                 }
                 DeferredInventoryEvent::Edit(InventoryEditEvent::MoveAborted { removed, .. }) => {
-                    if removed.send(()).is_err() {
-                        tracing::trace!("inventory move worker stopped before shutdown acknowledgement");
-                    }
+                    removed.send(()).ok();
                 }
                 DeferredInventoryEvent::Edit(InventoryEditEvent::MoveStarted { expectation, confirmed, registered }) => {
                     payloads.push(Box::new((expectation, confirmed, registered)));
@@ -540,6 +587,9 @@ impl SessionDriver {
             environment_pushes,
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             environment_inbox,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            dropped_pushes: Summary::new(DROPPED_PUSH_REPORT_INTERVAL),
+            send_failures: Summary::new(SEND_FAILURE_REPORT_INTERVAL),
             assets,
             terrain_received: false,
             primary_simulator: None,
@@ -556,7 +606,8 @@ impl SessionDriver {
             object_cache,
             pending_handshake_replies,
             inventory_changes,
-            rejected_inventory_blocks: 0,
+            rejected_inventory_blocks: Summary::new(self::inventory::INVENTORY_FAILURE_REPORT_INTERVAL),
+            inventory_fetch_failures: Summary::new(self::inventory::INVENTORY_FAILURE_REPORT_INTERVAL),
             inventory_fetch,
             inventory_edits,
             inventory_pending_moves: HashMap::new(),
@@ -894,7 +945,7 @@ impl SessionDriver {
         if let Some(result) = result {
             self.pending_media_apply = self.media.begin_apply_result(result);
         } else if self.cancellation.clone().now_or_never().is_none() {
-            tracing::warn!("object media worker stopped; media fetching is disabled for this session");
+            tracing::error!("object media worker stopped; media disabled for this session");
             self.media.disable();
         }
     }
@@ -966,9 +1017,7 @@ impl SessionDriver {
                         return ControlFlow::Continue(());
                     }
                     CachedObjectProgress::Complete(batch, media_requests, overrides) => {
-                        if let Err(error) = self.session_world.retain_cached_overrides(overrides) {
-                            tracing::warn!(?error, "cached PBR material overrides could not be restored");
-                        }
+                        self.session_world.restore_cached_overrides(overrides);
                         if let Some((continuation, media_requests)) = self.handoff.finish_cached_object_update(
                             &mut self.session_world,
                             pending.simulator_id,
@@ -1021,7 +1070,7 @@ impl SessionDriver {
                     }
                     EntityUpdateProgress::Complete(outcome) => {
                         pending.stage = PendingSimulatorObjectUpdateStage::Finalize(ObjectMessageFinalization::new(
-                            &self.session_world,
+                            &mut self.session_world,
                             outcome,
                             std::mem::take(&mut pending.media_requests),
                         ));
@@ -1039,7 +1088,7 @@ impl SessionDriver {
                     }
                     ObjectUpdateFinishProgress::Complete(outcome) => {
                         pending.stage = PendingSimulatorObjectUpdateStage::Finalize(ObjectMessageFinalization::new(
-                            &self.session_world,
+                            &mut self.session_world,
                             outcome,
                             std::mem::take(&mut pending.media_requests),
                         ));
@@ -1274,8 +1323,6 @@ impl SessionDriver {
                 } else {
                     None
                 };
-                let region = self.session_world.region_for(simulator_id).map(|region| region.get());
-                tracing::info!(simulator = simulator_id.get(), region, "primary simulator promoted");
                 self.on_primary_changed(simulator_id, *session, capabilities, self.active_login_data.clone());
                 if let Some(summary) = summary {
                     let touched_agent = match self.summary_touches_agent(&summary).await {
@@ -1333,7 +1380,13 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             SendFailed(error) => {
-                tracing::warn!(%error, "simulator send failed");
+                let due = self.send_failures.record(Instant::now(), |failures| {
+                    failures.failed = failures.failed.saturating_add(1);
+                    failures.last_error = Some(error);
+                });
+                if let Some(due) = due {
+                    due.report();
+                }
                 ControlFlow::Continue(())
             }
             EventQueueCoverageLost { reason, simulator_id, .. } => {
@@ -1551,9 +1604,13 @@ impl SessionDriver {
         if matches!(packet_order, PacketOrder::Ordered(_))
             && Some(simulator_id) == self.primary_simulator
             && let (Some(agent), Some(region)) = (self.active_session.as_ref(), region)
-            && let Err(error) = self.environment_pushes.publish(&message, agent.agent_id, region, simulator_id, received_at)
         {
-            tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "experience environment push could not be admitted");
+            let outcome = self.environment_pushes.publish(&message, agent.agent_id, region, received_at);
+            if !matches!(outcome, Ok(PushOutcome::Accepted))
+                && let Some(due) = self.dropped_pushes.record(Instant::now(), |pushes| pushes.record(simulator_id, region, outcome))
+            {
+                due.report();
+            }
         }
 
         let mut media_requests =
@@ -1748,8 +1805,6 @@ impl SessionDriver {
             }
         }
 
-        let region = self.session_world.region_for(simulator_id).map(|region| region.get());
-        tracing::info!(simulator = simulator_id.get(), region, "simulator disconnected");
         self.camera.simulator_disconnected(simulator_id);
         self.environments.simulator_disconnected(&mut self.session_world, simulator_id);
         if let Some(region) = self.session_world.region_for(simulator_id) {
@@ -1793,7 +1848,7 @@ impl SessionDriver {
     }
 
     async fn process_ingest_summary(&mut self, simulator_id: SimulatorId, summary: IngestSummary) -> ControlFlow<()> {
-        summary.log_incomplete_data(simulator_id, self.session_world.region_for(simulator_id));
+        self.session_world.record_ingest(&summary, simulator_id);
         let targets = route_recovery_targets(&self.session_world, summary.recovery_requests());
         let updated = match self.recovery_cancellations_on_owner_turn(summary.recovery_cancellations()).await {
             Ok(updated) => updated,
@@ -1940,10 +1995,7 @@ impl SessionDriver {
                 let region = first.key.region().get();
                 match result {
                     Ok(()) => self.recovery.mark_sent(&recoveries, completed_at),
-                    Err(error) if retryable_send_error(&error) => {
-                        self.recovery.defer(&recoveries, completed_at);
-                        tracing::debug!(simulator = simulator_id.get(), region, %error, "object recovery send deferred");
-                    }
+                    Err(error) if retryable_send_error(&error) => self.recovery.defer(&recoveries, completed_at),
                     Err(error) => {
                         if simulator_lost_error(&error) {
                             self.recovery.degrade_simulator(simulator_id);
@@ -1957,7 +2009,23 @@ impl SessionDriver {
         }
     }
 
+    fn flush_summaries(&mut self) {
+        self.flush_inventory_summaries();
+        if let Some(due) = self.send_failures.flush() {
+            due.report();
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        if let Some(due) = self.dropped_pushes.flush() {
+            due.report();
+        }
+        self.recovery.flush_pressure();
+        self.media.flush_summary();
+        self.camera.flush_summary();
+        self.session_world.flush_summaries();
+    }
+
     async fn finish(mut self) {
+        self.flush_summaries();
         if let Some(preparation) = self.pending_folder_preparation.take() {
             cancel_pending_folder_preparation(preparation).await;
         }
@@ -2030,7 +2098,7 @@ fn reply_region_handshake(
                             tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
                         }
                         Err(_) => {
-                            tracing::warn!(simulator = simulator_id.get(), "region handshake reply ended with the network session");
+                            tracing::debug!(simulator = simulator_id.get(), "region handshake reply abandoned at session end");
                         }
                     }
                 }));
@@ -2072,9 +2140,7 @@ fn cancel_pending_folder_preparation(preparation: PendingFolderPreparation) -> i
                 preparation.disposal.reclaim(preparation.before);
             }
         }
-        if preparation.applied.send(FolderApplyOutcome::Rejected).is_err() {
-            tracing::trace!(folder = %preparation.folder.id().uuid(), "inventory fetch worker stopped before shutdown acknowledgement");
-        }
+        preparation.applied.send(FolderApplyOutcome::Rejected).ok();
     }
 }
 
@@ -2139,7 +2205,7 @@ fn estimate_folder_fetch(fetch: &FolderFetch) -> usize {
     })
 }
 
-#[tracing::instrument(name = "viewer.session", level = "info", skip_all)]
+#[tracing::instrument(name = "viewer.session", level = "info", skip_all, fields(grid = ?credentials.grid))]
 pub(crate) async fn drain_session(
     session: Session,
     session_handle: SessionHandle,

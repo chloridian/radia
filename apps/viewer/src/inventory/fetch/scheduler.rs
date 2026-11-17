@@ -196,10 +196,8 @@ impl InventoryFetchController {
     }
 
     pub(crate) async fn stop(&mut self) {
-        if let Some(stop) = self.stop_tx.take()
-            && stop.send(()).is_err()
-        {
-            tracing::debug!("inventory fetch worker already stopped during session shutdown");
+        if let Some(stop) = self.stop_tx.take() {
+            stop.send(()).ok();
         }
         if let Some(task) = self.task.take()
             && let Err(error) = task.await
@@ -580,9 +578,7 @@ fn queue_foreground_request(
 
 fn finish_foreground_request(completions: Vec<oneshot::Sender<InventoryFetchOutcome>>, outcome: InventoryFetchOutcome) {
     for completion in completions {
-        if completion.send(outcome).is_err() {
-            tracing::trace!("inventory folder request completed after its consumer stopped waiting");
-        }
+        completion.send(outcome).ok();
     }
 }
 
