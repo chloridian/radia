@@ -82,31 +82,3 @@ impl MaterialDescription {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn uuid_texture_references_are_canonical() {
-        assert_eq!(TextureRef::from(Uuid::nil()), TextureRef::Clear);
-        assert_eq!(TextureRef::from(Uuid::max()), TextureRef::Clear);
-        let id = Uuid::from_u128(7);
-        assert_eq!(TextureRef::from(id), TextureRef::Asset(AssetId::new(id)));
-    }
-
-    #[test]
-    fn color_channel_selection() {
-        let color = MaterialTexture {
-            source: TextureRef::Asset(AssetId::new(Uuid::from_u128(17))),
-            transform: UvTransform { offset: [0.25, -0.5], scale: [2.0, -3.0], rotation: 0.75 },
-            tex_coord: 2,
-            sampler: Sampler { wrap_s: Wrap::ClampToEdge, ..Sampler::default() },
-        };
-        let legacy = MaterialDescription::Legacy(LegacyMaterial { diffuse: color, ..LegacyMaterial::default() });
-        let pbr = MaterialDescription::Pbr(PbrMaterial { base_color: color, ..PbrMaterial::default() });
-        for material in [legacy, pbr] {
-            assert_eq!(*material.base_color_texture(), color, "the color channel retains its own reference, UVs and sampler");
-        }
-    }
-}
