@@ -1,5 +1,6 @@
-use crate::{DVec3, Vec3};
 use std::time::{Duration, Instant};
+
+use crate::{DVec3, Vec3};
 
 pub const PHYSICS_TIMESTEP: f64 = 1.0 / 45.0;
 pub const PHASE_OUT_TIME: f64 = 2.0;
