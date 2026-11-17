@@ -1744,6 +1744,7 @@ fn gpu_instance_buffer_grows_at_layout_commit() {
     };
     compare(&mut geometry, &mut reference, camera(256.0, Vec3::X), "objects placed before growth still draw");
     assert_eq!(geometry.stats.instance_buffer_growths, 1);
+    assert!(geometry.instances.cap() * SLOT_BYTES <= crate::geometry::INSTANCE_BUFFER_BYTES, "growth stays within the instance budget");
     assert_eq!(geometry.stats.omitted_faces, 0);
     assert!(geometry.draw_list.slot_count() > near_slots, "the far objects enlarge the layout");
     assert!(geometry.stats.instance_buffer_bytes >= geometry.draw_list.slot_count() * INSTANCE_BYTES);

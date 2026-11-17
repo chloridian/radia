@@ -6,7 +6,7 @@ use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
 };
 
-use super::{Accounting, Lease, TRANSFORM_BYTES, buffer, draw_list::INDIRECT_DRAW_BYTES};
+use super::{Accounting, INSTANCE_BUFFER_BYTES, Lease, TRANSFORM_BYTES, buffer, draw_list::INDIRECT_DRAW_BYTES};
 use crate::{
     material::FaceParams,
     pipeline::{FACE_INDEX_BYTES, INSTANCE_BYTES},
@@ -30,7 +30,7 @@ impl InstanceBuffers {
     pub(super) fn new(device: &Device, memory: &Arc<Accounting>, capacity: usize) -> Self {
         let limits = device.limits();
         let bytes = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
-        let cap = usize::try_from(bytes).unwrap_or(usize::MAX) / INSTANCE_BYTES;
+        let cap = (usize::try_from(bytes).unwrap_or(usize::MAX) / INSTANCE_BYTES).min(INSTANCE_BUFFER_BYTES / SLOT_BYTES);
         let capacity = capacity.min(cap);
         let (instances, face_indices, indirect) = allocate(device, capacity);
         let lease = memory.charge(capacity * SLOT_BYTES);

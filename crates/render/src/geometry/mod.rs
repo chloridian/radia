@@ -44,6 +44,7 @@ pub use pick::PickError;
 
 const MESH_BYTES: usize = 64 * 1024 * 1024;
 const DEPTH_BYTES: usize = 128 * 1024 * 1024;
+const INSTANCE_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MESH_UPLOADS: usize = 16;
 const TRANSFORM_BYTES: usize = 112;
@@ -52,6 +53,7 @@ const TRANSFORM_BYTES: usize = 112;
 pub struct Stats {
     pub instances: usize,
     pub instance_buffer_bytes: usize,
+    pub instance_peak: usize,
     pub instance_buffer_growths: usize,
     pub draw_calls: usize,
     pub draw_commands: usize,
@@ -139,6 +141,7 @@ pub enum OmissionReason {
 struct Accounting {
     bytes: AtomicUsize,
     instances: AtomicUsize,
+    instance_peak: AtomicUsize,
     mesh_revision: AtomicU64,
     depth: AtomicUsize,
     peak: AtomicUsize,
@@ -152,7 +155,7 @@ impl Accounting {
 
     fn reserve(self: &Arc<Self>, bytes: usize, resource: Resource) -> Option<Lease> {
         let limit = match resource {
-            Resource::Mesh => MESH_BYTES.saturating_sub(self.instances.load(Ordering::Acquire)),
+            Resource::Mesh => MESH_BYTES,
             Resource::Instances => return Some(self.charge(bytes)),
             Resource::Depth => DEPTH_BYTES,
         };
@@ -167,7 +170,8 @@ impl Accounting {
     }
 
     fn charge(self: &Arc<Self>, bytes: usize) -> Lease {
-        self.instances.fetch_add(bytes, Ordering::AcqRel);
+        let before = self.instances.fetch_add(bytes, Ordering::AcqRel);
+        self.instance_peak.fetch_max(before + bytes, Ordering::AcqRel);
         Lease { memory: self.clone(), bytes, resource: Resource::Instances }
     }
 
@@ -485,6 +489,7 @@ impl GeometryRenderer {
         self.stats.mesh_bytes = self.memory.bytes.load(Ordering::Acquire);
         self.stats.mesh_peak = self.memory.peak.load(Ordering::Acquire);
         self.stats.instance_buffer_bytes = self.instances.bytes();
+        self.stats.instance_peak = self.memory.instance_peak.load(Ordering::Acquire);
         self.stats.instance_buffer_growths = self.instances.growths();
         self.stats.texture_bytes = self.textures.bytes();
         self.stats.texture_count = self.textures.count();
@@ -603,15 +608,15 @@ mod tests {
         assert_eq!(memory.bytes.load(Ordering::Acquire), 0);
         assert_eq!(memory.depth.load(Ordering::Acquire), 0);
 
-        let instances = memory.charge(MESH_BYTES + 1);
-        assert!(memory.reserve(1, Resource::Mesh).is_none(), "instance bytes leave no mesh budget");
+        let instances = memory.charge(INSTANCE_BUFFER_BYTES);
+        let replacement = memory.charge(1024);
+        let mesh = memory.reserve(MESH_BYTES, Resource::Mesh).expect("instance bytes leave the mesh budget whole");
         drop(instances);
-        let charged = memory.charge(1024);
-        assert!(memory.reserve(MESH_BYTES - 1023, Resource::Mesh).is_none());
-        let mesh = memory.reserve(MESH_BYTES - 1024, Resource::Mesh).expect("mesh budget net of instance bytes");
-        drop(charged);
-        assert!(memory.reserve(1024, Resource::Mesh).is_some(), "a released instance charge returns to the mesh budget");
+        assert_eq!(memory.instances.load(Ordering::Acquire), 1024);
+        assert_eq!(memory.instance_peak.load(Ordering::Acquire), INSTANCE_BUFFER_BYTES + 1024, "the peak keeps overlapping charges");
+        drop(replacement);
         drop(mesh);
+        assert_eq!(memory.instances.load(Ordering::Acquire), 0);
     }
 }
 
