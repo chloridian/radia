@@ -348,6 +348,19 @@ impl SurfacePipelines {
         pass.set_bind_group(0, &self.binding, &[]);
     }
 
+    pub(crate) fn set_faces(&mut self, device: &Device, textures: &Textures, faces: &Buffer) {
+        self.faces = faces.clone();
+        let [current, next] = self.region_water_normal_keys;
+        self.binding = frame_binding(
+            device,
+            &self.frame_environment_layout,
+            [&self.camera, &self.atmosphere, &self.region_water_uniform],
+            &self.faces,
+            [textures.raw_view(current), textures.raw_view(next)],
+            &textures.water_sampler,
+        );
+    }
+
     pub(crate) fn update_environment(
         &mut self,
         device: &Device,

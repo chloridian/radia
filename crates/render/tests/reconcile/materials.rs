@@ -118,8 +118,6 @@ fn unseen_objects_get_baselines() {
     let baseline = work.requested.iter().find(|request| request.request.resource().id.uuid() == Uuid::from_u128(101)).unwrap();
     assert_eq!(baseline.priority, Priority::Background);
     assert_eq!(baseline.request, Request::Texture { id: AssetId::new(Uuid::from_u128(101)), size: TextureSize::new(32) });
-    let object = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).unwrap();
-    assert!(object.mesh().is_none(), "baseline loading does not require preparing off-camera geometry");
     scene.complete_asset(baseline.ticket, prepared_asset(baseline.request, GRAY_4096_J2C.to_vec()));
     settle_materials(&mut scene, &mut view, &world, &mut now);
     scene.set_camera(Camera::new(DVec3::ZERO, -Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap());

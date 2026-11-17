@@ -8,17 +8,18 @@ use std::{
 };
 
 use assets::TextureHandle;
-use math::{DVec3, Quat, Vec3};
+use math::{DVec3, Frustum, Quat, Sphere, Vec3};
 use wgpu::{Buffer, Queue};
 use world::Region;
 
 use super::{
-    INSTANCE_BUFFER_BYTES, TRANSFORM_BYTES,
+    ShadingMode, TRANSFORM_BYTES,
     instance::{PARAMETER_BYTES, instance_base},
     items::{CachedFace, CachedItem, ItemId, ItemIndex, ItemSlab, draw_priority, surface_pipeline},
     mesh::GpuMesh,
     storage::Buffers,
     texture_bindings::{MaterialImages, TerrainDemand, TextureDemand},
+    visibility::bounds_sphere,
 };
 use crate::{
     pipeline::{INSTANCE_BYTES, Pipeline},
@@ -26,16 +27,15 @@ use crate::{
     texture::MaterialTextures,
 };
 
-pub(super) const MAX_FACE_INSTANCES: usize = INSTANCE_BUFFER_BYTES / INSTANCE_BYTES;
 pub(super) const INDIRECT_DRAW_BYTES: usize = 20;
 pub(super) type FaceOrder = (u8, u128, u16, u8);
+const CELL_SIZE: f64 = 16.0;
 const MAX_PATCH_RANGES: usize = 32;
 const MAX_LAYOUT_UPLOAD_RANGES: usize = 256;
 const MAX_PATCH_GAP_SLOTS: u32 = 4;
-const LAYOUT_ITEMS_PER_FRAME: usize = 1_024;
-const RETIRED_LAYOUT_ENTRIES_PER_FRAME: usize = 256;
+const LAYOUT_CLOCK_STEPS: usize = 64;
 const LAYOUT_BYTES_PER_FRAME: usize = 8 * 1024 * 1024;
-const LAYOUT_TIME_PER_FRAME: Duration = Duration::from_millis(1);
+pub(super) const LAYOUT_TIME_PER_FRAME: Duration = Duration::from_millis(1);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct LayoutId(u64);
@@ -72,7 +72,7 @@ impl DrawKey {
         matches!(self.pipeline, Pipeline::Fullbright | Pipeline::FullbrightDoubleSided | Pipeline::FullbrightFlipped)
     }
 
-    fn command(self, group: u32, first: u32, count: u32) -> DrawCommand {
+    fn command(self, group: u32, first: u32, count: u32, cell: u32) -> DrawCommand {
         DrawCommand {
             group,
             mesh: self.mesh,
@@ -82,6 +82,10 @@ impl DrawKey {
             indices: self.start..self.end,
             textures: self.textures,
             terrain: self.terrain,
+            cell,
+            sphere: None,
+            ranged: true,
+            live: true,
         }
     }
 }
@@ -95,6 +99,33 @@ pub(super) struct DrawCommand {
     pub(super) indices: Range<u32>,
     pub(super) textures: MaterialTextures,
     pub(super) terrain: Option<Region>,
+    cell: u32,
+    sphere: Option<Sphere>,
+    ranged: bool,
+    live: bool,
+}
+
+impl DrawCommand {
+    fn include(&mut self, sphere: Sphere, shading: ShadingMode) {
+        self.sphere = Some(self.sphere.map_or(sphere, |bounds| bounds.union(sphere)));
+        self.ranged &= shading == ShadingMode::Surface;
+    }
+
+    fn visible(&self, cells: &[CellClass], eye: DVec3, draw_distance: f64, frustum: &Frustum) -> bool {
+        if !self.live {
+            return false;
+        }
+        let Some(sphere) = self.sphere else { return false };
+        let Some(cell) = cells.get(self.cell as usize) else { return false };
+        if !cell.visible {
+            return false;
+        }
+        let center = sphere.center - eye;
+        if self.ranged && !cell.near && center.length() - sphere.radius > draw_distance {
+            return false;
+        }
+        cell.inside || frustum.intersects_sphere(center, sphere.radius)
+    }
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -116,7 +147,6 @@ pub(super) struct DrawBatch {
 struct BatchGroup {
     key: DrawBatchKey,
     buffers: Arc<Buffers>,
-    commands: Vec<DrawIndexedArgs>,
     refs: usize,
 }
 
@@ -134,6 +164,78 @@ struct DrawIndexedArgs {
     first_index: u32,
     base_vertex: i32,
     first_instance: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct CellClass {
+    visible: bool,
+    inside: bool,
+    near: bool,
+}
+
+impl CellClass {
+    fn new(cell: Option<Sphere>, eye: DVec3, draw_distance: f64, frustum: &Frustum) -> Self {
+        let Some(sphere) = cell else { return Self::default() };
+        let center = sphere.center - eye;
+        Self {
+            visible: frustum.intersects_sphere(center, sphere.radius),
+            inside: frustum.contains_sphere(center, sphere.radius),
+            near: center.length() + sphere.radius <= draw_distance,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct ViewDraws {
+    batches: Vec<DrawBatch>,
+    indirect_bytes: Vec<u8>,
+    first_instances: Vec<u32>,
+    encoded: Vec<u8>,
+    cells: Vec<CellClass>,
+    opaque: Vec<u32>,
+    blended: Vec<u32>,
+    blended_distances: Vec<f64>,
+    blended_marks: Vec<u64>,
+    blended_keys: Vec<(f64, FaceOrder, u32)>,
+    batch_commands: Vec<Vec<DrawIndexedArgs>>,
+    batch_order: Vec<usize>,
+    mark: u64,
+    layout: LayoutId,
+}
+
+impl ViewDraws {
+    pub(super) fn batches(&self) -> &[DrawBatch] {
+        &self.batches
+    }
+
+    pub(super) fn indirect_bytes(&self) -> &[u8] {
+        &self.indirect_bytes
+    }
+
+    pub(super) fn command_count(&self) -> usize {
+        self.first_instances.len()
+    }
+
+    pub(super) fn first_instance(&self, offset: u64, command: u32) -> Option<u32> {
+        let index = usize::try_from(offset).ok()?.checked_div(INDIRECT_DRAW_BYTES)?.checked_add(command as usize)?;
+        self.first_instances.get(index).copied()
+    }
+
+    #[cfg(test)]
+    pub(super) fn blended_order(&self) -> Vec<u32> {
+        self.blended.clone()
+    }
+
+    pub(super) fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[derive(Default)]
+pub(super) struct CullStats {
+    pub(super) commands: usize,
+    pub(super) changed: bool,
+    pub(super) blended_sorted: bool,
 }
 
 struct DrawGroup {
@@ -214,10 +316,6 @@ impl DrawInterner {
         self.batches.get(id).and_then(Option::as_ref)
     }
 
-    fn batch_group_mut(&mut self, id: usize) -> Option<&mut BatchGroup> {
-        self.batches.get_mut(id).and_then(Option::as_mut)
-    }
-
     pub(super) fn release(&mut self, id: u32) {
         let batch = {
             let Some(group) = self.groups.get_mut(id as usize).and_then(Option::as_mut) else { return };
@@ -257,7 +355,7 @@ impl DrawInterner {
             self.batches.push(None);
         }
         if let Some(slot) = self.batches.get_mut(id) {
-            *slot = Some(BatchGroup { key, buffers: Arc::clone(buffers), commands: Vec::new(), refs: 1 });
+            *slot = Some(BatchGroup { key, buffers: Arc::clone(buffers), refs: 1 });
         }
         self.batches_by_key.insert(key, id);
         id
@@ -297,18 +395,24 @@ impl DrawInterner {
 
 #[derive(Clone, Copy)]
 struct BlendedFace {
-    distance_squared: f64,
     order: FaceOrder,
     item: ItemIndex,
     face: usize,
     group: u32,
-    slot: u32,
+    cell: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct PendingCommand {
+    count: usize,
+    cursor: usize,
+    first: usize,
+    draw: usize,
 }
 
 #[derive(Default)]
 pub(super) struct LayoutStats {
     pub(super) omitted_faces: usize,
-    pub(super) blended: bool,
     pub(super) items_visited: usize,
     pub(super) faces_visited: usize,
 }
@@ -357,9 +461,8 @@ struct LayoutBuild {
     layout: LayoutId,
     state: LayoutState,
     uploads: HashSet<u32>,
-    previous: Vec<ItemIndex>,
     visible: Vec<ItemIndex>,
-    mesh_pins: HashSet<MeshId>,
+    evicted: HashSet<MeshId>,
     layout_items: Vec<ItemIndex>,
     selected_items: HashSet<ItemIndex>,
     phase: LayoutPhase,
@@ -367,14 +470,14 @@ struct LayoutBuild {
     item_cursor: usize,
     face_cursor: usize,
     item_has_slot: bool,
-    batch_cursor: usize,
-    batch_order_cursor: usize,
-    batch_command_cursor: usize,
-    blended_batch_start: usize,
-    batch_seen: HashSet<usize>,
-    group_cursor: usize,
+    item_sphere: Option<Sphere>,
+    command_cursor: usize,
+    commands: HashMap<(u32, u32), PendingCommand>,
+    command_keys: Vec<(u32, u32)>,
+    cells: HashMap<[i64; 3], u32>,
+    item_cells: Vec<u32>,
+    capacity: usize,
     required: usize,
-    group_limits: Vec<usize>,
     remaining: usize,
     omitted: usize,
     opaque_count: usize,
@@ -383,7 +486,7 @@ struct LayoutBuild {
     blend_index: usize,
     visible_items: usize,
     priority: BinaryHeap<PriorityItem>,
-    blended: BinaryHeap<BlendedFace>,
+    blended: Vec<BlendedFace>,
     items_visited: usize,
     faces_visited: usize,
     stale: bool,
@@ -391,7 +494,6 @@ struct LayoutBuild {
 
 #[derive(Clone, Copy)]
 enum LayoutPhase {
-    RetirePrevious,
     CountVisible,
     ClearInitialCounts,
     Priority,
@@ -403,51 +505,33 @@ enum LayoutPhase {
     Allocate,
     Fill,
     EmitBlended,
-    ClearFinalCounts,
-    BatchOpaque,
-    BatchOpaqueEncode,
-    BatchBlended,
     Commit,
 }
 
-impl LayoutPhase {
-    fn batching(self) -> bool {
-        matches!(self, Self::BatchOpaque | Self::BatchOpaqueEncode | Self::BatchBlended | Self::Commit)
-    }
-}
-
 impl LayoutBuild {
-    fn new(
-        layout: LayoutId,
-        previous: &[ItemIndex],
-        visible: &[ItemIndex],
-        camera: Camera,
-        retire_previous: bool,
-        items: &ItemSlab,
-    ) -> Self {
+    fn new(layout: LayoutId, visible: &[ItemIndex], camera: Camera, capacity: usize) -> Self {
         Self {
             layout,
             state: LayoutState::default(),
             uploads: HashSet::new(),
-            previous: if retire_previous { previous.to_vec() } else { Vec::new() },
             visible: visible.to_vec(),
-            mesh_pins: visible.iter().filter_map(|index| items.get(*index).map(|item| item.mesh.id())).collect(),
+            evicted: HashSet::new(),
             layout_items: Vec::new(),
             selected_items: HashSet::new(),
-            phase: if retire_previous { LayoutPhase::RetirePrevious } else { LayoutPhase::CountVisible },
+            phase: LayoutPhase::CountVisible,
             camera,
             item_cursor: 0,
             face_cursor: 0,
             item_has_slot: false,
-            batch_cursor: 0,
-            batch_order_cursor: 0,
-            batch_command_cursor: 0,
-            blended_batch_start: 0,
-            batch_seen: HashSet::new(),
-            group_cursor: 0,
+            item_sphere: None,
+            command_cursor: 0,
+            commands: HashMap::new(),
+            command_keys: Vec::new(),
+            cells: HashMap::new(),
+            item_cells: Vec::new(),
+            capacity,
             required: 0,
-            group_limits: Vec::new(),
-            remaining: MAX_FACE_INSTANCES,
+            remaining: capacity,
             omitted: 0,
             opaque_count: 0,
             instance_bytes: 0,
@@ -455,7 +539,7 @@ impl LayoutBuild {
             blend_index: 0,
             visible_items: 0,
             priority: BinaryHeap::new(),
-            blended: BinaryHeap::new(),
+            blended: Vec::new(),
             items_visited: 0,
             faces_visited: 0,
             stale: false,
@@ -469,7 +553,31 @@ impl LayoutBuild {
     }
 
     fn input_items(&self) -> &[ItemIndex] {
-        if self.required > MAX_FACE_INSTANCES { &self.layout_items } else { &self.visible }
+        if self.over_capacity() { &self.layout_items } else { &self.visible }
+    }
+
+    fn over_capacity(&self) -> bool {
+        self.required > self.capacity
+    }
+
+    fn cell(&mut self, position: DVec3) -> u32 {
+        let key = (position / CELL_SIZE).floor().to_array().map(|coordinate| coordinate as i64);
+        let next = u32::try_from(self.state.cells.len()).unwrap_or(u32::MAX);
+        let cell = *self.cells.entry(key).or_insert(next);
+        if cell == next && cell != u32::MAX {
+            self.state.cells.push(None);
+        }
+        cell
+    }
+
+    fn push_draw(&mut self, draw: DrawCommand) {
+        let mesh = draw.mesh;
+        let index = u32::try_from(self.state.draws.len()).unwrap_or(u32::MAX);
+        let live = !self.evicted.contains(&mesh);
+        self.state.draws.push(DrawCommand { live, ..draw });
+        if live {
+            self.state.mesh_references.entry(mesh).or_default().push(index);
+        }
     }
 
     fn retired(&self) -> bool {
@@ -477,110 +585,70 @@ impl LayoutBuild {
         state.draw_group_refs.is_empty()
             && state.active_textures.is_empty()
             && state.active_terrain.is_empty()
-            && state.draw_batches.is_empty()
+            && state.layout_items.is_empty()
     }
-}
-
-impl Eq for BlendedFace {}
-
-impl PartialEq for BlendedFace {
-    fn eq(&self, other: &Self) -> bool {
-        self.distance_squared.total_cmp(&other.distance_squared) == Ordering::Equal && self.order == other.order
-    }
-}
-
-impl Ord for BlendedFace {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.distance_squared.total_cmp(&other.distance_squared).then_with(|| other.order.cmp(&self.order))
-    }
-}
-
-impl PartialOrd for BlendedFace {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-#[derive(Default)]
-pub(super) struct PatchStats {
-    pub(super) faces_patched: usize,
-    pub(super) blended_sorted: bool,
 }
 
 #[derive(Default)]
 pub(super) struct LayoutState {
     draws: Vec<DrawCommand>,
-    mesh_references: HashSet<MeshId>,
+    cells: Vec<Option<Sphere>>,
+    mesh_references: HashMap<MeshId, Vec<u32>>,
     instance_bytes: Vec<u8>,
-    active_groups: Vec<u32>,
     active_textures: Vec<TextureDemand>,
     active_terrain: Vec<TerrainDemand>,
     texture_seen: HashSet<MaterialTextures>,
     terrain_seen: HashSet<Region>,
-    group_counts: Vec<usize>,
-    group_offsets: Vec<usize>,
-    group_cursors: Vec<usize>,
     layout_items: Vec<ItemIndex>,
-    priority_items: Vec<ItemIndex>,
     draw_group_refs: Vec<u32>,
     draw_group_seen: HashSet<u32>,
     blended: Vec<BlendedFace>,
     dirty_slots: Vec<u32>,
     opaque_draws: usize,
-    opaque_instances: usize,
-    instance_count: usize,
     visible_items: usize,
     omitted: usize,
     valid: bool,
-    batch_order: Vec<usize>,
-    draw_batches: Vec<DrawBatch>,
-    indirect_bytes: Vec<u8>,
-    first_instances: Vec<u32>,
-    blended_batches: usize,
-    blended_commands: usize,
 }
 
-fn retire_vec<T>(values: &mut Vec<T>, budget: &mut usize) {
-    while *budget > 0 && values.pop().is_some() {
-        *budget -= 1;
+impl LayoutState {
+    fn opaque(&self) -> &[DrawCommand] {
+        self.draws.get(..self.opaque_draws).unwrap_or_default()
+    }
+
+    fn disable(&mut self, mesh: MeshId) -> bool {
+        let Some(draws) = self.mesh_references.remove(&mesh) else { return false };
+        for index in draws {
+            if let Some(draw) = self.draws.get_mut(index as usize) {
+                draw.live = false;
+            }
+        }
+        true
+    }
+
+    fn include(&mut self, slot: u32, blended_index: Option<usize>, sphere: Sphere, shading: ShadingMode) {
+        let index = match blended_index {
+            Some(index) => self.opaque_draws.saturating_add(index),
+            None => self.opaque().partition_point(|draw| draw.first.saturating_add(draw.count) <= slot),
+        };
+        let Some(draw) = self.draws.get_mut(index) else { return };
+        if slot < draw.first || slot - draw.first >= draw.count {
+            return;
+        }
+        if draw.count == 1 {
+            draw.sphere = None;
+        }
+        draw.include(sphere, shading);
+        if let Some(cell) = self.cells.get_mut(draw.cell as usize) {
+            *cell = Some(cell.map_or(sphere, |bounds| bounds.union(sphere)));
+        }
     }
 }
 
-#[derive(Default)]
 pub(super) struct DrawList {
+    capacity: usize,
     groups: DrawInterner,
-    draws: Vec<DrawCommand>,
-    mesh_references: HashSet<MeshId>,
-    instance_bytes: Vec<u8>,
-    hidden_slots: HashSet<u32>,
-    active_groups: Vec<u32>,
-    active_textures: Vec<TextureDemand>,
-    active_terrain: Vec<TerrainDemand>,
-    texture_seen: HashSet<MaterialTextures>,
-    terrain_seen: HashSet<Region>,
-    group_counts: Vec<usize>,
-    group_offsets: Vec<usize>,
-    group_cursors: Vec<usize>,
-    layout_items: Vec<ItemIndex>,
-    priority_items: Vec<ItemIndex>,
-    draw_group_refs: Vec<u32>,
-    draw_group_seen: HashSet<u32>,
-    blended: Vec<BlendedFace>,
-    dirty_slots: Vec<u32>,
-    opaque_draws: usize,
-    opaque_instances: usize,
-    instance_count: usize,
-    visible_items: usize,
-    omitted: usize,
-    valid: bool,
-    batch_order: Vec<usize>,
-    draw_batches: Vec<DrawBatch>,
-    indirect_bytes: Vec<u8>,
-    first_instances: Vec<u32>,
-    blended_batches: usize,
-    blended_commands: usize,
-    batches_dirty: bool,
-    batches_stale: bool,
+    committed: LayoutState,
+    cull_dirty: bool,
     pending: Option<LayoutBuild>,
     retired: Option<LayoutBuild>,
     layout: LayoutId,
@@ -588,7 +656,20 @@ pub(super) struct DrawList {
 }
 
 impl DrawList {
-    pub(super) fn request_layout(&mut self, visible: &[ItemIndex], camera: Camera, retire_previous: bool, items: &ItemSlab) -> bool {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            groups: DrawInterner::default(),
+            committed: LayoutState::default(),
+            cull_dirty: false,
+            pending: None,
+            retired: None,
+            layout: LayoutId::default(),
+            last_layout: LayoutId::default(),
+        }
+    }
+
+    pub(super) fn request_layout(&mut self, visible: &[ItemIndex], camera: Camera) -> bool {
         if self.pending.is_some() {
             return false;
         }
@@ -596,7 +677,7 @@ impl DrawList {
             return false;
         }
         let layout = self.next_layout();
-        self.pending = Some(LayoutBuild::new(layout, &self.layout_items, visible, camera, retire_previous, items));
+        self.pending = Some(LayoutBuild::new(layout, visible, camera, self.capacity));
         true
     }
 
@@ -605,47 +686,44 @@ impl DrawList {
         self.last_layout
     }
 
-    #[cfg(test)]
-    pub(super) fn committed_slot(&self, face: &CachedFace) -> Option<u32> {
-        self.committed_address(face).map(|address| address.slot)
-    }
-
     fn committed_address(&self, face: &CachedFace) -> Option<FaceSlot> {
         if face.layout == self.layout {
             return face.slot.map(|slot| FaceSlot { layout: face.layout, slot, blended_index: face.blended_index });
         }
-        face.retained.filter(|retained| retained.layout == self.layout)
+        face.committed.filter(|committed| committed.layout == self.layout)
     }
 
-    pub(super) fn pins_mesh(&self, mesh: MeshId) -> bool {
-        self.mesh_references.contains(&mesh) || self.pending.as_ref().is_some_and(|build| !build.stale && build.mesh_pins.contains(&mesh))
+    pub(super) fn evict(&mut self, mesh: MeshId) {
+        if self.committed.disable(mesh) {
+            self.cull_dirty = true;
+        }
+        if let Some(build) = self.pending.as_mut() {
+            build.evicted.insert(mesh);
+            build.state.disable(mesh);
+        }
+    }
+
+    pub(super) fn shows_mesh(&self, mesh: MeshId, camera: Camera, frustum: &Frustum) -> bool {
+        let Some(draws) = self.committed.mesh_references.get(&mesh) else { return false };
+        let eye = camera.position();
+        let draw_distance = camera.draw_distance();
+        draws.iter().filter_map(|index| self.committed.draws.get(*index as usize)).any(|draw| {
+            draw.sphere.is_some_and(|sphere| {
+                let center = sphere.center - eye;
+                (!draw.ranged || center.length() - sphere.radius <= draw_distance) && frustum.intersects_sphere(center, sphere.radius)
+            })
+        })
     }
 
     #[cfg(test)]
     pub(super) fn committed_pins_mesh(&self, mesh: MeshId) -> bool {
-        self.mesh_references.contains(&mesh)
-    }
-
-    #[cfg(test)]
-    pub(super) fn committed_items(&self) -> &[ItemIndex] {
-        &self.layout_items
-    }
-
-    #[cfg(test)]
-    pub(super) fn blended_order(&self) -> Vec<u32> {
-        self.draws.get(self.opaque_draws..).unwrap_or_default().iter().map(|draw| draw.first).collect()
-    }
-
-    #[cfg(test)]
-    pub(super) fn staged_draw_count(&self) -> usize {
-        self.pending.as_ref().map_or(0, |build| build.state.draws.len())
+        self.committed.mesh_references.contains_key(&mesh)
     }
 
     #[cfg(test)]
     pub(super) fn staged_progress(&self) -> Option<(&'static str, usize, usize, usize, usize, usize, usize)> {
         let build = self.pending.as_ref()?;
         let phase = match build.phase {
-            LayoutPhase::RetirePrevious => "retire_previous",
             LayoutPhase::CountVisible => "count_visible",
             LayoutPhase::ClearInitialCounts => "clear_initial_counts",
             LayoutPhase::Priority => "priority",
@@ -657,10 +735,6 @@ impl DrawList {
             LayoutPhase::Allocate => "allocate",
             LayoutPhase::Fill => "fill",
             LayoutPhase::EmitBlended => "emit_blended",
-            LayoutPhase::ClearFinalCounts => "clear_final_counts",
-            LayoutPhase::BatchOpaque => "batch_opaque",
-            LayoutPhase::BatchOpaqueEncode => "batch_opaque_encode",
-            LayoutPhase::BatchBlended => "batch_blended",
             LayoutPhase::Commit => "commit",
         };
         Some((
@@ -700,7 +774,7 @@ impl DrawList {
     pub(super) fn retired_entries_remaining(&self) -> usize {
         let Some(build) = self.retired.as_ref() else { return 0 };
         let state = &build.state;
-        state.draw_group_refs.len() + state.active_textures.len() + state.active_terrain.len() + state.draw_batches.len()
+        state.draw_group_refs.len() + state.active_textures.len() + state.active_terrain.len() + state.layout_items.len()
     }
 
     pub(super) fn layout_building(&self) -> bool {
@@ -713,13 +787,9 @@ impl DrawList {
         }
     }
 
-    pub(super) fn advance_layout(
-        &mut self,
-        items: &mut ItemSlab,
-        meshes: &HashMap<MeshId, GpuMesh>,
-        indirect_first_instance: bool,
-    ) -> Option<LayoutProgress> {
-        self.retire_layout_step();
+    pub(super) fn advance_layout(&mut self, items: &mut ItemSlab, budget: Duration) -> Option<LayoutProgress> {
+        let started = Instant::now();
+        self.retire_layout_step(items, started, budget);
         if self.retired.is_some() {
             return None;
         }
@@ -728,97 +798,58 @@ impl DrawList {
             self.retired = Some(build);
             return Some(LayoutProgress { stats: LayoutStats::default(), complete: false, stale: true, commit_ms: 0.0 });
         }
-        let started = Instant::now();
-        let mut item_work = 0usize;
+        let mut steps = 0usize;
         let mut byte_work = 0usize;
         let mut items_visited = 0usize;
         let mut faces_visited = 0usize;
         let mut commit_ms = 0.0;
-        while item_work < LAYOUT_ITEMS_PER_FRAME && byte_work < LAYOUT_BYTES_PER_FRAME && started.elapsed() < LAYOUT_TIME_PER_FRAME {
+        while byte_work < LAYOUT_BYTES_PER_FRAME {
+            steps += 1;
+            if steps.is_multiple_of(LAYOUT_CLOCK_STEPS) && started.elapsed() >= budget {
+                break;
+            }
             match build.phase {
-                LayoutPhase::RetirePrevious => {
-                    if build.item_cursor >= build.previous.len() {
-                        build.phase = LayoutPhase::CountVisible;
-                        build.item_cursor = 0;
-                        build.face_cursor = 0;
-                        continue;
-                    }
-                    let index = build.previous[build.item_cursor];
-                    if build.face_cursor == 0 {
-                        items_visited += 1;
-                        build.items_visited += 1;
-                    }
-                    if contains_item(&build.visible, items, index) {
-                        build.item_cursor += 1;
-                        item_work += 1;
-                        continue;
-                    }
-                    let Some(item) = items.get_mut(index) else {
-                        build.item_cursor += 1;
-                        item_work += 1;
-                        continue;
-                    };
-                    if build.face_cursor >= item.faces.len() {
-                        build.item_cursor += 1;
-                        build.face_cursor = 0;
-                        item_work += 1;
-                        continue;
-                    }
-                    if let Some(face) = item.faces.get_mut(build.face_cursor) {
-                        self.hide_face(face);
-                        faces_visited += 1;
-                        build.faces_visited += 1;
-                        byte_work += std::mem::size_of::<CachedFace>();
-                    }
-                    build.face_cursor += 1;
-                }
                 LayoutPhase::CountVisible | LayoutPhase::CountSelected => {
                     let count_visible = matches!(build.phase, LayoutPhase::CountVisible);
-                    let input = if count_visible { &build.visible } else { &build.layout_items };
-                    if build.item_cursor >= input.len() {
+                    let input_len = if count_visible { build.visible.len() } else { build.layout_items.len() };
+                    if build.item_cursor >= input_len {
                         build.item_cursor = 0;
                         build.face_cursor = 0;
-                        if count_visible && build.required > MAX_FACE_INSTANCES {
+                        if count_visible && build.over_capacity() {
                             build.phase = LayoutPhase::ClearInitialCounts;
-                            build.group_cursor = 0;
                             build.state.visible_items = 0;
                         } else if count_visible {
                             build.phase = LayoutPhase::Commands;
-                            build.group_cursor = 0;
+                            build.command_cursor = 0;
                         } else {
                             build.phase = LayoutPhase::HideOmitted;
                         }
                         continue;
                     }
-                    let index = input[build.item_cursor];
+                    let index = if count_visible { build.visible[build.item_cursor] } else { build.layout_items[build.item_cursor] };
                     let Some(item) = items.get(index) else {
+                        build.item_cells.push(u32::MAX);
                         build.item_cursor += 1;
-                        item_work += 1;
                         continue;
                     };
                     if build.face_cursor == 0 {
-                        item_work += 1;
                         items_visited += 1;
                         build.items_visited += 1;
+                        let cell = build.cell(item.position);
+                        build.item_cells.push(cell);
                     }
                     if build.face_cursor >= item.faces.len() {
                         build.item_cursor += 1;
                         build.face_cursor = 0;
                         continue;
                     }
-                    let face = &item.faces[build.face_cursor];
-                    let group = face.group as usize;
-                    if group >= build.state.group_counts.len() {
-                        let capacity = group.saturating_add(1);
-                        build.state.group_counts.resize(capacity, 0);
-                        build.state.group_offsets.resize(capacity, 0);
-                        build.state.group_cursors.resize(capacity, 0);
-                    }
-                    let count = &mut build.state.group_counts[group];
-                    if *count == 0 {
-                        build.state.active_groups.push(face.group);
-                    }
-                    *count = count.saturating_add(1);
+                    let group = item.faces[build.face_cursor].group;
+                    let cell = build.item_cells.last().copied().unwrap_or(u32::MAX);
+                    let pending = build.commands.entry((group, cell)).or_insert_with(|| {
+                        build.command_keys.push((group, cell));
+                        PendingCommand::default()
+                    });
+                    pending.count = pending.count.saturating_add(1);
                     if count_visible {
                         build.required = build.required.saturating_add(1);
                     }
@@ -828,18 +859,13 @@ impl DrawList {
                     byte_work += std::mem::size_of::<CachedFace>();
                 }
                 LayoutPhase::ClearInitialCounts => {
-                    if build.group_cursor >= build.state.active_groups.len() {
-                        build.state.active_groups.clear();
-                        build.phase = LayoutPhase::Priority;
-                        build.item_cursor = 0;
-                        continue;
-                    }
-                    let group = build.state.active_groups[build.group_cursor] as usize;
-                    if let Some(count) = build.state.group_counts.get_mut(group) {
-                        *count = 0;
-                    }
-                    build.group_cursor += 1;
-                    item_work += 1;
+                    build.commands.clear();
+                    build.command_keys.clear();
+                    build.cells.clear();
+                    build.item_cells.clear();
+                    build.state.cells.clear();
+                    build.phase = LayoutPhase::Priority;
+                    build.item_cursor = 0;
                 }
                 LayoutPhase::Priority => {
                     if build.item_cursor >= build.visible.len() {
@@ -849,7 +875,6 @@ impl DrawList {
                     }
                     let index = build.visible[build.item_cursor];
                     build.item_cursor += 1;
-                    item_work += 1;
                     items_visited += 1;
                     build.items_visited += 1;
                     let Some(item) = items.get(index) else { continue };
@@ -861,10 +886,8 @@ impl DrawList {
                         build.phase = LayoutPhase::CountSelected;
                         build.item_cursor = 0;
                         build.face_cursor = 0;
-                        build.group_cursor = 0;
                         continue;
                     };
-                    item_work += 1;
                     items_visited += 1;
                     build.items_visited += 1;
                     if candidate.faces <= build.remaining {
@@ -876,18 +899,17 @@ impl DrawList {
                     }
                 }
                 LayoutPhase::HideOmitted => {
-                    if build.required <= MAX_FACE_INSTANCES || build.item_cursor >= build.visible.len() {
+                    if !build.over_capacity() || build.item_cursor >= build.visible.len() {
                         build.phase = LayoutPhase::Commands;
                         build.item_cursor = 0;
                         build.face_cursor = 0;
-                        build.group_cursor = 0;
+                        build.command_cursor = 0;
                         continue;
                     }
                     let index = build.visible[build.item_cursor];
                     if build.selected_items.contains(&index) {
                         build.item_cursor += 1;
                         build.face_cursor = 0;
-                        item_work += 1;
                         items_visited += 1;
                         build.items_visited += 1;
                         continue;
@@ -898,13 +920,11 @@ impl DrawList {
                     }
                     let Some(item) = items.get_mut(index) else {
                         build.item_cursor += 1;
-                        item_work += 1;
                         continue;
                     };
                     if build.face_cursor >= item.faces.len() {
                         build.item_cursor += 1;
                         build.face_cursor = 0;
-                        item_work += 1;
                         continue;
                     }
                     if let Some(face) = item.faces.get_mut(build.face_cursor) {
@@ -917,26 +937,17 @@ impl DrawList {
                 }
                 LayoutPhase::Commands | LayoutPhase::FullbrightCommands => {
                     let fullbright = matches!(build.phase, LayoutPhase::FullbrightCommands);
-                    if build.group_cursor >= build.state.active_groups.len() {
-                        build.group_cursor = 0;
+                    let Some(key) = build.command_keys.get(build.command_cursor).copied() else {
+                        build.command_cursor = 0;
                         if fullbright {
                             build.state.opaque_draws = build.state.draws.len();
-                            build.state.opaque_instances = build.opaque_count;
                             build.phase = LayoutPhase::Allocate;
                         } else {
                             build.phase = LayoutPhase::FullbrightCommands;
                         }
                         continue;
-                    }
-                    let group_id = build.state.active_groups[build.group_cursor];
-                    let group_index = group_id as usize;
-                    let count = build.state.group_counts.get(group_index).copied().unwrap_or_default();
-                    if !fullbright {
-                        if group_index >= build.group_limits.len() {
-                            build.group_limits.resize(group_index + 1, 0);
-                        }
-                        build.group_limits[group_index] = count;
-                    }
+                    };
+                    let (group_id, cell) = key;
                     if let Some(group) = self.groups.group(group_id) {
                         if !fullbright
                             && group.key.textures != MaterialTextures::default()
@@ -953,21 +964,20 @@ impl DrawList {
                                 textures: group.terrain_textures.clone().unwrap_or_else(|| std::array::from_fn(|_| None)),
                             });
                         }
-                        if !group.key.blended() && group.key.fullbright() == fullbright {
-                            build.state.group_offsets[group_index] = build.opaque_count;
-                            build.state.group_cursors[group_index] = 0;
-                            build.opaque_count = build.opaque_count.saturating_add(count);
-                            if count > 0
-                                && let (Ok(first), Ok(count)) = (u32::try_from(build.opaque_count - count), u32::try_from(count))
-                            {
-                                build.state.mesh_references.insert(group.key.mesh);
-                                build.state.draws.push(group.key.command(group_id, first, count));
-                                self.retain_layout_group(&mut build.state, group_id);
-                            }
+                        if !group.key.blended()
+                            && group.key.fullbright() == fullbright
+                            && let Some(pending) = build.commands.get_mut(&key)
+                            && pending.count > 0
+                            && let (Ok(first), Ok(count)) = (u32::try_from(build.opaque_count), u32::try_from(pending.count))
+                        {
+                            pending.first = build.opaque_count;
+                            pending.draw = build.state.draws.len();
+                            build.opaque_count = build.opaque_count.saturating_add(pending.count);
+                            build.push_draw(group.key.command(group_id, first, count, cell));
+                            self.retain_layout_group(&mut build.state, group_id);
                         }
                     }
-                    build.group_cursor += 1;
-                    item_work += 1;
+                    build.command_cursor += 1;
                 }
                 LayoutPhase::Allocate => {
                     let target = build.opaque_count.saturating_mul(INSTANCE_BYTES);
@@ -997,18 +1007,18 @@ impl DrawList {
                         continue;
                     }
                     let index = build.input_items()[build.item_cursor];
+                    let cell = build.item_cells.get(build.item_cursor).copied().unwrap_or(u32::MAX);
                     let Some(item) = items.get_mut(index) else {
                         build.item_cursor += 1;
                         build.face_cursor = 0;
                         build.item_has_slot = false;
-                        item_work += 1;
                         continue;
                     };
                     if build.face_cursor == 0 {
-                        item_work += 1;
                         items_visited += 1;
                         build.items_visited += 1;
                         build.item_has_slot = false;
+                        build.item_sphere = bounds_sphere(item.position, item.rotation, item.scale, item.info.bounds);
                     }
                     if build.face_cursor >= item.faces.len() {
                         build.visible_items += usize::from(build.item_has_slot);
@@ -1024,32 +1034,17 @@ impl DrawList {
                     };
                     if face.blended {
                         build.item_has_slot = true;
-                        build.blended.push(BlendedFace {
-                            distance_squared: blend_distance(item.position, item.rotation, item.scale, face.center, build.camera),
-                            order: face.order,
-                            item: index,
-                            face: face_index,
-                            group: face.group,
-                            slot: 0,
-                        });
+                        build.blended.push(BlendedFace { order: face.order, item: index, face: face_index, group: face.group, cell });
                     } else {
-                        let group = face.group as usize;
-                        let cursor = build.state.group_cursors.get_mut(group);
-                        let offset = if let Some(cursor) = cursor {
-                            let count = build.group_limits.get(group).copied().unwrap_or_default();
-                            if *cursor < count {
-                                let offset = build.state.group_offsets[group].saturating_add(*cursor);
-                                *cursor += 1;
-                                Some(offset)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        let slot = offset.and_then(|offset| u32::try_from(offset).ok()).filter(|slot| {
+                        let placement = build.commands.get_mut(&(face.group, cell)).and_then(|pending| {
+                            (pending.cursor < pending.count).then(|| {
+                                pending.cursor += 1;
+                                (pending.first.saturating_add(pending.cursor - 1), pending.draw)
+                            })
+                        });
+                        let slot = placement.and_then(|(offset, _)| u32::try_from(offset).ok()).filter(|slot| {
                             write_layout_instance(
-                                &self.instance_bytes,
+                                &self.committed.instance_bytes,
                                 &mut build.state.instance_bytes,
                                 &mut build.state.dirty_slots,
                                 *slot,
@@ -1059,6 +1054,16 @@ impl DrawList {
                         });
                         assign_slot(face, build.layout, self.layout, slot, None);
                         build.item_has_slot |= slot.is_some();
+                        if slot.is_some()
+                            && let Some((_, draw)) = placement
+                            && let Some(sphere) = build.item_sphere
+                            && let Some(command) = build.state.draws.get_mut(draw)
+                        {
+                            command.include(sphere, item.shading);
+                            if let Some(bounds) = build.state.cells.get_mut(cell as usize) {
+                                *bounds = Some(bounds.map_or(sphere, |bounds| bounds.union(sphere)));
+                            }
+                        }
                     }
                     build.face_cursor += 1;
                     faces_visited += 1;
@@ -1067,15 +1072,15 @@ impl DrawList {
                 }
                 LayoutPhase::EmitBlended => {
                     let Some(blended) = build.blended.pop() else {
-                        build.group_cursor = 0;
-                        build.phase = LayoutPhase::ClearFinalCounts;
+                        build.phase = LayoutPhase::Commit;
                         continue;
                     };
-                    item_work += 1;
                     let Some(item) = items.get_mut(blended.item) else {
                         build.stale = true;
                         continue;
                     };
+                    let sphere = bounds_sphere(item.position, item.rotation, item.scale, item.info.bounds);
+                    let shading = item.shading;
                     let Some(face) = item.faces.get_mut(blended.face) else {
                         build.stale = true;
                         continue;
@@ -1090,9 +1095,9 @@ impl DrawList {
                     };
                     let blend_index = build.blend_index;
                     build.blend_index += 1;
-                    build.state.blended.push(BlendedFace { slot, ..blended });
+                    build.state.blended.push(blended);
                     let start = slot as usize * INSTANCE_BYTES;
-                    let old = self.instance_bytes.get(start..start + INSTANCE_BYTES);
+                    let old = self.committed.instance_bytes.get(start..start + INSTANCE_BYTES);
                     build.state.instance_bytes.extend_from_slice(&item.transform);
                     build.state.instance_bytes.extend_from_slice(&face.parameter_bytes);
                     let new = build.state.instance_bytes.get(start..start + INSTANCE_BYTES);
@@ -1104,122 +1109,18 @@ impl DrawList {
                         break;
                     };
                     assign_slot(face, build.layout, self.layout, Some(slot), Some(blend_index));
-                    build.state.mesh_references.insert(key.mesh);
-                    build.state.draws.push(key.command(blended.group, slot, 1));
+                    let mut command = key.command(blended.group, slot, 1, blended.cell);
+                    if let Some(sphere) = sphere {
+                        command.include(sphere, shading);
+                        if let Some(bounds) = build.state.cells.get_mut(blended.cell as usize) {
+                            *bounds = Some(bounds.map_or(sphere, |bounds| bounds.union(sphere)));
+                        }
+                    }
+                    build.push_draw(command);
                     self.retain_layout_group(&mut build.state, blended.group);
                     faces_visited += 1;
                     build.faces_visited += 1;
                     byte_work += INSTANCE_BYTES;
-                }
-                LayoutPhase::ClearFinalCounts => {
-                    if build.group_cursor >= build.state.active_groups.len() {
-                        build.state.active_groups.clear();
-                        build.batch_cursor = 0;
-                        build.phase = LayoutPhase::BatchOpaque;
-                        continue;
-                    }
-                    let group = build.state.active_groups[build.group_cursor] as usize;
-                    if let Some(count) = build.state.group_counts.get_mut(group) {
-                        *count = 0;
-                    }
-                    build.group_cursor += 1;
-                    item_work += 1;
-                }
-                LayoutPhase::BatchOpaque => {
-                    if build.batch_cursor >= build.state.opaque_draws {
-                        build.batch_order_cursor = 0;
-                        build.batch_command_cursor = 0;
-                        build.phase = LayoutPhase::BatchOpaqueEncode;
-                        continue;
-                    }
-                    let draw = &build.state.draws[build.batch_cursor];
-                    let (binding, args) = ensure_batch(&mut self.groups, draw, meshes);
-                    if build.batch_seen.insert(binding.id) {
-                        build.state.batch_order.push(binding.id);
-                        if let Some(group) = self.groups.batch_group_mut(binding.id) {
-                            group.commands.clear();
-                        }
-                    }
-                    if let Some(group) = self.groups.batch_group_mut(binding.id) {
-                        group.commands.push(args);
-                    } else {
-                        build.stale = true;
-                        break;
-                    }
-                    build.batch_cursor += 1;
-                    item_work += 1;
-                    byte_work += INDIRECT_DRAW_BYTES;
-                }
-                LayoutPhase::BatchOpaqueEncode => {
-                    if build.batch_order_cursor >= build.state.batch_order.len() {
-                        build.batch_cursor = build.state.opaque_draws;
-                        build.blended_batch_start = build.state.draw_batches.len();
-                        build.state.blended_batches = build.state.draw_batches.len();
-                        build.state.blended_commands = build.state.first_instances.len();
-                        build.phase = LayoutPhase::BatchBlended;
-                        continue;
-                    }
-                    let id = build.state.batch_order[build.batch_order_cursor];
-                    let Some(group) = self.groups.batch_group(id) else {
-                        build.stale = true;
-                        break;
-                    };
-                    if build.batch_command_cursor == 0 {
-                        let offset = build.state.indirect_bytes.len() as u64;
-                        build.state.draw_batches.push(DrawBatch {
-                            id,
-                            key: group.key,
-                            buffers: Arc::clone(&group.buffers),
-                            offset,
-                            count: group.commands.len() as u32,
-                        });
-                    }
-                    if let Some(args) = group.commands.get(build.batch_command_cursor).copied() {
-                        build.state.first_instances.push(args.first_instance);
-                        encode_draw(&args, &mut build.state.indirect_bytes, indirect_first_instance);
-                    } else {
-                        build.stale = true;
-                        break;
-                    }
-                    build.batch_command_cursor += 1;
-                    item_work += 1;
-                    byte_work += INDIRECT_DRAW_BYTES;
-                    if build.batch_command_cursor >= group.commands.len() {
-                        build.batch_order_cursor += 1;
-                        build.batch_command_cursor = 0;
-                    }
-                }
-                LayoutPhase::BatchBlended => {
-                    if build.batch_cursor >= build.state.draws.len() {
-                        build.phase = LayoutPhase::Commit;
-                        continue;
-                    }
-                    let draw = &build.state.draws[build.batch_cursor];
-                    let (binding, args) = ensure_batch(&mut self.groups, draw, meshes);
-                    let merge = build.state.draw_batches.len() > build.blended_batch_start
-                        && build.state.draw_batches.last().is_some_and(|batch| batch.id == binding.id);
-                    if merge {
-                        if let Some(batch) = build.state.draw_batches.last_mut() {
-                            batch.count += 1;
-                        }
-                    } else if let Some(group) = self.groups.batch_group(binding.id) {
-                        let offset = build.state.indirect_bytes.len() as u64;
-                        build.state.draw_batches.push(DrawBatch {
-                            id: binding.id,
-                            key: group.key,
-                            buffers: Arc::clone(&group.buffers),
-                            offset,
-                            count: 1,
-                        });
-                    } else {
-                        build.stale = true;
-                        break;
-                    }
-                    build.state.first_instances.push(args.first_instance);
-                    encode_draw(&args, &mut build.state.indirect_bytes, indirect_first_instance);
-                    build.batch_cursor += 1;
-                    item_work += 1;
-                    byte_work += INDIRECT_DRAW_BYTES;
                 }
                 LayoutPhase::Commit => break,
             }
@@ -1236,37 +1137,24 @@ impl DrawList {
         let complete = matches!(build.phase, LayoutPhase::Commit);
         if complete {
             let commit_started = Instant::now();
-            build.state.layout_items = if build.required > MAX_FACE_INSTANCES {
-                std::mem::take(&mut build.layout_items)
-            } else {
-                std::mem::take(&mut build.visible)
-            };
+            build.state.layout_items =
+                if build.over_capacity() { std::mem::take(&mut build.layout_items) } else { std::mem::take(&mut build.visible) };
             build.state.visible_items = build.visible_items;
             build.state.omitted = build.omitted;
-            build.state.instance_count = build.state.instance_bytes.len() / INSTANCE_BYTES;
             build.state.valid = true;
             let omitted_faces = build.omitted;
             let stale = build.stale;
-            self.swap_state(&mut build.state);
+            std::mem::swap(&mut self.committed, &mut build.state);
             self.layout = build.layout;
+            self.cull_dirty = true;
             self.retired = Some(build);
             commit_ms += commit_started.elapsed().as_secs_f64() * 1000.0;
-            Some(LayoutProgress {
-                stats: LayoutStats { omitted_faces, blended: !self.blended.is_empty(), items_visited, faces_visited },
-                complete: true,
-                stale,
-                commit_ms,
-            })
+            Some(LayoutProgress { stats: LayoutStats { omitted_faces, items_visited, faces_visited }, complete: true, stale, commit_ms })
         } else {
             let stale = build.stale;
             let omitted_faces = build.omitted;
             self.pending = Some(build);
-            Some(LayoutProgress {
-                stats: LayoutStats { omitted_faces, blended: false, items_visited, faces_visited },
-                complete: false,
-                stale,
-                commit_ms,
-            })
+            Some(LayoutProgress { stats: LayoutStats { omitted_faces, items_visited, faces_visited }, complete: false, stale, commit_ms })
         }
     }
 
@@ -1276,51 +1164,24 @@ impl DrawList {
         }
     }
 
-    fn swap_state(&mut self, state: &mut LayoutState) {
-        std::mem::swap(&mut self.draws, &mut state.draws);
-        std::mem::swap(&mut self.mesh_references, &mut state.mesh_references);
-        std::mem::swap(&mut self.instance_bytes, &mut state.instance_bytes);
-        std::mem::swap(&mut self.active_groups, &mut state.active_groups);
-        std::mem::swap(&mut self.active_textures, &mut state.active_textures);
-        std::mem::swap(&mut self.active_terrain, &mut state.active_terrain);
-        std::mem::swap(&mut self.texture_seen, &mut state.texture_seen);
-        std::mem::swap(&mut self.terrain_seen, &mut state.terrain_seen);
-        std::mem::swap(&mut self.group_counts, &mut state.group_counts);
-        std::mem::swap(&mut self.group_offsets, &mut state.group_offsets);
-        std::mem::swap(&mut self.group_cursors, &mut state.group_cursors);
-        std::mem::swap(&mut self.layout_items, &mut state.layout_items);
-        std::mem::swap(&mut self.priority_items, &mut state.priority_items);
-        std::mem::swap(&mut self.draw_group_refs, &mut state.draw_group_refs);
-        std::mem::swap(&mut self.draw_group_seen, &mut state.draw_group_seen);
-        std::mem::swap(&mut self.blended, &mut state.blended);
-        std::mem::swap(&mut self.dirty_slots, &mut state.dirty_slots);
-        std::mem::swap(&mut self.opaque_draws, &mut state.opaque_draws);
-        std::mem::swap(&mut self.opaque_instances, &mut state.opaque_instances);
-        std::mem::swap(&mut self.instance_count, &mut state.instance_count);
-        std::mem::swap(&mut self.visible_items, &mut state.visible_items);
-        std::mem::swap(&mut self.omitted, &mut state.omitted);
-        std::mem::swap(&mut self.valid, &mut state.valid);
-        std::mem::swap(&mut self.batch_order, &mut state.batch_order);
-        std::mem::swap(&mut self.draw_batches, &mut state.draw_batches);
-        std::mem::swap(&mut self.indirect_bytes, &mut state.indirect_bytes);
-        std::mem::swap(&mut self.first_instances, &mut state.first_instances);
-        std::mem::swap(&mut self.blended_batches, &mut state.blended_batches);
-        std::mem::swap(&mut self.blended_commands, &mut state.blended_commands);
-        self.hidden_slots.clear();
-        self.batches_dirty = false;
-    }
-
-    fn retire_layout_step(&mut self) {
+    fn retire_layout_step(&mut self, items: &mut ItemSlab, started: Instant, budget: Duration) {
         let Some(build) = self.retired.as_mut() else { return };
-        let mut budget = RETIRED_LAYOUT_ENTRIES_PER_FRAME;
-        while budget > 0 && !build.retired() {
+        let mut steps = 0usize;
+        while !build.retired() {
+            steps += 1;
+            if steps.is_multiple_of(LAYOUT_CLOCK_STEPS) && started.elapsed() >= budget {
+                break;
+            }
             if let Some(group) = build.state.draw_group_refs.pop() {
                 self.groups.release(group);
-                budget -= 1;
-            } else {
-                retire_vec(&mut build.state.active_textures, &mut budget);
-                retire_vec(&mut build.state.active_terrain, &mut budget);
-                retire_vec(&mut build.state.draw_batches, &mut budget);
+            } else if build.state.active_textures.pop().is_some() || build.state.active_terrain.pop().is_some() {
+                continue;
+            } else if let Some(item) = build.state.layout_items.pop().and_then(|index| items.get_mut(index)) {
+                for face in item.faces.iter_mut().filter(|face| face.layout != self.layout) {
+                    face.slot = None;
+                    face.blended_index = None;
+                    face.committed = None;
+                }
             }
         }
         if self.retired.as_ref().is_some_and(LayoutBuild::retired) {
@@ -1328,193 +1189,135 @@ impl DrawList {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn layout(&mut self, previous: &[ItemIndex], visible: &[ItemIndex], items: &mut ItemSlab, camera: Camera) -> LayoutStats {
-        let mut items_visited = 0usize;
-        let mut faces_visited = 0usize;
-        let layout = self.next_layout();
-        self.layout = layout;
-        self.release_draw_group_refs();
-        self.draws.clear();
-        self.mesh_references.clear();
-        self.active_groups.clear();
-        self.active_textures.clear();
-        self.active_terrain.clear();
-        self.texture_seen.clear();
-        self.terrain_seen.clear();
-        self.blended.clear();
-        self.layout_items.clear();
-        self.priority_items.clear();
-        self.dirty_slots.clear();
-        self.opaque_draws = 0;
-        self.opaque_instances = 0;
-        self.instance_count = 0;
-        self.visible_items = 0;
-        self.omitted = 0;
-
-        if previous != visible {
-            for index in previous {
-                if !contains_item(visible, items, *index)
-                    && let Some(item) = items.get_mut(*index)
-                {
-                    items_visited += 1;
-                    faces_visited = faces_visited.saturating_add(item.faces.len());
-                    for face in &mut item.faces {
-                        face.slot = None;
-                        face.blended_index = None;
-                    }
-                }
+    pub(super) fn cull(
+        &mut self,
+        items: &ItemSlab,
+        camera: Camera,
+        frustum: &Frustum,
+        meshes: &HashMap<MeshId, GpuMesh>,
+        indirect_first_instance: bool,
+        view: &mut ViewDraws,
+    ) -> CullStats {
+        self.cull_dirty = false;
+        let blended_sorted = self.select(items, camera, frustum, view);
+        let Self { groups, committed, .. } = self;
+        for id in view.batch_order.drain(..) {
+            if let Some(commands) = view.batch_commands.get_mut(id) {
+                commands.clear();
             }
         }
-
-        self.group_counts.resize(self.groups.groups.len(), 0);
-        self.group_offsets.resize(self.groups.groups.len(), 0);
-        self.group_cursors.resize(self.groups.groups.len(), 0);
-        let mut required = 0usize;
-        for id in visible {
-            let Some(item) = items.get(*id) else { continue };
-            items_visited += 1;
-            faces_visited = faces_visited.saturating_add(item.faces.len());
-            required = required.saturating_add(item.faces.len());
-            let drawable = self.count_item_faces(item);
-            self.visible_items += usize::from(drawable);
+        for index in &view.opaque {
+            let Some(draw) = committed.draws.get(*index as usize) else { continue };
+            let (binding, args) = ensure_batch(groups, draw, meshes);
+            if binding.id >= view.batch_commands.len() {
+                view.batch_commands.resize_with(binding.id + 1, Vec::new);
+            }
+            let Some(commands) = view.batch_commands.get_mut(binding.id) else { continue };
+            if commands.is_empty() {
+                view.batch_order.push(binding.id);
+            }
+            commands.push(args);
         }
-        if required > MAX_FACE_INSTANCES {
-            self.omitted = 0;
-            self.visible_items = 0;
-            self.clear_group_counts();
-            self.priority_items.extend_from_slice(visible);
-            self.priority_items.sort_unstable_by(|a, b| {
-                let a_priority = items.get(*a).map_or((0.0, f64::INFINITY), |item| draw_priority(item, camera));
-                let b_priority = items.get(*b).map_or((0.0, f64::INFINITY), |item| draw_priority(item, camera));
-                b_priority
-                    .0
-                    .total_cmp(&a_priority.0)
-                    .then_with(|| a_priority.1.total_cmp(&b_priority.1))
-                    .then_with(|| items.get(*a).map(|item| item.id).cmp(&items.get(*b).map(|item| item.id)))
+        view.encoded.clear();
+        view.first_instances.clear();
+        view.batches.clear();
+        for id in &view.batch_order {
+            let (Some(group), Some(commands)) = (groups.batch_group(*id), view.batch_commands.get(*id)) else { continue };
+            let offset = view.encoded.len() as u64;
+            for args in commands {
+                view.first_instances.push(args.first_instance);
+                encode_draw(args, &mut view.encoded, indirect_first_instance);
+            }
+            view.batches.push(DrawBatch {
+                id: *id,
+                key: group.key,
+                buffers: Arc::clone(&group.buffers),
+                offset,
+                count: commands.len() as u32,
             });
-            items_visited = items_visited.saturating_add(self.priority_items.len());
-            let mut remaining = MAX_FACE_INSTANCES;
-            for id in &self.priority_items {
-                let count = items.get(*id).map_or(0, |item| item.faces.len());
-                faces_visited = faces_visited.saturating_add(count);
-                if count <= remaining {
-                    remaining -= count;
-                    self.layout_items.push(*id);
-                } else {
-                    self.omitted = self.omitted.saturating_add(count);
-                    if let Some(item) = items.get_mut(*id) {
-                        faces_visited = faces_visited.saturating_add(item.faces.len());
-                        for face in &mut item.faces {
-                            face.slot = None;
-                            face.blended_index = None;
-                        }
-                    }
-                }
-            }
-            for index in 0..self.layout_items.len() {
-                let id = self.layout_items[index];
-                let Some(item) = items.get(id) else { continue };
-                items_visited += 1;
-                faces_visited = faces_visited.saturating_add(item.faces.len());
-                let drawable = self.count_item_faces(item);
-                self.visible_items += usize::from(drawable);
+        }
+        let blended_start = view.batches.len();
+        for record in &view.blended {
+            let Some(draw) = committed.draws.get(committed.opaque_draws.saturating_add(*record as usize)) else { continue };
+            let (binding, args) = ensure_batch(groups, draw, meshes);
+            let offset = view.encoded.len() as u64;
+            view.first_instances.push(args.first_instance);
+            encode_draw(&args, &mut view.encoded, indirect_first_instance);
+            if view.batches.len() > blended_start
+                && let Some(batch) = view.batches.last_mut()
+                && batch.id == binding.id
+            {
+                batch.count += 1;
+            } else if let Some(group) = groups.batch_group(binding.id) {
+                view.batches.push(DrawBatch { id: binding.id, key: group.key, buffers: Arc::clone(&group.buffers), offset, count: 1 });
             }
         }
-        let layout_items = if required > MAX_FACE_INSTANCES { &self.layout_items } else { visible };
-
-        let mut opaque_count = 0usize;
-        for fullbright in [false, true] {
-            for group_id in &self.active_groups {
-                let index = *group_id as usize;
-                let count = self.group_counts[index];
-                let Some(group) = self.groups.groups[index].as_ref() else { continue };
-                if !fullbright && group.key.textures != MaterialTextures::default() && self.texture_seen.insert(group.key.textures) {
-                    self.active_textures.push(TextureDemand { key: group.key.textures, images: group.images.clone() });
-                }
-                if !fullbright
-                    && let Some(region) = group.key.terrain
-                    && self.terrain_seen.insert(region)
-                {
-                    self.active_terrain.push(TerrainDemand {
-                        region,
-                        textures: group.terrain_textures.clone().unwrap_or_else(|| std::array::from_fn(|_| None)),
-                    });
-                }
-                if !group.key.blended() && group.key.fullbright() == fullbright {
-                    self.group_offsets[index] = opaque_count;
-                    self.group_cursors[index] = 0;
-                    opaque_count = opaque_count.saturating_add(count);
-                    if count > 0
-                        && let (Ok(first), Ok(count)) = (u32::try_from(opaque_count - count), u32::try_from(count))
-                    {
-                        self.mesh_references.insert(group.key.mesh);
-                        self.draws.push(group.key.command(*group_id, first, count));
-                    }
-                }
-            }
+        let changed = view.encoded != view.indirect_bytes;
+        if changed {
+            std::mem::swap(&mut view.encoded, &mut view.indirect_bytes);
         }
-        for group in self.active_groups.drain(..) {
-            self.group_counts[group as usize] = 0;
-        }
-        self.opaque_draws = self.draws.len();
-        self.opaque_instances = opaque_count;
-        self.instance_bytes.resize(opaque_count.saturating_mul(INSTANCE_BYTES), 0);
-
-        for id in layout_items {
-            let Some(item) = items.get_mut(*id) else { continue };
-            items_visited += 1;
-            faces_visited = faces_visited.saturating_add(item.faces.len());
-            for (face_index, face) in item.faces.iter_mut().enumerate() {
-                if face.blended {
-                    let Ok(slot) = u32::try_from(self.opaque_instances.saturating_add(self.blended.len())) else { continue };
-                    face.slot = Some(slot);
-                    face.blended_index = Some(self.blended.len());
-                    face.layout = layout;
-                    face.retained = None;
-                    self.instance_bytes.extend_from_slice(&item.transform);
-                    self.instance_bytes.extend_from_slice(&face.parameter_bytes);
-                    self.blended.push(BlendedFace {
-                        distance_squared: blend_distance(item.position, item.rotation, item.scale, face.center, camera),
-                        order: face.order,
-                        item: *id,
-                        face: face_index,
-                        group: face.group,
-                        slot,
-                    });
-                } else {
-                    let group_index = face.group as usize;
-                    let cursor = &mut self.group_cursors[group_index];
-                    let offset = self.group_offsets[group_index].saturating_add(*cursor);
-                    let Ok(slot) = u32::try_from(offset) else { continue };
-                    if write_instance(&mut self.instance_bytes, slot, &item.transform, &face.parameter_bytes) {
-                        face.slot = Some(slot);
-                        face.layout = layout;
-                        face.retained = None;
-                        *cursor += 1;
-                    }
-                }
-            }
-        }
-        self.reorder_blended(items);
-        self.instance_count = self.instance_bytes.len() / INSTANCE_BYTES;
-        self.valid = true;
-        LayoutStats { omitted_faces: self.omitted, blended: !self.blended.is_empty(), items_visited, faces_visited }
+        CullStats { commands: view.first_instances.len(), changed, blended_sorted }
     }
 
-    #[cfg(test)]
-    fn count_item_faces(&mut self, item: &CachedItem) -> bool {
-        let mut drawable = false;
-        for face in &item.faces {
-            let index = face.group as usize;
-            let count = &mut self.group_counts[index];
-            if *count == 0 {
-                self.active_groups.push(face.group);
+    fn select(&self, items: &ItemSlab, camera: Camera, frustum: &Frustum, view: &mut ViewDraws) -> bool {
+        let state = &self.committed;
+        let eye = camera.position();
+        let draw_distance = camera.draw_distance();
+        view.cells.clear();
+        view.cells.extend(state.cells.iter().map(|cell| CellClass::new(*cell, eye, draw_distance, frustum)));
+        view.opaque.clear();
+        for (index, draw) in state.opaque().iter().enumerate() {
+            if draw.visible(&view.cells, eye, draw_distance, frustum) {
+                view.opaque.push(index as u32);
             }
-            *count += 1;
-            drawable = true;
         }
-        drawable
+        if view.layout != self.layout {
+            view.blended.clear();
+            view.layout = self.layout;
+        }
+        view.mark += 2;
+        let mark = view.mark;
+        view.blended_marks.resize(state.blended.len(), 0);
+        view.blended_distances.resize(state.blended.len(), 0.0);
+        let blended_draws = state.draws.get(state.opaque_draws..).unwrap_or_default();
+        for (record, (blended, draw)) in state.blended.iter().zip(blended_draws).enumerate() {
+            if !draw.visible(&view.cells, eye, draw_distance, frustum) {
+                continue;
+            }
+            let Some((item, face)) = blended_face(items, blended) else { continue };
+            view.blended_marks[record] = mark;
+            view.blended_distances[record] = blend_distance(item.position, item.rotation, item.scale, face.center, camera);
+        }
+        view.blended_keys.clear();
+        let push = |view: &mut ViewDraws, record: u32| {
+            let index = record as usize;
+            if view.blended_marks.get(index) == Some(&mark)
+                && let Some(blended) = state.blended.get(index)
+            {
+                view.blended_marks[index] = mark + 1;
+                view.blended_keys.push((view.blended_distances[index], blended.order, record));
+            }
+        };
+        let previous = std::mem::take(&mut view.blended);
+        for record in previous.iter().copied() {
+            push(view, record);
+        }
+        for record in 0..state.blended.len() {
+            push(view, record as u32);
+        }
+        view.blended = previous;
+        view.blended_keys.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        view.blended.clear();
+        view.blended.extend(view.blended_keys.iter().map(|key| key.2));
+        !view.blended.is_empty()
+    }
+
+    pub(super) fn slot_count(&self) -> usize {
+        self.committed.instance_bytes.len() / INSTANCE_BYTES
+    }
+
+    pub(super) fn cull_dirty(&self) -> bool {
+        self.cull_dirty
     }
 
     pub(super) fn patch(
@@ -1522,14 +1325,18 @@ impl DrawList {
         items: &ItemSlab,
         faces: &[(ItemIndex, usize)],
         pose_items: &[ItemIndex],
-        camera: Camera,
         origin: DVec3,
         transform_origin: DVec3,
-    ) -> PatchStats {
-        let mut stats = PatchStats::default();
+    ) -> usize {
+        let mut patched = 0;
         for (item_id, face_index) in faces {
             let Some(item) = items.get(*item_id) else { continue };
             let Some(face) = item.faces.get(*face_index) else { continue };
+            let sphere = if pose_items.binary_search(item_id).is_ok() {
+                bounds_sphere(item.position, item.rotation, item.scale, item.info.bounds)
+            } else {
+                None
+            };
             if let Some(build) = self.pending.as_mut()
                 && !build.stale
                 && face.layout == build.layout
@@ -1537,6 +1344,9 @@ impl DrawList {
                 && write_instance(&mut build.state.instance_bytes, slot, &item.transform, &face.parameter_bytes)
             {
                 build.upload(slot);
+                if let Some(sphere) = sphere {
+                    build.state.include(slot, face.blended_index, sphere, item.shading);
+                }
             }
             let Some(address) = self.committed_address(face) else { continue };
             let transform = if origin == transform_origin {
@@ -1544,26 +1354,21 @@ impl DrawList {
             } else {
                 instance_base(item.position, item.rotation, item.scale, item.invert_normals, origin)
             };
-            if !write_instance(&mut self.instance_bytes, address.slot, &transform, &face.parameter_bytes) {
+            if !write_instance(&mut self.committed.instance_bytes, address.slot, &transform, &face.parameter_bytes) {
                 continue;
             }
             self.committed_written(address.slot);
-            stats.faces_patched += 1;
-            if pose_items.binary_search(item_id).is_ok()
-                && let Some(index) = address.blended_index
-                && let Some(blended) = self.blended.get_mut(index)
-            {
-                blended.distance_squared = blend_distance(item.position, item.rotation, item.scale, face.center, camera);
-                stats.blended_sorted = true;
+            patched += 1;
+            if let Some(sphere) = sphere {
+                self.committed.include(address.slot, address.blended_index, sphere, item.shading);
+                self.cull_dirty = true;
             }
         }
-        self.dirty_slots.sort_unstable();
-        self.dirty_slots.dedup();
-        stats
+        patched
     }
 
     fn committed_written(&mut self, slot: u32) {
-        self.dirty_slots.push(slot);
+        self.committed.dirty_slots.push(slot);
         if let Some(build) = self.pending.as_mut()
             && (slot as usize) < build.state.instance_bytes.len() / INSTANCE_BYTES
         {
@@ -1571,56 +1376,15 @@ impl DrawList {
         }
     }
 
-    pub(super) fn sort_blended(&mut self, items: &ItemSlab, camera: Camera) -> bool {
-        if self.blended.is_empty() {
-            return false;
-        }
-        for blended in &mut self.blended {
-            if let Some(item) = items.get(blended.item)
-                && let Some(face) = item.faces.get(blended.face)
-            {
-                blended.distance_squared = blend_distance(item.position, item.rotation, item.scale, face.center, camera);
-            }
-        }
-        self.reorder_blended(items);
-        true
-    }
-
-    pub(super) fn reorder_blended(&mut self, items: &ItemSlab) {
-        let mut order = (0..self.blended.len())
-            .filter(|index| {
-                let blended = &self.blended[*index];
-                items
-                    .get(blended.item)
-                    .and_then(|item| item.faces.get(blended.face))
-                    .is_some_and(|face| face.group == blended.group && face.order == blended.order && face.blended)
-            })
-            .collect::<Vec<_>>();
-        self.release_draw_group_refs();
-        order.sort_unstable_by(|a, b| {
-            let (a, b) = (&self.blended[*a], &self.blended[*b]);
-            b.distance_squared.total_cmp(&a.distance_squared).then_with(|| a.order.cmp(&b.order))
-        });
-        self.draws.truncate(self.opaque_draws);
-        for index in order {
-            let blended = &self.blended[index];
-            if let Some(key) = self.groups.key(blended.group) {
-                self.mesh_references.insert(key.mesh);
-                self.draws.push(key.command(blended.group, blended.slot, 1));
-            }
-        }
-        self.retain_draw_group_refs();
-    }
-
-    pub(super) fn upload_layout(&mut self, queue: &Queue, buffer: &Buffer) -> UploadStats {
+    pub(super) fn upload_layout(&mut self, queue: &Queue, buffer: &Buffer, full: bool) -> UploadStats {
         let mut stats = UploadStats::default();
-        self.dirty_slots.sort_unstable();
-        self.dirty_slots.dedup();
+        self.committed.dirty_slots.sort_unstable();
+        self.committed.dirty_slots.dedup();
         let mut range_count = 0usize;
         let mut uploaded_bytes = 0usize;
         let mut first = None;
         let mut last = 0u32;
-        for slot in self.dirty_slots.iter().copied() {
+        for slot in self.committed.dirty_slots.iter().copied() {
             if first.is_none_or(|_| slot.saturating_sub(last) > MAX_PATCH_GAP_SLOTS) {
                 if let Some(start) = first {
                     uploaded_bytes = uploaded_bytes.saturating_add((last as usize + 1 - start as usize) * INSTANCE_BYTES);
@@ -1633,15 +1397,15 @@ impl DrawList {
         if let Some(start) = first {
             uploaded_bytes = uploaded_bytes.saturating_add((last as usize + 1 - start as usize) * INSTANCE_BYTES);
         }
-        if range_count > MAX_LAYOUT_UPLOAD_RANGES || uploaded_bytes > self.instance_bytes.len() / 2 {
-            if !self.instance_bytes.is_empty() {
-                queue.write_buffer(buffer, 0, &self.instance_bytes);
-                stats.bytes = self.instance_bytes.len();
+        if full || range_count > MAX_LAYOUT_UPLOAD_RANGES || uploaded_bytes > self.committed.instance_bytes.len() / 2 {
+            if !self.committed.instance_bytes.is_empty() {
+                queue.write_buffer(buffer, 0, &self.committed.instance_bytes);
+                stats.bytes = self.committed.instance_bytes.len();
                 stats.calls = 1;
             }
         } else {
             first = None;
-            for slot in self.dirty_slots.iter().copied() {
+            for slot in self.committed.dirty_slots.iter().copied() {
                 if let Some(start) = first
                     && slot.saturating_sub(last) > MAX_PATCH_GAP_SLOTS
                 {
@@ -1661,32 +1425,34 @@ impl DrawList {
                 stats.calls += uploaded.calls;
             }
         }
-        self.dirty_slots.clear();
+        self.committed.dirty_slots.clear();
         stats
     }
 
     pub(super) fn upload_patch(&mut self, queue: &Queue, buffer: &Buffer) -> UploadStats {
         let mut stats = UploadStats::default();
+        self.committed.dirty_slots.sort_unstable();
+        self.committed.dirty_slots.dedup();
         let mut range_count = 0;
         let mut previous = None;
-        for slot in self.dirty_slots.iter().copied() {
+        for slot in self.committed.dirty_slots.iter().copied() {
             if previous.is_none_or(|last: u32| slot.saturating_sub(last) > MAX_PATCH_GAP_SLOTS) {
                 range_count += 1;
             }
             previous = Some(slot);
         }
         if range_count > MAX_PATCH_RANGES {
-            if !self.instance_bytes.is_empty() {
-                queue.write_buffer(buffer, 0, &self.instance_bytes);
-                stats.bytes = self.instance_bytes.len();
+            if !self.committed.instance_bytes.is_empty() {
+                queue.write_buffer(buffer, 0, &self.committed.instance_bytes);
+                stats.bytes = self.committed.instance_bytes.len();
                 stats.calls = 1;
             }
-            self.dirty_slots.clear();
+            self.committed.dirty_slots.clear();
             return stats;
         }
         let mut first = None;
         let mut last = 0u32;
-        for slot in self.dirty_slots.iter().copied() {
+        for slot in self.committed.dirty_slots.iter().copied() {
             if let Some(start) = first
                 && slot.saturating_sub(last) > MAX_PATCH_GAP_SLOTS
             {
@@ -1705,14 +1471,14 @@ impl DrawList {
             stats.bytes += uploaded.bytes;
             stats.calls += uploaded.calls;
         }
-        self.dirty_slots.clear();
+        self.committed.dirty_slots.clear();
         stats
     }
 
     fn write_slot_range(&self, queue: &Queue, buffer: &Buffer, first: u32, last: u32) -> UploadStats {
         let start = first as usize * INSTANCE_BYTES;
         let end = (last as usize + 1).saturating_mul(INSTANCE_BYTES);
-        if let Some(bytes) = self.instance_bytes.get(start..end) {
+        if let Some(bytes) = self.committed.instance_bytes.get(start..end) {
             queue.write_buffer(buffer, start as u64, bytes);
             return UploadStats { bytes: bytes.len(), calls: 1 };
         }
@@ -1773,8 +1539,8 @@ impl DrawList {
             hidden |= self.hide_face(face);
         }
         if hidden {
-            debug_assert!(self.visible_items > 0);
-            self.visible_items -= 1;
+            debug_assert!(self.committed.visible_items > 0);
+            self.committed.visible_items -= 1;
         }
     }
 
@@ -1787,32 +1553,21 @@ impl DrawList {
         let committed = self.committed_address(face);
         face.slot = None;
         face.blended_index = None;
-        face.retained = None;
+        face.committed = None;
         let Some(FaceSlot { slot, .. }) = committed else { return false };
         let start = slot as usize * INSTANCE_BYTES;
-        if let Some(instance) = self.instance_bytes.get_mut(start..start + INSTANCE_BYTES) {
+        if let Some(instance) = self.committed.instance_bytes.get_mut(start..start + INSTANCE_BYTES) {
             instance.fill(0);
-            self.hidden_slots.insert(slot);
-            self.batches_dirty = true;
             self.committed_written(slot);
         }
         true
     }
 
     fn release_draw_group_refs(&mut self) {
-        for group in self.draw_group_refs.drain(..) {
+        for group in self.committed.draw_group_refs.drain(..) {
             self.groups.release(group);
         }
-        self.draw_group_seen.clear();
-    }
-
-    fn retain_draw_group_refs(&mut self) {
-        self.draw_group_seen.clear();
-        for draw in &self.draws {
-            if self.draw_group_seen.insert(draw.group) && self.groups.retain(draw.group) {
-                self.draw_group_refs.push(draw.group);
-            }
-        }
+        self.committed.draw_group_seen.clear();
     }
 
     pub(super) fn release_group(&mut self, group: u32) {
@@ -1821,219 +1576,77 @@ impl DrawList {
 
     pub(super) fn update_terrain(&mut self, region: Region, textures: &[Option<TextureHandle>; 4]) {
         self.groups.update_terrain(region, textures);
-        for demand in self.active_terrain.iter_mut().filter(|demand| demand.region == region) {
+        for demand in self.committed.active_terrain.iter_mut().filter(|demand| demand.region == region) {
             demand.textures.clone_from(textures);
         }
     }
 
     pub(super) fn invalidate_batches(&mut self) {
-        self.batches_stale = true;
-    }
-
-    pub(super) fn flush_batch_invalidation(&mut self) -> bool {
-        let batching = self.pending.as_ref().is_some_and(|build| build.phase.batching());
-        if !self.batches_stale || batching {
-            return false;
-        }
-        self.batches_stale = false;
         self.groups.invalidate_batches();
-        self.draw_batches.clear();
-        self.batches_dirty = true;
-        true
-    }
-
-    pub(super) fn batches_dirty(&self) -> bool {
-        self.batches_dirty
+        self.cull_dirty = true;
     }
 
     pub(super) fn texture_demands(&self) -> &[TextureDemand] {
-        &self.active_textures
+        &self.committed.active_textures
     }
 
     pub(super) fn texture_keys(&self) -> &HashSet<MaterialTextures> {
-        &self.texture_seen
+        &self.committed.texture_seen
     }
 
     pub(super) fn terrain_demands(&self) -> &[TerrainDemand] {
-        &self.active_terrain
+        &self.committed.active_terrain
     }
 
     pub(super) fn terrain_regions(&self) -> &HashSet<Region> {
-        &self.terrain_seen
+        &self.committed.terrain_seen
     }
 
+    #[cfg(test)]
+    pub(super) fn has_blended(&self) -> bool {
+        !self.committed.blended.is_empty()
+    }
+
+    #[cfg(test)]
     pub(super) fn draws(&self) -> &[DrawCommand] {
-        &self.draws
-    }
-
-    pub(super) fn command_count(&self) -> usize {
-        self.first_instances.len()
-    }
-
-    pub(super) fn hides_range(&self, first: u32, count: u32) -> bool {
-        (first..first.saturating_add(count)).any(|slot| self.hidden_slots.contains(&slot))
+        &self.committed.draws
     }
 
     #[cfg(test)]
     pub(super) fn instance_transform(&self, slot: u32) -> Option<&[u8]> {
         let start = usize::try_from(slot).ok()?.checked_mul(INSTANCE_BYTES)?;
-        self.instance_bytes.get(start..start.checked_add(TRANSFORM_BYTES)?)
-    }
-
-    pub(super) fn draw_batches(&self) -> &[DrawBatch] {
-        &self.draw_batches
-    }
-
-    pub(super) fn indirect_bytes(&self) -> &[u8] {
-        &self.indirect_bytes
-    }
-
-    pub(super) fn first_instance(&self, offset: u64, command: u32) -> Option<u32> {
-        let index = usize::try_from(offset).ok()?.checked_div(INDIRECT_DRAW_BYTES)?.checked_add(command as usize)?;
-        self.first_instances.get(index).copied()
+        self.committed.instance_bytes.get(start..start.checked_add(TRANSFORM_BYTES)?)
     }
 
     pub(super) fn visible_items(&self) -> usize {
-        self.visible_items
+        self.committed.visible_items
     }
 
     pub(super) fn set_visible_items(&mut self, count: usize) {
-        self.visible_items = count;
+        self.committed.visible_items = count;
     }
 
     pub(super) fn has_dirty_slots(&self) -> bool {
-        !self.dirty_slots.is_empty()
+        !self.committed.dirty_slots.is_empty()
     }
 
     pub(super) fn valid(&self) -> bool {
-        self.valid
-    }
-
-    pub(super) fn has_blended(&self) -> bool {
-        !self.blended.is_empty()
+        self.committed.valid
     }
 
     pub(super) fn clear(&mut self) {
         self.cancel_layout();
         self.release_draw_group_refs();
-        self.clear_group_counts();
-        self.draws.clear();
-        self.mesh_references.clear();
-        self.instance_bytes.clear();
-        self.hidden_slots.clear();
-        self.active_textures.clear();
-        self.active_terrain.clear();
-        self.blended.clear();
-        self.dirty_slots.clear();
-        self.opaque_draws = 0;
-        self.opaque_instances = 0;
-        self.instance_count = 0;
-        self.visible_items = 0;
-        self.omitted = 0;
-        self.valid = false;
+        self.committed = LayoutState::default();
+        self.cull_dirty = true;
         self.layout = self.next_layout();
-        self.batch_order.clear();
-        self.draw_batches.clear();
-        self.indirect_bytes.clear();
-        self.first_instances.clear();
-        self.blended_batches = 0;
-        self.blended_commands = 0;
-        self.batches_dirty = false;
-        for group in self.groups.batches.iter_mut().flatten() {
-            group.commands.clear();
-        }
-    }
-
-    pub(super) fn build_draw_batches(&mut self, meshes: &HashMap<MeshId, GpuMesh>, indirect_first_instance: bool) -> usize {
-        for group in self.groups.batches.iter_mut().flatten() {
-            group.commands.clear();
-        }
-        self.batch_order.clear();
-        self.draw_batches.clear();
-        self.indirect_bytes.clear();
-        self.first_instances.clear();
-
-        for draw in &self.draws[..self.opaque_draws] {
-            if self.hides_range(draw.first, draw.count) {
-                continue;
-            }
-            let (binding, args) = ensure_batch(&mut self.groups, draw, meshes);
-            let group = self.groups.batch_group_mut(binding.id).expect("interned batch group");
-            if group.commands.is_empty() {
-                self.batch_order.push(binding.id);
-            }
-            group.commands.push(args);
-        }
-        for id in &self.batch_order {
-            let Some(group) = self.groups.batch_group(*id) else { continue };
-            let offset = self.indirect_bytes.len() as u64;
-            for args in &group.commands {
-                self.first_instances.push(args.first_instance);
-                encode_draw(args, &mut self.indirect_bytes, indirect_first_instance);
-            }
-            self.draw_batches.push(DrawBatch {
-                id: *id,
-                key: group.key,
-                buffers: Arc::clone(&group.buffers),
-                offset,
-                count: group.commands.len() as u32,
-            });
-        }
-
-        self.blended_batches = self.draw_batches.len();
-        self.blended_commands = self.first_instances.len();
-        self.push_blended_batches(meshes, indirect_first_instance);
-        self.batches_dirty = false;
-        self.draws.len()
-    }
-
-    pub(super) fn rebuild_blended_batches(&mut self, meshes: &HashMap<MeshId, GpuMesh>, indirect_first_instance: bool) -> usize {
-        self.draw_batches.truncate(self.blended_batches);
-        self.first_instances.truncate(self.blended_commands);
-        let start = self.blended_commands.saturating_mul(INDIRECT_DRAW_BYTES);
-        self.indirect_bytes.truncate(start);
-        self.push_blended_batches(meshes, indirect_first_instance);
-        start
-    }
-
-    fn push_blended_batches(&mut self, meshes: &HashMap<MeshId, GpuMesh>, indirect_first_instance: bool) {
-        let blended_start = self.blended_batches;
-        for draw in &self.draws[self.opaque_draws..] {
-            if self.hides_range(draw.first, draw.count) {
-                continue;
-            }
-            let (binding, args) = ensure_batch(&mut self.groups, draw, meshes);
-            let merge = self.draw_batches.len() > blended_start && self.draw_batches.last().is_some_and(|batch| batch.id == binding.id);
-            if merge {
-                self.first_instances.push(args.first_instance);
-                encode_draw(&args, &mut self.indirect_bytes, indirect_first_instance);
-                if let Some(batch) = self.draw_batches.last_mut() {
-                    batch.count += 1;
-                }
-            } else {
-                let offset = self.indirect_bytes.len() as u64;
-                self.first_instances.push(args.first_instance);
-                encode_draw(&args, &mut self.indirect_bytes, indirect_first_instance);
-                let group = self.groups.batch_group(binding.id).expect("interned batch group");
-                self.draw_batches.push(DrawBatch { id: binding.id, key: group.key, buffers: Arc::clone(&group.buffers), offset, count: 1 });
-            }
-        }
-    }
-
-    fn clear_group_counts(&mut self) {
-        for group in self.active_groups.drain(..) {
-            let index = group as usize;
-            if let Some(count) = self.group_counts.get_mut(index) {
-                *count = 0;
-            }
-        }
     }
 }
 
 fn assign_slot(face: &mut CachedFace, layout: LayoutId, committed: LayoutId, slot: Option<u32>, blended_index: Option<usize>) {
     if face.layout != layout {
         if face.layout == committed {
-            face.retained = face.slot.map(|slot| FaceSlot { layout: committed, slot, blended_index: face.blended_index });
+            face.committed = face.slot.map(|slot| FaceSlot { layout: committed, slot, blended_index: face.blended_index });
         }
         face.layout = layout;
     }
@@ -2070,14 +1683,15 @@ fn write_layout_instance(
     true
 }
 
-fn contains_item(visible: &[ItemIndex], items: &ItemSlab, index: ItemIndex) -> bool {
-    let Some(id) = items.get(index).map(|item| item.id) else { return false };
-    visible.binary_search_by(|visible| items.get(*visible).map_or(std::cmp::Ordering::Less, |item| item.id.cmp(&id))).is_ok()
-}
-
 fn blend_distance(position: DVec3, rotation: Quat, scale: Vec3, center: Vec3, camera: Camera) -> f64 {
     let relative = position - camera.position() + (rotation * (center * scale)).as_dvec3();
     relative.length_squared()
+}
+
+fn blended_face<'a>(items: &'a ItemSlab, blended: &BlendedFace) -> Option<(&'a CachedItem, &'a CachedFace)> {
+    let item = items.get(blended.item)?;
+    let face = item.faces.get(blended.face)?;
+    (face.group == blended.group && face.order == blended.order && face.blended).then_some((item, face))
 }
 
 fn ensure_batch(groups: &mut DrawInterner, draw: &DrawCommand, meshes: &HashMap<MeshId, GpuMesh>) -> (BatchBinding, DrawIndexedArgs) {

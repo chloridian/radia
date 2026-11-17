@@ -1,6 +1,5 @@
 mod cache;
 mod draw_list;
-mod first_appearance;
 mod frame;
 mod instance;
 mod items;
@@ -26,14 +25,13 @@ use uuid::Uuid;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
-    util::{BufferInitDescriptor, DeviceExt},
 };
 
 use world::{Entity, WorldTransform};
 
 use self::cache::FrameCache;
-use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
-use self::first_appearance::FirstAppearances;
+use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, ViewDraws};
+use self::instance::{INITIAL_FACE_INSTANCES, InstanceBuffers};
 use self::items::ItemIndex;
 use self::mesh::GpuMesh;
 use self::storage::Storage;
@@ -47,7 +45,7 @@ pub use pick::PickError;
 
 const MESH_BYTES: usize = 64 * 1024 * 1024;
 const DEPTH_BYTES: usize = 128 * 1024 * 1024;
-pub(super) const INSTANCE_BUFFER_BYTES: usize = 20 * 1024 * 1024;
+const INSTANCE_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MESH_UPLOADS: usize = 16;
 const TRANSFORM_BYTES: usize = 112;
@@ -55,6 +53,9 @@ const TRANSFORM_BYTES: usize = 112;
 #[derive(Clone, Copy, Default)]
 pub struct Stats {
     pub instances: usize,
+    pub instance_buffer_bytes: usize,
+    pub instance_peak: usize,
+    pub instance_buffer_growths: usize,
     pub draw_calls: usize,
     pub draw_commands: usize,
     pub pending_meshes: usize,
@@ -140,6 +141,8 @@ pub enum OmissionReason {
 #[derive(Default)]
 struct Accounting {
     bytes: AtomicUsize,
+    instances: AtomicUsize,
+    instance_peak: AtomicUsize,
     mesh_revision: AtomicU64,
     depth: AtomicUsize,
     peak: AtomicUsize,
@@ -152,16 +155,33 @@ impl Accounting {
     }
 
     fn reserve(self: &Arc<Self>, bytes: usize, resource: Resource) -> Option<Lease> {
-        let (account, limit) = match resource {
-            Resource::Mesh => (&self.bytes, MESH_BYTES),
-            Resource::Depth => (&self.depth, DEPTH_BYTES),
+        let limit = match resource {
+            Resource::Mesh => MESH_BYTES,
+            Resource::Instances => return Some(self.charge(bytes)),
+            Resource::Depth => DEPTH_BYTES,
         };
-        let before =
-            account.try_update(Ordering::AcqRel, Ordering::Acquire, |used| used.checked_add(bytes).filter(|n| *n <= limit)).ok()?;
+        let before = self
+            .account(&resource)
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| used.checked_add(bytes).filter(|n| *n <= limit))
+            .ok()?;
         if matches!(resource, Resource::Mesh) {
             self.peak.fetch_max(before + bytes, Ordering::AcqRel);
         }
         Some(Lease { memory: self.clone(), bytes, resource })
+    }
+
+    fn charge(self: &Arc<Self>, bytes: usize) -> Lease {
+        let before = self.instances.fetch_add(bytes, Ordering::AcqRel);
+        self.instance_peak.fetch_max(before + bytes, Ordering::AcqRel);
+        Lease { memory: self.clone(), bytes, resource: Resource::Instances }
+    }
+
+    fn account(&self, resource: &Resource) -> &AtomicUsize {
+        match resource {
+            Resource::Mesh => &self.bytes,
+            Resource::Instances => &self.instances,
+            Resource::Depth => &self.depth,
+        }
     }
 }
 
@@ -179,16 +199,13 @@ struct Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        let account = match self.resource {
-            Resource::Mesh => &self.memory.bytes,
-            Resource::Depth => &self.memory.depth,
-        };
-        account.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.memory.account(&self.resource).fetch_sub(self.bytes, Ordering::AcqRel);
     }
 }
 
 enum Resource {
     Mesh,
+    Instances,
     Depth,
 }
 
@@ -280,11 +297,9 @@ pub(crate) struct GeometryRenderer {
     visible_textures: HashSet<TextureId>,
     visible_texture_requests: Vec<TextureHandle>,
     region_water_bounds: [Vec4; MAX_REGIONS],
-    region_water_ids: [u128; MAX_REGIONS],
     region_water_count: usize,
-    instances: Buffer,
-    face_indices: Buffer,
-    indirect: Buffer,
+    region_water_origin: Option<DVec3>,
+    instances: InstanceBuffers,
     indirect_first_instance: bool,
     depth: Option<Depth>,
     meshes: HashMap<MeshId, GpuMesh>,
@@ -293,9 +308,9 @@ pub(crate) struct GeometryRenderer {
     cache: FrameCache,
     active_origin: DVec3,
     draw_list: DrawList,
+    main_view: ViewDraws,
     layout_pose_items: HashSet<(ItemIndex, Entity)>,
     recovery_publication_pending: bool,
-    first_appearances: FirstAppearances,
     mesh_admission: frame::MeshAdmission,
     pending_meshes: HashSet<MeshId>,
     pending_textures: HashSet<TextureId>,
@@ -310,6 +325,7 @@ pub(crate) struct GeometryRenderer {
     motion_redraw: bool,
     layout_required: bool,
     replacement_retry_pending: bool,
+    mesh_omitted_faces: usize,
     epoch: u64,
     prepared: Option<FramePreparation>,
     applied_agent: Option<Uuid>,
@@ -338,34 +354,27 @@ impl GeometryRenderer {
     }
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
+        let memory = MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone();
         let textures = Textures::new(device, queue);
-        let instances = buffer(device, "Face instances", INSTANCE_BUFFER_BYTES, BufferUsages::STORAGE);
-        let face_indices: Vec<u8> = (0..MAX_FACE_INSTANCES as u32).flat_map(u32::to_le_bytes).collect();
-        let face_indices = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("Face indices"),
-            contents: &face_indices,
-            usage: BufferUsages::VERTEX,
-        });
-        let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout, &textures, &instances);
+        let instances = InstanceBuffers::new(device, &memory, INITIAL_FACE_INSTANCES);
+        let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout, &textures, &instances.instances);
         let void_water = VoidWater::new(device, format, &textures);
         let sky = Sky::new(device, format, &textures);
-        let indirect_bytes = MAX_FACE_INSTANCES * INDIRECT_DRAW_BYTES;
         Self {
             queue: queue.clone(),
-            memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
+            memory,
             pipelines,
             textures,
             requested_textures: HashSet::new(),
             visible_textures: HashSet::new(),
             visible_texture_requests: Vec::new(),
             region_water_bounds: [Vec4::ZERO; MAX_REGIONS],
-            region_water_ids: [0; MAX_REGIONS],
             region_water_count: 0,
+            region_water_origin: None,
             void_water,
             sky,
+            draw_list: DrawList::new(instances.cap()),
             instances,
-            face_indices,
-            indirect: buffer(device, "Scene indexed draws", indirect_bytes, BufferUsages::INDIRECT),
             indirect_first_instance: device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
             depth: None,
             meshes: HashMap::new(),
@@ -373,10 +382,9 @@ impl GeometryRenderer {
             retired: Vec::new(),
             cache: FrameCache::default(),
             active_origin: DVec3::ZERO,
-            draw_list: DrawList::default(),
+            main_view: ViewDraws::default(),
             layout_pose_items: HashSet::new(),
             recovery_publication_pending: false,
-            first_appearances: FirstAppearances::default(),
             mesh_admission: frame::MeshAdmission::default(),
             pending_meshes: HashSet::new(),
             pending_textures: HashSet::new(),
@@ -391,6 +399,7 @@ impl GeometryRenderer {
             motion_redraw: false,
             layout_required: false,
             replacement_retry_pending: false,
+            mesh_omitted_faces: 0,
             epoch: 0,
             prepared: None,
             applied_agent: None,
@@ -436,17 +445,16 @@ impl GeometryRenderer {
         self.future_placements.clear();
         self.layout_required = false;
         self.replacement_retry_pending = false;
+        self.mesh_omitted_faces = 0;
         if let Some(agent_id) = self.applied_agent.take() {
             self.restore_agent_pose(agent_id);
         }
         self.prepared = None;
+        self.region_water_origin = None;
         self.cache.camera = None;
-        self.cache.candidates.clear();
-        self.cache.next_candidates.clear();
-        self.cache.preparation_candidates.clear();
-        self.cache.next_preparation_candidates.clear();
-        self.cache.preparation_replacements.clear();
-        self.cache.next_preparation_replacements.clear();
+        self.cache.range.clear();
+        self.cache.range_camera = None;
+        self.cache.nonresident_demands = false;
         self.cache.visible.clear();
         self.cache.next_visible.clear();
         self.cache.clear_mesh_demands();
@@ -464,6 +472,7 @@ impl GeometryRenderer {
             }
         }
         self.draw_list.clear();
+        self.main_view.clear();
         self.visible_textures.clear();
         self.visible_texture_requests.clear();
         self.stats.instances = 0;
@@ -480,6 +489,9 @@ impl GeometryRenderer {
         self.stats.depth_bytes = self.memory.depth.load(Ordering::Acquire);
         self.stats.mesh_bytes = self.memory.bytes.load(Ordering::Acquire);
         self.stats.mesh_peak = self.memory.peak.load(Ordering::Acquire);
+        self.stats.instance_buffer_bytes = self.instances.bytes();
+        self.stats.instance_peak = self.memory.instance_peak.load(Ordering::Acquire);
+        self.stats.instance_buffer_growths = self.instances.growths();
         self.stats.texture_bytes = self.textures.bytes();
         self.stats.texture_count = self.textures.count();
         self.stats.texture_failure = self.textures.failure();
@@ -506,7 +518,7 @@ impl GeometryRenderer {
         let mut textures = None;
         let mut terrain = None;
         let mut buffers = None;
-        for draw in self.draw_list.draw_batches() {
+        for draw in self.main_view.batches() {
             if pipeline != Some(draw.key.pipeline) {
                 self.pipelines.bind_pipeline(pass, draw.key.pipeline);
                 pipeline = Some(draw.key.pipeline);
@@ -534,14 +546,14 @@ impl GeometryRenderer {
                 pass.set_vertex_buffer(1, composition.slice(..));
             }
             if self.indirect_first_instance {
-                pass.set_vertex_buffer(face_slot, self.face_indices.slice(..));
-                pass.multi_draw_indexed_indirect(&self.indirect, draw.offset, draw.count);
+                pass.set_vertex_buffer(face_slot, self.instances.face_indices.slice(..));
+                pass.multi_draw_indexed_indirect(&self.instances.indirect, draw.offset, draw.count);
             } else {
                 for command in 0..draw.count {
-                    let Some(first_instance) = self.draw_list.first_instance(draw.offset, command) else { continue };
+                    let Some(first_instance) = self.main_view.first_instance(draw.offset, command) else { continue };
                     let start = u64::from(first_instance) * FACE_INDEX_BYTES as u64;
-                    pass.set_vertex_buffer(face_slot, self.face_indices.slice(start..));
-                    pass.draw_indexed_indirect(&self.indirect, draw.offset + u64::from(command) * INDIRECT_DRAW_BYTES as u64);
+                    pass.set_vertex_buffer(face_slot, self.instances.face_indices.slice(start..));
+                    pass.draw_indexed_indirect(&self.instances.indirect, draw.offset + u64::from(command) * INDIRECT_DRAW_BYTES as u64);
                 }
             }
         }
@@ -599,6 +611,16 @@ mod tests {
         drop(b);
         assert_eq!(memory.bytes.load(Ordering::Acquire), 0);
         assert_eq!(memory.depth.load(Ordering::Acquire), 0);
+
+        let instances = memory.charge(INSTANCE_BUFFER_BYTES);
+        let replacement = memory.charge(1024);
+        let mesh = memory.reserve(MESH_BYTES, Resource::Mesh).expect("instance bytes leave the mesh budget whole");
+        drop(instances);
+        assert_eq!(memory.instances.load(Ordering::Acquire), 1024);
+        assert_eq!(memory.instance_peak.load(Ordering::Acquire), INSTANCE_BUFFER_BYTES + 1024, "the peak keeps overlapping charges");
+        drop(replacement);
+        drop(mesh);
+        assert_eq!(memory.instances.load(Ordering::Acquire), 0);
     }
 }
 
@@ -607,9 +629,6 @@ mod water_distance_tests;
 
 #[cfg(test)]
 mod surface_pipeline_tests;
-
-#[cfg(test)]
-mod camera_path_tests;
 
 #[cfg(test)]
 mod radiance_tests;

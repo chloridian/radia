@@ -9,6 +9,8 @@ use math::{DVec3, Vec3};
 
 use super::mesh::Detail;
 
+pub(crate) const RANGE_MARGIN: f64 = 16.0;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CameraError {
     Position,
@@ -89,6 +91,10 @@ impl Camera {
         self.draw_distance
     }
 
+    pub(crate) fn range(self) -> f64 {
+        self.draw_distance + RANGE_MARGIN
+    }
+
     pub fn position(self) -> DVec3 {
         self.position
     }
@@ -114,8 +120,14 @@ impl Camera {
     }
 
     pub(in crate::scene) fn importance(self, center: DVec3, radius: f64) -> Option<u32> {
-        self.detail(center, radius, None)?;
+        if !center.is_finite() || !radius.is_finite() || radius <= 0.0 {
+            return None;
+        }
         let offset = center - self.position;
+        let distance = offset.length();
+        if !distance.is_finite() || distance - radius > self.draw_distance {
+            return None;
+        }
         let depth = offset.dot(self.direction);
         if self.view_planes.into_iter().any(|plane| offset.dot(plane) < -radius) {
             return None;
@@ -158,21 +170,14 @@ impl Camera {
         if !center.is_finite() || !radius.is_finite() || radius <= 0.0 {
             return None;
         }
-        let offset = center - self.position;
-        if !offset.is_finite() || offset.length() - radius > self.draw_distance {
+        let distance = (center - self.position).length();
+        if !distance.is_finite() || distance - radius > self.range() {
             return None;
         }
-        let depth = offset.dot(self.direction);
-        if !depth.is_finite() {
-            return None;
-        }
-        if depth + radius <= 0.0 {
-            return None;
-        }
-        if depth <= radius {
+        if distance <= radius {
             return Some(Detail::High);
         }
-        let diameter = (radius / (depth - radius)) * self.focal_pixels * 2.0 * self.lod_factor;
+        let diameter = (radius / (distance - radius)) * self.focal_pixels * 2.0 * self.lod_factor;
         const THRESHOLDS: [f64; 3] = [24.0, 96.0, 384.0];
         let Some(previous) = previous else {
             return Some(detail_from_index(THRESHOLDS.into_iter().take_while(|threshold| diameter >= *threshold).count()));
@@ -196,7 +201,7 @@ impl Camera {
             return None;
         }
         let distance = (center - self.position).length() as f32;
-        if !distance.is_finite() || f64::from(distance) - f64::from(radius) > self.draw_distance {
+        if !distance.is_finite() || f64::from(distance) - f64::from(radius) > self.range() {
             return None;
         }
         let mut distance = distance;
@@ -281,7 +286,12 @@ mod tests {
         assert_eq!(camera.detail(center, 1.8, Some(Detail::Low)), Some(Detail::Lowest));
         assert_eq!(camera.detail(center, 3.0, Some(Detail::Lowest)), Some(Detail::Low));
         assert_eq!(camera.detail(DVec3::X, 2.0, None), Some(Detail::High));
-        assert_eq!(camera.detail(-DVec3::X * 10.0, 2.0, None), None);
+        assert_eq!(camera.detail(-DVec3::X * 10.0, 2.0, None), camera.detail(DVec3::X * 10.0, 2.0, None));
+        let turned = Camera::new(DVec3::ZERO, -Vec3::X, PI / 2.0, [1000, 1000]).unwrap();
+        for radius in [1.0, 5.0, 20.0, 40.0] {
+            assert_eq!(turned.detail(center, radius, None), camera.detail(center, radius, None));
+        }
+        assert_eq!(turned.detail(center, 2.6, Some(Detail::Low)), Some(Detail::Low));
         let translated = Camera::new(DVec3::splat(1e12), Vec3::X, PI / 2.0, [1000, 1000]).unwrap();
         assert_eq!(translated.detail(DVec3::splat(1e12) + center, 20.0, None), Some(Detail::Medium));
     }
@@ -296,6 +306,10 @@ mod tests {
         assert_eq!(camera.mesh_lod(DVec3::X * 2.0, scale, None), Some(MeshLod::High));
         assert_eq!(camera.mesh_lod(DVec3::X * 900.0, scale, None), None);
         assert_eq!(camera.mesh_lod(DVec3::X * 900.0, scale, Some(MeshLod::Medium)), None);
+        let edge = Vec3::X * 2.0;
+        assert_eq!(camera.mesh_lod(DVec3::X * (513.0 + RANGE_MARGIN), edge, None), Some(MeshLod::Lowest));
+        assert_eq!(camera.mesh_importance(DVec3::X * (513.0 + RANGE_MARGIN), edge), None, "margin meshes load in the background");
+        assert_eq!(camera.mesh_lod(DVec3::X * (513.1 + RANGE_MARGIN), edge, None), None);
         let zoomed = Camera::new(DVec3::ZERO, Vec3::X, PI / 2.0, [1000, 1000]).unwrap();
         assert_eq!(zoomed.mesh_lod(DVec3::X * 20.0, scale, None), Some(MeshLod::Lowest));
         assert_eq!(camera.mesh_lod(DVec3::X * 20.0, Vec3::new(-1.0, 1.0, 1.0), None), Some(MeshLod::Low));
@@ -353,6 +367,8 @@ mod tests {
             assert_eq!(camera.with_quality(distance, 1.0).unwrap().draw_distance(), distance);
         }
         assert_eq!(camera.detail(DVec3::X * 900.0, 1.0, None), None);
+        assert_eq!(camera.detail(DVec3::X * (513.0 + RANGE_MARGIN), 1.0, None), Some(Detail::Lowest));
+        assert_eq!(camera.detail(DVec3::X * (513.1 + RANGE_MARGIN), 1.0, None), None);
         assert_eq!(camera.with_quality(1024.0, 1.0).unwrap().detail(DVec3::X * 900.0, 1.0, None), Some(Detail::Lowest));
         for distance in [0.0, 31.0, 1024.01, f64::NAN, f64::INFINITY] {
             assert_eq!(camera.with_quality(distance, 1.0), Err(CameraError::Quality));
@@ -395,6 +411,8 @@ mod tests {
         assert_eq!(wide.importance(DVec3::new(10.0, 0.0, 12.0), 1.0), None);
         assert_eq!(wide.importance(-DVec3::X * 10.0, 1.0), None);
         assert_eq!(wide.importance(DVec3::X * 600.0, 1.0), None);
+        assert!(wide.importance(DVec3::X * 513.0, 1.0).is_some());
+        assert_eq!(wide.importance(DVec3::X * 513.1, 1.0), None);
         assert!(square.importance(DVec3::X * 10.0, 1.0) > square.importance(DVec3::X * 100.0, 1.0));
         let vertical = Camera::new(DVec3::ZERO, Vec3::Z, PI / 2.0, [1000, 1000]).unwrap();
         assert!(vertical.importance(DVec3::Z * 10.0, 1.0).is_some());
