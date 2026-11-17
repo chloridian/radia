@@ -138,6 +138,7 @@ pub enum OmissionReason {
 #[derive(Default)]
 struct Accounting {
     bytes: AtomicUsize,
+    instances: AtomicUsize,
     mesh_revision: AtomicU64,
     depth: AtomicUsize,
     peak: AtomicUsize,
@@ -150,16 +151,32 @@ impl Accounting {
     }
 
     fn reserve(self: &Arc<Self>, bytes: usize, resource: Resource) -> Option<Lease> {
-        let (account, limit) = match resource {
-            Resource::Mesh => (&self.bytes, MESH_BYTES),
-            Resource::Depth => (&self.depth, DEPTH_BYTES),
+        let limit = match resource {
+            Resource::Mesh => MESH_BYTES.saturating_sub(self.instances.load(Ordering::Acquire)),
+            Resource::Instances => return Some(self.charge(bytes)),
+            Resource::Depth => DEPTH_BYTES,
         };
-        let before =
-            account.try_update(Ordering::AcqRel, Ordering::Acquire, |used| used.checked_add(bytes).filter(|n| *n <= limit)).ok()?;
+        let before = self
+            .account(&resource)
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| used.checked_add(bytes).filter(|n| *n <= limit))
+            .ok()?;
         if matches!(resource, Resource::Mesh) {
             self.peak.fetch_max(before + bytes, Ordering::AcqRel);
         }
         Some(Lease { memory: self.clone(), bytes, resource })
+    }
+
+    fn charge(self: &Arc<Self>, bytes: usize) -> Lease {
+        self.instances.fetch_add(bytes, Ordering::AcqRel);
+        Lease { memory: self.clone(), bytes, resource: Resource::Instances }
+    }
+
+    fn account(&self, resource: &Resource) -> &AtomicUsize {
+        match resource {
+            Resource::Mesh => &self.bytes,
+            Resource::Instances => &self.instances,
+            Resource::Depth => &self.depth,
+        }
     }
 }
 
@@ -177,16 +194,13 @@ struct Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        let account = match self.resource {
-            Resource::Mesh => &self.memory.bytes,
-            Resource::Depth => &self.memory.depth,
-        };
-        account.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.memory.account(&self.resource).fetch_sub(self.bytes, Ordering::AcqRel);
     }
 }
 
 enum Resource {
     Mesh,
+    Instances,
     Depth,
 }
 
@@ -335,14 +349,15 @@ impl GeometryRenderer {
     }
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
+        let memory = MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone();
         let textures = Textures::new(device, queue);
-        let instances = InstanceBuffers::new(device, INITIAL_FACE_INSTANCES);
+        let instances = InstanceBuffers::new(device, &memory, INITIAL_FACE_INSTANCES);
         let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout, &textures, &instances.instances);
         let void_water = VoidWater::new(device, format, &textures);
         let sky = Sky::new(device, format, &textures);
         Self {
             queue: queue.clone(),
-            memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
+            memory,
             pipelines,
             textures,
             requested_textures: HashSet::new(),
@@ -587,6 +602,16 @@ mod tests {
         drop(b);
         assert_eq!(memory.bytes.load(Ordering::Acquire), 0);
         assert_eq!(memory.depth.load(Ordering::Acquire), 0);
+
+        let instances = memory.charge(MESH_BYTES + 1);
+        assert!(memory.reserve(1, Resource::Mesh).is_none(), "instance bytes leave no mesh budget");
+        drop(instances);
+        let charged = memory.charge(1024);
+        assert!(memory.reserve(MESH_BYTES - 1023, Resource::Mesh).is_none());
+        let mesh = memory.reserve(MESH_BYTES - 1024, Resource::Mesh).expect("mesh budget net of instance bytes");
+        drop(charged);
+        assert!(memory.reserve(1024, Resource::Mesh).is_some(), "a released instance charge returns to the mesh budget");
+        drop(mesh);
     }
 }
 

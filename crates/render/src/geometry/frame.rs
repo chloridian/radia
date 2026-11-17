@@ -467,7 +467,7 @@ impl GeometryRenderer {
             self.draw_list.patch(&self.cache.items, &self.cache.patch_faces, &update.pose_items, self.active_origin, frame_origin);
         let draw_upload_started = Instant::now();
         if layout_committed {
-            let grown = self.instances.fit(device, &self.queue, self.draw_list.slot_count());
+            let grown = self.instances.fit(device, &self.queue, &self.memory, self.draw_list.slot_count());
             if grown {
                 self.pipelines.set_faces(device, &self.textures, &self.instances.instances);
                 self.main_view.clear();

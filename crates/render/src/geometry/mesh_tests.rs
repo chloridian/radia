@@ -1726,7 +1726,7 @@ fn gpu_instance_buffer_grows_at_layout_commit() {
     let near_slots = reference.draw_list.slot_count();
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
     geometry.memory = Arc::new(crate::geometry::Accounting::default());
-    geometry.instances = InstanceBuffers::new(&device, near_slots);
+    geometry.instances = InstanceBuffers::new(&device, &geometry.memory, near_slots);
     geometry.pipelines.set_faces(&device, &geometry.textures, &geometry.instances.instances);
     prepare_until_current(&device, &queue, &mut geometry, &view, near);
     assert_eq!(geometry.stats.instance_buffer_growths, 0, "the near layout fits the initial buffer");

@@ -1,14 +1,20 @@
+use std::sync::Arc;
+
 use math::{DVec3, Mat4, Quat, Vec3, normal_matrix};
 use wgpu::{
     Buffer, BufferUsages, Device, Queue,
     util::{BufferInitDescriptor, DeviceExt},
 };
 
-use super::{TRANSFORM_BYTES, buffer, draw_list::INDIRECT_DRAW_BYTES};
-use crate::{material::FaceParams, pipeline::INSTANCE_BYTES};
+use super::{Accounting, Lease, TRANSFORM_BYTES, buffer, draw_list::INDIRECT_DRAW_BYTES};
+use crate::{
+    material::FaceParams,
+    pipeline::{FACE_INDEX_BYTES, INSTANCE_BYTES},
+};
 
 pub(super) const PARAMETER_BYTES: usize = INSTANCE_BYTES - TRANSFORM_BYTES;
 pub(super) const INITIAL_FACE_INSTANCES: usize = 16_384;
+const SLOT_BYTES: usize = INSTANCE_BYTES + FACE_INDEX_BYTES + INDIRECT_DRAW_BYTES;
 
 pub(super) struct InstanceBuffers {
     pub(super) instances: Buffer,
@@ -17,16 +23,18 @@ pub(super) struct InstanceBuffers {
     capacity: usize,
     cap: usize,
     growths: usize,
+    lease: Lease,
 }
 
 impl InstanceBuffers {
-    pub(super) fn new(device: &Device, capacity: usize) -> Self {
+    pub(super) fn new(device: &Device, memory: &Arc<Accounting>, capacity: usize) -> Self {
         let limits = device.limits();
         let bytes = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
         let cap = usize::try_from(bytes).unwrap_or(usize::MAX) / INSTANCE_BYTES;
         let capacity = capacity.min(cap);
         let (instances, face_indices, indirect) = allocate(device, capacity);
-        Self { instances, face_indices, indirect, capacity, cap, growths: 0 }
+        let lease = memory.charge(capacity * SLOT_BYTES);
+        Self { instances, face_indices, indirect, capacity, cap, growths: 0, lease }
     }
 
     pub(super) fn cap(&self) -> usize {
@@ -41,7 +49,7 @@ impl InstanceBuffers {
         self.growths
     }
 
-    pub(super) fn fit(&mut self, device: &Device, queue: &Queue, faces: usize) -> bool {
+    pub(super) fn fit(&mut self, device: &Device, queue: &Queue, memory: &Arc<Accounting>, faces: usize) -> bool {
         if faces <= self.capacity {
             return false;
         }
@@ -51,11 +59,14 @@ impl InstanceBuffers {
         }
         let capacity = capacity.min(self.cap);
         let (instances, face_indices, indirect) = allocate(device, capacity);
-        let old = [
-            std::mem::replace(&mut self.instances, instances),
-            std::mem::replace(&mut self.face_indices, face_indices),
-            std::mem::replace(&mut self.indirect, indirect),
-        ];
+        let old = (
+            [
+                std::mem::replace(&mut self.instances, instances),
+                std::mem::replace(&mut self.face_indices, face_indices),
+                std::mem::replace(&mut self.indirect, indirect),
+            ],
+            std::mem::replace(&mut self.lease, memory.charge(capacity * SLOT_BYTES)),
+        );
         queue.on_submitted_work_done(move || drop(old));
         self.capacity = capacity;
         self.growths += 1;
