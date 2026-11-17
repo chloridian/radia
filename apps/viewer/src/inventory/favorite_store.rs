@@ -1,4 +1,5 @@
 use std::{
+    error,
     fmt::{self, Display, Formatter},
     fs::{self, File},
     io::{self, ErrorKind, Read, Write},
@@ -69,7 +70,7 @@ impl Display for FavoriteStoreError {
     }
 }
 
-impl std::error::Error for FavoriteStoreError {}
+impl error::Error for FavoriteStoreError {}
 
 #[derive(Debug)]
 enum StorageError {
@@ -347,11 +348,13 @@ mod tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
-    use crate::inventory::{FavoriteLocation, favorites::FavoritesError};
-
     use super::{
         AgentFavorites, FavoriteStore, FavoriteStoreError, MAX_FAVORITE_STORE_BYTES, MAX_FAVORITES_PER_AGENT, MAX_STORED_AGENTS,
         StoredGrid, apply_favorites_refresh, load_from, login_locations_path_under, save_to,
+    };
+    use crate::{
+        inventory::{FavoriteLocation, favorites::FavoritesError},
+        session::RegionLookupError,
     };
 
     #[test]
@@ -392,7 +395,7 @@ mod tests {
             Grid::Agni,
             agent_id,
             "Example Resident",
-            Err(FavoritesError::RegionLookup(crate::session::RegionLookupError::Canceled)),
+            Err(FavoritesError::RegionLookup(RegionLookupError::Canceled)),
         );
 
         assert_matches!(result, Err(FavoriteStoreError::Favorites(FavoritesError::RegionLookup(_))));

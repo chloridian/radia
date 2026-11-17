@@ -1,39 +1,39 @@
 mod overrides;
 mod resolution;
-mod storage;
+mod store;
 mod validation;
 mod worker;
-
-pub(in crate::session) use resolution::{CachedObjectContinuation, CachedObjectProgress};
 
 #[cfg(test)]
 use std::path::Path;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    mem,
     num::NonZeroU32,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use ::storage::sqlite::MAX_BATCH_BYTES;
-use ::storage::sqlite::{OpenStatus, SqliteDb};
 use network::{Grid, SimulatorId};
 use protocol::{
     lludp::Message,
     messages::{RegionHandshake, generic_streaming_message::MAX_DATA_BYTES},
 };
+use storage::sqlite::{MAX_BATCH_BYTES, OpenStatus, SqliteDb};
 use tokio::{
     runtime::Handle,
     sync::{OwnedSemaphorePermit, Semaphore, mpsc},
+    task,
     time::timeout,
 };
 use uuid::Uuid;
 use world::{PbrMaterialOverrides, UpdateSource, WorldChangeCursor};
 
-#[cfg(test)]
-use self::storage::open_for_test as open_for_test_storage;
-use self::storage::{PendingSubmission, make_access_submission, open_default, queue_scope_load};
-use self::worker::{CacheWriteJob, CacheWriteOperation, CacheWriteWorker};
+pub(in crate::session) use self::resolution::{CachedObjectContinuation, CachedObjectProgress};
+use self::{
+    store::{PendingSubmission, make_access_submission, open_default, queue_scope_load},
+    worker::{CacheWriteJob, CacheWriteOperation, CacheWriteWorker},
+};
 
 const SCHEMA_VERSION: i64 = 1;
 const SQLITE_PAGE_SIZE: i64 = 4096;
@@ -244,7 +244,7 @@ impl ObjectCacheSession {
         let task_runtime = runtime.clone();
         drop(runtime.spawn(async move {
             let open_runtime = task_runtime.clone();
-            let result = tokio::task::spawn_blocking(move || {
+            let result = task::spawn_blocking(move || {
                 let (db, status) = open_default()?;
                 let db = Arc::new(db);
                 let writer = CacheWriteWorker::start(Arc::clone(&db), open_runtime).map_err(|error| error.to_string())?;
@@ -275,7 +275,7 @@ impl ObjectCacheSession {
                 }
                 self.db = Some(db);
                 self.write_worker = Some(writer);
-                let pending = std::mem::take(&mut self.pending);
+                let pending = mem::take(&mut self.pending);
                 self.pending_rows = 0;
                 self.pending_bytes = 0;
                 for submission in pending {
@@ -550,7 +550,7 @@ impl ObjectCacheSession {
             }
         }
         if let Some(writer) = self.write_worker.take() {
-            let shutdown = tokio::task::spawn_blocking(move || writer.shutdown()).await;
+            let shutdown = task::spawn_blocking(move || writer.shutdown()).await;
             match shutdown {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
@@ -570,7 +570,7 @@ impl ObjectCacheSession {
         if db.had_write_failure() {
             self.warn("SQLite worker reported a failed object-cache write");
         }
-        let shutdown = tokio::task::spawn_blocking(move || {
+        let shutdown = task::spawn_blocking(move || {
             Arc::try_unwrap(db)
                 .map_err(|_| "object cache writer still owns the SQLite worker".to_owned())?
                 .shutdown()
@@ -718,13 +718,23 @@ fn now_millis() -> i64 {
 
 #[cfg(test)]
 pub(super) fn open_for_test(path: impl AsRef<Path>, grid: Grid) -> ObjectCacheSession {
-    open_for_test_storage(path, grid)
+    store::open_for_test(path, grid)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::session::object_cache::test_support::*;
+    use std::assert_matches;
+
+    use protocol::messages::CacheMissType;
+
+    use super::{
+        test_support::{
+            CACHE_ID, SIMULATOR, cache_count, cached_message, cached_references, fixture_message, flush, open_cache, region_handshake,
+            resolve, vectors,
+        },
+        *,
+    };
+    use crate::session::inbound::ObjectOperation;
     #[tokio::test]
     async fn unavailable_cache_advertises_support() {
         let mut cache = ObjectCacheSession::new(Grid::Agni);
@@ -780,10 +790,7 @@ mod tests {
 
         assert_eq!(cache_count(cache.db.as_ref().expect("cache database is open")).await, 0);
         let resolved = resolve(&mut cache, &cached_message(region_data, references), 80).await;
-        std::assert_matches!(
-            resolved.blocks[0],
-            Some(crate::session::inbound::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. })
-        );
+        assert_matches!(resolved.blocks[0], Some(ObjectOperation::Cached { cache_miss_type: CacheMissType::Full, .. }));
         cache.close().await;
     }
 }

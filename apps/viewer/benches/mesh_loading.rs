@@ -1,6 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
+    f64::consts::FRAC_PI_3,
     num::NonZeroU32,
+    ops::Range,
     sync::{
         Arc,
         atomic::{AtomicU8, Ordering},
@@ -14,10 +16,18 @@ use futures::channel::oneshot;
 use llsd::{Value, xml};
 use math::{DVec3, Quat, Vec3};
 use network::capabilities::Client;
-use render::scene::{AssetChange, Camera, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView};
+use render::scene::{
+    AssetChange, AssetTicket, Budget, Camera, Geometry, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView,
+};
 use tempfile::tempdir;
-use test_support::http_peer::LoopbackPeer;
-use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
+use test_support::{http_peer::LoopbackPeer, mesh, texture::RGBA_J2C};
+use tokio::{
+    runtime::{Builder, Handle, Runtime},
+    sync::mpsc,
+    task,
+    task::JoinHandle,
+    time,
+};
 use url::Url;
 use utils::AssetId;
 use uuid::Uuid;
@@ -61,7 +71,7 @@ struct Sample {
 }
 
 pub fn register(c: &mut Criterion) {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
+    let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
     let mesh_assets = mesh_assets();
     let warm_directory = tempdir().expect("create warm cache directory");
     let warm_cache = Arc::new(AssetCache::open(warm_directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open warm cache"));
@@ -174,7 +184,7 @@ async fn run_measurement(cache: Arc<AssetCache>, mesh_assets: Arc<HashMap<Uuid, 
     let (mut fixture, region) = scene_fixture();
     let (cancel, cancelled) = oneshot::channel();
     let service = AssetCoordinator::new(
-        tokio::runtime::Handle::current(),
+        Handle::current(),
         async move {
             let _ = cancelled.await;
         },
@@ -188,11 +198,11 @@ async fn run_measurement(cache: Arc<AssetCache>, mesh_assets: Arc<HashMap<Uuid, 
     let mut nearest_objects = fixture.mesh_objects.clone();
     nearest_objects.sort_unstable_by(|left, right| left.1.total_cmp(&right.1));
     let nearest_ids = nearest_objects.iter().take(nearest_count).map(|(id, _)| *id).collect::<HashSet<_>>();
-    let mut demands = HashMap::<render::scene::AssetTicket, TrackedDemand>::new();
+    let mut demands = HashMap::<AssetTicket, TrackedDemand>::new();
     let mut texture_ready = HashSet::new();
     let mut sample = Sample::default();
 
-    let completed = tokio::time::timeout(Duration::from_secs(30), async {
+    let completed = time::timeout(Duration::from_secs(30), async {
         loop {
             while let Ok((ticket, status)) = statuses.try_recv() {
                 apply_status(ticket, status, &mut fixture, &mut demands, &mut texture_ready);
@@ -236,7 +246,7 @@ async fn run_measurement(cache: Arc<AssetCache>, mesh_assets: Arc<HashMap<Uuid, 
                 ReconcileStep::Continue => {}
                 ReconcileStep::Wait(deadline) => {
                     tokio::select! {
-                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
+                        _ = time::sleep_until(time::Instant::from_std(deadline)) => {}
                         status = statuses.recv() => {
                             let (ticket, status) = status.expect("asset status channel stays open");
                             apply_status(ticket, status, &mut fixture, &mut demands, &mut texture_ready);
@@ -253,11 +263,8 @@ async fn run_measurement(cache: Arc<AssetCache>, mesh_assets: Arc<HashMap<Uuid, 
     })
     .await;
     if completed.is_err() {
-        let published_meshes = fixture
-            .view
-            .objects()
-            .filter(|object| matches!(object.geometry(), render::scene::Geometry::Mesh(_)) && object.mesh().is_some())
-            .count();
+        let published_meshes =
+            fixture.view.objects().filter(|object| matches!(object.geometry(), Geometry::Mesh(_)) && object.mesh().is_some()).count();
         let ready_demands = demands.values().filter(|demand| matches!(demand._demand.status(), Status::Ready(_))).count();
         let (queued, fetching, decoding, failed, stale) =
             demands.values().fold((0, 0, 0, 0, 0), |counts, demand| match demand._demand.status() {
@@ -344,17 +351,13 @@ async fn acquire(handle: &AssetHandle, region: Region, request: Request, priorit
     loop {
         match handle.request_with_importance(region, request, priority, importance).await {
             Ok(demand) => return demand,
-            Err(RequestError::Busy) => tokio::task::yield_now().await,
+            Err(RequestError::Busy) => task::yield_now().await,
             Err(error) => panic!("benchmark asset demand failed: {error:?}"),
         }
     }
 }
 
-fn watch_demand(
-    ticket: render::scene::AssetTicket,
-    mut demand: Demand,
-    sender: mpsc::Sender<(render::scene::AssetTicket, Status)>,
-) -> JoinHandle<()> {
+fn watch_demand(ticket: AssetTicket, mut demand: Demand, sender: mpsc::Sender<(AssetTicket, Status)>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let initial = demand.status();
         let mut status = initial;
@@ -374,10 +377,10 @@ fn watch_demand(
 }
 
 fn apply_status(
-    ticket: render::scene::AssetTicket,
+    ticket: AssetTicket,
     status: Status,
     fixture: &mut SceneFixture,
-    demands: &mut HashMap<render::scene::AssetTicket, TrackedDemand>,
+    demands: &mut HashMap<AssetTicket, TrackedDemand>,
     texture_ready: &mut HashSet<AssetId>,
 ) {
     let Some(demand) = demands.get_mut(&ticket) else { return };
@@ -400,7 +403,7 @@ fn update_times(
 ) {
     let mut ready_meshes = HashSet::new();
     for object in view.objects() {
-        if matches!(object.geometry(), render::scene::Geometry::Mesh(_)) && object.mesh().is_some() {
+        if matches!(object.geometry(), Geometry::Mesh(_)) && object.mesh().is_some() {
             ready_meshes.insert(object.detail().summary.id);
         }
     }
@@ -478,8 +481,8 @@ fn scene_fixture() -> (SceneFixture, Region) {
         order += 1;
     }
 
-    let (mut scene, view) = Reconciler::new(render::scene::Budget::default());
-    scene.set_camera(Camera::new(DVec3::ZERO, Vec3::X, std::f64::consts::FRAC_PI_3, [1000, 1000]).expect("benchmark camera"));
+    let (mut scene, view) = Reconciler::new(Budget::default());
+    scene.set_camera(Camera::new(DVec3::ZERO, Vec3::X, FRAC_PI_3, [1000, 1000]).expect("benchmark camera"));
     (SceneFixture { world, scene, view, mesh_objects, textures: texture_set }, region)
 }
 
@@ -514,7 +517,7 @@ fn mesh_assets() -> Arc<HashMap<Uuid, Vec<u8>>> {
                 let id = Uuid::from_u128(MESH_ASSET_BASE + u128::try_from(index).unwrap());
                 let lods =
                     if index < MESH_ASSETS / 4 { [(0, 4), (1, 8), (2, 64), (3, 512)] } else { [(0, 16), (1, 64), (2, 512), (3, 2048)] };
-                (id, test_support::mesh::asset_with_seeded_lod_vertices(&lods, TEXTURE_IDS, index as u64 + 17))
+                (id, mesh::asset_with_seeded_lod_vertices(&lods, TEXTURE_IDS, index as u64 + 17))
             })
             .collect(),
     )
@@ -539,7 +542,7 @@ fn respond(request: &[u8], base: &Url, mesh_assets: &HashMap<Uuid, Vec<u8>>) -> 
         return (200, Vec::new(), grants(base));
     }
     if path == "/content/" && query.starts_with("texture_id=") {
-        return (200, Vec::new(), test_support::texture::RGBA_J2C.to_vec());
+        return (200, Vec::new(), RGBA_J2C.to_vec());
     }
     if path != "/content/" || !query.starts_with("mesh_id=") {
         return (404, Vec::new(), Vec::new());
@@ -557,7 +560,7 @@ fn respond(request: &[u8], base: &Url, mesh_assets: &HashMap<Uuid, Vec<u8>>) -> 
     (206, vec![("Content-Range".into(), content_range)], bytes.to_vec())
 }
 
-fn parse_range(request: &[u8]) -> Option<std::ops::Range<usize>> {
+fn parse_range(request: &[u8]) -> Option<Range<usize>> {
     let request = String::from_utf8_lossy(request);
     let value = request
         .lines()

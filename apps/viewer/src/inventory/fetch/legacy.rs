@@ -1,7 +1,7 @@
-use ::inventory::{CategoryKey, InventoryChild, InventoryOwner, Item};
+use inventory::{CategoryKey, InventoryChild, InventoryOwner, Item, ServerVersion};
 use llsd::{Map, Value};
 use network::capabilities::{CapabilityUrl, Client};
-use protocol::inventory::{self, DecodeError, RequestedFolder};
+use protocol::inventory::{DecodeError, FolderDescendents, RequestedFolder, decode_fetch_inventory_descendents2, decode_fetch_inventory2};
 use uuid::Uuid;
 
 use super::{
@@ -24,7 +24,7 @@ pub(super) async fn fetch_batch(
         .post_bytes_with_response_limit(capability, &folder_request(folders), MAX_FETCH_RESPONSE_BYTES)
         .await
         .map_err(classify_request_error)?;
-    inventory::decode_fetch_inventory_descendents2(&response, &requested)
+    decode_fetch_inventory_descendents2(&response, &requested)
         .map_err(classify_decode_error)?
         .into_iter()
         .zip(folders.iter().copied())
@@ -44,7 +44,7 @@ pub(crate) async fn fetch_items(
             .post_bytes_with_response_limit(capability, &item_request(batch), MAX_FETCH_RESPONSE_BYTES)
             .await
             .map_err(map_request_error)?;
-        let decoded = inventory::decode_fetch_inventory2(&response, owner.id(), batch).map_err(map_decode_error)?;
+        let decoded = decode_fetch_inventory2(&response, owner.id(), batch).map_err(map_decode_error)?;
         for item in decoded {
             let parent = item.parent_id.ok_or(InventoryFetchError::InvalidResponse)?;
             items.push(to_item(&item, owner, CategoryKey::new(owner, utils::FolderId::new(parent)))?);
@@ -53,7 +53,7 @@ pub(crate) async fn fetch_items(
     Ok(items)
 }
 
-fn to_folder_fetch(folder: protocol::inventory::FolderDescendents, key: CategoryKey) -> Result<FolderFetch, InventoryFetchError> {
+fn to_folder_fetch(folder: FolderDescendents, key: CategoryKey) -> Result<FolderFetch, InventoryFetchError> {
     let mut children = Vec::with_capacity(folder.direct_categories.len().saturating_add(folder.direct_items.len()));
     for category in &folder.direct_categories {
         children.push(InventoryChild::Category(to_category(category, key.owner(), Some(key))?));
@@ -64,7 +64,7 @@ fn to_folder_fetch(folder: protocol::inventory::FolderDescendents, key: Category
     let descendent_count = Some(folder.descendent_count);
     Ok(FolderFetch {
         folder: key,
-        version: ::inventory::ServerVersion::from_raw(folder.version),
+        version: ServerVersion::from_raw(folder.version),
         descendent_count,
         children,
         provenance: FolderFetchProvenance::Untracked,

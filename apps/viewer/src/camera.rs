@@ -5,12 +5,11 @@ use std::{
 
 use math::{DQuat, DVec3};
 use render::scene;
-use world::WorldPose;
-
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use winit::event::ElementState;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use winit::keyboard::Key;
+use world::WorldPose;
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::agent_movement::{HeldControls, KeyBinding};
@@ -322,17 +321,24 @@ pub(crate) fn handle_keyboard_input(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::f32::consts::FRAC_PI_2;
+
     use math::Quat;
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    use winit::keyboard::NamedKey;
+
+    use super::*;
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    use crate::agent_movement::input::MovementKey;
 
     #[test]
     fn follow_offsets_use_agent_axes() {
-        let pose = WorldPose { position: DVec3::new(100.0, 200.0, 30.0), rotation: math::Quat::IDENTITY };
+        let pose = WorldPose { position: DVec3::new(100.0, 200.0, 30.0), rotation: Quat::IDENTITY };
         let (position, focus) = FollowCamera::position_and_focus(pose);
         assert_eq!(position, pose.position + DVec3::new(-3.0, 0.0, 0.75));
         assert_eq!(focus, pose.position + DVec3::new(1.0, 0.0, 1.0));
 
-        let pose = WorldPose { rotation: math::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2), ..pose };
+        let pose = WorldPose { rotation: Quat::from_rotation_z(FRAC_PI_2), ..pose };
         let (position, focus) = FollowCamera::position_and_focus(pose);
         assert!((position - (pose.position + DVec3::new(0.0, -3.0, 0.75))).length() < 1e-6);
         assert!((focus - (pose.position + DVec3::new(0.0, 1.0, 1.0))).length() < 1e-6);
@@ -341,7 +347,7 @@ mod tests {
     #[test]
     fn follow_translates_rigidly() {
         let start = Instant::now();
-        let pose = WorldPose { position: DVec3::new(10.0, 20.0, 30.0), rotation: math::Quat::IDENTITY };
+        let pose = WorldPose { position: DVec3::new(10.0, 20.0, 30.0), rotation: Quat::IDENTITY };
         let mut camera = FollowCamera::default();
         let first = camera.follow(pose, [1280, 720], 512.0, 1.0, start).expect("initial follow camera");
         let translated = WorldPose { position: pose.position + DVec3::new(100.0, -50.0, 20.0), ..pose };
@@ -355,10 +361,10 @@ mod tests {
     #[test]
     fn follow_converges_after_turn() {
         let start = Instant::now();
-        let pose = WorldPose { position: DVec3::ZERO, rotation: math::Quat::IDENTITY };
+        let pose = WorldPose { position: DVec3::ZERO, rotation: Quat::IDENTITY };
         let mut camera = FollowCamera::default();
         camera.follow(pose, [1280, 720], 512.0, 1.0, start).expect("initial follow camera");
-        let turned = WorldPose { rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2), ..pose };
+        let turned = WorldPose { rotation: Quat::from_rotation_z(FRAC_PI_2), ..pose };
         let halfway = camera.follow(turned, [1280, 720], 512.0, 1.0, start + Duration::from_millis(20)).expect("turned follow camera");
         let (target, target_focus) = FollowCamera::position_and_focus(turned);
         assert!(halfway.position().distance(target) > 0.01, "camera offset should lag the avatar turn");
@@ -373,7 +379,7 @@ mod tests {
     #[test]
     fn follow_snaps_large_changes() {
         let start = Instant::now();
-        let pose = WorldPose { position: DVec3::ZERO, rotation: math::Quat::IDENTITY };
+        let pose = WorldPose { position: DVec3::ZERO, rotation: Quat::IDENTITY };
         let mut camera = FollowCamera::default();
         camera.follow(pose, [1280, 720], 512.0, 1.0, start).expect("initial follow camera");
         camera.offset = DVec3::new(-100.0, 0.0, 0.0);
@@ -387,10 +393,6 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn keys_select_camera_mode() {
-        use winit::keyboard::NamedKey;
-
-        use crate::agent_movement::input::MovementKey;
-
         let forward = Key::Character("w".into());
         for (key, state, captured, result, mode, moving) in [
             (forward.clone(), ElementState::Pressed, false, Some(true), CameraMode::Follow, true),
@@ -409,7 +411,7 @@ mod tests {
 
             assert_eq!(handle_keyboard_input(&mut controls, &mut camera_mode, &key, state, false, captured), result, "{case}");
             assert_eq!(camera_mode, mode, "{case}");
-            let flags = controls.observation(false, math::Quat::IDENTITY).control_flags;
+            let flags = controls.observation(false, Quat::IDENTITY).control_flags;
             assert_eq!(flags & 0x0000_0001 != 0, moving, "{case}");
         }
     }

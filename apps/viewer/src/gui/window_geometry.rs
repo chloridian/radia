@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs,
+    fs, io,
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::{
@@ -132,19 +132,19 @@ fn storage_path() -> Option<PathBuf> {
     dirs::data_local_dir().map(|path| path.join("Radia").join("window-sizes.json"))
 }
 
-fn read_geometries(path: &Path) -> std::io::Result<StoredWindowGeometries> {
+fn read_geometries(path: &Path) -> io::Result<StoredWindowGeometries> {
     match fs::read(path) {
-        Ok(contents) => from_slice(&contents).map_err(std::io::Error::other),
+        Ok(contents) => from_slice(&contents).map_err(io::Error::other),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(StoredWindowGeometries::new()),
         Err(error) => Err(error),
     }
 }
 
-fn save_geometry(path: &Path, key: &str, geometry: StoredWindowGeometry) -> std::io::Result<()> {
+fn save_geometry(path: &Path, key: &str, geometry: StoredWindowGeometry) -> io::Result<()> {
     let _guard = SAVE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let mut geometries = read_geometries(path)?;
     geometries.insert(key.to_owned(), geometry);
-    let contents = to_vec(&geometries).map_err(std::io::Error::other)?;
+    let contents = to_vec(&geometries).map_err(io::Error::other)?;
     fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))?;
     write_atomic(path, &contents)
 }

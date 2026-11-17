@@ -8,7 +8,6 @@ use std::{
     },
 };
 
-use crate::test_helpers::simulator_id;
 use math::{DVec3, Vec3};
 use network::SimulatorId;
 use protocol::messages::{CacheMissType, RequestAgentData};
@@ -16,21 +15,22 @@ use tokio::sync::oneshot::channel;
 use utils::AssetId;
 use uuid::Uuid;
 use world::{
-    Appearance, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FieldUpdate, Kind, LocalAddress,
-    MAX_AVATAR_TEXTURE_SLOTS, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, Parent, ParentUpdate,
-    PbrMaterialAssignments, Pose, Region, RegionHandle, RegionInfo, Shape, UpdateSource,
-};
-
-use crate::session::{
-    inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation},
-    recovery::{MAX_RECOVERY_OBJECTS_PER_REQUEST, RecoveryCompletion, RecoveryIntake},
+    Appearance, ApplyError::InvalidValue, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex,
+    FieldUpdate, Kind, LocalAddress, MAX_AVATAR_TEXTURE_SLOTS, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
+    OrderEvidence, Parent, ParentUpdate, PbrMaterialAssignments, Pose, Region, RegionHandle, RegionInfo, Shape, UpdateSource,
 };
 
 use super::{
     BlockOutcome, IngestStatus, IngestSummary, MAX_OBJECTS_PER_INTAKE_QUANTUM, MAX_WORLD_ENTITIES, RegistrationError, SessionWorld,
     viewer_world_limits,
 };
-use world::ApplyError::InvalidValue;
+use crate::{
+    session::{
+        inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation},
+        recovery::{MAX_RECOVERY_OBJECTS_PER_REQUEST, RecoveryCompletion, RecoveryIntake},
+    },
+    test_helpers::simulator_id,
+};
 
 #[test]
 fn packet_handle_checked_against_world() {
@@ -230,7 +230,7 @@ async fn deep_lookup_yields_keeping_order() {
     progress_rx.await.expect("unrelated task gets a turn during ancestry traversal");
     assert!(!worker.is_finished(), "the 600-edge lookup spans multiple bounded turns");
     let (session, summary) = worker.await.expect("world owner completes update");
-    std::assert_matches!(
+    assert_matches!(
         summary.blocks[0],
         BlockOutcome::Applied { ref applied, .. } if matches!(applied.outcome, world::ApplyOutcome::Updated(_))
     );
@@ -637,7 +637,7 @@ fn only_fresh_full_satisfies_recovery() {
         ObjectOperation::Cached {
             source: UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0),
             local_id,
-            cache_miss_type: protocol::messages::CacheMissType::Full,
+            cache_miss_type: CacheMissType::Full,
         },
     );
     assert_eq!(cached.recovery_targets().collect::<Vec<_>>(), [address]);
@@ -658,7 +658,7 @@ fn only_fresh_full_satisfies_recovery() {
         ObjectOperation::Cached {
             source: UpdateSource::new(region, 4, OrderEvidence::Ordered(4), 0),
             local_id,
-            cache_miss_type: protocol::messages::CacheMissType::Full,
+            cache_miss_type: CacheMissType::Full,
         },
     );
     assert_eq!(cached.recovery_targets().collect::<Vec<_>>(), [address]);

@@ -9,32 +9,36 @@ mod persistence;
 mod presentation;
 
 #[cfg(test)]
-pub(crate) use self::driver::inventory::confirm_pending_moves;
+pub(crate) use self::driver::inventory_sync::confirm_pending_moves;
 #[cfg(test)]
-pub(crate) use self::driver::inventory::{FolderFetchApply, apply_inventory_fetch};
-pub(crate) use self::driver::{CredentialPersistence, drain_session};
+pub(crate) use self::driver::inventory_sync::{FolderFetchApply, apply_inventory_fetch};
 #[cfg(test)]
 use self::input::select_drain_input;
 #[cfg(test)]
-pub(crate) use self::inventory_intake::apply_udp as apply_inventory_udp;
-pub(crate) use self::persistence::{WriteLock, save_favorite_store, write_lock};
-pub(crate) use self::presentation::{
-    AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionEnd, SessionReadyUpdate, ViewerUpdate,
+pub(crate) use self::inventory_intake::apply_udp;
+pub(crate) use self::{
+    driver::{CredentialPersistence, drain_session},
+    persistence::{WriteLock, save_favorite_store, write_lock},
+    presentation::{
+        AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionEnd, SessionReadyUpdate, ViewerUpdate,
+    },
 };
 
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::VecDeque,
         future::{pending, ready},
         num::NonZeroU32,
+        time::Instant,
     };
 
+    use futures::poll;
     use math::Vec3;
     use network::{Event, Event::SimulatorMessage, Grid, PacketOrder, PacketOrder::Ordered, SimulatorId};
     use protocol::{
         Audible, ChatSourceType, ChatType,
-        lludp::Message,
-        lludp::Message::ObjectUpdate,
+        lludp::{Message, Message::ObjectUpdate, Packet},
         messages::{
             ChatFromSimulator,
             chat::chat_from_simulator::ChatData,
@@ -46,12 +50,15 @@ mod tests {
     use uuid::Uuid;
     use world::{Kind, ObjectObservation, ParentUpdate, Pose, UpdateSource};
 
-    use crate::session::coordinator::events::WorldHandoff;
-    use crate::session::coordinator::input::Input;
-    use crate::session::object_cache::ObjectCacheSession;
-    use crate::session::world::{IngestSummary, SessionWorld, viewer_world_limits};
-    use crate::test_helpers::simulator_id;
-    use crate::world_reader::WorldReadHost;
+    use crate::{
+        session::{
+            coordinator::{events::WorldHandoff, input::Input},
+            object_cache::ObjectCacheSession,
+            world::{IngestSummary, SessionWorld, viewer_world_limits},
+        },
+        test_helpers::simulator_id,
+        world_reader::{MAX_INTAKE_TURNS, WorldReadHost},
+    };
 
     pub(super) fn region_handshake(name: &str) -> Message {
         Message::RegionHandshake(RegionHandshake {
@@ -64,10 +71,6 @@ mod tests {
 
     #[tokio::test]
     async fn floods_preserve_reads_and_intake() {
-        use crate::world_reader::MAX_INTAKE_TURNS;
-        use futures::poll;
-        use std::{collections::VecDeque, time::Instant};
-
         const EVENTS: u32 = 512;
         let simulator = simulator_id();
         let events = (1..=EVENTS).map(|sequence| agent_update(Uuid::from_u128(u128::from(sequence)), sequence, 0)).collect::<Vec<_>>();
@@ -195,7 +198,7 @@ mod tests {
             source: "127.0.0.1:13000".parse().expect("simulator address"),
             sequence,
             packet_order,
-            received_at: std::time::Instant::now(),
+            received_at: Instant::now(),
             ping_delay: None,
             message,
         }
@@ -216,9 +219,9 @@ mod tests {
         })
     }
 
-    pub(super) fn fixture_packet(fixture: &str) -> protocol::lludp::Packet {
+    pub(super) fn fixture_packet(fixture: &str) -> Packet {
         let bytes = test_support::parse_hex_fixture(fixture).expect("valid LLUDP fixture");
-        protocol::lludp::Packet::decode(&bytes).expect("decode LLUDP fixture")
+        Packet::decode(&bytes).expect("decode LLUDP fixture")
     }
 
     pub(super) fn apply_world_event(world: &mut SessionWorld, event: &Event) -> Option<(SimulatorId, IngestSummary)> {
@@ -226,7 +229,7 @@ mod tests {
     }
 
     async fn apply_world_cooperatively(world: &mut SessionWorld, handoff: &mut WorldHandoff, event: &Event) {
-        if let Event::SimulatorMessage { simulator_id, sequence, packet_order, received_at, ping_delay, message, .. } = event {
+        if let SimulatorMessage { simulator_id, sequence, packet_order, received_at, ping_delay, message, .. } = event {
             let mut object_cache = ObjectCacheSession::new(Grid::Agni);
             let mut media_requests = Vec::new();
             let _ = handoff

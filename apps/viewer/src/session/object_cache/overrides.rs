@@ -3,13 +3,11 @@ use std::collections::{HashMap, HashSet};
 use network::SimulatorId;
 use world::{LocalAddress, MAX_WORLD_CHANGE_PAGE_ITEMS, World, WorldChange, WorldChangeClasses, WorldEntityRemovalReason};
 
-use super::storage::make_override_submission;
 use super::{
     CacheScope, MAX_REGION_OVERRIDE_BYTES, MAX_REGION_OVERRIDES, MAX_TOTAL_BYTES, MAX_TOTAL_ENTRIES, ObjectCacheSession, OverrideWrite,
-    StoredOverride, now_millis,
+    StoredOverride, now_millis, store::make_override_submission,
 };
-use crate::session::inbound::encode_pbr_overrides;
-use crate::session::world::SessionWorld;
+use crate::session::{inbound::pbr, world::SessionWorld};
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 enum Touch {
@@ -94,7 +92,7 @@ impl ObjectCacheSession {
         let known = region.and_then(|region| region.overrides.get(&local_id.get()));
         let stored_absent = region.is_some_and(|region| region.lacks_override(local_id.get()));
         let current = world.entity_at(address).and_then(|entity| world.object(entity)).and_then(|object| {
-            let payload = encode_pbr_overrides(local_id, object.pbr_material_overrides()?)?;
+            let payload = pbr::encode_payload(local_id, object.pbr_material_overrides()?)?;
             Some(StoredOverride { object_id: object.id(), payload: payload.into() })
         });
         match current {
@@ -162,8 +160,13 @@ mod tests {
     use world::{OrderEvidence, PbrMaterialOverride, PbrMaterialOverrides, Region};
 
     use super::*;
-    use crate::session::inbound::decode_object_message;
-    use crate::session::object_cache::test_support::*;
+    use crate::session::{
+        inbound::decode_object_message,
+        object_cache::test_support::{
+            NEXT_CACHE_ID, REGION_HANDLE, SIMULATOR, cache_count, cache_totals, cached_message, cached_references, decoded_cached_batch,
+            fixture_message, flush, load_region, open_cache, override_rows, region_handshake, region_world, vectors,
+        },
+    };
 
     const LOCAL_ID: u32 = 4_242;
     const OBJECT_ID: Uuid = Uuid::from_u128(0x0bec7);
@@ -264,7 +267,7 @@ mod tests {
             .map(|(index, roughness)| (index, PbrMaterialOverride { roughness: Some(*roughness), ..Default::default() }));
         let overrides = PbrMaterialOverrides::new(faces.collect()).expect("valid overrides");
         let local_id = NonZeroU32::new(LOCAL_ID).expect("fixture local ID is nonzero");
-        let data = encode_pbr_overrides(local_id, &overrides).expect("overrides fit a message");
+        let data = pbr::encode_payload(local_id, &overrides).expect("overrides fit a message");
         Message::GenericStreamingMessage(GenericStreamingMessage { method: 0x4175, data })
     }
 

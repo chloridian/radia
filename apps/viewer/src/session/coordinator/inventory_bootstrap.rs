@@ -5,11 +5,8 @@ use std::{
     sync::Arc,
 };
 
-use ::inventory::{Category, CategoryKey, FolderType, Inventory, InventoryError, InventoryLimits, InventoryOwner, ServerVersion};
-use protocol::login::{
-    InventoryBootstrap as LoginInventoryBootstrap, InventoryBootstrapError as LoginInventoryBootstrapError, InventorySkeleton,
-    InventorySkeletonFolder, ResponseData,
-};
+use inventory::{Category, CategoryKey, FolderType, Inventory, InventoryError, InventoryLimits, InventoryOwner, ServerVersion};
+use protocol::login::{self, InventoryBootstrap, InventorySkeleton, InventorySkeletonFolder, ResponseData};
 use tokio::{runtime::Handle, task::JoinHandle};
 use utils::FolderId;
 use uuid::Uuid;
@@ -49,7 +46,7 @@ impl From<InventoryError> for InventoryBootstrapError {
 
 #[derive(Debug)]
 pub(crate) enum InventoryWorkerError {
-    Login(LoginInventoryBootstrapError),
+    Login(login::InventoryBootstrapError),
     Build(InventoryBootstrapError),
 }
 
@@ -79,7 +76,7 @@ struct ScopeCategories {
 
 pub(crate) fn build_inventory(
     agent_id: Uuid,
-    bootstrap: LoginInventoryBootstrap,
+    bootstrap: InventoryBootstrap,
 ) -> Result<(Inventory, InventoryBootstrapReport), InventoryBootstrapError> {
     let personal_root_id = bootstrap.personal_root.ok_or(InventoryBootstrapError::MissingPersonalRoot)?;
     if personal_root_id.is_nil() || agent_id.is_nil() {
@@ -231,9 +228,8 @@ fn empty_root(owner: InventoryOwner, id: FolderId) -> Category {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use protocol::login::{InventorySkeleton, InventorySkeletonFolder, Value};
     use std::{
+        assert_matches,
         collections::BTreeMap,
         sync::{
             Arc,
@@ -242,8 +238,11 @@ mod tests {
         },
         time::Duration,
     };
-    use tokio::sync::oneshot;
-    use tokio::time::timeout;
+
+    use protocol::login::{InventorySkeleton, InventorySkeletonFolder, MAX_LOGIN_INVENTORY_FOLDERS, Value};
+    use tokio::{sync::oneshot, time::timeout};
+
+    use super::*;
 
     fn uuid(id: u128) -> Uuid {
         Uuid::from_u128(id)
@@ -252,7 +251,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn max_skeleton_does_not_block() {
         let root = uuid(1);
-        let folders = (1..=protocol::login::MAX_LOGIN_INVENTORY_FOLDERS)
+        let folders = (1..=MAX_LOGIN_INVENTORY_FOLDERS)
             .map(|id| {
                 let id = uuid(id as u128);
                 let parent_id = if id == root { Uuid::nil() } else { root };
@@ -283,7 +282,7 @@ mod tests {
             build_inventory_from_login(agent_id, login_data)
         });
         started_receiver.await.expect("slow worker section has started");
-        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let (sender, receiver) = oneshot::channel();
         tokio::spawn(async move {
             let _ = sender.send(());
         });
@@ -295,8 +294,8 @@ mod tests {
         assert!(worker_busy.load(Ordering::Acquire), "worker should still be busy while intake progresses");
         release_sender.send(()).expect("worker is still waiting at its barrier");
         let (inventory, report) = build.await.expect("inventory worker should finish").expect("valid login inventory should build");
-        assert_eq!(report.personal_categories, protocol::login::MAX_LOGIN_INVENTORY_FOLDERS);
-        assert_eq!(inventory.snapshot().categories().count(), protocol::login::MAX_LOGIN_INVENTORY_FOLDERS);
+        assert_eq!(report.personal_categories, MAX_LOGIN_INVENTORY_FOLDERS);
+        assert_eq!(inventory.snapshot().categories().count(), MAX_LOGIN_INVENTORY_FOLDERS);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -325,16 +324,14 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn worker_keeps_error_types() {
         let invalid_login = ResponseData::from_fields(BTreeMap::from([("inventory-root".into(), Value::String("invalid".into()))]));
-        let login_result =
-            super::spawn_inventory_build(&Handle::current(), uuid(10), invalid_login).await.expect("login worker should complete");
+        let login_result = spawn_inventory_build(&Handle::current(), uuid(10), invalid_login).await.expect("login worker should complete");
         let Err(login_error) = login_result else { panic!("invalid login root should fail parsing") };
-        std::assert_matches!(login_error, InventoryWorkerError::Login(LoginInventoryBootstrapError::InvalidPersonalRoot));
+        assert_matches!(login_error, InventoryWorkerError::Login(login::InventoryBootstrapError::InvalidPersonalRoot));
 
-        let model_result = super::spawn_inventory_build(&Handle::current(), uuid(10), ResponseData::default())
-            .await
-            .expect("login worker should complete");
+        let model_result =
+            spawn_inventory_build(&Handle::current(), uuid(10), ResponseData::default()).await.expect("login worker should complete");
         let Err(model_error) = model_result else { panic!("missing personal root should fail model construction") };
-        std::assert_matches!(model_error, InventoryWorkerError::Build(InventoryBootstrapError::MissingPersonalRoot));
+        assert_matches!(model_error, InventoryWorkerError::Build(InventoryBootstrapError::MissingPersonalRoot));
     }
 
     fn folder(id: u128, parent_id: u128, name: &str, type_default: Option<i32>) -> InventorySkeletonFolder {
@@ -343,7 +340,7 @@ mod tests {
 
     #[test]
     fn builds_with_distinct_owners() {
-        let bootstrap = LoginInventoryBootstrap {
+        let bootstrap = InventoryBootstrap {
             personal_root: Some(uuid(1)),
             personal_skeleton: InventorySkeleton {
                 folders: vec![folder(1, 0, "Personal", Some(8)), folder(2, 1, "Favorites", Some(23))],
@@ -379,7 +376,7 @@ mod tests {
 
     #[test]
     fn counts_rejected_entries() {
-        let bootstrap = LoginInventoryBootstrap {
+        let bootstrap = InventoryBootstrap {
             personal_root: Some(uuid(1)),
             personal_skeleton: InventorySkeleton {
                 folders: vec![
@@ -392,7 +389,7 @@ mod tests {
                 ],
                 rejected_entries: 1,
             },
-            ..LoginInventoryBootstrap::default()
+            ..InventoryBootstrap::default()
         };
 
         let (inventory, report) = build_inventory(uuid(10), bootstrap).expect("the valid root should still build");

@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use ::inventory::{Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryLimits, InventoryOwner, ServerVersion};
+use inventory::{Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryLimits, InventoryOwner, ServerVersion};
 use utils::FolderId;
 use uuid::Uuid;
 
@@ -19,9 +19,9 @@ fn apply_fetch(
     version: ServerVersion,
     descendent_count: Option<u32>,
     children: Vec<InventoryChild>,
-) -> Result<::inventory::ChangeSet, ::inventory::InventoryError> {
+) -> Result<inventory::ChangeSet, inventory::InventoryError> {
     let prepared = inventory.snapshot().prepare_folder_fetch(folder, version, descendent_count, children)?;
-    let ::inventory::FolderFetchCommit::Applied(changes) = inventory.commit_folder_fetch(prepared)? else {
+    let inventory::FolderFetchCommit::Applied(changes) = inventory.commit_folder_fetch(prepared)? else {
         panic!("single-owner fetch preparation became stale before commit");
     };
     Ok(changes)

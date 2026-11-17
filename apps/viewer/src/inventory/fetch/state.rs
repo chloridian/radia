@@ -1,6 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 
-use ::inventory::{CategoryKey, InventorySnapshot};
+use inventory::{CategoryKey, InventorySnapshot};
 
 use super::MAX_LEGACY_BATCH;
 
@@ -28,7 +28,7 @@ pub(super) fn next_background_job(
     snapshot: &InventorySnapshot,
     in_flight: &HashSet<CategoryKey>,
     failed: &HashSet<CategoryKey>,
-    source_kind: impl Fn(::inventory::InventoryOwner) -> SourceKind,
+    source_kind: impl Fn(inventory::InventoryOwner) -> SourceKind,
 ) -> Option<BackgroundPlan> {
     let mut index = 0;
     while index < background.len() {

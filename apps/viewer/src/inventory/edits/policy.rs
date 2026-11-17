@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use ::inventory::{Category, CategoryKey, FolderType, InventoryNodeId, InventoryNodeKey, InventoryOwner, InventorySnapshot};
+use inventory::{Category, CategoryKey, FolderType, InventoryNodeId, InventoryNodeKey, InventoryOwner, InventorySnapshot};
 
 use super::types::InventoryEditRejection;
 
@@ -34,8 +34,8 @@ pub(crate) fn validate_edit(snapshot: &InventorySnapshot, owner: InventoryOwner,
                     }
                 }
                 InventoryNodeId::Item(id) => {
-                    let item = snapshot.item(::inventory::ItemKey::new(owner, id)).ok_or(InventoryEditRejection::MissingItem)?;
-                    if item.inventory_type == ::inventory::InventoryType::CallingCard
+                    let item = snapshot.item(inventory::ItemKey::new(owner, id)).ok_or(InventoryEditRejection::MissingItem)?;
+                    if item.inventory_type == inventory::InventoryType::CallingCard
                         || category_is_within(snapshot, item.parent, FolderType::Trash)
                         || category_is_within(snapshot, item.parent, FolderType::Inbox)
                     {
@@ -54,7 +54,7 @@ pub(crate) fn validate_edit(snapshot: &InventorySnapshot, owner: InventoryOwner,
                     category.parent
                 }
                 InventoryNodeId::Item(id) => {
-                    let item = snapshot.item(::inventory::ItemKey::new(owner, id)).ok_or(InventoryEditRejection::MissingItem)?;
+                    let item = snapshot.item(inventory::ItemKey::new(owner, id)).ok_or(InventoryEditRejection::MissingItem)?;
                     if category_is_within(snapshot, item.parent, FolderType::CurrentOutfit) {
                         return Err(InventoryEditRejection::OperationNotAllowed);
                     }
@@ -87,7 +87,7 @@ pub(crate) fn validate_edit(snapshot: &InventorySnapshot, owner: InventoryOwner,
                     }
                 }
                 InventoryNodeId::Item(id) => {
-                    let item = snapshot.item(::inventory::ItemKey::new(owner, id)).ok_or(InventoryEditRejection::MissingItem)?;
+                    let item = snapshot.item(inventory::ItemKey::new(owner, id)).ok_or(InventoryEditRejection::MissingItem)?;
                     if category_is_within(snapshot, item.parent, FolderType::Trash)
                         || category_is_within(snapshot, item.parent, FolderType::CurrentOutfit)
                     {
@@ -175,7 +175,7 @@ fn folder_would_cycle(folder: CategoryKey, destination: CategoryKey, snapshot: &
 mod tests {
     use std::sync::Arc;
 
-    use ::inventory::{
+    use inventory::{
         AssetType, Category, CategoryKey, FolderType, Inventory, InventoryLimits, InventoryNodeId, InventoryNodeKey, InventoryOwner,
         InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
     };

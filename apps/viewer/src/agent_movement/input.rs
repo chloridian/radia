@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    f32::consts::FRAC_PI_2,
+    time::{Duration, Instant},
+};
 
 use math::{Quat, Vec3};
 use winit::{
@@ -21,7 +24,7 @@ const FAST_LEFT: u32 = 0x0000_0800;
 const FAST_UP: u32 = 0x0000_1000;
 const FLY: u32 = 0x0000_2000;
 pub(crate) const STOP: u32 = 0x0000_4000;
-const TURN_RATE: f32 = std::f32::consts::FRAC_PI_2;
+const TURN_RATE: f32 = FRAC_PI_2;
 const MAX_TURN_STEP: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -268,8 +271,10 @@ mod tests {
     use math::{Quat, Vec3};
     use winit::{event::ElementState, keyboard::Key};
 
-    use super::{AT_NEG, AT_POS, FAST_AT, FAST_LEFT, FAST_UP, FLY, LEFT_NEG, LEFT_POS, STOP, UP_NEG, UP_POS, YAW_NEG, YAW_POS};
-    use super::{BodyRotation, HeldControls, KeyBinding, MovementKey};
+    use super::{
+        AT_NEG, AT_POS, BodyRotation, FAST_AT, FAST_LEFT, FAST_UP, FLY, HeldControls, KeyBinding, LEFT_NEG, LEFT_POS, MovementKey, STOP,
+        UP_NEG, UP_POS, YAW_NEG, YAW_POS,
+    };
 
     #[test]
     fn bindings_derive_control_flags() {

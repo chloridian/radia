@@ -4,15 +4,18 @@ mod legacy;
 mod scheduler;
 mod state;
 
-use std::{fmt, time::Duration};
+use std::{error, fmt, time::Duration};
 
-use ::inventory::{CategoryKey, InventoryChild, InventoryError, InventoryRevision, ServerVersion};
+use inventory::{CategoryKey, InventoryChild, InventoryError, InventoryRevision, ServerVersion};
+use network::capabilities::HttpErrorKind;
 use tokio::sync::oneshot;
 
-pub(crate) use decode::{to_category as category_from_wire, to_item as item_from_wire};
-pub(crate) use scheduler::InventoryFetchController;
-pub use scheduler::{InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequestError, InventoryLoadingStatus};
-pub(super) use scheduler::{fetch_single_folder, fetch_single_items};
+pub use self::scheduler::{InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequestError, InventoryLoadingStatus};
+pub(super) use self::scheduler::{fetch_single_folder, fetch_single_items};
+pub(crate) use self::{
+    decode::{to_category, to_item},
+    scheduler::InventoryFetchController,
+};
 
 const MAX_FETCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_AIS_DEPTH: u8 = 16;
@@ -36,15 +39,13 @@ fn classify_request_error(error: network::Error) -> RequestFailure {
             RequestFailure::Missing
         }
         network::Error::CapabilityHttp(error)
-            if error.kind == network::capabilities::HttpErrorKind::Transport
-                || error.kind == network::capabilities::HttpErrorKind::Timeout
+            if error.kind == HttpErrorKind::Transport
+                || error.kind == HttpErrorKind::Timeout
                 || error.status.is_some_and(|status| status.is_server_error() || status.as_u16() == 429) =>
         {
             RequestFailure::Transient(error.retry_after)
         }
-        network::Error::CapabilityHttp(error) if error.kind == network::capabilities::HttpErrorKind::ResourceExhausted => {
-            RequestFailure::FolderTooLarge
-        }
+        network::Error::CapabilityHttp(error) if error.kind == HttpErrorKind::ResourceExhausted => RequestFailure::FolderTooLarge,
         network::Error::Capability(_) => RequestFailure::InvalidResponse,
         _ => RequestFailure::Failed,
     }
@@ -73,7 +74,7 @@ impl fmt::Display for InventoryFetchError {
     }
 }
 
-impl std::error::Error for InventoryFetchError {}
+impl error::Error for InventoryFetchError {}
 
 impl From<InventoryError> for InventoryFetchError {
     fn from(error: InventoryError) -> Self {

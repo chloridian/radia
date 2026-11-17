@@ -1,12 +1,13 @@
 use super::*;
+use crate::test_helpers;
 
 #[test]
 fn media_requests_cover_full_compressed() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let marker = "x-mv:12/00000000-0000-0000-0000-000000000001";
     let id = Uuid::from_u128(0x1234);
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
-    let Message::ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
+    let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects.truncate(1);
     update.objects[0].pcode = 9;
     update.objects[0].id = id;
@@ -21,7 +22,7 @@ fn media_requests_cover_full_compressed() {
     assert_eq!(requests[0].source.region(), region);
 
     let mut compressed = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED).message().clone();
-    let Message::ObjectUpdateCompressed(update) = &mut compressed else { panic!("expected compressed fixture") };
+    let ObjectUpdateCompressed(update) = &mut compressed else { panic!("expected compressed fixture") };
     update.objects.truncate(1);
     update.objects[0].pcode = 9;
     update.objects[0].id = id;
@@ -35,10 +36,10 @@ fn media_requests_cover_full_compressed() {
 
 #[test]
 fn media_requests_require_volume_marker() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let mut message = packet(vectors::OBJECT_UPDATE).message().clone();
     {
-        let Message::ObjectUpdate(update) = &mut message else { panic!("expected full object fixture") };
+        let ObjectUpdate(update) = &mut message else { panic!("expected full object fixture") };
         update.objects.truncate(1);
         update.objects[0].pcode = 47;
         update.objects[0].media_url = "x-mv:12/00000000-0000-0000-0000-000000000001".into();
@@ -46,7 +47,7 @@ fn media_requests_require_volume_marker() {
     assert!(object_media_requests(region, 1, OrderEvidence::Ordered(1), &message).is_empty());
 
     {
-        let Message::ObjectUpdate(update) = &mut message else { panic!("expected full object fixture") };
+        let ObjectUpdate(update) = &mut message else { panic!("expected full object fixture") };
         update.objects[0].pcode = 9;
         update.objects[0].media_url = "https://media.test/object".into();
     }
@@ -64,7 +65,7 @@ fn attachment_state_decodes_wire_nibbles() {
 
 #[test]
 fn override_message_targets_local_id() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let message = message(0x4175, br"{'id':i7,'te':[i4],'od':[{'mf':r0.5}]}");
     let batch = decode_object_message(region, 5, OrderEvidence::Ordered(5), &message).expect("override batch");
 
@@ -76,7 +77,7 @@ fn override_message_targets_local_id() {
 
 #[test]
 fn malformed_override_is_ignored() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let message = message(0x4175, b"not LLSD");
     let batch = decode_object_message(region, 5, OrderEvidence::Ordered(5), &message).expect("override batch");
 
@@ -86,7 +87,7 @@ fn malformed_override_is_ignored() {
 
 #[test]
 fn unrelated_streaming_method_is_ignored() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let message = message(0x1234, br"{'id':i7,'te':[],'od':[]}");
 
     assert!(decode_object_message(region, 5, OrderEvidence::Ordered(5), &message).is_none());

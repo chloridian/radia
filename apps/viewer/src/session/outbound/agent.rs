@@ -62,6 +62,7 @@ fn update(
 #[cfg(test)]
 mod tests {
     use protocol::lludp::Packet;
+    use test_support::lludp::vectors::AGENT_UPDATE_INITIAL;
 
     use super::*;
     fn idle_movement() -> MovementObservation {
@@ -100,8 +101,7 @@ mod tests {
         let view = Camera::new(DVec3::new(128.0, 128.0, 30.0), Vec3::X, 1.0, [720, 720]).unwrap().with_quality(128.0, 1.0).unwrap();
         let update = movement_camera(agent_id, session_id, view, DVec3::ZERO, idle_movement()).unwrap();
         let packet = Packet::new(3, update.into()).with_reliable().encode().expect("encode default update");
-        let expected =
-            test_support::parse_hex_fixture(test_support::lludp::vectors::AGENT_UPDATE_INITIAL).expect("valid AgentUpdate fixture");
+        let expected = test_support::parse_hex_fixture(AGENT_UPDATE_INITIAL).expect("valid AgentUpdate fixture");
         assert_eq!(packet, expected);
     }
 }

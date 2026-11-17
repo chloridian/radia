@@ -1,12 +1,12 @@
-use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
+use std::{assert_matches, collections::HashMap, io, net::SocketAddr, sync::Arc};
 
-use ::inventory::{
+use futures::{FutureExt, future};
+use inventory::{
     AssetType, Category, CategoryKey, FolderType, Inventory, InventoryDelta, InventoryLimits, InventoryNodeId, InventoryOwner,
     InventorySnapshot, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
 };
-use futures::FutureExt;
 use llsd::{Map, Value, xml};
-use network::{Error as NetworkError, capabilities::Client};
+use network::capabilities::Client;
 use protocol::lludp::{Message, Packet};
 use tokio::{
     net::UdpSocket,
@@ -17,11 +17,13 @@ use tokio::{
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
-use crate::inventory::test_support::{LoopbackPeer, TEST_TIMEOUT};
-
 use super::{
     controller::{EditSession, InventoryMove, MoveTransport},
     *,
+};
+use crate::{
+    inventory::test_support::{LoopbackPeer, TEST_TIMEOUT},
+    session,
 };
 
 struct UdpMovePeer {
@@ -30,13 +32,13 @@ struct UdpMovePeer {
 }
 
 impl MoveTransport for UdpMovePeer {
-    fn send(&self, movement: InventoryMove) -> Result<(), NetworkError> {
+    fn send(&self, movement: InventoryMove) -> Result<(), network::Error> {
         let message = match movement {
             InventoryMove::Item(message) => Message::MoveInventoryItem(message),
             InventoryMove::Folder(message) => Message::MoveInventoryFolder(message),
         };
-        let bytes = Packet::new(1, message).with_reliable().encode().map_err(|error| NetworkError::SimulatorSend(error.to_string()))?;
-        self.sender.try_send_to(&bytes, self.destination).map(|_| ()).map_err(|error| NetworkError::SimulatorSend(error.to_string()))
+        let bytes = Packet::new(1, message).with_reliable().encode().map_err(|error| network::Error::SimulatorSend(error.to_string()))?;
+        self.sender.try_send_to(&bytes, self.destination).map(|_| ()).map_err(|error| network::Error::SimulatorSend(error.to_string()))
     }
 }
 
@@ -117,7 +119,7 @@ fn start_controller(
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let (model_sender, model) = watch::channel(Some(inventory.snapshot()));
     let mut controller = InventoryEditController::new();
-    controller.start_with_transport(&Handle::current(), client, session, transport, model, futures::future::pending().boxed().shared());
+    controller.start_with_transport(&Handle::current(), client, session, transport, model, future::pending().boxed().shared());
     (controller, model_sender)
 }
 
@@ -170,7 +172,7 @@ async fn confirm_udp_move(
         (_, message) => panic!("unexpected outbound move: {message:?}"),
     }
     let before = inventory.snapshot();
-    let update = crate::session::apply_inventory_udp(inventory, owner.id(), &message)
+    let update = session::apply_udp(inventory, owner.id(), &message)
         .expect("intake inbound UDP move update")
         .expect("move update belongs to the active owner");
     assert_eq!(update.rejected_blocks, 0);
@@ -178,13 +180,13 @@ async fn confirm_udp_move(
         .changes
         .changes
         .iter()
-        .find(|change| matches!(change, ::inventory::InventoryChange::NodeMoved { node, .. } if *node == expectation.node));
-    std::assert_matches!(
+        .find(|change| matches!(change, inventory::InventoryChange::NodeMoved { node, .. } if *node == expectation.node));
+    assert_matches!(
         selected,
-        Some(::inventory::InventoryChange::NodeMoved { node, from, to })
+        Some(inventory::InventoryChange::NodeMoved { node, from, to })
             if *node == expectation.node && *from == expectation.from && *to == expectation.to
     );
-    crate::session::confirm_pending_moves(&mut pending, &before, &inventory.snapshot());
+    session::confirm_pending_moves(&mut pending, &before, &inventory.snapshot());
     assert!(pending.is_empty());
     model.send_replace(Some(inventory.snapshot()));
 }
@@ -363,8 +365,8 @@ async fn ais_failures_apply_nothing() {
 struct NoopMoveTransport;
 
 impl MoveTransport for NoopMoveTransport {
-    fn send(&self, _movement: InventoryMove) -> Result<(), NetworkError> {
-        Err(NetworkError::SessionClosed)
+    fn send(&self, _movement: InventoryMove) -> Result<(), network::Error> {
+        Err(network::Error::SessionClosed)
     }
 }
 
@@ -439,7 +441,7 @@ async fn move_timeout_refetches_both_folders() {
     assert!(changes.refetch_categories.contains(&second));
     model.send_replace(Some(inventory.snapshot()));
     refreshed.send(true).expect("move worker waits for refetch scheduling");
-    std::assert_matches!(move_item.await.expect("timed out move result"), InventoryEditOutcome::TimedOut);
+    assert_matches!(move_item.await.expect("timed out move result"), InventoryEditOutcome::TimedOut);
     controller.stop().await;
 }
 
@@ -491,7 +493,7 @@ async fn ais_timeout_refreshes_rename() {
 
     assert_eq!(rename.await.expect("timed out rename result"), InventoryEditOutcome::TimedOut);
     if let Err(error) = request.try_respond(200, metadata("_updated_items", &[item_key.id().uuid()])).await {
-        std::assert_matches!(error.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted);
+        assert_matches!(error.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted);
     }
     assert_eq!(
         model.borrow().as_ref().and_then(|snapshot| snapshot.item(item_key)).map(|item| item.name.as_ref()),

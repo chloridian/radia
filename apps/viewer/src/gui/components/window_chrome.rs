@@ -116,4 +116,4 @@ mod platform {
     }
 }
 
-pub(crate) use platform::{appears_transparent, titlebar};
+pub(crate) use self::platform::{appears_transparent, titlebar};

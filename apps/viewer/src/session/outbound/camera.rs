@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{future, time::Duration};
 
 use math::{DVec3, Quat, Vec3};
 use network::{AgentSession, Delivery, Error, SessionHandle, SimulatorId};
@@ -8,6 +8,7 @@ use tokio::{
     sync::watch,
     time::{Instant, sleep_until},
 };
+use tracing::field;
 use utils::Summary;
 use uuid::Uuid;
 
@@ -49,7 +50,7 @@ impl DeferredUpdates {
         tracing::debug!(
             always_run = self.always_run,
             agent = self.agent,
-            last_error = self.last_error.as_ref().map(tracing::field::display),
+            last_error = self.last_error.as_ref().map(field::display),
             "agent updates deferred"
         );
     }
@@ -159,7 +160,7 @@ impl CameraUplink {
                 if let Some(deadline) = deadline {
                     sleep_until(deadline).await;
                 } else {
-                    std::future::pending::<()>().await;
+                    future::pending::<()>().await;
                 }
             } => Instant::now(),
         }
@@ -352,7 +353,7 @@ fn camera_axes(direction: Vec3) -> (Vec3, Vec3) {
 
 async fn changed<T>(receiver: &mut watch::Receiver<T>) {
     if receiver.changed().await.is_err() {
-        std::future::pending::<()>().await;
+        future::pending::<()>().await;
     }
 }
 
@@ -362,12 +363,10 @@ fn rotation_changed(previous: Quat, current: Quat) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    use std::net::{SocketAddr, UdpSocket};
     use std::{cell::Cell, time::Duration};
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    use std::net::UdpSocket;
-
-    use crate::test_helpers::simulator_id;
     use futures::FutureExt;
     use math::{DVec3, Quat, Vec3};
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -377,7 +376,7 @@ mod tests {
     use protocol::messages::SetAlwaysRun;
     use render::scene::Camera;
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    use tokio::net::UdpSocket as TokioUdpSocket;
+    use tokio::net;
     use tokio::time::{Instant, advance};
     use uuid::Uuid;
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -385,30 +384,24 @@ mod tests {
         event::ElementState,
         keyboard::{Key, NamedKey},
     };
-
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     use world::RegionHandle;
 
+    use super::{CameraUplink, KEEPALIVE_INTERVAL, MIN_UPDATE_INTERVAL, UplinkMessage, camera_changed};
+    use crate::{agent_movement::MovementObservation, test_helpers::simulator_id};
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     use crate::{
-        agent_movement::{HeldControls, KeyBinding, input::MovementKey},
+        agent_movement::{HeldControls, KeyBinding, STOP, input::MovementKey},
         camera::FollowCamera,
         session::world::{SessionWorld, viewer_world_limits},
     };
-
-    use super::{CameraUplink, KEEPALIVE_INTERVAL, MIN_UPDATE_INTERVAL, UplinkMessage, camera_changed};
 
     fn view(position: DVec3, direction: Vec3) -> Camera {
         Camera::new(position, direction, 1.0, [720, 720]).expect("valid camera").with_quality(64.0, 1.0).expect("valid quality")
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    fn send_as_packet(
-        socket: &UdpSocket,
-        destination: std::net::SocketAddr,
-        sequence: u32,
-        message: UplinkMessage,
-    ) -> Result<(), network::Error> {
+    fn send_as_packet(socket: &UdpSocket, destination: SocketAddr, sequence: u32, message: UplinkMessage) -> Result<(), network::Error> {
         let message = match message {
             UplinkMessage::AgentUpdate(update) => Message::AgentUpdate(update),
             UplinkMessage::SetAlwaysRun(update) => Message::SetAlwaysRun(update),
@@ -418,7 +411,7 @@ mod tests {
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    async fn receive_packet(socket: &TokioUdpSocket) -> Message {
+    async fn receive_packet(socket: &net::UdpSocket) -> Message {
         let mut bytes = [0; 2048];
         let (length, _) = socket.recv_from(&mut bytes).await.expect("loopback update");
         Packet::decode(&bytes[..length]).expect("valid LLUDP packet").message().clone()
@@ -431,9 +424,9 @@ mod tests {
         agent_id: Uuid,
         session_id: Uuid,
         camera: impl Into<Option<Camera>>,
-        movement: crate::agent_movement::MovementObservation,
+        movement: MovementObservation,
         socket: &UdpSocket,
-        destination: std::net::SocketAddr,
+        destination: SocketAddr,
         sequence: &mut u32,
     ) {
         uplink.tick_with(Some((simulator, agent_id, session_id)), Some(DVec3::ZERO), camera.into(), Some(movement), |message, delivery| {
@@ -451,7 +444,7 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[tokio::test]
     async fn simulator_receives_actions_and_stop() {
-        let receiver = TokioUdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
+        let receiver = net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
         let sender = UdpSocket::bind("127.0.0.1:0").expect("bind loopback viewer");
         let destination = receiver.local_addr().expect("simulator address");
         let simulator = simulator_id();
@@ -557,7 +550,7 @@ mod tests {
         });
 
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].agent_data.control_flags & crate::agent_movement::STOP, crate::agent_movement::STOP);
+        assert_eq!(sent[0].agent_data.control_flags & STOP, STOP);
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -566,12 +559,7 @@ mod tests {
         let simulator = simulator_id();
         let (agent_id, session_id) = (Uuid::from_u128(1), Uuid::from_u128(2));
         let camera = view(DVec3::ZERO, Vec3::X);
-        let movement = crate::agent_movement::MovementObservation {
-            control_flags: 0,
-            body_rotation: Quat::IDENTITY,
-            always_run: false,
-            stop_sequence: 0,
-        };
+        let movement = MovementObservation { control_flags: 0, body_rotation: Quat::IDENTITY, always_run: false, stop_sequence: 0 };
         let mut uplink = CameraUplink::new();
         let mut sent = Vec::new();
         uplink.tick_with(Some((simulator, agent_id, session_id)), Some(DVec3::ZERO), Some(camera), Some(movement), |message, _| {
@@ -595,7 +583,7 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[tokio::test(start_paused = true)]
     async fn origin_wakes_camera_and_key() {
-        let receiver = TokioUdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
+        let receiver = net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
         let sender = UdpSocket::bind("127.0.0.1:0").expect("bind loopback viewer");
         let destination = receiver.local_addr().expect("simulator address");
         let simulator = simulator_id();
@@ -727,12 +715,7 @@ mod tests {
         let mut uplink = CameraUplink::new();
         let camera = view(DVec3::ZERO, Vec3::X);
         let mut sent = Vec::new();
-        let movement = crate::agent_movement::MovementObservation {
-            control_flags: 0,
-            body_rotation: Quat::IDENTITY,
-            always_run: false,
-            stop_sequence: 0,
-        };
+        let movement = MovementObservation { control_flags: 0, body_rotation: Quat::IDENTITY, always_run: false, stop_sequence: 0 };
         uplink.tick_with(Some((simulator, Uuid::nil(), Uuid::nil())), Some(DVec3::ZERO), Some(camera), Some(movement), |message, _| {
             if let UplinkMessage::AgentUpdate(update) = message {
                 sent.push(update);
@@ -813,12 +796,7 @@ mod tests {
         let simulator = simulator_id();
         let destination = Some((simulator, Uuid::nil(), Uuid::nil()));
         let camera = view(DVec3::ZERO, Vec3::X);
-        let movement = crate::agent_movement::MovementObservation {
-            control_flags: 0,
-            body_rotation: Quat::IDENTITY,
-            always_run: false,
-            stop_sequence: 0,
-        };
+        let movement = MovementObservation { control_flags: 0, body_rotation: Quat::IDENTITY, always_run: false, stop_sequence: 0 };
         let mut uplink = CameraUplink::new();
         let sent = Cell::new(0);
         let mut send = |_, _| {
@@ -846,12 +824,7 @@ mod tests {
     async fn camera_change_waits_for_limit() {
         let simulator = simulator_id();
         let mut uplink = CameraUplink::new();
-        let movement = crate::agent_movement::MovementObservation {
-            control_flags: 0,
-            body_rotation: Quat::IDENTITY,
-            always_run: false,
-            stop_sequence: 0,
-        };
+        let movement = MovementObservation { control_flags: 0, body_rotation: Quat::IDENTITY, always_run: false, stop_sequence: 0 };
         let mut sent = Vec::new();
         uplink.tick_with(
             Some((simulator, Uuid::nil(), Uuid::nil())),
@@ -896,8 +869,8 @@ mod tests {
         assert_eq!(sent.len(), 2);
     }
 
-    fn run_movement(always_run: bool) -> crate::agent_movement::MovementObservation {
-        crate::agent_movement::MovementObservation { control_flags: 0, body_rotation: Quat::IDENTITY, always_run, stop_sequence: 0 }
+    fn run_movement(always_run: bool) -> MovementObservation {
+        MovementObservation { control_flags: 0, body_rotation: Quat::IDENTITY, always_run, stop_sequence: 0 }
     }
 
     fn tick_runs(

@@ -8,7 +8,7 @@ use std::{
 use llsd::{Limits, Map, Value, binary, notation, xml};
 use protocol::lludp::Message;
 use render::scene::{EnvironmentProperty, EnvironmentPush};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, mpsc::error::TrySendError};
 use utils::{AssetId, ExperienceId};
 use uuid::Uuid;
 use world::Region;
@@ -42,11 +42,11 @@ impl Display for EnvironmentQueueError {
 
 impl Error for EnvironmentQueueError {}
 
-impl From<mpsc::error::TrySendError<EnvironmentCommand>> for EnvironmentQueueError {
-    fn from(error: mpsc::error::TrySendError<EnvironmentCommand>) -> Self {
+impl From<TrySendError<EnvironmentCommand>> for EnvironmentQueueError {
+    fn from(error: TrySendError<EnvironmentCommand>) -> Self {
         match error {
-            mpsc::error::TrySendError::Full(_) => Self::Full,
-            mpsc::error::TrySendError::Closed(_) => Self::Closed,
+            TrySendError::Full(_) => Self::Full,
+            TrySendError::Closed(_) => Self::Closed,
         }
     }
 }
@@ -202,10 +202,16 @@ fn properties(value: Option<&Value>) -> Result<Vec<EnvironmentProperty>, Invalid
 
 #[cfg(test)]
 mod tests {
-    use protocol::messages::GenericMessage;
-    use protocol::messages::generic_message::{AgentData, MethodData, Parameter};
+    use std::assert_matches;
+
+    use protocol::messages::{
+        GenericMessage,
+        generic_message::{AgentData, MethodData, Parameter},
+    };
+    use tokio::sync::mpsc::error::TryRecvError;
 
     use super::*;
+    use crate::test_helpers;
 
     fn message(agent: Uuid, invoice: Uuid, body: &str) -> Message {
         Message::GenericMessage(GenericMessage {
@@ -249,7 +255,7 @@ mod tests {
         };
         assert!(sky.is_empty() && water.is_empty());
         for body in ["{'action':'ClearEnvironment'}", "{'action':'ClearEnvironment','action_data':{'transition_time':i-1}}"] {
-            std::assert_matches!(
+            assert_matches!(
                 decode(&message(agent, Uuid::nil(), body), agent).unwrap(),
                 Some(EnvironmentPush::Clear { experience: None, transition: Duration::ZERO })
             );
@@ -269,7 +275,7 @@ mod tests {
 
     #[test]
     fn unrepresentable_transition_is_not_published() {
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         let agent = Uuid::from_u128(1);
         let experience = Uuid::from_u128(2);
         let seconds = 18_446_744_073_709_549_568.0f64;
@@ -283,7 +289,7 @@ mod tests {
         let (sender, inbox) = EnvironmentInbox::channel();
         sender.publish(&message, agent, region, received_at).unwrap();
         let mut receiver = inbox.take().unwrap();
-        std::assert_matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+        assert_matches!(receiver.try_recv(), Err(TryRecvError::Empty));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     input::{Input, InputState},
 };
-use network::{AgentSession, Delivery, Error as NetworkError, SessionHandle};
+use network::{AgentSession, Delivery, SessionHandle};
 use protocol::{
     ChatType,
     messages::{
@@ -224,11 +224,13 @@ impl Render for ChatScreen {
     }
 }
 
-fn send_error_copy(error: &NetworkError) -> &'static str {
+fn send_error_copy(error: &network::Error) -> &'static str {
     match error {
-        NetworkError::CommandQueueFull => "Message wasn't sent. Try again in a moment.",
-        NetworkError::OutboundMessageTooLarge => "This message is too long to send. Shorten it and try again.",
-        NetworkError::SessionClosed | NetworkError::SimulatorConnectionClosed => "Message wasn't sent. Reconnect and try sending again.",
+        network::Error::CommandQueueFull => "Message wasn't sent. Try again in a moment.",
+        network::Error::OutboundMessageTooLarge => "This message is too long to send. Shorten it and try again.",
+        network::Error::SessionClosed | network::Error::SimulatorConnectionClosed => {
+            "Message wasn't sent. Reconnect and try sending again."
+        }
         _ => "Couldn't send nearby chat. Check your connection and try again.",
     }
 }
@@ -258,7 +260,6 @@ mod tests {
     use gpui::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
 
     use super::{ChatMessage, ChatScreen, MAX_CHAT_HISTORY_BYTES, MAX_CHAT_HISTORY_MESSAGES, retain_message, send_error_copy};
-    use network::Error as NetworkError;
 
     #[test]
     fn history_keeps_recent_messages() {
@@ -305,11 +306,14 @@ mod tests {
 
     #[test]
     fn send_errors_preserve_safe_feedback() {
-        assert_eq!(send_error_copy(&NetworkError::CommandQueueFull), "Message wasn't sent. Try again in a moment.");
-        assert_eq!(send_error_copy(&NetworkError::OutboundMessageTooLarge), "This message is too long to send. Shorten it and try again.");
-        assert_eq!(send_error_copy(&NetworkError::SessionClosed), "Message wasn't sent. Reconnect and try sending again.");
+        assert_eq!(send_error_copy(&network::Error::CommandQueueFull), "Message wasn't sent. Try again in a moment.");
         assert_eq!(
-            send_error_copy(&NetworkError::SimulatorSend("session_id=private".into())),
+            send_error_copy(&network::Error::OutboundMessageTooLarge),
+            "This message is too long to send. Shorten it and try again."
+        );
+        assert_eq!(send_error_copy(&network::Error::SessionClosed), "Message wasn't sent. Reconnect and try sending again.");
+        assert_eq!(
+            send_error_copy(&network::Error::SimulatorSend("session_id=private".into())),
             "Couldn't send nearby chat. Check your connection and try again."
         );
     }

@@ -1,4 +1,4 @@
 pub(crate) mod agent;
 mod camera;
 
-pub(crate) use camera::CameraUplink;
+pub(crate) use self::camera::CameraUplink;
