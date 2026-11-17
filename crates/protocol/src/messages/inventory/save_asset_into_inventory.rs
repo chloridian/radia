@@ -1,5 +1,6 @@
 use uuid::Uuid;
 
+use super::validate_agent_id;
 use crate::{
     LLUdpError,
     lludp::{
@@ -9,8 +10,6 @@ use crate::{
     },
     schema::ids::SAVE_ASSET_INTO_INVENTORY,
 };
-
-use super::validate_agent_id;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SaveAssetIntoInventory {

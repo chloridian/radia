@@ -4,7 +4,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::MAP_BLOCK_REPLY,
@@ -79,9 +79,9 @@ impl TypedMessage for MapBlockReply {
 
     fn retained_capacity_bytes(&self) -> usize {
         let mut bytes = 0;
-        crate::lludp::message::allocation::add_capacity(&mut bytes, self.data.capacity(), std::mem::size_of::<Data>());
+        allocation::add_capacity(&mut bytes, self.data.capacity(), size_of::<Data>());
         for block in &self.data {
-            crate::lludp::message::allocation::add_string_capacity(&mut bytes, &block.name);
+            allocation::add_string_capacity(&mut bytes, &block.name);
         }
         bytes
     }

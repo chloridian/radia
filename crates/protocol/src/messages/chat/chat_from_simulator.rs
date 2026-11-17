@@ -5,7 +5,7 @@ use crate::{
     Audible, ChatSourceType, ChatType, LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::CHAT_FROM_SIMULATOR,
@@ -39,9 +39,9 @@ impl TypedMessage for ChatFromSimulator {
                 from_name: reader.variable1_string()?,
                 source_id: reader.uuid()?,
                 owner_id: reader.uuid()?,
-                source_type: crate::ChatSourceType::from_wire(reader.u8()?),
-                chat_type: crate::ChatType::from_wire(reader.u8()?),
-                audible: crate::Audible::from_wire(reader.u8()?),
+                source_type: ChatSourceType::from_wire(reader.u8()?),
+                chat_type: ChatType::from_wire(reader.u8()?),
+                audible: Audible::from_wire(reader.u8()?),
                 position: reader.vector3()?,
                 message: reader.variable2_string()?,
             },
@@ -62,8 +62,8 @@ impl TypedMessage for ChatFromSimulator {
 
     fn retained_capacity_bytes(&self) -> usize {
         let mut bytes = 0;
-        crate::lludp::message::allocation::add_string_capacity(&mut bytes, &self.chat_data.from_name);
-        crate::lludp::message::allocation::add_string_capacity(&mut bytes, &self.chat_data.message);
+        allocation::add_string_capacity(&mut bytes, &self.chat_data.from_name);
+        allocation::add_string_capacity(&mut bytes, &self.chat_data.message);
         bytes
     }
 }

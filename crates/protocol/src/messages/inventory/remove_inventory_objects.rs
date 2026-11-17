@@ -1,18 +1,17 @@
 use uuid::Uuid;
 
+use super::{
+    blocks::{read_id, write_id},
+    read_blocks, read_blocks_with_count, validate_agent_id, write_count,
+};
 use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::REMOVE_INVENTORY_OBJECTS,
-};
-
-use super::{
-    blocks::{read_id, write_id},
-    read_blocks, read_blocks_with_count, validate_agent_id, write_count,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,9 +54,6 @@ impl TypedMessage for RemoveInventoryObjects {
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        crate::lludp::message::allocation::capacity_bytes(
-            self.folder_data.capacity().saturating_add(self.item_data.capacity()),
-            std::mem::size_of::<Uuid>(),
-        )
+        allocation::capacity_bytes(self.folder_data.capacity().saturating_add(self.item_data.capacity()), size_of::<Uuid>())
     }
 }

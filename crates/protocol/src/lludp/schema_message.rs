@@ -1,5 +1,4 @@
-use std::mem::size_of;
-
+use math::{DVec3, Quat, Vec3, Vec4};
 use uuid::Uuid;
 
 use crate::{
@@ -10,7 +9,6 @@ use crate::{
     },
     schema::{self, BlockMode, FieldKind, FieldSchema, MessageSchema},
 };
-use math::{DVec3, Quat, Vec3, Vec4};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FieldValue {

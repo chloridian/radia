@@ -4,7 +4,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::TELEPORT_FAILED,
@@ -51,11 +51,11 @@ impl TypedMessage for TeleportFailed {
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        let mut bytes = crate::lludp::message::allocation::capacity_bytes(self.reason.capacity(), std::mem::size_of::<u8>());
-        crate::lludp::message::allocation::add_capacity(&mut bytes, self.alert_info.capacity(), std::mem::size_of::<AlertInfo>());
+        let mut bytes = allocation::capacity_bytes(self.reason.capacity(), size_of::<u8>());
+        allocation::add_capacity(&mut bytes, self.alert_info.capacity(), size_of::<AlertInfo>());
         for info in &self.alert_info {
-            crate::lludp::message::allocation::add_capacity(&mut bytes, info.message.capacity(), std::mem::size_of::<u8>());
-            crate::lludp::message::allocation::add_capacity(&mut bytes, info.extra_params.capacity(), std::mem::size_of::<u8>());
+            allocation::add_capacity(&mut bytes, info.message.capacity(), size_of::<u8>());
+            allocation::add_capacity(&mut bytes, info.extra_params.capacity(), size_of::<u8>());
         }
         bytes
     }

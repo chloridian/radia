@@ -1,10 +1,9 @@
 use std::assert_matches;
 
-use protocol::messages::object;
 use protocol::{
     LLUdpError,
     lludp::{Message, Packet},
-    messages::{ExtraParamUpdate, ObjectExtraParams, object::improved_terse_object_update},
+    messages::{ExtraParamUpdate, ObjectExtraParams, object, object::improved_terse_object_update},
 };
 use test_support::{lludp::vectors, parse_hex_fixture};
 use uuid::Uuid;

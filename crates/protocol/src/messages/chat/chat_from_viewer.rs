@@ -4,7 +4,7 @@ use crate::{
     ChatType, LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::CHAT_FROM_VIEWER,
@@ -57,7 +57,7 @@ impl TypedMessage for ChatFromViewer {
 
     fn retained_capacity_bytes(&self) -> usize {
         let mut bytes = 0;
-        crate::lludp::message::allocation::add_string_capacity(&mut bytes, &self.chat_data.message);
+        allocation::add_string_capacity(&mut bytes, &self.chat_data.message);
         bytes
     }
 }

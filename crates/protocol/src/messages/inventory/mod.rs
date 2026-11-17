@@ -8,18 +8,19 @@ mod remove_inventory_objects;
 mod save_asset_into_inventory;
 mod update_create_inventory_item;
 
-pub use self::blocks::{InventoryFolderBlock, InventoryItemBlock, MoveInventoryFolderBlock, MoveInventoryItemBlock};
-pub use self::bulk_update_inventory::BulkUpdateInventory;
-pub use self::move_inventory_folder::MoveInventoryFolder;
-pub use self::move_inventory_item::MoveInventoryItem;
-pub use self::remove_inventory_folder::RemoveInventoryFolder;
-pub use self::remove_inventory_item::RemoveInventoryItem;
-pub use self::remove_inventory_objects::RemoveInventoryObjects;
-pub use self::save_asset_into_inventory::SaveAssetIntoInventory;
-pub use self::update_create_inventory_item::UpdateCreateInventoryItem;
-
 use uuid::Uuid;
 
+pub use self::{
+    blocks::{InventoryFolderBlock, InventoryItemBlock, MoveInventoryFolderBlock, MoveInventoryItemBlock},
+    bulk_update_inventory::BulkUpdateInventory,
+    move_inventory_folder::MoveInventoryFolder,
+    move_inventory_item::MoveInventoryItem,
+    remove_inventory_folder::RemoveInventoryFolder,
+    remove_inventory_item::RemoveInventoryItem,
+    remove_inventory_objects::RemoveInventoryObjects,
+    save_asset_into_inventory::SaveAssetIntoInventory,
+    update_create_inventory_item::UpdateCreateInventoryItem,
+};
 use crate::{
     LLUdpError,
     lludp::codec::{Reader, Writer},

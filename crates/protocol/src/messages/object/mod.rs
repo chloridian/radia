@@ -6,23 +6,22 @@ pub mod object_update_cached;
 pub mod object_update_compressed;
 pub mod request_multiple_objects;
 
-pub use self::improved_terse_object_update::{ImprovedTerseObjectUpdate, ObjectBlock};
-pub use self::kill_object::KillObject;
-pub use self::object_extra_params::{ExtraParamUpdate, ObjectExtraParams};
-pub use self::object_update::{ObjectData, ObjectUpdate};
-pub use self::object_update_cached::{CachedObjectReference, ObjectUpdateCached};
-pub use self::object_update_compressed::{ObjectSpecificData, ObjectUpdateCompressed};
-pub use self::request_multiple_objects::{CacheMissType, ObjectRequest, RequestAgentData, RequestMultipleObjects};
-
-use std::mem::size_of;
-
 use math::{Quat, Vec3};
 use uuid::Uuid;
 
+pub use self::{
+    improved_terse_object_update::{ImprovedTerseObjectUpdate, ObjectBlock},
+    kill_object::KillObject,
+    object_extra_params::{ExtraParamUpdate, ObjectExtraParams},
+    object_update::{ObjectData, ObjectUpdate},
+    object_update_cached::{CachedObjectReference, ObjectUpdateCached},
+    object_update_compressed::{ObjectSpecificData, ObjectUpdateCompressed},
+    request_multiple_objects::{CacheMissType, ObjectRequest, RequestAgentData, RequestMultipleObjects},
+};
 use crate::{
     LLUdpError,
     lludp::codec::{Reader, Writer},
-    types::{TextureEntry, decode_texture_entry as decode_texture_entry_payload},
+    types::{self, TextureEntry},
 };
 
 pub const MAX_TEXTURE_ENTRY_BYTES: usize = 4095;
@@ -148,7 +147,7 @@ pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpE
     if bytes.len() > MAX_TEXTURE_ENTRY_BYTES {
         return Err(LLUdpError::InvalidMessage);
     }
-    decode_texture_entry_payload(bytes).map_err(|_| LLUdpError::InvalidMessage)
+    types::decode_texture_entry(bytes).map_err(|_| LLUdpError::InvalidMessage)
 }
 
 #[cfg(test)]

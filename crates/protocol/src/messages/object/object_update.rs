@@ -5,7 +5,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     messages::object::{
@@ -63,7 +63,7 @@ impl TypedMessage for ObjectUpdate {
     const INBOUND_ONLY: bool = true;
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
-        self::decode(reader)
+        decode(reader)
     }
 
     fn encode(&self, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
@@ -77,13 +77,13 @@ impl TypedMessage for ObjectUpdate {
     }
 
     fn preflight_allocation_bound(payload: &[u8]) -> Result<usize, LLUdpError> {
-        crate::lludp::message::allocation::with_payload(payload, preflight_allocation_bytes(payload)?)
+        allocation::with_payload(payload, preflight_allocation_bytes(payload)?)
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        let mut bytes = crate::lludp::message::allocation::capacity_bytes(self.objects.capacity(), std::mem::size_of::<ObjectData>());
+        let mut bytes = allocation::capacity_bytes(self.objects.capacity(), size_of::<ObjectData>());
         for object in &self.objects {
-            crate::lludp::message::allocation::add_object_update_capacity(&mut bytes, object);
+            allocation::add_object_update_capacity(&mut bytes, object);
         }
         bytes
     }

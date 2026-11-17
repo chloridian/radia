@@ -11,15 +11,17 @@ pub mod teleport_cancel;
 pub mod teleport_failed;
 pub mod teleport_finish;
 
-pub use self::agent_movement_complete::AgentMovementComplete;
-pub use self::agent_throttle::{AgentThrottle, ThrottleRates};
-pub use self::agent_update::AgentUpdate;
-pub use self::avatar_appearance::AvatarAppearance;
-pub use self::avatar_sit_response::AvatarSitResponse;
-pub use self::complete_agent_movement::CompleteAgentMovement;
-pub use self::logout_reply::LogoutReply;
-pub use self::logout_request::LogoutRequest;
-pub use self::set_always_run::SetAlwaysRun;
-pub use self::teleport_cancel::TeleportCancel;
-pub use self::teleport_failed::TeleportFailed;
-pub use self::teleport_finish::TeleportFinish;
+pub use self::{
+    agent_movement_complete::AgentMovementComplete,
+    agent_throttle::{AgentThrottle, ThrottleRates},
+    agent_update::AgentUpdate,
+    avatar_appearance::AvatarAppearance,
+    avatar_sit_response::AvatarSitResponse,
+    complete_agent_movement::CompleteAgentMovement,
+    logout_reply::LogoutReply,
+    logout_request::LogoutRequest,
+    set_always_run::SetAlwaysRun,
+    teleport_cancel::TeleportCancel,
+    teleport_failed::TeleportFailed,
+    teleport_finish::TeleportFinish,
+};

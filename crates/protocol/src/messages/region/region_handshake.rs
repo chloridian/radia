@@ -4,7 +4,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::REGION_HANDSHAKE,
@@ -158,19 +158,19 @@ impl TypedMessage for RegionHandshake {
             skip_variable1(&mut reader)?;
             let count = reader.terminal_variable_count()?;
             allocation_bytes = allocation_bytes
-                .checked_add(count.checked_mul(std::mem::size_of::<RegionInfo4>()).ok_or(LLUdpError::AllocationBoundOverflow)?)
+                .checked_add(count.checked_mul(size_of::<RegionInfo4>()).ok_or(LLUdpError::AllocationBoundOverflow)?)
                 .ok_or(LLUdpError::AllocationBoundOverflow)?;
         }
         Ok(allocation_bytes)
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        let mut bytes = crate::lludp::message::allocation::capacity_bytes(self.region_info4.capacity(), std::mem::size_of::<RegionInfo4>());
-        crate::lludp::message::allocation::add_string_capacity(&mut bytes, &self.region_info1.sim_name);
+        let mut bytes = allocation::capacity_bytes(self.region_info4.capacity(), size_of::<RegionInfo4>());
+        allocation::add_string_capacity(&mut bytes, &self.region_info1.sim_name);
         if let Some(info) = &self.region_info3 {
-            crate::lludp::message::allocation::add_string_capacity(&mut bytes, &info.colo_name);
-            crate::lludp::message::allocation::add_string_capacity(&mut bytes, &info.product_sku);
-            crate::lludp::message::allocation::add_string_capacity(&mut bytes, &info.product_name);
+            allocation::add_string_capacity(&mut bytes, &info.colo_name);
+            allocation::add_string_capacity(&mut bytes, &info.product_sku);
+            allocation::add_string_capacity(&mut bytes, &info.product_name);
         }
         bytes
     }

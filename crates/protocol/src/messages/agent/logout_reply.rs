@@ -4,7 +4,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::LOGOUT_REPLY,
@@ -54,6 +54,6 @@ impl TypedMessage for LogoutReply {
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        crate::lludp::message::allocation::capacity_bytes(self.inventory_data.capacity(), std::mem::size_of::<InventoryData>())
+        allocation::capacity_bytes(self.inventory_data.capacity(), size_of::<InventoryData>())
     }
 }

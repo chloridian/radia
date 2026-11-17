@@ -6,10 +6,10 @@ pub(crate) mod schema_message;
 pub(crate) mod types;
 mod zero_code;
 
-pub use error::LLUdpError;
-pub use message::{AllocationStrategy, Message};
-pub use packet::{
-    MAX_PACKET_RETAINED_CAPACITY_BYTES, Packet, PacketFlags, PacketFrame, PacketHeader, PacketPreflight, PreflightedPacketFrame,
+pub use self::{
+    error::LLUdpError,
+    message::{AllocationStrategy, Message},
+    packet::{MAX_PACKET_RETAINED_CAPACITY_BYTES, Packet, PacketFlags, PacketFrame, PacketHeader, PacketPreflight, PreflightedPacketFrame},
+    schema_message::{BlockInstance, BlockValues, FieldValue, SchemaMessage},
+    types::{Audible, ChatSourceType, ChatType, Frequency, MessageId},
 };
-pub use schema_message::{BlockInstance, BlockValues, FieldValue, SchemaMessage};
-pub use types::{Audible, ChatSourceType, ChatType, Frequency, MessageId};

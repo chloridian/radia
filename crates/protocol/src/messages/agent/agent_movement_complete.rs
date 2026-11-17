@@ -5,7 +5,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::AGENT_MOVEMENT_COMPLETE,
@@ -62,7 +62,7 @@ impl TypedMessage for AgentMovementComplete {
 
     fn retained_capacity_bytes(&self) -> usize {
         let mut bytes = 0;
-        crate::lludp::message::allocation::add_string_capacity(&mut bytes, &self.sim_data.channel_version);
+        allocation::add_string_capacity(&mut bytes, &self.sim_data.channel_version);
         bytes
     }
 }

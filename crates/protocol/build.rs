@@ -5,6 +5,8 @@ use std::{env, fs, path::PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use self::build::{generate, template};
+
 const PINNED_TEMPLATE_COMMIT: &str = "d5445ef1ccb26864236653bbe91d6878bb2277fc";
 const PINNED_TEMPLATE_SHA256: &str = "f7da9162ae7ab4424bb5e9d285a537ef4b251d2f9942246f934d9af9bff1f3c8";
 
@@ -20,8 +22,8 @@ fn main() {
         );
     }
 
-    let template = build::template::parse("build/message_template.msg", &source).unwrap_or_else(|error| panic!("{error}"));
-    let generated = build::generate::generate(&template);
+    let template = template::parse("build/message_template.msg", &source).unwrap_or_else(|error| panic!("{error}"));
+    let generated = generate::generate(&template);
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR")).join("schema.rs");
 
     fs::write(output, generated).expect("write generated schema metadata");
