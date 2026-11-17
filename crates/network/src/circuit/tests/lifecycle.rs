@@ -411,7 +411,7 @@ async fn promoted_logout_bypasses_full_queue() {
     std::assert_matches!(logout_packet.message(), Message::LogoutRequest(_));
     assert!(logout_response.await.expect("logout completion").is_ok(), "logout local send completes despite a full ordinary queue");
     assert!(repeated_logout_response.await.expect("repeated logout completion").is_ok());
-    assert!(matches!(logout_receipt_response.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+    std::assert_matches!(logout_receipt_response.try_recv(), Err(oneshot::error::TryRecvError::Empty));
     std::assert_matches!(pending_response.await, Ok(Err(Error::SimulatorConnectionClosed)));
 
     shutdown.send_replace(true);

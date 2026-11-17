@@ -16,10 +16,10 @@ async fn close_stops_client() {
         .expect("closing the session should cancel the HTTP request")
         .expect("capability request task should finish")
         .expect_err("closed session cannot return capabilities");
-    assert!(matches!(error, CapabilitySessionClosed));
+    std::assert_matches!(error, CapabilitySessionClosed);
 
     let error = client.request_capabilities(&["TestCapability"]).await.expect_err("retained client must reject new requests");
-    assert!(matches!(error, CapabilitySessionClosed));
+    std::assert_matches!(error, CapabilitySessionClosed);
     assert!(harness.server.finish().is_empty(), "no additional request should reach the server after session close");
 }
 
@@ -48,7 +48,7 @@ async fn close_cancels_queue() {
             .expect("closing the session should end queued and active requests")
             .expect("capability request task should finish")
             .expect_err("closed session cannot return capabilities");
-        assert!(matches!(error, CapabilitySessionClosed));
+        std::assert_matches!(error, CapabilitySessionClosed);
     }
     assert_eq!(server.finish(), MAX_CONCURRENT_CAPABILITY_REQUESTS, "only requests already in flight should reach the server");
 }
@@ -84,9 +84,9 @@ async fn ack_waits_for_admission() {
     })
     .await
     .expect("the returned batch should reach admission while the first channel slot is full");
-    assert!(matches!(harness.server.requests.try_recv(), Err(sync::mpsc::TryRecvError::Empty)), "ack must wait for batch admission");
+    std::assert_matches!(harness.server.requests.try_recv(), Err(sync::mpsc::TryRecvError::Empty), "ack must wait for batch admission");
 
-    assert!(matches!(harness.received_events.recv().await, Some(Event::Failed(_))));
+    std::assert_matches!(harness.received_events.recv().await, Some(Event::Failed(_)));
     let batch = timeout(TEST_TIMEOUT, harness.received_events.recv())
         .await
         .expect("event queue should deliver one complete batch")
@@ -135,29 +135,29 @@ async fn bad_batch_not_dispatched() {
         .await
         .expect("durable coverage loss should wake subscribers")
         .expect("coverage ledger remains open");
-    assert!(matches!(
+    std::assert_matches!(
         harness.received_events.try_recv(),
         Ok(Event::Failed(reason)) if reason == "hold the only event slot"
-    ));
+    );
     let notification = timeout(TEST_TIMEOUT, harness.received_events.recv())
         .await
         .expect("loss notification should follow after a slot opens")
         .expect("event channel should remain open");
-    assert!(matches!(
+    std::assert_matches!(
         notification,
         Event::EventQueueCoverageLost { simulator_id, source, reason }
             if simulator_id == test_simulator_id(1) && source == test_source() && reason.contains("response")
-    ));
+    );
     assert!(harness.received_events.try_recv().is_err(), "one queue incarnation emits one loss notification");
     assert_eq!(task.wait().await, EventQueueExit::StoppedWithCoverageLoss, "an irrecoverable malformed batch stops this queue incarnation");
-    assert!(matches!(
+    std::assert_matches!(
         harness.coverage_losses.snapshot().losses.as_slice(),
         [crate::coverage::CoverageLoss::Source(loss)]
             if loss.watermark.simulator_id == test_simulator_id(1)
                 && matches!(loss.watermark.source, crate::coverage::CoverageSource::EventQueue { .. })
                 && loss.reason == crate::coverage::CoverageLossReason::EventQueueAdmission
                 && loss.retired
-    ));
+    );
 
     assert!(harness.server.finish().is_empty(), "a malformed batch must stop polling");
 }
@@ -182,11 +182,11 @@ async fn redelivered_batch_is_suppressed() {
         .await
         .expect("first response batch should be admitted")
         .expect("event channel should remain open");
-    assert!(matches!(
+    std::assert_matches!(
         first_batch,
         Event::CapabilityEventBatch { events, .. }
             if events.iter().map(|event| event.message.as_str()).collect::<Vec<_>>() == ["First", "Second"]
-    ));
+    );
 
     let redelivery_poll = harness.expect_request("/events");
     assert_eq!(map_field(&decode_request_body(&redelivery_poll), "ack"), Some(&Value::Integer(5)));
@@ -250,14 +250,15 @@ async fn lost_batch_is_redelivered() {
         timeout(TEST_TIMEOUT, first_task.wait()).await.expect("the first EventQueue should stop after shutdown"),
         EventQueueExit::Stopped
     );
-    assert!(
-        matches!(server.requests.try_recv(), Err(sync::mpsc::TryRecvError::Empty)),
+    std::assert_matches!(
+        server.requests.try_recv(),
+        Err(sync::mpsc::TryRecvError::Empty),
         "the unadmitted batch must not advance the ACK or start another poll"
     );
-    assert!(matches!(
+    std::assert_matches!(
         first_receiver.try_recv(),
         Ok(Event::Failed(message)) if message == "hold the first queue slot"
-    ));
+    );
     assert!(first_receiver.try_recv().is_err(), "the first queue must not publish a batch prefix or loss wake-up after shutdown");
 
     let first_loss = match coverage_losses.snapshot().losses.as_slice() {
@@ -265,7 +266,7 @@ async fn lost_batch_is_redelivered() {
         losses => panic!("expected one durable EventQueue coverage loss, got {losses:?}"),
     };
     assert_eq!(first_loss.watermark.simulator_id, simulator_id);
-    assert!(matches!(first_loss.watermark.source, crate::coverage::CoverageSource::EventQueue { .. }));
+    std::assert_matches!(first_loss.watermark.source, crate::coverage::CoverageSource::EventQueue { .. });
     assert_eq!(first_loss.reason, crate::coverage::CoverageLossReason::EventQueueAdmission);
     assert!(first_loss.retired, "stopping the first queue retires its loss record");
 
@@ -284,12 +285,12 @@ async fn lost_batch_is_redelivered() {
         .await
         .expect("the fresh queue should admit the redelivered batch")
         .expect("the second EventQueue channel should remain open");
-    assert!(matches!(
+    std::assert_matches!(
         redelivered_batch,
         Event::CapabilityEventBatch { simulator_id: id, events, .. }
             if id == simulator_id
                 && events.iter().map(|event| event.message.as_str()).collect::<Vec<_>>() == ["First", "Second"]
-    ));
+    );
     assert!(second_receiver.try_recv().is_err(), "the complete redelivery is published exactly once");
 
     let held_poll = server.next_request();
@@ -301,12 +302,10 @@ async fn lost_batch_is_redelivered() {
     );
     server.stop();
     assert!(server.finish().is_empty(), "all expected seed and poll requests were observed");
-    assert!(
-        matches!(
-            coverage_losses.snapshot().losses.as_slice(),
-            [crate::coverage::CoverageLoss::Source(current)]
-                if current.watermark == first_loss.watermark && current.retired
-        ),
+    std::assert_matches!(
+        coverage_losses.snapshot().losses.as_slice(),
+        [crate::coverage::CoverageLoss::Source(current)]
+            if current.watermark == first_loss.watermark && current.retired,
         "the first incarnation's loss remains pending for reconciliation"
     );
 }
@@ -546,17 +545,17 @@ async fn aborting_poll_records_coverage_loss() {
     .await
     .expect("aborting an in-flight poll should record and retire its source loss");
     assert_eq!(loss.watermark.simulator_id, simulator_id);
-    assert!(matches!(loss.watermark.source, crate::coverage::CoverageSource::EventQueue { .. }));
+    std::assert_matches!(loss.watermark.source, crate::coverage::CoverageSource::EventQueue { .. });
     assert_eq!(loss.reason, crate::coverage::CoverageLossReason::EventQueueAdmission);
     let notification = timeout(TEST_TIMEOUT, received_events.recv())
         .await
         .expect("aborting a poll should still wake the event receiver")
         .expect("event channel should remain open");
-    assert!(matches!(
+    std::assert_matches!(
         notification,
         Event::EventQueueCoverageLost { simulator_id: id, source, reason }
             if id == simulator_id && source == test_source() && reason.contains("canceled")
-    ));
+    );
     server.stop();
     assert!(server.finish().is_empty(), "the two observed requests were already consumed");
 }
@@ -612,13 +611,13 @@ async fn not_found_stops_polling() {
     assert!(reason.contains("HTTP 404"));
     assert_eq!(server.finish().len(), 2, "404 must not trigger another poll");
     assert_eq!(task.wait().await, EventQueueExit::StoppedWithCoverageLoss);
-    assert!(matches!(
+    std::assert_matches!(
         coverage_losses.snapshot().losses.as_slice(),
         [crate::coverage::CoverageLoss::Source(loss)]
             if matches!(loss.watermark.source, crate::coverage::CoverageSource::EventQueue { .. })
                 && loss.reason == crate::coverage::CoverageLossReason::EventQueueAdmission
                 && loss.retired
-    ));
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -660,7 +659,7 @@ async fn primary_404_keeps_session() {
     let (_, peer) = receive_udp(&simulator).await;
     simulator.send_to(&acknowledgement(20, 1), peer).await.expect("ack circuit setup");
     let (movement, _) = receive_udp(&simulator).await;
-    assert!(matches!(Packet::decode(&movement).expect("decode movement").message(), Message::CompleteAgentMovement(_)));
+    std::assert_matches!(Packet::decode(&movement).expect("decode movement").message(), Message::CompleteAgentMovement(_));
     simulator.send_to(&acknowledgement(21, 2), peer).await.expect("ack initial movement");
 
     let mut handshake = test_fixture(vectors::REGION_HANDSHAKE);
@@ -669,7 +668,7 @@ async fn primary_404_keeps_session() {
     simulator.send_to(&handshake, peer).await.expect("send region handshake");
     let (reply, _) = receive_udp(&simulator).await;
     let reply = Packet::decode(&reply).expect("decode handshake reply");
-    assert!(matches!(reply.message(), Message::RegionHandshakeReply(_)));
+    std::assert_matches!(reply.message(), Message::RegionHandshakeReply(_));
     simulator.send_to(&acknowledgement(23, reply.sequence()), peer).await.expect("ack handshake reply");
 
     let mut movement_complete = test_fixture(vectors::AGENT_MOVEMENT_COMPLETE);
@@ -734,10 +733,10 @@ async fn primary_404_keeps_session() {
         panic!("EventQueue 404 ended the active viewer session");
     }
     send_result.expect("active session must continue accepting simulator commands");
-    assert!(matches!(
+    std::assert_matches!(
         message.message(),
         Message::ChatFromViewer(chat) if chat.chat_data.message == "still connected"
-    ));
+    );
     simulator.send_to(&acknowledgement(25, message.sequence()), peer).await.expect("ack post-failure chat");
 
     disconnect.send_replace(true);
