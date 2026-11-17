@@ -88,12 +88,13 @@ impl LocalChoice {
 
 static SHARED_ENVIRONMENT: EnvironmentChoice = EnvironmentChoice::Shared;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EnvironmentProperty {
     pub name: String,
     pub source: Arc<[u8]>,
 }
 
+#[derive(Debug)]
 pub enum EnvironmentPush {
     Clear { experience: Option<ExperienceId>, transition: Duration },
     Full { experience: ExperienceId, asset: AssetId, transition: Duration },
@@ -924,7 +925,7 @@ mod tests {
         manager.set_local(EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Midday)), region).unwrap();
         let first = requested(&mut manager, EnvironmentPreset::Midday);
         manager.set_local(EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Sunset)), region).unwrap();
-        assert!(matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == first.ticket));
+        std::assert_matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == first.ticket);
         let second = requested(&mut manager, EnvironmentPreset::Sunset);
         assert_ne!(first.ticket, second.ticket);
     }

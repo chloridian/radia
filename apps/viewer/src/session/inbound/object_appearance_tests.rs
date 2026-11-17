@@ -354,7 +354,7 @@ fn full_materials_follow_variable1_limit() {
             let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected full volume observation") };
             assert_eq!(observation.pbr_materials.as_ref().unwrap().bindings().count(), 14);
         } else {
-            assert!(matches!(encoded, Err(protocol::LLUdpError::VariableFieldTooLong)));
+            std::assert_matches!(encoded, Err(protocol::LLUdpError::VariableFieldTooLong));
         }
     }
 }

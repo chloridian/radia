@@ -266,10 +266,10 @@ mod tests {
         };
         let mut world = World::new(limits);
         let region = world.register_region().unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap().outcome,
             crate::RegionOutcome::Patched { .. }
-        ));
+        );
         let result = world
             .observe_object(ObjectObservation {
                 pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),

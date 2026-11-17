@@ -64,6 +64,7 @@ pub(super) enum SimulatorScope {
     Neighbor,
 }
 
+#[derive(Debug)]
 pub(super) struct SimulatorMessageOutcome {
     pub(super) summary: Option<(SimulatorId, IngestSummary)>,
     pub(super) touched_agent: bool,
@@ -98,6 +99,7 @@ pub(super) struct ObjectUpdateFinishContinuation {
     agent_cursor: Option<ObjectLookupCursor>,
 }
 
+#[derive(Debug)]
 pub(super) enum EntityUpdateProgress {
     Pending,
     Complete(SimulatorMessageOutcome),

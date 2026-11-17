@@ -10,11 +10,11 @@ fn object_count_tracks_live_objects() {
     let (mut world, region) = with_region();
     assert_eq!(world.object_count(), 0);
 
-    assert!(matches!(world.observe_object(object(source(region, 1), 1, 1, Object, Root)).unwrap().outcome, Introduced(_)));
-    assert!(matches!(world.observe_object(object(source(region, 2), 2, 2, Object, Root)).unwrap().outcome, Introduced(_)));
+    std::assert_matches!(world.observe_object(object(source(region, 1), 1, 1, Object, Root)).unwrap().outcome, Introduced(_));
+    std::assert_matches!(world.observe_object(object(source(region, 2), 2, 2, Object, Root)).unwrap().outcome, Introduced(_));
     assert_eq!(world.object_count(), 2);
 
-    assert!(matches!(world.observe_object(object(source(region, 3), 1, 3, Object, Root)).unwrap().outcome, Updated(_)));
+    std::assert_matches!(world.observe_object(object(source(region, 3), 1, 3, Object, Root)).unwrap().outcome, Updated(_));
     assert_eq!(world.object_count(), 2);
 
     assert_eq!(world.remove_object(source(region, 4), local_id(3)).unwrap().outcome, Removed(uuid(1)));
@@ -69,14 +69,14 @@ fn world_queries_follow_lifecycle() {
     let mut world = World::new(limits());
     let first_region = world.register_region().unwrap();
     let second_region = world.register_region().unwrap();
-    assert!(matches!(
+    std::assert_matches!(
         world.patch_region(first_region, RegionInfo { name: Some("First".to_owned()), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         world.patch_region(second_region, RegionInfo { name: Some("Second".to_owned()), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
-    ));
+    );
 
     let parent = world.observe_object(object(source(first_region, 1), 200, 1, Object, Root)).unwrap();
     let Introduced(parent_entity) = parent.outcome else { panic!("expected parent introduction") };

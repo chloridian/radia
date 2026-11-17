@@ -374,7 +374,7 @@ async fn shutdown_cancels_error() {
     let outcome =
         timeout(Duration::from_secs(1), send_failure).await.expect("shutdown should release the blocked send").expect("send task");
 
-    assert!(matches!(outcome, EventSendOutcome::Shutdown));
+    std::assert_matches!(outcome, EventSendOutcome::Shutdown);
 }
 
 #[test]

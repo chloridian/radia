@@ -178,7 +178,7 @@ fn demand_reconcile(c: &mut Criterion) {
                         }
                         assert!(turns < 8, "bounded turns admit work during sustained dirty churn");
                     };
-                    assert!(matches!(&job, LoadJob::Fetch(_)), "admission includes a network fetch");
+                    std::assert_matches!(&job, LoadJob::Fetch(_), "admission includes a network fetch");
                     assert!(store.maintain(*now), "dirty work remains after useful admission");
                     black_box((turns, eligible.len()));
                 },

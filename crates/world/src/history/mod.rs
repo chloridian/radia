@@ -384,8 +384,8 @@ mod tests {
         assert_eq!(world.region(region), None);
         assert!(world.objects().iter().next().is_none());
         let retirement_page = world.change_page(before_retirement_cursor, 8).unwrap();
-        assert!(matches!(retirement_page.records.as_slice(), [record]
-            if record.revision == revision && matches!(record.change, RegionRetired { region: retired, entities_removed: 2 } if retired == region)));
+        std::assert_matches!(retirement_page.records.as_slice(), [record]
+            if record.revision == revision && matches!(record.change, RegionRetired { region: retired, entities_removed: 2 } if retired == region));
         assert!(!retirement_page.has_more);
         assert_eq!(world.check_invariants(), Ok(()));
 
@@ -401,8 +401,11 @@ mod tests {
         assert!(world.change_page(after_retirement_cursor, 8).unwrap().records.is_empty());
         let registered_region = world.register_region().unwrap();
         let changes = world.change_page(after_retirement_cursor, 8).unwrap();
-        assert!(matches!(changes.records.as_slice(), [record] if record.revision == world.revision()
-            && matches!(record.change, RegionRegistered(region) if region == registered_region)));
+        std::assert_matches!(
+            changes.records.as_slice(),
+            [record] if record.revision == world.revision()
+                && matches!(record.change, RegionRegistered(region) if region == registered_region)
+        );
         assert!(!changes.has_more);
         assert_eq!(world.check_invariants(), Ok(()));
     }
@@ -427,16 +430,17 @@ mod tests {
         let mut world = World::new(limits(8));
         let first_region = world.register_region().unwrap();
         let second_region = world.register_region().unwrap();
-        assert!(matches!(last_changes(&world), [RegionRegistered(region)] if *region == second_region));
+        std::assert_matches!(last_changes(&world), [RegionRegistered(region)] if *region == second_region);
         assert_region_revision(
             world.patch_region(first_region, RegionInfo { name: Some("first".to_owned()), ..RegionInfo::default() }).unwrap().outcome,
         );
-        assert!(matches!(last_changes(&world), [RegionUpdated(region)] if *region == first_region));
+        std::assert_matches!(last_changes(&world), [RegionUpdated(region)] if *region == first_region);
 
         let first_address = LocalAddress::new(first_region, NonZeroU32::new(1).unwrap());
         assert_revision(world.observe_object(observation(first_region, 1, 230, 1)).unwrap());
-        assert!(
-            matches!(last_changes(&world), [EntityAdded { id, address, .. }] if *id == Uuid::from_u128(230) && *address == first_address)
+        std::assert_matches!(
+            last_changes(&world),
+            [EntityAdded { id, address, .. }] if *id == Uuid::from_u128(230) && *address == first_address
         );
 
         let rebound_address = LocalAddress::new(first_region, NonZeroU32::new(2).unwrap());
@@ -469,7 +473,7 @@ mod tests {
         assert_revision(world.observe_object(attachment).unwrap());
 
         assert_revision(world.remove_object(UpdateSource::new(region, 5, Ordered(5), 0), NonZeroU32::new(1).unwrap()).unwrap());
-        assert!(matches!(last_changes(&world), [SubtreeRemovalPending { id, .. }] if *id == Uuid::from_u128(250)));
+        std::assert_matches!(last_changes(&world), [SubtreeRemovalPending { id, .. }] if *id == Uuid::from_u128(250));
         assert_eq!(world.object_count(), 2);
         assert!(world.entity(Uuid::from_u128(250)).is_none());
         assert!(world.entity(Uuid::from_u128(251)).is_none());
@@ -525,12 +529,12 @@ mod tests {
             ..ObjectPatch::new(UpdateSource::new(region, 3, Ordered(3), 0), NonZeroU32::new(1).unwrap())
         };
         assert_revision(world.patch_object(appearance).unwrap());
-        assert!(matches!(
+        std::assert_matches!(
             last_changes(&world),
             [EntityUpdated { id, classes, .. }]
                 if *id == Uuid::from_u128(340) && classes.contains(WorldChangeClasses::APPEARANCE)
                     && !classes.contains(WorldChangeClasses::SHAPE)
-        ));
+        );
 
         let mixed_freshness = ObjectPatch {
             shape: FieldUpdate::Set(Shape::Mesh { asset_id: AssetId::new(Uuid::from_u128(1)), flags: SculptFlags::default() }),
@@ -538,24 +542,24 @@ mod tests {
             ..ObjectPatch::new(UpdateSource::new(region, 2, Ordered(2), 0), NonZeroU32::new(1).unwrap())
         };
         assert_revision(world.patch_object(mixed_freshness).unwrap());
-        assert!(matches!(
+        std::assert_matches!(
             last_changes(&world),
             [EntityUpdated { id, classes, .. }]
                 if *id == Uuid::from_u128(340) && classes.contains(WorldChangeClasses::SHAPE)
                     && !classes.contains(WorldChangeClasses::APPEARANCE)
-        ));
+        );
 
         let asset_change = ObjectPatch {
             shape: FieldUpdate::Set(Shape::Mesh { asset_id: AssetId::new(Uuid::from_u128(2)), flags: SculptFlags::default() }),
             ..ObjectPatch::new(UpdateSource::new(region, 4, Ordered(4), 0), NonZeroU32::new(1).unwrap())
         };
         assert_revision(world.patch_object(asset_change).unwrap());
-        assert!(matches!(
+        std::assert_matches!(
             last_changes(&world),
             [EntityUpdated { id, classes, .. }]
                 if *id == Uuid::from_u128(340) && classes.contains(WorldChangeClasses::SHAPE)
                     && !classes.contains(WorldChangeClasses::APPEARANCE)
-        ));
+        );
     }
 
     #[test]
@@ -576,13 +580,13 @@ mod tests {
         movement.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
         assert_revision(world.patch_object(movement).unwrap());
 
-        assert!(matches!(
+        std::assert_matches!(
             last_changes(&world),
             [EntityUpdated { id, classes, .. }, SubtreeInvalidated { id: root, .. }]
                 if *id == Uuid::from_u128(310)
                     && classes.contains(WorldChangeClasses::POSE)
                     && *root == Uuid::from_u128(310)
-        ));
+        );
     }
 
     #[test]
@@ -591,7 +595,7 @@ mod tests {
         let region = world.register_region().unwrap();
         assert_revision(world.observe_object(observation(region, 1, 260, 1)).unwrap());
         assert_revision(world.observe_object(observation(region, 2, 261, 1)).unwrap());
-        assert!(matches!(last_changes(&world), [SubtreeRemovalPending { id, .. }, EntityAdded { .. }] if *id == Uuid::from_u128(260)));
+        std::assert_matches!(last_changes(&world), [SubtreeRemovalPending { id, .. }, EntityAdded { .. }] if *id == Uuid::from_u128(260));
         assert!(world.entity(Uuid::from_u128(260)).is_none());
         drain_removals(&mut world);
         assert!(last_changes(&world).iter().any(|change| {
@@ -603,7 +607,7 @@ mod tests {
         child.parent = Local(NonZeroU32::new(1).unwrap());
         assert_revision(world.observe_object(child).unwrap());
         assert_region_revision(world.retire_region(region).unwrap().outcome);
-        assert!(matches!(last_changes(&world), [RegionRetired { region: retired, entities_removed: 2 }] if *retired == region));
+        std::assert_matches!(last_changes(&world), [RegionRetired { region: retired, entities_removed: 2 }] if *retired == region);
         assert_eq!(world.object_count(), 0);
         drain_removals(&mut world);
         let changes = world.journal.entries.iter().flat_map(|entry| &entry.changes).collect::<Vec<_>>();
@@ -634,7 +638,7 @@ mod tests {
         let cursor = world.read_barrier().changes;
         assert_revision(world.remove_object(UpdateSource::new(region, 4, Ordered(4), 0), NonZeroU32::new(1).unwrap()).unwrap());
         let pending = world.change_page(cursor, 8).unwrap();
-        assert!(matches!(pending.records.as_slice(), [record] if matches!(record.change, SubtreeRemovalPending { .. })));
+        std::assert_matches!(pending.records.as_slice(), [record] if matches!(record.change, SubtreeRemovalPending { .. }));
 
         let progress = world.reclaim_removals(crate::MAX_REMOVAL_WORK_PER_TURN);
         assert_eq!(progress.removed_entities, 3);

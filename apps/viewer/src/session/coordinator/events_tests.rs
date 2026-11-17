@@ -675,7 +675,7 @@ fn newer_handoff_conflicts_invalidate_observation() {
     )
     .expect("apply stale kill");
     let result = summary.blocks[0].applied().expect("recorded kill");
-    assert!(matches!(&result.outcome, TombstoneRecorded(address) if *address == removed_address));
+    std::assert_matches!(&result.outcome, TombstoneRecorded(address) if *address == removed_address);
     assert!(observations.contains_key(&destination_id));
 
     apply_world_event_with_handoff(
@@ -874,7 +874,7 @@ fn unknown_removal_cancels_recovery() {
     for (block, address) in summary.blocks.iter().zip(&addresses) {
         let result = block.applied().expect("recorded tombstone");
         assert_eq!(result.revision, None);
-        assert!(matches!(&result.outcome, TombstoneRecorded(recorded) if recorded == address));
+        std::assert_matches!(&result.outcome, TombstoneRecorded(recorded) if recorded == address);
     }
     assert_eq!(summary.recovery_cancellation_addresses().collect::<Vec<_>>(), addresses);
 }
@@ -889,13 +889,13 @@ fn repeated_removal_keeps_recovery() {
 
     let (_, first) = apply_world_event(&mut intake, &simulator_message(simulator_id, 1, message.clone())).expect("registered simulator");
     let first_result = first.blocks[0].applied().expect("recorded tombstone");
-    assert!(matches!(&first_result.outcome, TombstoneRecorded(_)));
+    std::assert_matches!(&first_result.outcome, TombstoneRecorded(_));
 
     let (_, repeated) = apply_world_event(&mut intake, &simulator_message(simulator_id, 1, message)).expect("registered simulator");
     let repeated_result = repeated.blocks[0].applied().expect("unchanged removal");
 
     assert_eq!(repeated_result.revision, None);
-    assert!(matches!(&repeated_result.outcome, Unchanged));
+    std::assert_matches!(&repeated_result.outcome, Unchanged);
     assert_eq!(repeated.recovery_cancellation_addresses().count(), 0);
 }
 
@@ -924,10 +924,10 @@ fn object_update_order_schedules_recovery() {
     {
         let state = intake.world();
         let child = state.object(state.entity(child_id).unwrap()).unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             child.parent(),
             Parent::Resolved(parent) if state.object(parent).unwrap().id() == parent_id
-        ));
+        );
     }
 
     let mut terse = fixture_packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).message().clone();

@@ -18,6 +18,7 @@ pub(crate) enum PushOutcome {
     Invalid,
 }
 
+#[derive(Debug)]
 pub(crate) struct EnvironmentCommand {
     pub(crate) region: Region,
     pub(crate) received_at: Instant,
@@ -248,10 +249,10 @@ mod tests {
         };
         assert!(sky.is_empty() && water.is_empty());
         for body in ["{'action':'ClearEnvironment'}", "{'action':'ClearEnvironment','action_data':{'transition_time':i-1}}"] {
-            assert!(matches!(
+            std::assert_matches!(
                 decode(&message(agent, Uuid::nil(), body), agent).unwrap(),
                 Some(EnvironmentPush::Clear { experience: None, transition: Duration::ZERO })
-            ));
+            );
         }
         assert!(decode(&message(agent, experience, "{'action':'PushPartialEnvironment'}"), agent).unwrap().is_none());
     }
@@ -282,7 +283,7 @@ mod tests {
         let (sender, inbox) = EnvironmentInbox::channel();
         sender.publish(&message, agent, region, received_at).unwrap();
         let mut receiver = inbox.take().unwrap();
-        assert!(matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+        std::assert_matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     }
 
     #[test]

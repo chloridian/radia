@@ -1139,10 +1139,10 @@ mod tests {
     fn generation_limit_detaches_avatar() {
         let mut world = World::new(test_limits());
         let region = world.register_region().unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap().outcome,
             crate::RegionOutcome::Patched { .. }
-        ));
+        );
         let seat = observation(&mut world, region, 1, 1, Object, Root);
         let avatar = observation(&mut world, region, 2, 2, Avatar, Local(NonZeroU32::new(1).unwrap()));
         {
@@ -1213,7 +1213,7 @@ mod tests {
         let parent = observation(&mut world, region, 1, 1, Object, Root);
         let child = observation(&mut world, region, 2, 2, Avatar, Local(NonZeroU32::new(1).unwrap()));
         let retired = world.retire_region(region).unwrap();
-        assert!(matches!(retired.outcome, crate::RegionOutcome::Retired { entities_removed: 2, .. }));
+        std::assert_matches!(retired.outcome, crate::RegionOutcome::Retired { entities_removed: 2, .. });
         assert!(world.object(parent).is_none());
         assert!(world.object(child).is_none());
         assert!(retired.recovery_cancellations.is_empty());

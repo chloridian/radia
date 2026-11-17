@@ -15,12 +15,13 @@ use world::Region;
 use super::{DrawKey, DrawList, LayoutStats, ViewDraws};
 use crate::{
     geometry::{
-        ShadingMode,
+        ShadingMode, TRANSFORM_BYTES,
         cache::FrameCache,
         fixtures,
-        instance::{instance_base, parameter_part, scene_origin},
+        instance::{PARAMETER_BYTES, instance_base, parameter_part, scene_origin},
         items::{CachedFace, CachedItem, ItemId, ItemIndex, ItemSlab, MeshInfo},
         texture_bindings::MaterialImages,
+        visibility::WorldSphere,
     },
     material::FaceParams,
     pipeline::{INSTANCE_BYTES, Pipeline},
@@ -109,11 +110,11 @@ fn stale_layout_retires_whole_build() {
 #[test]
 fn canceled_build_keeps_committed_patches() {
     let (_region_world, region) = crate::test_support::registered_region();
-    let (_scene, view, _) = super::super::fixtures::scene(255);
+    let (_scene, view, _) = fixtures::scene(255);
     let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
     let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
     let camera = camera(0.0);
-    let origin = super::super::instance::scene_origin(camera.position());
+    let origin = scene_origin(camera.position());
     let mut items = FrameCache::default();
     let mut list = DrawList::new(usize::MAX);
     let mut visible = (1..=4_096)
@@ -217,13 +218,13 @@ fn draw_changes_match_fresh_layout() {
 #[test]
 fn hiding_slot_preserves_others() {
     let (_region_world, region) = crate::test_support::registered_region();
-    let (_scene, view, _) = super::super::fixtures::scene(255);
+    let (_scene, view, _) = fixtures::scene(255);
     let object = view.objects().next().expect("fixture object");
     let (_, mesh) = object.mesh().expect("fixture mesh");
     let mesh = mesh.clone();
     let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
     let camera = camera(0.0);
-    let origin = super::super::instance::scene_origin(camera.position());
+    let origin = scene_origin(camera.position());
     let mut items = FrameCache::default();
     let mut list = DrawList::new(usize::MAX);
     let first = items.insert_item(new_item(item_id(0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("first item index");
@@ -246,13 +247,13 @@ fn hiding_slot_preserves_others() {
 #[test]
 fn overflow_omits_until_in_budget() {
     let (_region_world, region) = crate::test_support::registered_region();
-    let (_scene, view, _) = super::super::fixtures::scene(255);
+    let (_scene, view, _) = fixtures::scene(255);
     let object = view.objects().next().expect("fixture object");
     let (_, mesh) = object.mesh().expect("fixture mesh");
     let mesh = mesh.clone();
     let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
     let camera = camera(0.0);
-    let origin = super::super::instance::scene_origin(camera.position());
+    let origin = scene_origin(camera.position());
     let capacity = 64;
     let faces_per_item = capacity / 2 + 1;
     let mut items = FrameCache::default();
@@ -314,11 +315,11 @@ fn overflow_omits_until_in_budget() {
 #[test]
 fn moved_faces_cull_by_their_pose() {
     let (_region_world, region) = crate::test_support::registered_region();
-    let (_scene, view, _) = super::super::fixtures::scene(255);
+    let (_scene, view, _) = fixtures::scene(255);
     let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
     let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
     let camera = camera(0.0);
-    let origin = super::super::instance::scene_origin(camera.position());
+    let origin = scene_origin(camera.position());
     let mut items = FrameCache::default();
     let mut list = DrawList::new(usize::MAX);
     let visible = (1..=4_096)
@@ -429,14 +430,14 @@ proptest! {
 
 fn assert_cull_matches_faces(placements: &[(f64, f64, f64, f32, u8)], eye: DVec3, yaw: f64, pitch: f64, draw_distance: f64) {
     let (_region_world, region) = crate::test_support::registered_region();
-    let (_scene, view, _) = super::super::fixtures::scene(255);
+    let (_scene, view, _) = fixtures::scene(255);
     let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
     let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
     let direction = DVec3::new(yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin()).as_vec3();
     let viewport = [128, 96];
     let camera =
         Camera::new(eye, direction, 1.0, viewport).and_then(|camera| camera.with_quality(draw_distance, 1.0)).expect("test camera");
-    let origin = super::super::instance::scene_origin(camera.position());
+    let origin = scene_origin(camera.position());
     let mut items = FrameCache::default();
     let mut list = DrawList::new(usize::MAX);
     let mut visible = Vec::new();
@@ -455,7 +456,7 @@ fn assert_cull_matches_faces(placements: &[(f64, f64, f64, f32, u8)], eye: DVec3
     list.select(&items.items, camera, &frustum, &mut view);
     for index in &visible {
         let item = items.items.get(*index).expect("visible item");
-        let expected = super::super::visibility::WorldSphere::new(item.position, item.rotation, item.scale, item.info.bounds, camera)
+        let expected = WorldSphere::new(item.position, item.rotation, item.scale, item.info.bounds, camera)
             .is_some_and(|sphere| sphere.visible(item.shading, camera, &frustum));
         for face in &item.faces {
             let (count, emitted) = face_command(&list, &view, face);
@@ -563,14 +564,14 @@ proptest! {
 
 fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
     let (_region_world, region) = crate::test_support::registered_region();
-    let (_scene, view, _) = super::super::fixtures::scene(255);
+    let (_scene, view, _) = fixtures::scene(255);
     let first_object = view.objects().next().expect("fixture object");
     let (_, mesh) = first_object.mesh().expect("fixture mesh");
     let mesh = mesh.clone();
     let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
     let camera_x = 0.0;
     let current_camera = camera(camera_x);
-    let origin = super::super::instance::scene_origin(current_camera.position());
+    let origin = scene_origin(current_camera.position());
     let mut items = FrameCache::default();
     let mut list = DrawList::new(usize::MAX);
     let mut visible = visible_items(&items.items, camera_x);
@@ -624,7 +625,7 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
             }
             4 => {
                 camera_x += f64::from(*delta_x);
-                let next_origin = super::super::instance::scene_origin(camera(camera_x).position());
+                let next_origin = scene_origin(camera(camera_x).position());
                 if next_origin != origin {
                     origin = next_origin;
                     for (_, item) in items.items.iter_mut() {
@@ -635,7 +636,7 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
             }
             _ => {
                 camera_x = (camera_x / 256.0).floor() * 256.0 + 256.0;
-                origin = super::super::instance::scene_origin(camera(camera_x).position());
+                origin = scene_origin(camera(camera_x).position());
                 for (_, item) in items.items.iter_mut() {
                     item.transform = instance_base(item.position, item.rotation, item.scale, item.invert_normals, origin);
                 }
@@ -656,13 +657,13 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
 
 fn active_layout() -> (world::World, crate::scene::SceneView, Camera, FrameCache, DrawList, ItemIndex) {
     let (_region_world, region) = crate::test_support::registered_region();
-    let (_scene, view, _) = super::super::fixtures::scene(255);
+    let (_scene, view, _) = fixtures::scene(255);
     let object = view.objects().next().expect("fixture object");
     let (_, mesh) = object.mesh().expect("fixture mesh");
     let mesh = mesh.clone();
     let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
     let camera = camera(0.0);
-    let origin = super::super::instance::scene_origin(camera.position());
+    let origin = scene_origin(camera.position());
     let mut items = FrameCache::default();
     let mut list = DrawList::new(usize::MAX);
     let index = items.insert_item(new_item(item_id(0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index");
@@ -972,10 +973,7 @@ fn settle(list: &mut DrawList, items: &mut ItemSlab) {
     panic!("pending layout work did not settle");
 }
 
-fn instance_from_parts(
-    transform: &[u8; super::super::TRANSFORM_BYTES],
-    parameters: &[u8; super::super::instance::PARAMETER_BYTES],
-) -> Vec<u8> {
+fn instance_from_parts(transform: &[u8; TRANSFORM_BYTES], parameters: &[u8; PARAMETER_BYTES]) -> Vec<u8> {
     transform.iter().chain(parameters).copied().collect()
 }
 

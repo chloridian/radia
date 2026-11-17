@@ -1880,7 +1880,7 @@ mod tests {
         let job = store.next_job(now).unwrap();
         let LoadJob::Fetch(fetch) = &job else { panic!("new request must start with a fetch") };
         let failure = transport.fetch(fetch).await.expect_err("discovery fails transiently");
-        assert!(matches!(failure, Failure::Transient { .. }));
+        std::assert_matches!(failure, Failure::Transient { .. });
         store.complete(job.fail(failure), now);
         let job = store.next_job(now + Duration::from_secs(1)).unwrap();
         let LoadJob::Fetch(fetch) = &job else { panic!("retry must start with a fetch") };
@@ -2011,7 +2011,7 @@ mod tests {
         assert_eq!(budget.stats().high_water_bytes, 192 * 1024 * 1024);
         cancel.send(()).unwrap();
         service.stop().await;
-        assert!(matches!(second.status(), assets::Status::StaleSession));
+        std::assert_matches!(second.status(), assets::Status::StaleSession);
         assert_eq!(budget.stats().resident_bytes, blob.image().unwrap().pixels().len() + RGBA_J2C.len());
         assert!(matches!(
             handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await,

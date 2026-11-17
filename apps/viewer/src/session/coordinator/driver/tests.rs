@@ -111,7 +111,7 @@ async fn pending_update_serves_read_first() {
         world.advance_object_batch(&mut continuation, &mut on_chunk)
     })
     .await;
-    assert!(matches!(turn, super::OwnerTurnProgress::ReadServed));
+    std::assert_matches!(turn, super::OwnerTurnProgress::ReadServed);
     std::assert_matches!(first_progress, Some(ObjectBatchProgress::Pending));
     let barrier = barrier_read.await.expect("barrier request is served by the owner");
     assert_eq!(barrier.object_count_upper_bound, DEPTH as usize);
@@ -123,7 +123,7 @@ async fn pending_update_serves_read_first() {
             world.advance_object_batch(&mut continuation, &mut on_chunk)
         })
         .await;
-        assert!(matches!(turn, super::OwnerTurnProgress::Continue | super::OwnerTurnProgress::ReadServed));
+        std::assert_matches!(turn, super::OwnerTurnProgress::Continue | super::OwnerTurnProgress::ReadServed);
         match progress.expect("noncancelled owner turn advances the retained update") {
             ObjectBatchProgress::Pending => {}
             ObjectBatchProgress::Complete(summary) => break summary,
@@ -307,7 +307,7 @@ async fn pending_parent_yields_in_order() {
             world.advance_object_batch(&mut continuation, &mut on_chunk)
         })
         .await;
-        assert!(matches!(turn, super::OwnerTurnProgress::ReadServed));
+        std::assert_matches!(turn, super::OwnerTurnProgress::ReadServed);
         let barrier = read.await.expect("the owner serves each queued barrier");
         assert_eq!(barrier.revision, revision_before_turn);
         if turns == 0 {
@@ -337,7 +337,7 @@ async fn pending_parent_yields_in_order() {
                 world.advance_object_batch(&mut later, &mut on_chunk)
             })
             .await;
-            assert!(matches!(turn, super::OwnerTurnProgress::Continue | super::OwnerTurnProgress::ReadServed));
+            std::assert_matches!(turn, super::OwnerTurnProgress::Continue | super::OwnerTurnProgress::ReadServed);
             match progress.expect("noncancelled owner turn advances ordered input") {
                 ObjectBatchProgress::Pending => {}
                 ObjectBatchProgress::Complete(summary) => break summary,
@@ -398,7 +398,7 @@ async fn cancellation_precedes_queued_read() {
     })
     .await;
 
-    assert!(matches!(turn, super::OwnerTurnProgress::Cancelled));
+    std::assert_matches!(turn, super::OwnerTurnProgress::Cancelled);
     assert!(progress.is_none());
     assert!(poll!(read.as_mut()).is_pending(), "cancellation wins before the queued read is served");
     assert_eq!(session.world().object_count(), 0, "the pending update does not advance after cancellation");
@@ -482,14 +482,14 @@ async fn pending_sit_serves_read_first() {
         panic!("avatar sit response must retain its visibility lookup");
     };
     let revision_before_update = session.world().revision();
-    assert!(matches!(handoff.advance_entity_update(&mut session, &mut continuation), super::EntityUpdateProgress::Pending));
+    std::assert_matches!(handoff.advance_entity_update(&mut session, &mut continuation), super::EntityUpdateProgress::Pending);
 
     let mut reads = WorldReadHost::new(session.world(), tokio::runtime::Handle::current());
     let reader = reads.reader();
     let mut barrier_read = Box::pin(reader.barrier());
     assert!(poll!(barrier_read.as_mut()).is_pending());
     let cancellation = pending::<()>().boxed().shared();
-    assert!(matches!(super::serve_owner_turn(&mut reads, &mut session, &cancellation).await, super::OwnerTurnProgress::ReadServed));
+    std::assert_matches!(super::serve_owner_turn(&mut reads, &mut session, &cancellation).await, super::OwnerTurnProgress::ReadServed);
     let barrier = barrier_read.await.expect("barrier request is served by the owner");
     assert_eq!(barrier.object_count_upper_bound, DEPTH as usize);
     assert_eq!(session.world().revision(), revision_before_update);
