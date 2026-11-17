@@ -47,7 +47,7 @@ async fn receive_ping_id(simulator: &UdpSocket, buffer: &mut [u8]) -> u8 {
 }
 
 #[tokio::test]
-async fn skips_ping_when_ids_full() {
+async fn full_ping_ids_skip_ping() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let mut circuit = Circuit::new();
     let now = Instant::now();
@@ -62,7 +62,7 @@ async fn skips_ping_when_ids_full() {
 }
 
 #[tokio::test]
-async fn send_commits_after_local_send() {
+async fn local_send_commits_sequence() {
     let (simulator, transport) = connected_simulator().await;
     let mut circuit = Circuit::new();
     let sent_at = Instant::now();
@@ -772,7 +772,7 @@ fn retry_timeout_backs_off() {
 }
 
 #[tokio::test]
-async fn ping_ids_expire_and_wrap() {
+async fn ping_ids_expire_for_reuse() {
     let (simulator, transport) = connected_simulator().await;
     let mut circuit = Circuit::new();
     let start = Instant::now();

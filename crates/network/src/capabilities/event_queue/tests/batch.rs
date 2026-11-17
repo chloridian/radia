@@ -373,7 +373,7 @@ async fn event_batch_admission_is_atomic() {
 }
 
 #[test]
-fn event_budget_retries_after_dequeue() {
+fn dequeue_frees_event_budget() {
     let queued_event_bytes = Arc::new(Semaphore::new(MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES));
     let mut reservations = Vec::with_capacity(MAX_CONCURRENT_EVENT_QUEUES);
     for _ in 0..MAX_CONCURRENT_EVENT_QUEUES {

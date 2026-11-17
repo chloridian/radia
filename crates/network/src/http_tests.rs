@@ -69,7 +69,7 @@ async fn viewer_redirect_omits_referer() {
 }
 
 #[tokio::test]
-async fn viewer_redirects_stop_after_five() {
+async fn viewer_follows_five_redirects() {
     let mut responses = (1..=5)
         .map(|hop| format!("HTTP/1.1 302 Found\r\nLocation: /hop{hop}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes())
         .collect::<Vec<_>>();
@@ -239,7 +239,7 @@ async fn held_body_response() -> (Url, tokio::sync::oneshot::Sender<()>, JoinHan
 }
 
 #[tokio::test]
-async fn post_headers_returns_before_body() {
+async fn post_headers_precede_body() {
     let (url, release_body, server) = held_body_response().await;
     let client = Client::new(Some(Duration::from_secs(20)), false, None).expect("build HTTP client");
     let incoming =

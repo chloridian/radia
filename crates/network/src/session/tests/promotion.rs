@@ -300,7 +300,7 @@ async fn login_handoff() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn disconnect_after_promotion() {
+async fn promoted_disconnect_logs_out_once() {
     let PromotedSession { mut session, handle, worker, primary: _primary, destination, destination_peer, destination_id, http_task } =
         promoted_session().await;
     let mut events = replace(&mut session.events, mpsc::channel(1).1);

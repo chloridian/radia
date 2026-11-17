@@ -739,7 +739,7 @@ async fn handoff_waits_for_matching_movement() {
 }
 
 #[test]
-fn teleport_finish_promotes_after_movement() {
+fn teleport_finish_awaits_movement() {
     run_large_stack_test(run_teleport_finish_test);
 }
 

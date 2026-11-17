@@ -533,7 +533,7 @@ async fn local_ids_are_simulator_scoped() {
 }
 
 #[test]
-fn neighbor_targets_and_replacements() {
+fn neighbor_ids_route_sends() {
     run_large_stack_test(run_neighbor_targets_and_replacements);
 }
 

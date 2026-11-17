@@ -54,7 +54,7 @@ async fn close_cancels_queue() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ack_advances_after_admission() {
+async fn ack_waits_for_admission() {
     const TWO_EVENT_RESPONSE: &str = "<llsd><map><key>id</key><integer>4</integer><key>events</key><array><map><key>message</key><string>FirstEvent</string></map><map><key>message</key><string>SecondEvent</string></map></array></map></llsd>";
     let mut harness = EventQueueHarness::new(
         |base| {
