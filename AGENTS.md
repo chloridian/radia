@@ -29,7 +29,7 @@ The legacy viewer is a reference for protocol behavior, content compatibility, a
 - Order Rust files as follows: module docs, inner attributes, module declarations (`mod`/`pub mod`), imports, re-exports (`pub use`), constants and statics, type aliases, types with their impls immediately following, free functions, then tests. Group imports as std, external and workspace crates, then crate/self/super together. Keep tests last, including test module declarations.
 - A module with submodules is a directory with `mod.rs`; never place `foo.rs` beside `foo/`.
 - Keep unit tests inline in the module they test. Move them to a sibling `<name>_tests.rs` only when they obscure the implementation.
-- Each crate has one bench target: `benches/main.rs` declares every bench as a module, with a single `[[bench]] name = "main"` entry. Select benches with criterion filters, not extra targets.
+- Each crate has one bench target: `benches/main.rs` declares every bench as a module, with a single `[[bench]] name = "main"` entry. Select benches with criterion filters, not extra targets. Benchmarks are Criterion modules there, never ignored measurement tests or `src/` files; shared peers and fixtures go in `test-support`.
 
 ## Code
 
@@ -78,7 +78,7 @@ Source has no comments or doc comments, and that includes safety comments on `un
 ## Testing
 
 - Use [rust-testing](.agents/skills/rust-testing/SKILL.md) for all Rust test work.
-- Smallest proof first. Run tests and clippy for the crates you touched. Run the workspace-wide suite only when asked, because CI owns it.
+- Smallest proof first. Run tests and clippy with `--release` for the crates you touched. Run the workspace-wide suite only when asked, because CI owns it.
 - Spend tests where running the viewer will not expose the bug: untrusted wire and asset input, concurrency, cancellation and ordering, `World` and cache invariants with their reverse transitions, recovery paths, and regressions likely to return. Visual output, gui layout, and straight-line plumbing are verified live; for them, adding no test is a complete answer.
 - Test behavior through public APIs. Skip tests that assert callback wiring or mirror the implementation. Extend an existing test or harness before adding a new one.
 - Use property-based or stateful tests where operations interact (reordering, reparenting, stale updates, ID reuse). Generators must be domain-valid and failures reproducible.
@@ -93,11 +93,19 @@ Source has no comments or doc comments, and that includes safety comments on `un
 - Before finalizing a PR, decide whether it is a release boundary. If so, bump the version and explain it in the PR description. No bumps for routine merges or internal refactors.
 - No git tags, publishing, or GitHub releases without approval.
 
+## Commits and pull requests
+
+- Commit with one Conventional Commit subject line, `<type>(<scope>): <subject>`, and no body. Omit the scope only for repository-wide changes.
+- Name branches by type prefix and change (`feat/scene-environments`).
+- Title PRs with an imperative sentence in sentence case and no type prefix (`Share one inventory cache database across grids and agents`).
+- Open a PR body with the problem in plain prose, then the solution in a sentence or two. End with a `Verification:` paragraph that reports only checks that ran. No `## Summary` headings and no implementation inventory. Call the reference client the official Second Life viewer and name no third-party viewer.
+- Keep issue IDs out of branch names, commits, and PR titles and bodies.
+
 ## Documentation
 
 - [architecture.md](docs/architecture.md): high-level architecture, subsystem responsibilities, state ownership, data flow, crate boundaries, and dependencies.
-- [reference.md](docs/reference.md): guidance for consulting the official Second Life viewer, including which systems to study, which to reference only for behavior, and which implementations to ignore.
-- [tooling.md](docs/tooling.md): commands, testing, fuzzing, benchmarks, profiling, analysis.
+- [reference.md](docs/reference.md): guidance for consulting the official Second Life viewer, including which systems to study, which to reference only for behavior, and which implementations to ignore. Add no per-feature compatibility records; record source provenance in PR descriptions and in fixture and test names.
+- [tooling.md](docs/tooling.md): commands, testing, benchmarks, profiling, analysis. A broad guide: edit it only when a change alters a documented tool or workflow, and add no per-crate or per-benchmark lines.
 - [vision.md](docs/vision.md): product direction and architectural principles. Follow when making architectural and product decisions.
 
 Durable architecture and decisions go in these docs. Do not describe crate layout or data flow in this file.
