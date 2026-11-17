@@ -10,7 +10,7 @@ use std::{
 
 use assets::{
     AdmissionError, Budget, CacheReadCompletion, DecodeInput, Demand, Failure, FetchJob, FetchResponse, Kind, LoadCompletion, LoadJob,
-    MAX_RETRY_AFTER, MemoryStats, Priority, Request, Route, Store,
+    MAX_RETRY_AFTER, MemoryStats, Priority, Request, Resource, Route, Store,
     cache::{AssetCache, AssetCacheStats, CacheWrite},
     legacy_request, split_legacy_response,
 };
@@ -27,12 +27,13 @@ use tokio::{
     time,
 };
 use tracing::Instrument;
-use utils::AssetId;
+use utils::{AssetId, Summary};
 use world::Region;
 
 const COMMANDS: usize = 64;
 const MAX_MATERIALS_PER_POST: usize = 50;
 const MATERIALS_POST_INTERVAL: Duration = Duration::from_secs(1);
+const ASSET_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 static UNEXPECTED_HTTP_STATUS_WARNED: AtomicU8 = AtomicU8::new(0);
 
 type MaterialReply = oneshot::Sender<Result<Vec<u8>, Failure>>;
@@ -467,16 +468,65 @@ impl AssetCoordinator {
     fn control(&self, control: RouteCommand) {
         if self.handle.active.load(Ordering::Acquire) && self.controls.try_send(control).is_err() {
             self.handle.active.store(false, Ordering::Release);
-            tracing::warn!("asset route control overloaded; asset service stopped");
+            tracing::error!("asset service stopped: route control queue full");
         }
     }
 }
 
 enum WorkerResult {
     Input(DecodeInput),
-    Complete(LoadCompletion),
+    Complete(LoadCompletion, Option<AssetFailure>),
     CacheRead(CacheReadCompletion),
     CacheWritten,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AssetStage {
+    Fetch,
+    Prepare,
+}
+
+#[derive(Clone, Copy)]
+struct AssetFailure {
+    stage: AssetStage,
+    resource: Resource,
+    failure: Failure,
+}
+
+impl AssetFailure {
+    fn new(stage: AssetStage, resource: Resource, failure: Failure) -> Option<Self> {
+        (failure != Failure::Cancelled).then_some(Self { stage, resource, failure })
+    }
+}
+
+#[derive(Default)]
+struct AssetFailures {
+    prepare_failed: u64,
+    fetch_failed: u64,
+    sample: Option<AssetFailure>,
+}
+
+impl AssetFailures {
+    fn record(&mut self, failure: AssetFailure) {
+        match failure.stage {
+            AssetStage::Fetch => self.fetch_failed = self.fetch_failed.saturating_add(1),
+            AssetStage::Prepare => self.prepare_failed = self.prepare_failed.saturating_add(1),
+        }
+        self.sample = Some(failure);
+    }
+
+    fn report(self) {
+        let Some(sample) = self.sample else { return };
+        tracing::debug!(
+            prepare_failed = self.prepare_failed,
+            fetch_failed = self.fetch_failed,
+            sample_stage = ?sample.stage,
+            sample_asset = ?sample.resource.id,
+            sample_kind = ?sample.resource.kind,
+            sample_failure = ?sample.failure,
+            "asset failures"
+        );
+    }
 }
 
 type CacheWriteSpawner = dyn for<'a, 'b> FnMut(Vec<CacheWrite>, &'a Handle, &'b mut FuturesUnordered<JoinHandle<WorkerResult>>) + Send;
@@ -552,6 +602,7 @@ async fn run(
     let mut jobs = FuturesUnordered::<JoinHandle<WorkerResult>>::new();
     let mut waiting = VecDeque::<DecodeInput>::new();
     let mut fetches = VecDeque::<FetchJob>::new();
+    let mut failures = Summary::<AssetFailures>::new(ASSET_FAILURE_REPORT_INTERVAL);
     loop {
         if !active.load(Ordering::Acquire) {
             break;
@@ -589,14 +640,13 @@ async fn run(
                     continue;
                 }
             };
-            let span = tracing::debug_span!("assets.decode", asset = ?job.resource().id, kind = ?job.resource().kind);
+            let span = tracing::Span::current();
+            let resource = job.resource();
             jobs.push(runtime.spawn_blocking(move || {
                 let _span = span.enter();
                 let completion = job.run();
-                if let Some(failure) = completion.failure() {
-                    tracing::debug!(?failure, "asset preparation rejected");
-                }
-                WorkerResult::Complete(completion)
+                let failure = completion.failure().and_then(|failure| AssetFailure::new(AssetStage::Prepare, resource, failure));
+                WorkerResult::Complete(completion, failure)
             }));
         }
         enum Input {
@@ -667,13 +717,17 @@ async fn run(
                             .map_err(RequestError::Admission)
                     })
                     .transpose();
-                if reply.send(result).is_err() {
-                    tracing::trace!(region = region.get(), "asset request receiver closed");
-                }
+                reply.send(result).ok();
             }
             Input::Job(Ok(WorkerResult::Input(input))) => waiting.push_back(input),
-            Input::Job(Ok(WorkerResult::Complete(completion))) => {
-                write_spawner(store.complete(completion, Instant::now()), &runtime, &mut jobs);
+            Input::Job(Ok(WorkerResult::Complete(completion, failure))) => {
+                let now = Instant::now();
+                if let Some(failure) = failure
+                    && let Some(due) = failures.record(now, |failures| failures.record(failure))
+                {
+                    due.report();
+                }
+                write_spawner(store.complete(completion, now), &runtime, &mut jobs);
             }
             Input::Job(Ok(WorkerResult::CacheRead(completion))) => match store.complete_cache_read(completion, Instant::now()) {
                 Some(LoadJob::Decode(input)) => waiting.push_back(input),
@@ -683,6 +737,9 @@ async fn run(
             },
             Input::Job(Ok(WorkerResult::CacheWritten)) => {}
         }
+    }
+    if let Some(due) = failures.flush() {
+        due.report();
     }
     active.store(false, Ordering::Release);
     store.close();
@@ -705,7 +762,7 @@ fn spawn_fetch(
     jobs: &mut FuturesUnordered<JoinHandle<WorkerResult>>,
 ) {
     let transport = transports.get(&job.route()).cloned();
-    let span = tracing::debug_span!("assets.fetch", asset = ?job.resource().id, kind = ?job.resource().kind, route = ?job.route());
+    let resource = job.resource();
     jobs.push(
         runtime.spawn(
             async move {
@@ -722,15 +779,13 @@ fn spawn_fetch(
                     }
                     None => Err(Failure::RouteClosed),
                 };
-                if let Err(failure) = &result {
-                    tracing::debug!(?failure, "asset fetch did not complete");
-                }
+                let failure = result.as_ref().err().and_then(|failure| AssetFailure::new(AssetStage::Fetch, resource, *failure));
                 match job.complete_response(result) {
                     Ok(input) => WorkerResult::Input(input),
-                    Err(failure) => WorkerResult::Complete(failure.into()),
+                    Err(fetch) => WorkerResult::Complete(fetch.into(), failure),
                 }
             }
-            .instrument(span),
+            .instrument(tracing::Span::current()),
         ),
     );
 }
