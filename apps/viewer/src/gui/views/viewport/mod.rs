@@ -473,7 +473,7 @@ mod tests {
         app.request_chat(1);
         std::assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Ready(1)));
         app.request_chat(1);
-        assert!(matches!(incoming.try_recv(), Ok(ViewportEvent::Chat(1))), "a rejected request must not suppress a later request");
+        std::assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Chat(1)), "a rejected request must not suppress a later request");
         app.request_chat(1);
         assert!(incoming.try_recv().is_err(), "an accepted request must coalesce until received");
     }

@@ -1037,7 +1037,7 @@ mod tests {
         intake.complete(&mut world, *completion);
         let observed = world.world().environment(region).unwrap().parcel.unwrap().assignment.unwrap();
         assert_eq!(observed.version, Some(7));
-        assert!(matches!(observed.source, EnvironmentSource::Inline(_)));
+        std::assert_matches!(observed.source, EnvironmentSource::Inline(_));
         assert_eq!(server.await.unwrap().len(), 2);
     }
 }

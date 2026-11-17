@@ -442,8 +442,9 @@ mod tests {
         assert!(read.retained_bytes() <= MAX_ENVIRONMENT_READ_BYTES);
         let _ = world.retire_region(region).unwrap();
         assert_eq!(deliver(reader.environment(region), &mut service, &world).await.unwrap(), None);
-        assert!(
-            matches!(read.region_assignment.unwrap().source, EnvironmentSource::Inline(source) if source.len() == MAX_ENVIRONMENT_SOURCE_BYTES)
+        std::assert_matches!(
+            read.region_assignment.unwrap().source,
+            EnvironmentSource::Inline(source) if source.len() == MAX_ENVIRONMENT_SOURCE_BYTES
         );
     }
 
@@ -470,8 +471,11 @@ mod tests {
         assert_ne!(old, replacement);
         let details = deliver(reader.details(&[old, replacement]), &mut service, &world).await.unwrap();
         assert_eq!(details.hydration_revision, world.revision());
-        assert!(matches!(&details.details[..], [ObjectDetailResult::Gone(entity), ObjectDetailResult::Found(detail)]
-                if *entity == old && detail.summary.entity == replacement));
+        std::assert_matches!(
+            &details.details[..],
+            [ObjectDetailResult::Gone(entity), ObjectDetailResult::Found(detail)]
+                if *entity == old && detail.summary.entity == replacement
+        );
         let regions = deliver(reader.regions(None, 64), &mut service, &world).await.unwrap();
         assert_eq!(regions.regions.len(), 1);
         assert_eq!(regions.regions[0].region, region);
@@ -597,7 +601,7 @@ mod tests {
         let second = deliver(reader.details(&entities), &mut service, &world).await.unwrap();
         assert_eq!(second.details, [ObjectDetailResult::Gone(target)]);
         let third = deliver(reader.details(&entities), &mut service, &world).await.unwrap();
-        assert!(matches!(third.details.as_slice(), [ObjectDetailResult::Gone(entity)] if *entity == second_target));
+        std::assert_matches!(third.details.as_slice(), [ObjectDetailResult::Gone(entity)] if *entity == second_target);
     }
 
     #[tokio::test]
@@ -658,7 +662,7 @@ mod tests {
         assert!(poll!(replacement.as_mut()).is_pending());
         service.next_request().await.serve(&world);
         let replacement = replacement.await.unwrap();
-        assert!(matches!(replacement.details.as_slice(), [ObjectDetailResult::Found(detail)] if detail.summary.entity == other));
+        std::assert_matches!(replacement.details.as_slice(), [ObjectDetailResult::Found(detail)] if detail.summary.entity == other);
 
         assert!(replaced.await.unwrap().details.is_empty());
         assert!(deliver(reader.details(&[target]), &mut service, &world).await.unwrap().details.is_empty());
