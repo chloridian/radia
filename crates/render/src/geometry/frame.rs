@@ -28,6 +28,9 @@ use crate::{
 
 use super::{FramePreparation, FramePreparationKey, GeometryRenderer, PrepareTimes, ShadingMode, Stats, mesh::MeshUpload};
 
+pub(super) const BUDGET_REPORT_INTERVAL: Duration = Duration::from_secs(5);
+pub(super) const SLOW_PREPARE_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
 pub(super) const MESH_DEMANDS_PER_FRAME: usize = 24;
 
 #[derive(Default)]
@@ -665,8 +668,7 @@ impl GeometryRenderer {
             || self.cache.rescan_pending
             || self.draw_list.layout_pending()
             || self.layout_required;
-        if self.stats.omitted_faces > 0 && self.draw_report.is_none_or(|at| at.elapsed() >= Duration::from_secs(5)) {
-            self.draw_report = Some(Instant::now());
+        if self.stats.omitted_faces > 0 && self.budget_reports.record(Instant::now(), |_| {}).is_some() {
             tracing::warn!(
                 omitted_faces = self.stats.omitted_faces,
                 mesh_budget_blocked = self.stats.mesh_budget_blocked,
@@ -1151,33 +1153,99 @@ impl GeometryRenderer {
         self.stats.prepare_draw_upload_ms = times.draw_upload.as_secs_f64() * 1000.0;
         self.stats.prepare_draw_batches_ms = times.draw_batches.as_secs_f64() * 1000.0;
         self.stats.prepare_finalize_ms = times.finalize.as_secs_f64() * 1000.0;
-        if self.stats.prepare_ms >= 16.0 && self.slow_report.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
-            self.slow_report = Some(Instant::now());
-            tracing::warn!(
-                total_ms = self.stats.prepare_ms,
-                visibility_ms = times.visibility.as_secs_f64() * 1000.0,
-                texture_requests_ms = times.requests.as_secs_f64() * 1000.0,
-                texture_upload_ms = times.textures.as_secs_f64() * 1000.0,
-                mesh_upload_ms = times.meshes.as_secs_f64() * 1000.0,
-                draw_list_ms = times.draw_list.as_secs_f64() * 1000.0,
-                mesh_uploads = uploaded,
-                mesh_upload_bytes = self.stats.uploaded_bytes,
-                draw_submissions = self.stats.draw_calls,
-                draw_commands = self.stats.draw_commands,
-                instances = self.stats.instances,
-                pending_meshes = self.stats.pending_meshes,
-                pending_textures = self.stats.pending_textures,
-                layouts = self.stats.layouts,
-                items_updated = self.stats.items_updated,
-                faces_patched = self.stats.faces_patched,
-                blended_sorts = self.stats.blended_sorts,
-                animated_faces_visited = self.stats.animated_faces_visited,
-                animated_faces_changed = self.stats.animated_faces_changed,
-                omitted_faces = self.stats.omitted_faces,
-                "slow scene preparation"
-            );
+        if self.stats.prepare_ms >= 16.0 {
+            let frame = SlowPrepare {
+                total_ms: self.stats.prepare_ms,
+                visibility_ms: times.visibility.as_secs_f64() * 1000.0,
+                texture_requests_ms: times.requests.as_secs_f64() * 1000.0,
+                texture_upload_ms: times.textures.as_secs_f64() * 1000.0,
+                mesh_upload_ms: times.meshes.as_secs_f64() * 1000.0,
+                draw_list_ms: times.draw_list.as_secs_f64() * 1000.0,
+                mesh_uploads: uploaded,
+                mesh_upload_bytes: self.stats.uploaded_bytes,
+                draw_submissions: self.stats.draw_calls,
+                draw_commands: self.stats.draw_commands,
+                instances: self.stats.instances,
+                pending_meshes: self.stats.pending_meshes,
+                pending_textures: self.stats.pending_textures,
+                layouts: self.stats.layouts,
+                items_updated: self.stats.items_updated,
+                faces_patched: self.stats.faces_patched,
+                blended_sorts: self.stats.blended_sorts,
+                animated_faces_visited: self.stats.animated_faces_visited,
+                animated_faces_changed: self.stats.animated_faces_changed,
+                omitted_faces: self.stats.omitted_faces,
+            };
+            let due = self.slow_prepares.record(Instant::now(), |slow| {
+                slow.frames = slow.frames.saturating_add(1);
+                if slow.worst.as_ref().is_none_or(|worst| frame.total_ms > worst.total_ms) {
+                    slow.worst = Some(frame);
+                }
+            });
+            if let Some(due) = due {
+                due.report();
+            }
         }
     }
+}
+
+#[derive(Default)]
+pub(super) struct SlowPrepares {
+    frames: u64,
+    worst: Option<SlowPrepare>,
+}
+
+impl SlowPrepares {
+    pub(super) fn report(self) {
+        let Some(worst) = self.worst else { return };
+        tracing::debug!(
+            slow_frames = self.frames,
+            worst_ms = worst.total_ms,
+            visibility_ms = worst.visibility_ms,
+            texture_requests_ms = worst.texture_requests_ms,
+            texture_upload_ms = worst.texture_upload_ms,
+            mesh_upload_ms = worst.mesh_upload_ms,
+            draw_list_ms = worst.draw_list_ms,
+            mesh_uploads = worst.mesh_uploads,
+            mesh_upload_bytes = worst.mesh_upload_bytes,
+            draw_submissions = worst.draw_submissions,
+            draw_commands = worst.draw_commands,
+            instances = worst.instances,
+            pending_meshes = worst.pending_meshes,
+            pending_textures = worst.pending_textures,
+            layouts = worst.layouts,
+            items_updated = worst.items_updated,
+            faces_patched = worst.faces_patched,
+            blended_sorts = worst.blended_sorts,
+            animated_faces_visited = worst.animated_faces_visited,
+            animated_faces_changed = worst.animated_faces_changed,
+            omitted_faces = worst.omitted_faces,
+            "slow scene preparation"
+        );
+    }
+}
+
+struct SlowPrepare {
+    total_ms: f64,
+    visibility_ms: f64,
+    texture_requests_ms: f64,
+    texture_upload_ms: f64,
+    mesh_upload_ms: f64,
+    draw_list_ms: f64,
+    mesh_uploads: usize,
+    mesh_upload_bytes: usize,
+    draw_submissions: usize,
+    draw_commands: usize,
+    instances: usize,
+    pending_meshes: usize,
+    pending_textures: usize,
+    layouts: usize,
+    items_updated: usize,
+    faces_patched: usize,
+    blended_sorts: usize,
+    animated_faces_visited: usize,
+    animated_faces_changed: usize,
+    omitted_faces: usize,
 }
 
 fn set_cached_item_pose(item: &mut super::items::CachedItem, pose: WorldPose, origin: DVec3) -> bool {

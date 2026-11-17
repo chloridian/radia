@@ -17,6 +17,7 @@ use std::{
 use assets::{
     Failure, Filter, Image, MinFilter, Priority, Sampler, TextureDecodeJob, TextureEvents, TextureHandle, TextureId, WeakTexture, Wrap,
 };
+use utils::Summary;
 use wgpu::{
     AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingResource, BindingType, Buffer, BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, Color, ColorTargetState,
@@ -328,13 +329,25 @@ pub(crate) enum TextureUsage {
     Geometry,
 }
 
+#[derive(Default)]
+struct ConversionFailures {
+    failures: u64,
+    sample: Option<(TextureId, Failure)>,
+}
+
+impl ConversionFailures {
+    fn report(self) {
+        let Some((sample_texture, sample_failure)) = self.sample else { return };
+        tracing::warn!(failures = self.failures, ?sample_texture, ?sample_failure, "texture preparation failures");
+    }
+}
+
 pub(crate) struct Textures {
     revision: u64,
     geometry_revision: u64,
     queue: Queue,
     memory: Arc<Accounting>,
-    conversion_failures: u64,
-    last_failure_warning: Option<Instant>,
+    conversion_failures: Summary<ConversionFailures>,
     entries: HashMap<TextureId, TextureEntry>,
     cap_bytes: Arc<AtomicUsize>,
     soft_cap: usize,
@@ -580,8 +593,7 @@ impl Textures {
             geometry_revision: 0,
             queue: queue.clone(),
             memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
-            conversion_failures: 0,
-            last_failure_warning: None,
+            conversion_failures: Summary::new(FAILURE_LOG_INTERVAL),
             entries: HashMap::new(),
             cap_bytes: Arc::new(AtomicUsize::new(0)),
             soft_cap: DEFAULT_SOFT_CAP,
@@ -718,19 +730,13 @@ impl Textures {
             Conversion::Ready(pixels) => entry.state = TextureUploadState::Prepared(pixels),
             Conversion::Failed { failure, .. } => {
                 entry.state = if failure == Failure::Cancelled { TextureUploadState::Dormant } else { TextureUploadState::Failed(failure) };
-                if failure != Failure::Cancelled {
-                    self.conversion_failures = self.conversion_failures.saturating_add(1);
-                    let now = Instant::now();
-                    if self.last_failure_warning.is_none_or(|last| now.saturating_duration_since(last) >= FAILURE_LOG_INTERVAL) {
-                        tracing::warn!(
-                            failures = self.conversion_failures,
-                            sample_texture = ?completion.id,
-                            sample_failure = ?failure,
-                            "texture preparation failures"
-                        );
-                        self.conversion_failures = 0;
-                        self.last_failure_warning = Some(now);
-                    }
+                if failure != Failure::Cancelled
+                    && let Some(due) = self.conversion_failures.record(Instant::now(), |failures| {
+                        failures.failures = failures.failures.saturating_add(1);
+                        failures.sample = Some((completion.id, failure));
+                    })
+                {
+                    due.report();
                 }
             }
         }
@@ -1020,6 +1026,9 @@ impl Textures {
 
 impl Drop for Textures {
     fn drop(&mut self) {
+        if let Some(due) = self.conversion_failures.flush() {
+            due.report();
+        }
         for entry in self.entries.values() {
             if let TextureUploadState::Preparing { cancelled, .. } = &entry.state {
                 cancelled.store(true, Ordering::Release);

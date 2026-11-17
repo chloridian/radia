@@ -8,7 +8,7 @@ use math::{DVec3, Quat, Vec3, ray_intersects_bounds, ray_triangle_intersection};
 
 use super::items::ItemId;
 use super::{GeometryRenderer, ShadingMode};
-use crate::scene::{Camera, Object, SharedMesh};
+use crate::scene::{Camera, SharedMesh};
 
 const MAX_PICK_TRIANGLES: usize = 250_000;
 
@@ -37,8 +37,7 @@ impl GeometryRenderer {
             if !item.pickable {
                 continue;
             }
-            let faces =
-                item.faces.iter().filter(|face| face.slot.is_some()).map(|face| (&face.indices, face.params.double_sided, face.order.3));
+            let faces = item.faces.iter().filter(|face| face.slot.is_some()).map(|face| (&face.indices, face.params.double_sided));
             if let Err(error) =
                 query.visit_item(item.id, &item.mesh, item.position, item.rotation, item.scale, item.invert_normals, item.shading, faces)
             {
@@ -54,16 +53,11 @@ impl GeometryRenderer {
 
     fn log_pick(&self, query: &PickQuery, outcome: PickOutcome) {
         let Some(hit) = query.hit.as_ref().filter(|_| outcome == PickOutcome::Hit) else {
-            tracing::info!(
-                outcome = ?outcome,
-                triangles_tested = query.work,
-                visible_items = self.cache.visible.len(),
-                "geometry pick"
-            );
+            tracing::debug!(outcome = ?outcome, triangles_tested = query.work, visible_items = self.cache.visible.len(), "geometry pick");
             return;
         };
         let Some(item) = self.cache.index(hit.item_id).and_then(|index| self.cache.items.get(index)) else {
-            tracing::info!(
+            tracing::debug!(
                 outcome = ?PickOutcome::HitItemUnavailable,
                 triangles_tested = query.work,
                 visible_items = self.cache.visible.len(),
@@ -71,54 +65,12 @@ impl GeometryRenderer {
             );
             return;
         };
-
-        let mesh = item.mesh.mesh();
         let source = item.source.as_ref();
-        let replacement_source = item.replacement.as_ref().and_then(|replacement| replacement.item.source.as_ref());
-        let item_source_mesh = source.and_then(Object::mesh);
-        let published_source = replacement_source.or(source);
-        let published_mesh = published_source.and_then(Object::mesh);
-        let published_source_kind = if replacement_source.is_some() {
-            "replacement"
-        } else if source.is_some() {
-            "cached_item"
-        } else {
-            "none"
-        };
-        let resident = self.meshes.get(&item.mesh.id());
-        let visible_sharing_count = self
-            .cache
-            .visible
-            .iter()
-            .filter(|id| self.cache.items.get(**id).is_some_and(|visible| visible.mesh.id() == item.mesh.id()))
-            .count();
-        tracing::info!(
+        tracing::debug!(
             outcome = ?outcome,
-            object_uuid = ?source.map(|source| source.detail().summary.id),
-            entity = ?item.entity,
-            region = ?item.region,
+            object = ?source.map(|source| source.detail().summary.id),
             local_id = ?source.map(|source| source.detail().summary.address.local_id()),
-            raw_shape = ?published_source.and_then(|source| source.detail().shape),
-            item_source_raw_shape = ?source.and_then(|source| source.detail().shape),
-            item_source_mesh_key = ?item_source_mesh.map(|(key, _)| key),
-            item_source_mesh_id = ?item_source_mesh.map(|(_, mesh)| mesh.id()),
-            published_source = published_source_kind,
-            published_mesh_key = ?published_mesh.map(|(key, _)| key),
-            published_mesh_id = ?published_mesh.map(|(_, mesh)| mesh.id()),
-            item_mesh_id = ?item.mesh.id(),
-            item_mesh_bounds = ?mesh.bounds(),
-            item_cpu_vertex_count = mesh.vertices().len(),
-            item_cpu_index_count = mesh.indices().len(),
-            item_cpu_face_count = mesh.faces().len(),
-            item_cpu_nonempty_face_count = mesh.faces().iter().filter(|face| !face.indices.is_empty()).count(),
-            cached_face_count = item.faces.len(),
-            submitted_face_count = item.faces.iter().filter(|face| face.slot.is_some()).count(),
-            hit_face_range = ?hit.face_range,
-            hit_material_slot = hit.material_slot,
-            resident = resident.is_some(),
-            resident_vertex_range = ?resident.map(|mesh| mesh.allocation.vertices()),
-            resident_index_range = ?resident.map(|mesh| mesh.allocation.indices()),
-            visible_sharing_count,
+            region = ?item.region,
             triangles_tested = query.work,
             "geometry pick"
         );
@@ -137,8 +89,6 @@ enum PickOutcome {
 #[derive(Debug, Eq, PartialEq)]
 struct PickHit {
     item_id: ItemId,
-    face_range: Range<u32>,
-    material_slot: u8,
 }
 
 struct PickQuery {
@@ -163,7 +113,7 @@ impl PickQuery {
         scale: Vec3,
         invert_normals: bool,
         shading: ShadingMode,
-        faces: impl Iterator<Item = (&'a Range<u32>, bool, u8)>,
+        faces: impl Iterator<Item = (&'a Range<u32>, bool)>,
     ) -> Result<(), PickError> {
         let mesh = shared.mesh();
         let max_distance = if shading == ShadingMode::Surface { self.camera.draw_distance() as f32 } else { f32::INFINITY };
@@ -175,7 +125,7 @@ impl PickQuery {
             return Ok(());
         }
 
-        for (range, double_sided, material_slot) in faces {
+        for (range, double_sided) in faces {
             let Ok(start) = usize::try_from(range.start) else { continue };
             let Ok(end) = usize::try_from(range.end) else { continue };
             let Some(indices) = mesh.indices().get(start..end) else { continue };
@@ -197,7 +147,7 @@ impl PickQuery {
                     continue;
                 }
                 self.closest = distance;
-                self.hit = Some(PickHit { item_id, face_range: range.clone(), material_slot });
+                self.hit = Some(PickHit { item_id });
             }
         }
         Ok(())
@@ -220,7 +170,7 @@ mod tests {
         scene::{Camera, SharedMesh},
     };
 
-    type TestFace = (Range<u32>, bool, u8);
+    type TestFace = (Range<u32>, bool);
     type TestItem = (SharedMesh, DVec3, ShadingMode, Vec<TestFace>);
 
     #[test]
@@ -229,7 +179,7 @@ mod tests {
         let (triangle, indices) = first_triangle(&mesh);
         let (front_camera, center, front_ray) = camera_for_triangle(triangle);
         assert_hit_near(
-            &[(mesh.clone(), DVec3::ZERO, ShadingMode::Surface, vec![(indices.clone(), false, 0)])],
+            &[(mesh.clone(), DVec3::ZERO, ShadingMode::Surface, vec![(indices.clone(), false)])],
             front_camera,
             front_ray,
             center,
@@ -238,10 +188,10 @@ mod tests {
         let back_camera = Camera::new(center + front_ray * 5.0, -front_ray.as_vec3(), 1.0, [128, 128]).unwrap();
         let back_ray = back_camera.direction().as_dvec3();
         assert_eq!(
-            pick_items(&[(mesh.clone(), DVec3::ZERO, ShadingMode::Surface, vec![(indices.clone(), false, 0)])], back_camera, back_ray),
+            pick_items(&[(mesh.clone(), DVec3::ZERO, ShadingMode::Surface, vec![(indices.clone(), false)])], back_camera, back_ray),
             Ok(None)
         );
-        assert_hit_near(&[(mesh, DVec3::ZERO, ShadingMode::Surface, vec![(indices, true, 0)])], back_camera, back_ray, center);
+        assert_hit_near(&[(mesh, DVec3::ZERO, ShadingMode::Surface, vec![(indices, true)])], back_camera, back_ray, center);
     }
 
     #[test]
@@ -251,8 +201,8 @@ mod tests {
         let (camera, center, ray) = camera_for_triangle(triangle);
         let position_at = |distance| camera.position() + ray * distance - center;
         let items = [
-            (mesh.clone(), position_at(1.0), ShadingMode::Surface, vec![(indices.clone(), false, 0)]),
-            (mesh, position_at(2.0), ShadingMode::Surface, vec![(indices, false, 0)]),
+            (mesh.clone(), position_at(1.0), ShadingMode::Surface, vec![(indices.clone(), false)]),
+            (mesh, position_at(2.0), ShadingMode::Surface, vec![(indices, false)]),
         ];
         assert_hit_near(&items, camera, ray, camera.position() + ray);
     }
@@ -275,7 +225,7 @@ mod tests {
                 Vec3::ONE,
                 false,
                 ShadingMode::Surface,
-                std::iter::once((&indices, false, 3)),
+                std::iter::once((&indices, false)),
             )
             .unwrap();
         query
@@ -287,14 +237,12 @@ mod tests {
                 Vec3::ONE,
                 false,
                 ShadingMode::Surface,
-                std::iter::once((&indices, false, 7)),
+                std::iter::once((&indices, false)),
             )
             .unwrap();
 
         let hit = query.hit.as_ref().expect("expected a ray hit");
         assert_eq!(hit.item_id, nearer);
-        assert_eq!(hit.face_range, indices);
-        assert_eq!(hit.material_slot, 7);
         let point = query.result().expect("expected a picked point");
         assert!(point.distance(camera.position() + ray) < 1e-4, "picked {point:?} from {hit:?}");
     }
@@ -306,8 +254,8 @@ mod tests {
         let (camera, center, ray) = camera_for_triangle(triangle);
         let position_at = |distance| camera.position() + ray * distance - center;
         let items = [
-            (mesh.clone(), position_at(0.01), ShadingMode::Surface, vec![(indices.clone(), false, 0)]),
-            (mesh, position_at(0.1), ShadingMode::Surface, vec![(indices, false, 0)]),
+            (mesh.clone(), position_at(0.01), ShadingMode::Surface, vec![(indices.clone(), false)]),
+            (mesh, position_at(0.1), ShadingMode::Surface, vec![(indices, false)]),
         ];
         assert_hit_near(&items, camera, ray, camera.position() + ray * 0.1);
     }
@@ -319,8 +267,8 @@ mod tests {
         let (camera, center, ray) = camera_for_triangle(triangle);
         let camera = camera.with_quality(32.0, 1.0).unwrap();
         let position = camera.position() + ray * 40.0 - center;
-        let object = [(mesh.clone(), position, ShadingMode::Surface, vec![(indices.clone(), true, 0)])];
-        let terrain = [(mesh, position, ShadingMode::Terrain, vec![(indices, true, 0)])];
+        let object = [(mesh.clone(), position, ShadingMode::Surface, vec![(indices.clone(), true)])];
+        let terrain = [(mesh, position, ShadingMode::Terrain, vec![(indices, true)])];
         assert_eq!(pick_items(&object, camera, ray), Ok(None));
         assert_hit_near(&terrain, camera, ray, camera.position() + ray * 40.0);
     }
@@ -330,13 +278,13 @@ mod tests {
         let mesh = shared_mesh();
         let (triangle, indices) = first_triangle(&mesh);
         let (camera, _, ray) = camera_for_triangle(triangle);
-        let repeated = (0..=MAX_PICK_TRIANGLES).map(|_| (&indices, false, 0));
+        let repeated = (0..=MAX_PICK_TRIANGLES).map(|_| (&indices, false));
         let mut query = PickQuery::new(camera, ray);
         query
             .visit_item((2, 1, 0), &mesh, DVec3::new(0.0, 100.0, 0.0), Quat::IDENTITY, Vec3::ONE, false, ShadingMode::Surface, repeated)
             .unwrap();
         assert_eq!(query.result(), None);
-        let repeated = (0..=MAX_PICK_TRIANGLES).map(|_| (&indices, false, 0));
+        let repeated = (0..=MAX_PICK_TRIANGLES).map(|_| (&indices, false));
         let mut query = PickQuery::new(camera, ray);
         assert_eq!(
             query.visit_item((2, 1, 0), &mesh, DVec3::ZERO, Quat::IDENTITY, Vec3::ONE, false, ShadingMode::Surface, repeated),
@@ -355,7 +303,7 @@ mod tests {
                 Vec3::ONE,
                 false,
                 *shading,
-                faces.iter().map(|(range, double_sided, slot)| (range, *double_sided, *slot)),
+                faces.iter().map(|(range, double_sided)| (range, *double_sided)),
             )?;
         }
         Ok(query.result())
