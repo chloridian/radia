@@ -208,7 +208,7 @@ struct MeshInfoBuild {
 pub(super) struct MeshDemandOrder {
     pub(super) mesh: MeshId,
     resident: bool,
-    visible: bool,
+    pub(super) visible: bool,
     priority: (f64, f64),
 }
 
@@ -229,12 +229,12 @@ impl PartialOrd for MeshDemandOrder {
 impl Ord for MeshDemandOrder {
     fn cmp(&self, other: &Self) -> Ordering {
         other
-            .resident
-            .cmp(&self.resident)
+            .visible
+            .cmp(&self.visible)
+            .then_with(|| other.resident.cmp(&self.resident))
             .then_with(|| other.priority.0.total_cmp(&self.priority.0))
             .then_with(|| self.priority.1.total_cmp(&other.priority.1))
             .then_with(|| self.mesh.cmp(&other.mesh))
-            .then_with(|| self.visible.cmp(&other.visible))
     }
 }
 
@@ -321,7 +321,6 @@ pub(super) struct FrameCache {
     pub(super) region_water: HashMap<Region, ItemIndex>,
     pub(super) region_water_changed: bool,
     pub(super) mesh_order: BTreeSet<MeshDemandOrder>,
-    pub(super) preparation_mesh_order: BTreeSet<MeshDemandOrder>,
     pub(super) mesh_order_by_id: HashMap<MeshId, MeshDemandOrder>,
     pub(super) mesh_demand_revision: u64,
     pub(super) admission_protected: HashSet<MeshId>,
@@ -347,9 +346,8 @@ pub(super) struct FrameCache {
 
 impl FrameCache {
     pub(super) fn clear_mesh_demands(&mut self) {
-        let changed = !self.mesh_order.is_empty() || !self.preparation_mesh_order.is_empty();
+        let changed = !self.mesh_order.is_empty();
         self.mesh_order.clear();
-        self.preparation_mesh_order.clear();
         self.mesh_order_by_id.clear();
         self.admission_protected.clear();
         self.mesh_representatives.clear();
@@ -1788,7 +1786,7 @@ impl GeometryRenderer {
         let mut missing = false;
         for (mesh, composition, priority, resident, viewed) in demands.into_iter().flatten() {
             self.stats.mesh_demand_items_visited += 1;
-            missing |= add_mesh_demand(&mut self.cache, &mut self.stats, &mesh, composition, priority, resident, !viewed);
+            missing |= add_mesh_demand(&mut self.cache, &mut self.stats, &mesh, composition, priority, resident, viewed);
         }
         self.cache.nonresident_demands |= missing;
         missing
@@ -1802,16 +1800,12 @@ fn add_mesh_demand(
     composition: Option<Arc<[f32]>>,
     priority: (f64, f64),
     resident: bool,
-    preparation: bool,
+    viewed: bool,
 ) -> bool {
     let mesh_id = mesh.id();
     let Some(current) = cache.mesh_order_by_id.get(&mesh_id).copied() else {
-        let order = MeshDemandOrder { mesh: mesh_id, resident, visible: !preparation, priority };
-        if preparation {
-            cache.preparation_mesh_order.insert(order);
-        } else {
-            cache.mesh_order.insert(order);
-        }
+        let order = MeshDemandOrder { mesh: mesh_id, resident, visible: viewed, priority };
+        cache.mesh_order.insert(order);
         cache.mesh_order_by_id.insert(mesh_id, order);
         cache.mesh_representatives.insert(mesh_id, mesh.clone());
         cache.mesh_compositions.insert(mesh_id, composition);
@@ -1820,27 +1814,15 @@ fn add_mesh_demand(
         return !resident;
     };
     let priority_improved = priority.0 > current.priority.0 || (priority.0 == current.priority.0 && priority.1 < current.priority.1);
-    let was_visible = current.visible;
-    let is_visible = was_visible || !preparation;
     let next = MeshDemandOrder {
         mesh: mesh_id,
         resident,
-        visible: is_visible,
+        visible: current.visible || viewed,
         priority: if priority_improved { priority } else { current.priority },
     };
-    let order_changed = next != current || is_visible && !was_visible;
-    if order_changed {
-        if is_visible {
-            if was_visible {
-                cache.mesh_order.remove(&current);
-            } else {
-                cache.preparation_mesh_order.remove(&current);
-            }
-            cache.mesh_order.insert(next);
-        } else {
-            cache.preparation_mesh_order.remove(&current);
-            cache.preparation_mesh_order.insert(next);
-        }
+    if next != current {
+        cache.mesh_order.remove(&current);
+        cache.mesh_order.insert(next);
         cache.mesh_order_by_id.insert(mesh_id, next);
         cache.mesh_demand_revision = cache.mesh_demand_revision.wrapping_add(1);
         stats.mesh_demand_order_updates += 1;
@@ -1854,7 +1836,7 @@ fn add_mesh_demand(
 
 #[cfg(test)]
 pub(super) fn add_mesh_demand_for_test(cache: &mut FrameCache, stats: &mut super::Stats, mesh: &SharedMesh, priority: (f64, f64)) {
-    let _ = add_mesh_demand(cache, stats, mesh, None, priority, false, false);
+    let _ = add_mesh_demand(cache, stats, mesh, None, priority, false, true);
 }
 
 pub(super) fn range_moved(anchor: Camera, camera: Camera) -> bool {

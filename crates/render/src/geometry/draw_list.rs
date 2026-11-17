@@ -86,6 +86,7 @@ impl DrawKey {
             cell,
             sphere: None,
             ranged: true,
+            live: true,
         }
     }
 }
@@ -102,6 +103,7 @@ pub(super) struct DrawCommand {
     cell: u32,
     sphere: Option<Sphere>,
     ranged: bool,
+    live: bool,
 }
 
 impl DrawCommand {
@@ -111,6 +113,9 @@ impl DrawCommand {
     }
 
     fn visible(&self, cells: &[CellClass], eye: DVec3, draw_distance: f64, frustum: &Frustum) -> bool {
+        if !self.live {
+            return false;
+        }
         let Some(sphere) = self.sphere else { return false };
         let Some(cell) = cells.get(self.cell as usize) else { return false };
         if !cell.visible {
@@ -458,7 +463,7 @@ struct LayoutBuild {
     state: LayoutState,
     uploads: HashSet<u32>,
     visible: Vec<ItemIndex>,
-    mesh_pins: HashSet<MeshId>,
+    evicted: HashSet<MeshId>,
     layout_items: Vec<ItemIndex>,
     selected_items: HashSet<ItemIndex>,
     phase: LayoutPhase,
@@ -504,13 +509,13 @@ enum LayoutPhase {
 }
 
 impl LayoutBuild {
-    fn new(layout: LayoutId, visible: &[ItemIndex], camera: Camera, items: &ItemSlab) -> Self {
+    fn new(layout: LayoutId, visible: &[ItemIndex], camera: Camera) -> Self {
         Self {
             layout,
             state: LayoutState::default(),
             uploads: HashSet::new(),
             visible: visible.to_vec(),
-            mesh_pins: visible.iter().filter_map(|index| items.get(*index).map(|item| item.mesh.id())).collect(),
+            evicted: HashSet::new(),
             layout_items: Vec::new(),
             selected_items: HashSet::new(),
             phase: LayoutPhase::CountVisible,
@@ -560,6 +565,16 @@ impl LayoutBuild {
         cell
     }
 
+    fn push_draw(&mut self, draw: DrawCommand) {
+        let mesh = draw.mesh;
+        let index = u32::try_from(self.state.draws.len()).unwrap_or(u32::MAX);
+        let live = !self.evicted.contains(&mesh);
+        self.state.draws.push(DrawCommand { live, ..draw });
+        if live {
+            self.state.mesh_references.entry(mesh).or_default().push(index);
+        }
+    }
+
     fn retired(&self) -> bool {
         let state = &self.state;
         state.draw_group_refs.is_empty()
@@ -573,7 +588,7 @@ impl LayoutBuild {
 pub(super) struct LayoutState {
     draws: Vec<DrawCommand>,
     cells: Vec<Option<Sphere>>,
-    mesh_references: HashSet<MeshId>,
+    mesh_references: HashMap<MeshId, Vec<u32>>,
     instance_bytes: Vec<u8>,
     active_textures: Vec<TextureDemand>,
     active_terrain: Vec<TerrainDemand>,
@@ -593,6 +608,16 @@ pub(super) struct LayoutState {
 impl LayoutState {
     fn opaque(&self) -> &[DrawCommand] {
         self.draws.get(..self.opaque_draws).unwrap_or_default()
+    }
+
+    fn disable(&mut self, mesh: MeshId) -> bool {
+        let Some(draws) = self.mesh_references.remove(&mesh) else { return false };
+        for index in draws {
+            if let Some(draw) = self.draws.get_mut(index as usize) {
+                draw.live = false;
+            }
+        }
+        true
     }
 
     fn include(&mut self, slot: u32, blended_index: Option<usize>, sphere: Sphere, shading: ShadingMode) {
@@ -626,7 +651,7 @@ pub(super) struct DrawList {
 }
 
 impl DrawList {
-    pub(super) fn request_layout(&mut self, visible: &[ItemIndex], camera: Camera, items: &ItemSlab) -> bool {
+    pub(super) fn request_layout(&mut self, visible: &[ItemIndex], camera: Camera) -> bool {
         if self.pending.is_some() {
             return false;
         }
@@ -634,7 +659,7 @@ impl DrawList {
             return false;
         }
         let layout = self.next_layout();
-        self.pending = Some(LayoutBuild::new(layout, visible, camera, items));
+        self.pending = Some(LayoutBuild::new(layout, visible, camera));
         true
     }
 
@@ -650,14 +675,31 @@ impl DrawList {
         face.committed.filter(|committed| committed.layout == self.layout)
     }
 
-    pub(super) fn pins_mesh(&self, mesh: MeshId) -> bool {
-        self.committed.mesh_references.contains(&mesh)
-            || self.pending.as_ref().is_some_and(|build| !build.stale && build.mesh_pins.contains(&mesh))
+    pub(super) fn evict(&mut self, mesh: MeshId) {
+        if self.committed.disable(mesh) {
+            self.cull_dirty = true;
+        }
+        if let Some(build) = self.pending.as_mut() {
+            build.evicted.insert(mesh);
+            build.state.disable(mesh);
+        }
+    }
+
+    pub(super) fn shows_mesh(&self, mesh: MeshId, camera: Camera, frustum: &Frustum) -> bool {
+        let Some(draws) = self.committed.mesh_references.get(&mesh) else { return false };
+        let eye = camera.position();
+        let draw_distance = camera.draw_distance();
+        draws.iter().filter_map(|index| self.committed.draws.get(*index as usize)).any(|draw| {
+            draw.sphere.is_some_and(|sphere| {
+                let center = sphere.center - eye;
+                (!draw.ranged || center.length() - sphere.radius <= draw_distance) && frustum.intersects_sphere(center, sphere.radius)
+            })
+        })
     }
 
     #[cfg(test)]
     pub(super) fn committed_pins_mesh(&self, mesh: MeshId) -> bool {
-        self.committed.mesh_references.contains(&mesh)
+        self.committed.mesh_references.contains_key(&mesh)
     }
 
     #[cfg(test)]
@@ -913,8 +955,7 @@ impl DrawList {
                             pending.first = build.opaque_count;
                             pending.draw = build.state.draws.len();
                             build.opaque_count = build.opaque_count.saturating_add(pending.count);
-                            build.state.mesh_references.insert(group.key.mesh);
-                            build.state.draws.push(group.key.command(group_id, first, count, cell));
+                            build.push_draw(group.key.command(group_id, first, count, cell));
                             self.retain_layout_group(&mut build.state, group_id);
                         }
                     }
@@ -1050,7 +1091,6 @@ impl DrawList {
                         break;
                     };
                     assign_slot(face, build.layout, self.layout, Some(slot), Some(blend_index));
-                    build.state.mesh_references.insert(key.mesh);
                     let mut command = key.command(blended.group, slot, 1, blended.cell);
                     if let Some(sphere) = sphere {
                         command.include(sphere, shading);
@@ -1058,7 +1098,7 @@ impl DrawList {
                             *bounds = Some(bounds.map_or(sphere, |bounds| bounds.union(sphere)));
                         }
                     }
-                    build.state.draws.push(command);
+                    build.push_draw(command);
                     self.retain_layout_group(&mut build.state, blended.group);
                     faces_visited += 1;
                     build.faces_visited += 1;
