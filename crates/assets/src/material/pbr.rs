@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn factors_and_defaults() {
+    fn factors_override_gltf_defaults() {
         assert_eq!(pbr_description(br#"{"asset":{"version":"2.0"},"materials":[{}]}"#), PbrMaterial::default());
         let material = pbr_description(br#"{"asset":{"version":"2.0"},"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[0.2,0.4,0.6,0.8]},"alphaMode":"BLEND","doubleSided":true}]}"#);
         assert_eq!(material.base_color_factor, [0.2, 0.4, 0.6, 0.8]);

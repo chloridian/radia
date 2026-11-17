@@ -176,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn split_returns_listed_materials() {
+    fn split_keeps_listed_materials() {
         let mut record = b"[\0\0\0\x03".to_vec();
         for (value, name) in [(1, b"oak"), (2, b"elm")] {
             record.extend_from_slice(b"{\0\0\0\x02k\0\0\0\x02IDb\0\0\0\x10");
