@@ -748,11 +748,6 @@ impl DrawList {
         ))
     }
 
-    #[cfg(test)]
-    pub(super) fn pending_stale(&self) -> bool {
-        self.pending.as_ref().is_some_and(|build| build.stale)
-    }
-
     pub(super) fn cancel_layout(&mut self) {
         if self.retired.is_none()
             && let Some(build) = self.pending.take()

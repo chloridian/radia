@@ -186,8 +186,6 @@ impl GeometryRenderer {
         }
 
         self.stats = Stats::default();
-        #[cfg(test)]
-        let fresh_build = self.draw_list.layout_building() && !self.draw_list.pending_stale();
         self.mesh_admission.visits_this_frame = 0;
         let previous_camera = self.cache.camera;
         let camera_changed = previous_camera != Some(camera) || self.cache.size != size;
@@ -203,10 +201,6 @@ impl GeometryRenderer {
         let noted_camera = self.note_rebuild_camera(camera);
         let cache_started = Instant::now();
         let mut update = self.update_cache_for_frame(view, self.recovery_publication_pending);
-        #[cfg(test)]
-        {
-            self.stats.layout_invalidation_reason = update.layout_invalidation_reason;
-        }
         if update.rebuild_completed {
             self.recovery_publication_pending = true;
         }
@@ -227,8 +221,6 @@ impl GeometryRenderer {
         let rebuilding = update.rebuild_pending;
         let stale_pass = update.rebuild_completed && range_moved(candidate_camera, camera);
         if self.draw_list.layout_pending() && (update.immediate_visibility_change || update.layout_invalidated) {
-            #[cfg(test)]
-            self.note_layout_stale(if update.immediate_visibility_change { "immediate_visibility" } else { "layout_invalidated" });
             self.draw_list.mark_layout_stale();
         }
         let frame_origin = if rebuilding { self.cache.origin } else { origin };
@@ -405,8 +397,6 @@ impl GeometryRenderer {
             }
         }
         if self.draw_list.layout_pending() && (update.layout_invalidated || origin_rebased) {
-            #[cfg(test)]
-            self.note_layout_stale(if update.layout_invalidated { "layout_invalidated" } else { "origin_rebased" });
             self.draw_list.mark_layout_stale();
         }
         if layout_requested {
@@ -436,10 +426,6 @@ impl GeometryRenderer {
             self.pipelines.update_camera_uniform(&self.queue, camera, size, self.active_origin);
         }
         if let Some(progress) = layout_progress {
-            #[cfg(test)]
-            if progress.stale && fresh_build {
-                self.stats.layout_stale_reason.get_or_insert("layout_build");
-            }
             self.stats.layout_items_visited = progress.stats.items_visited;
             self.stats.layout_faces_visited = progress.stats.faces_visited;
             self.stats.prepare_layout_commit_ms = progress.commit_ms;
@@ -601,13 +587,6 @@ impl GeometryRenderer {
         });
         times.finalize = instances_started.elapsed();
         self.record_prepare(started, times, uploaded);
-    }
-
-    #[cfg(test)]
-    fn note_layout_stale(&mut self, reason: &'static str) {
-        if self.draw_list.layout_building() && !self.draw_list.pending_stale() {
-            self.stats.layout_stale_reason.get_or_insert(reason);
-        }
     }
 
     fn advance_mesh_admission(&mut self, device: &Device, uploaded: &mut usize, camera: Camera, frustum: &Frustum) {
