@@ -409,11 +409,31 @@ pub(super) fn preempt_deferred_send(
     Ok(())
 }
 
+#[derive(Default)]
+pub(super) struct DroppedNotifications {
+    dropped: u64,
+    last_error: Option<ConnectionError>,
+}
+
+impl DroppedNotifications {
+    pub(super) fn report(self, simulator_id: SimulatorId) {
+        if let Some(last_error) = self.last_error {
+            tracing::warn!(
+                simulator = simulator_id.get(),
+                dropped = self.dropped,
+                %last_error,
+                "send failure notifications dropped at circuit close"
+            );
+        }
+    }
+}
+
 pub(super) fn fail_queued_on_close(
     events: &mpsc::Sender<SimulatorEvent>,
     pending: &mut VecDeque<SimulatorEvent>,
     simulator_id: SimulatorId,
     mut queued: QueuedMessage,
+    dropped: &mut DroppedNotifications,
 ) {
     let failure = ConnectionError::SimulatorConnectionClosed;
     if let Some(completion) = queued.completion.take()
@@ -425,7 +445,8 @@ pub(super) fn fail_queued_on_close(
         && let Err(error) =
             queue_send_notification(events, pending, simulator_id, queued.cancel_target, Some(failure), queued.report_failure)
     {
-        tracing::warn!(simulator = simulator_id.get(), %error, "could not queue a simulator send failure notification");
+        dropped.dropped = dropped.dropped.saturating_add(1);
+        dropped.last_error = Some(error);
     }
 }
 

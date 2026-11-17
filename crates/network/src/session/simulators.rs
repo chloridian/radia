@@ -587,7 +587,10 @@ impl SessionState {
     ) -> Result<(), SessionError> {
         match decode_crossed_region(body, self.session.agent_id, self.session.session_id) {
             Ok(handoff) => self.request_handoff(simulator_id, handoff, HandoffAnnouncement::CrossedRegion, setup, handoff_state).await,
-            Err(_reason) => Ok(()),
+            Err(reason) => {
+                tracing::debug!(simulator = simulator_id.get(), announcement = "CrossedRegion", reason, "handoff announcement rejected");
+                Ok(())
+            }
         }
     }
 
@@ -610,7 +613,10 @@ impl SessionState {
                 )
                 .await
             }
-            Err(_reason) => Ok(()),
+            Err(reason) => {
+                tracing::debug!(simulator = simulator_id.get(), announcement = "TeleportFinish", reason, "handoff announcement rejected");
+                Ok(())
+            }
         }
     }
 

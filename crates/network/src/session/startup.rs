@@ -94,30 +94,17 @@ impl RootConnectionStart {
             async move {
                 let outcome = match SimulatorConnection::connect(session, options).await {
                     Ok(connection) => {
-                        if ready_sender.send(Ok(())).is_err() {
-                            tracing::debug!(
-                                simulator = simulator_id.get(),
-                                "startup waiter closed after the primary connection became ready"
-                            );
-                        }
+                        ready_sender.send(Ok(())).ok();
                         SimulatorTaskOutcome::Finished(
                             connection.run(events.clone(), shutdown, neighbor_requests, commands, logout, memory).await,
                         )
                     }
                     Err(error) => {
-                        if ready_sender.send(Err(error.clone())).is_err() {
-                            tracing::debug!(simulator = simulator_id.get(), "startup waiter closed after the primary connection failed");
-                        }
+                        ready_sender.send(Err(error.clone())).ok();
                         SimulatorTaskOutcome::ConnectFailed(error)
                     }
                 };
-                if events
-                    .send(SimulatorEvent::Finished { simulator_id, region_handle: None, endpoint, outcome: outcome.clone() })
-                    .await
-                    .is_err()
-                {
-                    tracing::debug!(simulator = simulator_id.get(), "simulator connection result receiver closed");
-                }
+                events.send(SimulatorEvent::Finished { simulator_id, region_handle: None, endpoint, outcome: outcome.clone() }).await.ok();
                 (simulator_id, None, endpoint, outcome)
             }
             .in_current_span(),
@@ -285,7 +272,6 @@ impl SessionState {
 
 impl SessionDispatcher<'_> {
     pub(super) fn handle_session_startup_timeout(&mut self) -> RuntimeAction {
-        tracing::warn!("simulator session timed out");
         RuntimeAction::Exit(Err(SessionError::SessionStartupTimedOut))
     }
 }

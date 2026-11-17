@@ -16,7 +16,7 @@ use super::{
     active_queue_class, expire_deferred_retries, expire_pending_send, fail_queued_on_close, flush_send_notifications,
     lifecycle::{LogoutAction, Phase, RunControl},
     logout_message, message_class,
-    outbound::{MovementSend, PendingSendExpiration, QueuedMessage, begin_send},
+    outbound::{DroppedNotifications, MovementSend, PendingSendExpiration, QueuedMessage, begin_send},
     preempt_deferred_send, prepare_next_send, prepare_shutdown_send, queue_send_notification,
     receive::PacketRejections,
     report_queued_failure,
@@ -52,10 +52,11 @@ impl ConnectionTask {
         let result = self.run_loop().await;
         self.packet_rejections.flush();
         flush_send_notifications(&self.events, &mut self.pending_notifications, &mut self.shutdown).await;
-        tracing::info!(
-            role = ?self.connection.current_primary_state().connection_role(),
-            "simulator disconnected"
-        );
+        let role = self.connection.current_primary_state().connection_role();
+        match &result {
+            Ok(()) => tracing::info!(?role, "simulator disconnected"),
+            Err(error) => tracing::warn!(?role, %error, "simulator disconnected"),
+        }
         result
     }
 
@@ -199,18 +200,20 @@ impl ConnectionTask {
         if !self.phase.is_draining() {
             return;
         }
+        let mut dropped = DroppedNotifications::default();
         for queued in self.outbound.drain() {
-            fail_queued_on_close(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued);
+            fail_queued_on_close(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued, &mut dropped);
         }
         if let Some(queued) = self.pending_handshake_reply.take() {
-            fail_queued_on_close(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued);
+            fail_queued_on_close(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued, &mut dropped);
         }
         if self.pending_send.as_ref().is_some_and(|pending| !pending.meta.is_acknowledgement)
             && let Some(mut canceled) = self.pending_send.take()
             && let Some(queued) = canceled.queued_message.take()
         {
-            fail_queued_on_close(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued);
+            fail_queued_on_close(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued, &mut dropped);
         }
+        dropped.report(self.connection.simulator_id);
     }
 
     fn drain_is_complete(&self) -> bool {
@@ -386,14 +389,16 @@ impl ConnectionTask {
         };
         match self.phase.request_logout(command) {
             LogoutAction::Queue(completed) => {
+                let mut dropped = DroppedNotifications::default();
                 if let Some(mut canceled) = self.pending_send.take()
                     && let Some(queued) = canceled.queued_message.take()
                 {
-                    fail_queued_on_close(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued);
+                    fail_queued_on_close(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued, &mut dropped);
                 }
                 for queued in self.outbound.drain() {
-                    fail_queued_on_close(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued);
+                    fail_queued_on_close(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued, &mut dropped);
                 }
+                dropped.report(self.connection.simulator_id);
                 self.priority_logout = Some(QueuedMessage {
                     message: logout_message(&self.connection.session),
                     delivery: Delivery::ReliableNoRetry,
