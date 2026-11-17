@@ -564,23 +564,18 @@ mod tests {
     }
 
     #[test]
-    fn media_controls_use_integer_values() {
-        let mut fields = Map::new();
-        fields.insert("controls".into(), Value::Integer(0));
-        assert_eq!(parse_entry(&fields).unwrap().controls, MediaControls::Standard);
-
-        fields.insert("controls".into(), Value::Integer(1));
-        assert_eq!(parse_entry(&fields).unwrap().controls, MediaControls::Mini);
-
-        fields.remove("controls");
-        assert_eq!(parse_entry(&fields).unwrap().controls, MediaControls::Standard);
-    }
-
-    #[test]
-    fn media_controls_reject_invalid_values() {
-        for value in [Value::Integer(-1), Value::Integer(2), Value::String("MINI".into())] {
-            let fields = Map::from([("controls".into(), value)]);
-            assert!(parse_entry(&fields).is_err());
+    fn media_controls_values() {
+        for (value, expected) in [
+            (Some(Value::Integer(0)), Some(MediaControls::Standard)),
+            (Some(Value::Integer(1)), Some(MediaControls::Mini)),
+            (None, Some(MediaControls::Standard)),
+            (Some(Value::Integer(-1)), None),
+            (Some(Value::Integer(2)), None),
+            (Some(Value::String("MINI".into())), None),
+        ] {
+            let case = format!("{value:?}");
+            let fields: Map = value.into_iter().map(|value| ("controls".into(), value)).collect();
+            assert_eq!(parse_entry(&fields).ok().map(|entry| entry.controls), expected, "{case}");
         }
     }
 

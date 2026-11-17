@@ -1,11 +1,9 @@
-use std::{path::Path, time::Instant};
+use std::path::Path;
 
 use network::{Grid, SimulatorId};
 use protocol::{
     lludp::{Message, Packet},
-    messages::{
-        CachedObjectReference, ObjectUpdate as FullUpdate, ObjectUpdateCached, RegionHandshake, region::region_handshake::RegionInfo2,
-    },
+    messages::{CachedObjectReference, ObjectUpdateCached, RegionHandshake, region::region_handshake::RegionInfo2},
 };
 use rusqlite::Transaction;
 use storage::sqlite::{SqliteBatch, SqliteDb};
@@ -179,53 +177,8 @@ pub(super) async fn override_rows(db: &SqliteDb) -> Vec<(u32, Uuid)> {
     receipt.wait().await.expect("read override rows")
 }
 
-pub(super) fn synthetic_region_updates() -> (protocol::messages::object::RegionData, Vec<Message>, Vec<CachedObjectReference>) {
-    let Message::ObjectUpdate(template_update) = fixture_message(vectors::OBJECT_UPDATE) else {
-        panic!("full update fixture should be an object update");
-    };
-    let mut region_data = template_update.region_data;
-    region_data.region_handle = REGION_HANDLE;
-    let template = template_update.objects.first().expect("full update fixture has an object").clone();
-    let mut messages = Vec::with_capacity(20);
-    let mut references = Vec::with_capacity(5_000);
-    let mut objects = Vec::with_capacity(255);
-    for local_id in 1..=5_000_u32 {
-        let mut object = template.clone();
-        object.local_id = local_id;
-        object.id = Uuid::from_u128(u128::from(local_id));
-        object.crc = local_id.wrapping_mul(31);
-        references.push(CachedObjectReference { local_id, crc: object.crc, update_flags: object.update_flags });
-        objects.push(object);
-        if objects.len() == 255 {
-            messages
-                .push(Message::ObjectUpdate(FullUpdate { region_data, objects: std::mem::replace(&mut objects, Vec::with_capacity(255)) }));
-        }
-    }
-    if !objects.is_empty() {
-        messages.push(Message::ObjectUpdate(FullUpdate { region_data, objects }));
-    }
-    (region_data, messages, references)
-}
-
 pub(super) fn region_world() -> SessionWorld {
     let mut world = SessionWorld::new(viewer_world_limits());
     world.register_simulator(SIMULATOR, Some(RegionHandle::new(REGION_HANDLE))).expect("register synthetic region");
     world
-}
-
-pub(super) async fn measure_full_update_intake(cache: &mut ObjectCacheSession, messages: Vec<Message>) -> (std::time::Duration, usize) {
-    let mut world = region_world();
-    let region = world.region_for(SIMULATOR).expect("synthetic simulator has a registered region");
-    let started = Instant::now();
-    for (index, message) in messages.into_iter().enumerate() {
-        let sequence = u32::try_from(index + 1).expect("synthetic packet sequence fits u32");
-        let order = OrderEvidence::Ordered(u64::from(sequence));
-        let batch = decode_object_message(region, sequence, order, &message).expect("full update decodes into World operations");
-        let summary = world.apply_object_batch_cooperatively(SIMULATOR, batch, |_, _| {}).await;
-        assert!(summary.is_some(), "synthetic update applies to the registered region");
-        cache.record_update(SIMULATOR, message);
-    }
-    let elapsed = started.elapsed();
-    assert_eq!(world.world().object_count(), 5_000);
-    (elapsed, world.world().object_count())
 }

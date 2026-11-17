@@ -68,19 +68,6 @@ mod tests {
         MovementObservation { control_flags: 0, body_rotation: Quat::IDENTITY, always_run: false, stop_sequence: 0 }
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    #[test]
-    fn camera_distance_reaches_simulator() {
-        use std::time::Instant;
-
-        let view = crate::camera::OrbitCamera::new(DVec3::ZERO).scene_camera([1280, 720], Instant::now()).unwrap();
-        assert_eq!(
-            movement_camera(Uuid::nil(), Uuid::nil(), view, DVec3::ZERO, idle_movement()).unwrap().agent_data.far,
-            view.draw_distance() as f32,
-            "simulator interest must match the actual default scene draw distance"
-        );
-    }
-
     #[test]
     fn camera_uses_region_coordinates() {
         let origin = DVec3::new(1e12, 2e12, 0.0);

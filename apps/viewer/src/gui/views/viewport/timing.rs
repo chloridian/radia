@@ -63,30 +63,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_before_first_frame() {
-        assert!(FrameTimes::default().summary().is_none());
-    }
-
-    #[test]
     fn percentiles_use_nearest_rank() {
-        let mut times = FrameTimes::default();
-        for millis in 1..=20 {
-            times.record(Duration::from_millis(millis));
+        for (frames, expected) in [(0, None), (20, Some((10, 19))), (121, Some((61, 115)))] {
+            let mut times = FrameTimes::default();
+            for millis in 1..=frames {
+                times.record(Duration::from_millis(millis));
+            }
+            let summary = times.summary().map(|summary| (summary.p50, summary.p95));
+            let expected = expected.map(|(p50, p95)| (Duration::from_millis(p50), Duration::from_millis(p95)));
+            assert_eq!(summary, expected, "{frames} frames");
         }
-        let summary = times.summary().expect("recorded frame work has a summary");
-        assert_eq!(summary.p50, Duration::from_millis(10));
-        assert_eq!(summary.p95, Duration::from_millis(19));
-    }
-
-    #[test]
-    fn ring_keeps_latest_120_frames() {
-        let mut times = FrameTimes::default();
-        for millis in 1..=121 {
-            times.record(Duration::from_millis(millis));
-        }
-        let summary = times.summary().expect("recorded frame work has a summary");
-        assert_eq!(summary.p50, Duration::from_millis(61));
-        assert_eq!(summary.p95, Duration::from_millis(115));
     }
 
     #[test]
