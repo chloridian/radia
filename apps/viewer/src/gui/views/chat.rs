@@ -261,7 +261,7 @@ mod tests {
     use network::Error as NetworkError;
 
     #[test]
-    fn chat_history_keeps_recent_messages() {
+    fn history_keeps_recent_messages() {
         let mut messages = VecDeque::new();
         let mut bytes = 0;
         for index in 0..MAX_CHAT_HISTORY_MESSAGES + 5 {
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_history_bounds_bytes() {
+    fn history_bounds_bytes() {
         let mut messages = VecDeque::new();
         let mut bytes = 0;
         for index in 0..2 {

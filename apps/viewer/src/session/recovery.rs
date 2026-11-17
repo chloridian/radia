@@ -656,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn batches_are_bounded_and_local() {
+    fn batches_are_bounded_per_simulator() {
         let simulators = [simulator_id(), simulator_id()];
         let (_region_world, regions) = registered_regions(simulators.len());
         let now = Instant::now();
@@ -853,7 +853,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn idle_rechecks_after_idle_interval() {
+    async fn idle_rechecks_on_interval() {
         let mut intake = RecoveryIntake::new();
         let next = intake.next_completion();
         tokio::pin!(next);
