@@ -12,12 +12,12 @@ use std::{
 };
 
 use tokio::sync::watch;
-use utils::AssetId;
+use utils::{AssetId, Summary};
 
 use crate::{
     Blob, Budget, Content, TextureEvents, TextureHandle, TextureSize, WeakTexture,
     budget::{Reservation, TEXTURE_WORK_BYTES, WORK_BYTES},
-    cache::{AssetCache, AssetLookup, CacheWrite, read_work_bytes_for_request},
+    cache::{AssetCache, AssetCacheError, AssetLookup, CacheWrite, read_work_bytes_for_request},
     content::{Finished, Prepared, StoredContent},
     mesh::{MeshLod, MeshLodRequest},
 };
@@ -31,6 +31,7 @@ const MAX_LEGACY_MATERIAL_FETCHES: usize = 50;
 const FETCH_LIMITS: [usize; 3] = [MAX_MESH_FETCHES, MAX_LEGACY_MATERIAL_FETCHES, MAX_NON_MESH_FETCHES];
 const DEMAND_DEADLINE: Duration = Duration::from_secs(60);
 const NEGATIVE_TTL: Duration = Duration::from_secs(30);
+const DISCARD_FAILURE_INTERVAL: Duration = Duration::from_secs(60);
 pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
 const CACHE_PRESSURE_RETRY: Duration = Duration::from_secs(1);
 const MAX_ATTEMPTS: u8 = 3;
@@ -916,6 +917,20 @@ pub struct Store {
     running_other_decodes: usize,
     textures: TextureEvents,
     cache: Option<Arc<AssetCache>>,
+    discard_failures: Summary<DiscardFailures>,
+}
+
+#[derive(Default)]
+struct DiscardFailures {
+    failed: u64,
+    last_error: Option<AssetCacheError>,
+}
+
+impl DiscardFailures {
+    fn report(self) {
+        let Some(last_error) = self.last_error else { return };
+        tracing::warn!(failed = self.failed, %last_error, "corrupt asset cache entries could not be discarded");
+    }
 }
 
 impl Drop for Store {
@@ -968,6 +983,7 @@ impl Store {
             running_other_decodes: 0,
             textures: TextureEvents::default(),
             cache: None,
+            discard_failures: Summary::new(DISCARD_FAILURE_INTERVAL),
         }
     }
 
@@ -1713,8 +1729,12 @@ impl Store {
         if origin == DecodeOrigin::Disk && result.as_ref().is_err_and(|failure| *failure != Failure::Cancelled) && !job.is_cancelled() {
             if let Some(cache) = &self.cache
                 && let Err(error) = cache.discard_corrupt(job.request)
+                && let Some(due) = self.discard_failures.record(now, |failures| {
+                    failures.failed = failures.failed.saturating_add(1);
+                    failures.last_error = Some(error);
+                })
             {
-                tracing::warn!(error = %error, "failed to discard corrupt asset cache entry");
+                due.report();
             }
             return writes;
         }
@@ -1787,6 +1807,9 @@ impl Store {
             return;
         }
         self.closed = true;
+        if let Some(due) = self.discard_failures.flush() {
+            due.report();
+        }
         self.running_fetches = [0; 3];
         self.running_cache_reads = 0;
         self.running_non_mesh_cache_reads = 0;
