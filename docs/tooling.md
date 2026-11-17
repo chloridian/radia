@@ -164,6 +164,7 @@ cargo mutants -f <file-path>
 - `cargo bloat` measures linked code size, not memory usage.
 - Miri may fail on unsupported OS operations; prefer focused tests.
 - Mutation testing is expensive; start with individual files.
+- `rust-analyzer-mcp` is available on Windows for editor and agent integration.
 
 ## Platforms
 
