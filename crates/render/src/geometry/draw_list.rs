@@ -643,11 +643,6 @@ impl DrawList {
         self.last_layout
     }
 
-    #[cfg(test)]
-    pub(super) fn committed_slot(&self, face: &CachedFace) -> Option<u32> {
-        self.committed_address(face).map(|address| address.slot)
-    }
-
     fn committed_address(&self, face: &CachedFace) -> Option<FaceSlot> {
         if face.layout == self.layout {
             return face.slot.map(|slot| FaceSlot { layout: face.layout, slot, blended_index: face.blended_index });
@@ -663,11 +658,6 @@ impl DrawList {
     #[cfg(test)]
     pub(super) fn committed_pins_mesh(&self, mesh: MeshId) -> bool {
         self.committed.mesh_references.contains(&mesh)
-    }
-
-    #[cfg(test)]
-    pub(super) fn committed_items(&self) -> &[ItemIndex] {
-        &self.committed.layout_items
     }
 
     #[cfg(test)]
