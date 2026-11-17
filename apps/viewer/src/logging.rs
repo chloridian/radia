@@ -25,7 +25,7 @@ pub(crate) fn init() -> Option<WorkerGuard> {
             let file_filter = EnvFilter::try_from_env("FILE_LOG")
                 .unwrap_or_else(|_| {
                     EnvFilter::new(
-                        "info,viewer=debug,network=debug,assets=debug,storage=debug,inventory=debug,render=info,world=info,protocol=info,llsd=info",
+                        "info,viewer=debug,network=debug,assets=debug,storage=debug,inventory=debug,render=debug,world=info,protocol=info,llsd=info",
                     )
                 })
                 .add_directive("jpeg2k=warn".parse().expect("valid jpeg2k tracing directive"));
