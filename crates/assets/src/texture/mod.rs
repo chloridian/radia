@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_handles_thin_and_odd() {
+    fn downsample_averages_odd_sizes() {
         let pixels = [0, 10, 20, 30, 40, 50, 60];
         assert_eq!(downsample(&pixels, [7, 1], [3, 1], PixelFormat::Gray8, || false).unwrap(), [5, 25, 50]);
         assert_eq!(downsample(&pixels, [1, 7], [1, 3], PixelFormat::Gray8, || false).unwrap(), [5, 25, 50]);

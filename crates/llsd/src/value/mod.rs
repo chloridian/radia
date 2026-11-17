@@ -184,30 +184,22 @@ mod tests {
     #[test]
     fn finite_numeric_conversion() {
         for (value, expected) in [
-            (Value::Integer(i32::MIN), -2_147_483_648.0),
-            (Value::Integer(i32::MAX), 2_147_483_648.0),
-            (Value::Real(0.25), 0.25),
-            (Value::Real(f64::from(f32::MAX)), f32::MAX),
-            (Value::Real(-f64::from(f32::MAX)), -f32::MAX),
-            (Value::Real(-0.0), -0.0),
+            (Value::Integer(i32::MIN), Some(-2_147_483_648.0)),
+            (Value::Integer(i32::MAX), Some(2_147_483_648.0)),
+            (Value::Real(0.25), Some(0.25)),
+            (Value::Real(f64::from(f32::MAX)), Some(f32::MAX)),
+            (Value::Real(-f64::from(f32::MAX)), Some(-f32::MAX)),
+            (Value::Real(-0.0), Some(-0.0)),
+            (Value::Undefined, None),
+            (Value::Boolean(true), None),
+            (Value::String("1".into()), None),
+            (Value::Real(f64::NAN), None),
+            (Value::Real(f64::INFINITY), None),
+            (Value::Real(f64::NEG_INFINITY), None),
+            (Value::Real(f64::MAX), None),
+            (Value::Real(-f64::MAX), None),
         ] {
-            assert_eq!(value.as_finite_f32().map(f32::to_bits), Some(expected.to_bits()), "{value:?}");
-        }
-    }
-
-    #[test]
-    fn rejects_non_finite_conversion() {
-        for value in [
-            Value::Undefined,
-            Value::Boolean(true),
-            Value::String("1".into()),
-            Value::Real(f64::NAN),
-            Value::Real(f64::INFINITY),
-            Value::Real(f64::NEG_INFINITY),
-            Value::Real(f64::MAX),
-            Value::Real(-f64::MAX),
-        ] {
-            assert_eq!(value.as_finite_f32(), None, "{value:?}");
+            assert_eq!(value.as_finite_f32().map(f32::to_bits), expected.map(f32::to_bits), "{value:?}");
         }
     }
 }

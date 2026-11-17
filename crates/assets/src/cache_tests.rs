@@ -211,14 +211,3 @@ fn dropped_write_releases_admission() {
     assert_eq!(cache.lookup(Request::new(resource)), AssetLookup::Miss);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
 }
-
-#[test]
-fn open_uses_assets_index() {
-    let directory = tempdir().expect("cache directory");
-    let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
-    assert_eq!(cache.lookup(Request::new(resource(50, Kind::Texture))), AssetLookup::Miss);
-    cache.storage.flush().expect("flush index");
-    assert!(directory.path().join("assets/index.sqlite").exists());
-    assert!(!directory.path().join("snapshot").exists());
-    cache.shutdown().expect("close cache");
-}

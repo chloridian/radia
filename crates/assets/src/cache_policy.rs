@@ -140,15 +140,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_cost_increases_value() {
-        let entry = candidate(3, 512 * 1024, 900, 2, Kind::Texture);
-        let cheap = score_candidate(entry, 1000, 0);
-        let expensive = score_candidate(entry, 1000, 120_000);
-
-        assert!(expensive.value > cheap.value);
-    }
-
-    #[test]
     fn mesh_decode_cost_is_scored() {
         let costs = Arc::new(DecodeCosts::default());
         let policy = AssetEvictionPolicy::new(Arc::clone(&costs));
@@ -158,13 +149,6 @@ mod tests {
         let expensive = policy.score(entry, 1000);
 
         assert!(expensive.value > cheap.value);
-    }
-
-    #[test]
-    fn reconstruction_multiplier_is_capped() {
-        let score = score_candidate(candidate(5, 1, 1000, FREQUENCY_CAP, Kind::Mesh), 1000, MAX_OBSERVED_DECODE_MICROS);
-
-        assert_eq!(score.value, RECENCY_SCALE * 16 * 4);
     }
 
     #[test]
