@@ -1,7 +1,11 @@
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::{
+    assert_matches,
     collections::HashMap,
-    fs,
+    env, fs, mem,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc, Barrier,
         mpsc::{self, Receiver, SyncSender},
@@ -10,19 +14,16 @@ use std::{
     time::Duration,
 };
 
-#[cfg(windows)]
-use std::os::windows::fs::OpenOptionsExt;
-
-use crate::sqlite::MAX_BATCH_ROWS;
-use proptest::{prelude::*, test_runner::RngSeed};
+use proptest::{collection, prelude::*, test_runner::RngSeed};
 use rusqlite::Connection;
 use tempfile::tempdir;
 
 use super::*;
+use crate::sqlite::MAX_BATCH_ROWS;
 
 const TEST_NAMESPACES: [Namespace; 2] = [Namespace::new("tests/storage", "bin"), Namespace::new("assets/textures", "j2c")];
 const TEST_NAMESPACE: NamespaceId = NamespaceId::new(0);
-type QueuedPuts = (Receiver<()>, Vec<SyncSender<()>>, Vec<thread::JoinHandle<Result<(), StorageError>>>);
+type QueuedPuts = (Receiver<()>, Vec<SyncSender<()>>, Vec<JoinHandle<Result<(), StorageError>>>);
 
 struct PanickingPolicy;
 
@@ -95,7 +96,7 @@ fn lock_is_exclusive_across_processes() {
     let directory = tempdir().expect("cache directory");
     let first = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open first cache");
 
-    let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+    let status = Command::new(env::current_exe().expect("test executable"))
         .arg("--exact")
         .arg("cache::tests::lock_helper")
         .arg("--nocapture")
@@ -114,11 +115,11 @@ fn lock_is_exclusive_across_processes() {
 
 #[test]
 fn lock_helper() {
-    let Some(directory) = std::env::var_os("RADIA_STORAGE_LOCK_TEST_DIR") else {
+    let Some(directory) = env::var_os("RADIA_STORAGE_LOCK_TEST_DIR") else {
         return;
     };
     let directory = PathBuf::from(directory);
-    std::assert_matches!(Cache::open(&directory, DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES), Err(StorageError::InUse));
+    assert_matches!(Cache::open(&directory, DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES), Err(StorageError::InUse));
     fs::write(directory.with_extension("lock-checked"), []).expect("record child lock check");
 }
 
@@ -132,12 +133,12 @@ fn key_paths_shard_safely() {
     );
     let directory = tempdir().expect("invalid namespace cache root");
     for namespace in ["assets/../outside", "assets\\textures"] {
-        std::assert_matches!(
+        assert_matches!(
             Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &[Namespace::new(namespace, "bin")]),
             Err(StorageError::InvalidNamespaces)
         );
     }
-    std::assert_matches!(
+    assert_matches!(
         Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &[Namespace::new("assets/textures", "LLSD")]),
         Err(StorageError::InvalidNamespaces)
     );
@@ -152,7 +153,7 @@ fn small_namespace_accepts_lower_limit() {
 }
 
 #[test]
-fn limit_counts_wal_and_shm() -> Result<(), Box<dyn std::error::Error>> {
+fn limit_counts_wal_and_shm() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let size_limit = MIN_SIZE_LIMIT + 8192;
     let cache = Cache::open(directory.path(), size_limit, &TEST_NAMESPACES)?;
@@ -165,12 +166,12 @@ fn limit_counts_wal_and_shm() -> Result<(), Box<dyn std::error::Error>> {
 
     let wal_bytes = match fs::metadata(directory.path().join("index.sqlite-wal")) {
         Ok(metadata) => metadata.len(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
         Err(error) => return Err(error.into()),
     };
     let shm_bytes = match fs::metadata(directory.path().join("index.sqlite-shm")) {
         Ok(metadata) => metadata.len(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
         Err(error) => return Err(error.into()),
     };
     assert!(wal_bytes <= index::INDEX_WAL_LIMIT_BYTES);
@@ -199,11 +200,11 @@ fn namespace_change_remaps_entries() {
 
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &NEW).expect("open new namespace table");
     let remapped = Key::new(NamespaceId::new(0), retained_key.name());
-    std::assert_matches!(cache.lookup(remapped), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"retained");
+    assert_matches!(cache.lookup(remapped), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"retained");
     cache.flush().expect("sweep removed namespace payload");
     assert!(!removed_path.exists());
     assert!(retained_path.exists());
-    std::assert_matches!(cache.put(Key::new(NamespaceId::new(1), [3; 16]), vec![0]), Err(StorageError::UnknownNamespace));
+    assert_matches!(cache.put(Key::new(NamespaceId::new(1), [3; 16]), vec![0]), Err(StorageError::UnknownNamespace));
     cache.shutdown().expect("close remapped cache");
 }
 
@@ -212,7 +213,7 @@ fn discard_rejects_only_unknown_namespace() {
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     cache.discard(key(24)).expect("discard absent key");
-    std::assert_matches!(cache.discard(Key::new(NamespaceId::new(2), [0; 16])), Err(StorageError::UnknownNamespace));
+    assert_matches!(cache.discard(Key::new(NamespaceId::new(2), [0; 16])), Err(StorageError::UnknownNamespace));
     cache.shutdown().expect("close cache");
 }
 
@@ -241,7 +242,7 @@ fn locked_old_temp_allows_open() {
     let directory = tempdir().expect("cache directory");
     let path = directory.path().join(".snapshot-tmp-locked");
     fs::write(&path, b"obsolete").expect("write obsolete index temp file");
-    let locked_file = fs::OpenOptions::new().read(true).share_mode(0).open(path).expect("lock obsolete index temp file");
+    let locked_file = OpenOptions::new().read(true).share_mode(0).open(path).expect("lock obsolete index temp file");
 
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache despite locked temp file");
     drop(locked_file);
@@ -255,7 +256,7 @@ fn locked_old_files_retry_removal() {
         let directory = tempdir().expect("cache directory");
         let path = directory.path().join(name);
         fs::write(&path, b"obsolete").expect("write obsolete index file");
-        let locked_file = fs::OpenOptions::new().read(true).share_mode(0).open(&path).expect("lock obsolete index file");
+        let locked_file = OpenOptions::new().read(true).share_mode(0).open(&path).expect("lock obsolete index file");
 
         let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open despite locked legacy index file");
         cache.shutdown().expect("close cache");
@@ -290,7 +291,7 @@ fn corrupt_index_sweeps_payloads() {
     cache.flush().expect("sweep payloads from the recreated index");
     assert!(!payload.exists());
     cache.put(key(2), b"new payload".to_vec()).expect("write to recreated index");
-    std::assert_matches!(cache.lookup(key(2)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"new payload");
+    assert_matches!(cache.lookup(key(2)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"new payload");
     cache.shutdown().expect("close recreated cache");
 }
 
@@ -360,7 +361,7 @@ fn damaged_payloads_are_corrupt() {
 }
 
 #[test]
-fn busy_usage_retry_keeps_newest() -> Result<(), Box<dyn std::error::Error>> {
+fn busy_usage_retry_keeps_newest() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let hooks = Arc::new(writer::FaultHooks::default());
     let cache = Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::new(LruPolicy), hooks)?;
@@ -372,7 +373,7 @@ fn busy_usage_retry_keeps_newest() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     cache.arm_fault(WritePoint::IndexTouchBusy);
-    std::assert_matches!(cache.flush(), Err(StorageError::Unavailable(UnavailableReason::Busy)));
+    assert_matches!(cache.flush(), Err(StorageError::Unavailable(UnavailableReason::Busy)));
     let newest = match cache.lookup(cache_key) {
         Lookup::Hit(value) => value,
         lookup => return Err(format!("expected second cache hit, got {lookup:?}").into()),
@@ -412,11 +413,11 @@ fn write_failure_keeps_existing_entries() {
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     cache.put(key(40), b"existing payload".to_vec()).expect("store existing payload");
     cache.arm_fault(WritePoint::DataWriteFailure);
-    std::assert_matches!(
+    assert_matches!(
         cache.put(key(41), b"disk full payload".to_vec()),
-        Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull
+        Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::StorageFull
     );
-    std::assert_matches!(cache.lookup(key(40)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"existing payload");
+    assert_matches!(cache.lookup(key(40)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"existing payload");
     assert_eq!(cache.lookup(key(41)), Lookup::Miss);
     cache.shutdown().expect("close cache after failed write");
 }
@@ -431,13 +432,13 @@ fn writer_panic_unblocks_shutdown() {
     let limit = empty_size + 40 * 1024;
     let cache = Cache::open_with_policy(directory.path(), limit, &TEST_NAMESPACES, PanickingPolicy).expect("open cache");
     cache.put(key(1), vec![1; 16 * 1024]).expect("store first payload");
-    std::assert_matches!(cache.put(key(2), vec![2; 16 * 1024]), Err(StorageError::Unavailable(UnavailableReason::WriterStopped)));
+    assert_matches!(cache.put(key(2), vec![2; 16 * 1024]), Err(StorageError::Unavailable(UnavailableReason::WriterStopped)));
 
     let (finished, completion) = mpsc::channel();
     let shutdown = thread::spawn(move || finished.send(cache.shutdown()).expect("send shutdown result"));
     let result = completion.recv_timeout(Duration::from_secs(3)).expect("shutdown returns after writer panic");
     shutdown.join().expect("shutdown thread completes");
-    std::assert_matches!(result, Err(StorageError::WorkerPanicked));
+    assert_matches!(result, Err(StorageError::WorkerPanicked));
 }
 
 #[test]
@@ -473,7 +474,7 @@ fn lookup_retries_after_replacement() {
         selected.recv_timeout(Duration::from_secs(3)).expect("reader selected old entry");
         cache.put(key(21), b"replacement payload".to_vec()).expect("replace entry");
         resume_reader.send(()).expect("resume reader");
-        std::assert_matches!(
+        assert_matches!(
             reader.join().expect("reader completes"),
             Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"replacement payload"
         );
@@ -490,9 +491,9 @@ fn discard_reservation_failure_retries() {
     cache.put(key(22), payload.to_vec()).expect("store payload");
 
     cache.arm_fault(WritePoint::InvalidReserve);
-    std::assert_matches!(cache.discard(key(22)), Err(StorageError::Unavailable(UnavailableReason::Allocation)));
+    assert_matches!(cache.discard(key(22)), Err(StorageError::Unavailable(UnavailableReason::Allocation)));
     assert_eq!(cache.entry_count(), 1, "failed reservation must leave the entry valid");
-    std::assert_matches!(cache.lookup(key(22)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == payload);
+    assert_matches!(cache.lookup(key(22)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == payload);
     cache.arm_fault(WritePoint::InvalidReserve);
     assert_eq!(cache.lookup_bounded(key(22), 1), Lookup::Unavailable(UnavailableReason::Allocation));
     assert_eq!(cache.entry_count(), 1, "failed reservation must leave the entry valid");
@@ -515,16 +516,16 @@ fn replacement_crash_never_trusts_bytes() {
         cache.arm_fault(point);
         let result = cache.put(key(23), b"replacement payload".to_vec());
         if point == WritePoint::IndexBatchCommitted {
-            std::assert_matches!(result, Ok(()), "the replacement row committed before the crash hook");
+            assert_matches!(result, Ok(()), "the replacement row committed before the crash hook");
         } else {
-            std::assert_matches!(result, Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted, "{point:?}");
+            assert_matches!(result, Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::Interrupted, "{point:?}");
         }
         cache.simulate_crash().expect("simulate replacement crash");
 
         let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("recover fixed path");
         match point {
             WritePoint::DataTempCreated | WritePoint::DataWritePartial | WritePoint::DataWritten => {
-                std::assert_matches!(cache.lookup(key(23)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"old payload", "{point:?}");
+                assert_matches!(cache.lookup(key(23)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"old payload", "{point:?}");
             }
             WritePoint::DataRenamed | WritePoint::IndexBatchStarted => {
                 assert_eq!(cache.lookup(key(23)), Lookup::Corrupt, "{point:?}");
@@ -532,7 +533,7 @@ fn replacement_crash_never_trusts_bytes() {
                 assert_eq!(cache.lookup(key(23)), Lookup::Miss, "{point:?}");
             }
             WritePoint::IndexBatchCommitted => {
-                std::assert_matches!(cache.lookup(key(23)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"replacement payload", "{point:?}");
+                assert_matches!(cache.lookup(key(23)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"replacement payload", "{point:?}");
             }
             WritePoint::DataWriteFailure
             | WritePoint::IndexBatchFailure
@@ -597,9 +598,9 @@ fn interrupted_batch_keeps_committed() {
     assert!(committed < results.len());
     for (key, result) in keys.into_iter().zip(results) {
         if result.is_ok() {
-            std::assert_matches!(cache.lookup(key), Lookup::Hit(CacheValue { bytes, .. }) if bytes == [1]);
+            assert_matches!(cache.lookup(key), Lookup::Hit(CacheValue { bytes, .. }) if bytes == [1]);
         } else {
-            std::assert_matches!(cache.lookup(key), Lookup::Miss);
+            assert_matches!(cache.lookup(key), Lookup::Miss);
         }
     }
     assert_eq!(cache.entry_count(), committed);
@@ -651,7 +652,7 @@ fn schema_recovery_reports_no_writes() {
     assert!(results.iter().all(Result::is_err));
     assert_eq!(cache.entry_count(), 0);
     for key in keys {
-        std::assert_matches!(cache.lookup(key), Lookup::Miss);
+        assert_matches!(cache.lookup(key), Lookup::Miss);
     }
     Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().expect("close recovered cache");
 }
@@ -664,9 +665,9 @@ fn failed_replacement_removes_uncommitted_bytes() {
     cache.put(key(23), b"old payload".to_vec()).expect("store old payload");
     cache.arm_fault(WritePoint::IndexBatchFailure);
 
-    std::assert_matches!(
+    assert_matches!(
         cache.put(key(23), b"replacement payload".to_vec()),
-        Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull
+        Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::StorageFull
     );
     cache.flush().expect("drain invalid replacement");
 
@@ -710,7 +711,7 @@ fn full_queue_rejects_writes() {
             }
             admitted += 1;
         }
-        std::assert_matches!(cache.put(key(1024), Vec::new()), Err(StorageError::Unavailable(UnavailableReason::WriteQueueFull)));
+        assert_matches!(cache.put(key(1024), Vec::new()), Err(StorageError::Unavailable(UnavailableReason::WriteQueueFull)));
         for resume in resumes {
             resume.send(()).expect("release queued write");
         }
@@ -728,7 +729,7 @@ proptest! {
 
     #[test]
     fn stateful_operations_preserve_index(
-        operations in proptest::collection::vec((0u8..8, 0u16..12, proptest::collection::vec(any::<u8>(), 0..33), 0u8..6), 1..24)
+        operations in collection::vec((0u8..8, 0u16..12, collection::vec(any::<u8>(), 0..33), 0u8..6), 1..24)
     ) {
         let directory = tempdir().expect("cache directory");
         let mut cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
@@ -761,7 +762,7 @@ proptest! {
                     match result {
                         Ok(()) if selected == WritePoint::IndexBatchCommitted => {}
                         Err(StorageError::Io(error))
-                            if selected != WritePoint::IndexBatchCommitted && error.kind() == std::io::ErrorKind::Interrupted => {}
+                            if selected != WritePoint::IndexBatchCommitted && error.kind() == io::ErrorKind::Interrupted => {}
                         other => prop_assert!(false, "unexpected write result: {other:?}"),
                     }
                     cache.simulate_crash().expect("simulate process crash");
@@ -812,7 +813,7 @@ fn small_limit_survives_repeated_recovery() {
         cache.clear().expect("clear small cache");
         assert!(cache.accounted_size() <= small_limit);
         assert_eq!(cache.entry_count(), 0);
-        std::assert_matches!(cache.lookup(key(0)), Lookup::Miss);
+        assert_matches!(cache.lookup(key(0)), Lookup::Miss);
     }
     for revision in 0..20u8 {
         let bytes = vec![revision; 32];
@@ -822,7 +823,7 @@ fn small_limit_survives_repeated_recovery() {
         cache = Cache::open(directory.path(), small_limit, &TEST_NAMESPACES).expect("reopen after committed replacement");
         assert!(cache.accounted_size() <= small_limit);
         assert_eq!(cache.entry_count(), 1);
-        std::assert_matches!(cache.lookup(key(0)), Lookup::Hit(value) if value.bytes.as_slice() == bytes);
+        assert_matches!(cache.lookup(key(0)), Lookup::Hit(value) if value.bytes.as_slice() == bytes);
     }
     cache.shutdown().expect("close recovered cache");
 }
@@ -840,7 +841,7 @@ fn check_model(cache: &Cache, model: &HashMap<u16, Vec<u8>>) -> Result<(), TestC
 }
 
 fn reconcile_after_eviction(cache: &Cache, model: &mut HashMap<u16, Vec<u8>>) -> Result<(), TestCaseError> {
-    let previous = std::mem::take(model);
+    let previous = mem::take(model);
     for (id, bytes) in previous {
         match cache.lookup(key(id)) {
             Lookup::Hit(value) => {

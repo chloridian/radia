@@ -2,12 +2,12 @@ use std::{
     collections::{BTreeSet, HashMap},
     io,
     path::Path,
-    sync::{Arc, Mutex, RwLock, mpsc::SyncSender},
+    sync,
+    sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, mpsc::SyncSender},
 };
 
 use super::{Entry, Key, PlannedChange, StorageError, UnavailableReason};
-use crate::cache::index::Mutation;
-use crate::cache::{DIRECTORY_OVERHEAD, FILE_OVERHEAD, INDEX_FILE, INDEX_FILE_OVERHEAD, JOURNAL_FILE, SNAPSHOT_FILE};
+use crate::cache::{DIRECTORY_OVERHEAD, FILE_OVERHEAD, INDEX_FILE, INDEX_FILE_OVERHEAD, JOURNAL_FILE, SNAPSHOT_FILE, index::Mutation};
 
 pub(super) fn mutations(changes: &[PlannedChange]) -> Result<Vec<Mutation>, StorageError> {
     let mut mutations = Vec::new();
@@ -64,21 +64,21 @@ pub(super) fn account_size(index_bytes: u64, data_bytes: u64, entry_count: usize
         .checked_add(FILE_OVERHEAD.checked_mul(files)?)
 }
 
-pub(super) fn read_map(entries: &RwLock<HashMap<Key, Arc<Entry>>>) -> std::sync::RwLockReadGuard<'_, HashMap<Key, Arc<Entry>>> {
+pub(super) fn read_map(entries: &RwLock<HashMap<Key, Arc<Entry>>>) -> RwLockReadGuard<'_, HashMap<Key, Arc<Entry>>> {
     match entries.read() {
         Ok(entries) => entries,
         Err(poisoned) => poisoned.into_inner(),
     }
 }
 
-pub(super) fn write_map(entries: &RwLock<HashMap<Key, Arc<Entry>>>) -> std::sync::RwLockWriteGuard<'_, HashMap<Key, Arc<Entry>>> {
+pub(super) fn write_map(entries: &RwLock<HashMap<Key, Arc<Entry>>>) -> RwLockWriteGuard<'_, HashMap<Key, Arc<Entry>>> {
     match entries.write() {
         Ok(entries) => entries,
         Err(poisoned) => poisoned.into_inner(),
     }
 }
 
-pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(super) fn lock<T>(mutex: &Mutex<T>) -> sync::MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(value) => value,
         Err(poisoned) => poisoned.into_inner(),
