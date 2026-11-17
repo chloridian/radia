@@ -201,7 +201,7 @@ impl Camera {
             return None;
         }
         let distance = (center - self.position).length() as f32;
-        if !distance.is_finite() || f64::from(distance) - f64::from(radius) > self.draw_distance {
+        if !distance.is_finite() || f64::from(distance) - f64::from(radius) > self.range() {
             return None;
         }
         let mut distance = distance;
@@ -306,6 +306,10 @@ mod tests {
         assert_eq!(camera.mesh_lod(DVec3::X * 2.0, scale, None), Some(MeshLod::High));
         assert_eq!(camera.mesh_lod(DVec3::X * 900.0, scale, None), None);
         assert_eq!(camera.mesh_lod(DVec3::X * 900.0, scale, Some(MeshLod::Medium)), None);
+        let edge = Vec3::X * 2.0;
+        assert_eq!(camera.mesh_lod(DVec3::X * (513.0 + RANGE_MARGIN), edge, None), Some(MeshLod::Lowest));
+        assert_eq!(camera.mesh_importance(DVec3::X * (513.0 + RANGE_MARGIN), edge), None, "margin meshes load in the background");
+        assert_eq!(camera.mesh_lod(DVec3::X * (513.1 + RANGE_MARGIN), edge, None), None);
         let zoomed = Camera::new(DVec3::ZERO, Vec3::X, PI / 2.0, [1000, 1000]).unwrap();
         assert_eq!(zoomed.mesh_lod(DVec3::X * 20.0, scale, None), Some(MeshLod::Lowest));
         assert_eq!(camera.mesh_lod(DVec3::X * 20.0, Vec3::new(-1.0, 1.0, 1.0), None), Some(MeshLod::Low));
