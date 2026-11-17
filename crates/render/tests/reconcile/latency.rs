@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use assets::mesh::MeshLod;
-use render::scene::{Batch, DrawnMeshKey, Geometry, PreparedMesh};
+use render::scene::{Batch, DrawnMeshKey, Geometry, PreparedMesh, SceneView};
+use test_support::mesh;
 use world::{PrimShape, SculptFlags, Shape};
 
 use super::support::{
@@ -52,14 +53,7 @@ fn fixture(with_prims: bool) -> (World, HashSet<AssetId>) {
     (world, assets)
 }
 
-fn warm(
-    scene: &mut Reconciler,
-    view: &mut render::scene::SceneView,
-    world: &World,
-    now: &mut Instant,
-    mesh_assets: &HashSet<AssetId>,
-    bytes: &[u8],
-) {
+fn warm(scene: &mut Reconciler, view: &mut SceneView, world: &World, now: &mut Instant, mesh_assets: &HashSet<AssetId>, bytes: &[u8]) {
     let mut pending = None;
     let mut wait_until = None;
     let mut headers = HashSet::with_capacity(mesh_assets.len());
@@ -108,7 +102,7 @@ fn warm(
     panic!("warm scene did not settle");
 }
 
-fn prim_high_targets(view: &render::scene::SceneView) -> usize {
+fn prim_high_targets(view: &SceneView) -> usize {
     view.objects()
         .filter(|object| matches!(object.geometry(), Geometry::Prim(_)))
         .filter(|object| {
@@ -119,13 +113,13 @@ fn prim_high_targets(view: &render::scene::SceneView) -> usize {
         .count()
 }
 
-fn prims_are_high(view: &render::scene::SceneView) -> bool {
+fn prims_are_high(view: &SceneView) -> bool {
     view.objects()
         .filter(|object| matches!(object.geometry(), Geometry::Prim(_)))
         .all(|object| object.mesh_state().is_some_and(|(key, state)| key.detail == Detail::High && matches!(state, PreparedMesh::Ready(_))))
 }
 
-fn prim_lowest_ready(view: &render::scene::SceneView) -> usize {
+fn prim_lowest_ready(view: &SceneView) -> usize {
     view.objects()
         .filter(|object| matches!(object.geometry(), Geometry::Prim(_)))
         .filter(|object| {
@@ -134,7 +128,7 @@ fn prim_lowest_ready(view: &render::scene::SceneView) -> usize {
         .count()
 }
 
-fn prim_high_ready(view: &render::scene::SceneView) -> usize {
+fn prim_high_ready(view: &SceneView) -> usize {
     view.objects()
         .filter(|object| matches!(object.geometry(), Geometry::Prim(_)))
         .filter(|object| {
@@ -143,7 +137,7 @@ fn prim_high_ready(view: &render::scene::SceneView) -> usize {
         .count()
 }
 
-fn meshes_at_lod(view: &render::scene::SceneView, lod: MeshLod) -> usize {
+fn meshes_at_lod(view: &SceneView, lod: MeshLod) -> usize {
     view.objects()
         .filter(|object| matches!(object.geometry(), Geometry::Mesh(_)))
         .filter(|object| matches!(object.mesh(), Some((DrawnMeshKey::Asset { lod: published, .. }, _)) if published == lod))
@@ -155,7 +149,7 @@ fn measure(with_prims: bool) -> Latency {
     let budget = Budget::default();
     let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
-    let bytes = test_support::mesh::asset_with_lod_faces(&[(0, 1), (3, 1)]);
+    let bytes = mesh::asset_with_lod_faces(&[(0, 1), (3, 1)]);
     warm(&mut scene, &mut view, &world, &mut now, &mesh_assets, &bytes);
     assert_eq!(
         meshes_at_lod(&view, MeshLod::Lowest),

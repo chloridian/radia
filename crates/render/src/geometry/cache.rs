@@ -1,7 +1,8 @@
 use std::{
+    array,
     cmp::Ordering,
     collections::{BTreeSet, HashMap, HashSet},
-    mem::{self, size_of},
+    mem,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -10,13 +11,15 @@ use math::{Frustum, Quat, Vec3};
 use uuid::Uuid;
 use world::{Entity, Region};
 
-use super::instance::{instance_base, parameter_part};
-use super::items::{
-    CachedFace, CachedFaceContext, CachedItem, CachedReplacement, ItemId, ItemIndex, ItemSlab, MeshInfo, cached_faces, draw_priority,
-    mesh_info, object_draw_scale, same_surface_geometry,
+use super::{
+    GeometryRenderer, MeshState, ShadingMode,
+    instance::{instance_base, parameter_part},
+    items::{
+        CachedFace, CachedFaceContext, CachedItem, CachedReplacement, ItemId, ItemIndex, ItemSlab, MeshInfo, cached_faces, draw_priority,
+        draw_scale, mesh_info, object_draw_scale, same_surface_geometry,
+    },
+    visibility::WorldSphere,
 };
-use super::visibility::WorldSphere;
-use super::{GeometryRenderer, MeshState, ShadingMode};
 use crate::scene::{
     Camera, DrawnMeshKey, MeshId, Object, Placement, PreparedMesh, RANGE_MARGIN, SceneView, SharedMesh, Surface, SurfaceKind, ViewVersion,
     VisibilityVersion, texture_animation,
@@ -332,7 +335,7 @@ pub(super) struct FrameCache {
     pub(super) patch_items: Vec<ItemIndex>,
     pub(super) patch_faces: Vec<(ItemIndex, usize)>,
     pub(super) changed_objects: HashSet<Entity>,
-    pub(super) changed_surfaces: HashSet<(Region, crate::scene::SurfaceKind)>,
+    pub(super) changed_surfaces: HashSet<(Region, SurfaceKind)>,
     pub(super) changed_regions: HashSet<Region>,
     pub(super) rebuild: Option<CacheRebuild>,
     pub(super) version: Option<ViewVersion>,
@@ -420,7 +423,7 @@ impl FrameCache {
     pub(super) fn promote_replacement(&mut self, index: ItemIndex) -> Option<CachedItem> {
         let item = self.items.get_mut(index)?;
         let replacement = item.replacement.take()?;
-        let previous = std::mem::replace(item, replacement.item);
+        let previous = mem::replace(item, replacement.item);
         self.replacements.remove(&index);
         Some(previous)
     }
@@ -648,8 +651,7 @@ impl GeometryRenderer {
         regions.sort_unstable();
         regions.dedup();
         for region in regions {
-            let textures =
-                view.region(region).map(|region| region.terrain_textures().clone()).unwrap_or_else(|| std::array::from_fn(|_| None));
+            let textures = view.region(region).map(|region| region.terrain_textures().clone()).unwrap_or_else(|| array::from_fn(|_| None));
             for surface in view.surfaces().filter(|surface| surface.region == region && matches!(surface.kind, SurfaceKind::Terrain(_))) {
                 let id = surface_item_id(region, surface.kind);
                 if let Some(item) = self.cache.get_by_id_mut(id)
@@ -893,7 +895,7 @@ impl GeometryRenderer {
             if let Some(region) = self.cache.changed_regions.iter().next().copied() {
                 self.cache.changed_regions.remove(&region);
                 let textures =
-                    view.region(region).map(|region| region.terrain_textures().clone()).unwrap_or_else(|| std::array::from_fn(|_| None));
+                    view.region(region).map(|region| region.terrain_textures().clone()).unwrap_or_else(|| array::from_fn(|_| None));
                 for surface in view.surfaces().filter(|surface| surface.region == region && matches!(surface.kind, SurfaceKind::Terrain(_)))
                 {
                     let id = surface_item_id(region, surface.kind);
@@ -1486,7 +1488,7 @@ impl GeometryRenderer {
     fn update_held_object_pose(&mut self, index: ItemIndex, transform: world::WorldTransform, update: &mut CacheUpdate) {
         let Some(cached) = self.cache.items.get_mut(index) else { return };
         let mirror = cached.source.as_ref().and_then(Object::mesh_flags).is_some_and(|flags| flags.mirror);
-        let scale = super::items::draw_scale(transform.scale, mirror);
+        let scale = draw_scale(transform.scale, mirror);
         let pose_changed =
             cached.position != transform.pose.position || cached.rotation != transform.pose.rotation || cached.scale != scale;
         let scale_changed = cached.scale != scale;
@@ -1637,7 +1639,7 @@ impl GeometryRenderer {
             SurfaceKind::Terrain(_) => (Vec3::ONE, Quat::IDENTITY, true, ShadingMode::Terrain),
         };
         let terrain_textures = (shading == ShadingMode::Terrain)
-            .then(|| view.region(surface.region).map_or_else(|| std::array::from_fn(|_| None), |region| region.terrain_textures().clone()));
+            .then(|| view.region(surface.region).map_or_else(|| array::from_fn(|_| None), |region| region.terrain_textures().clone()));
         let info = self.cached_mesh_info(mesh);
         let terrain_region = (shading == ShadingMode::Terrain).then_some(surface.region);
         let faces = cached_faces(
@@ -1680,7 +1682,7 @@ impl GeometryRenderer {
         })
     }
 
-    fn cached_mesh_info(&mut self, mesh: &crate::scene::SharedMesh) -> std::sync::Arc<MeshInfo> {
+    fn cached_mesh_info(&mut self, mesh: &SharedMesh) -> Arc<MeshInfo> {
         let id = mesh.id();
         if let Some(info) = self.cache.mesh_info.get(&id) {
             return info.clone();

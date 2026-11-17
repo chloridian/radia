@@ -1,3 +1,5 @@
+use std::{array, sync::mpsc};
+
 use futures::executor::block_on;
 use wgpu::{
     Backends, BufferDescriptor, BufferUsages, DeviceDescriptor, Extent3d, InstanceDescriptor, MapMode, Operations, PollType,
@@ -42,7 +44,7 @@ fn sky_matches_reference_samples() {
     });
     let (fallback_texture, fallback_color, fallback_raw) = test_texture(&device, &queue, [128, 128, 128, 255]);
     let (cloud_texture, cloud_color, cloud_raw) = test_texture(&device, &queue, [192, 0, 0, 255]);
-    let cloud_views = std::array::from_fn(|binding| {
+    let cloud_views = array::from_fn(|binding| {
         if matches!(binding, 4 | 5) {
             sky_texture_view(binding, &cloud_color, &cloud_raw)
         } else {
@@ -58,7 +60,7 @@ fn sky_matches_reference_samples() {
 
     let (moon_texture, moon_color, moon_raw) = test_texture(&device, &queue, [255, 255, 255, 255]);
     let (moon_next_texture, moon_next_color, moon_next_raw) = test_texture(&device, &queue, [0, 0, 0, 0]);
-    let moon_views = std::array::from_fn(|binding| match binding {
+    let moon_views = array::from_fn(|binding| match binding {
         2 => &moon_color,
         3 => &moon_next_color,
         4 | 5 => sky_texture_view(binding, &fallback_color, &fallback_raw),
@@ -251,7 +253,7 @@ fn stars_sample_current_bloom() {
         Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
     );
     queue.submit([encoder.finish()]);
-    let (send, receive) = std::sync::mpsc::channel();
+    let (send, receive) = mpsc::channel();
     readback.slice(..).map_async(MapMode::Read, move |result| {
         send.send(result).expect("readback receiver remains alive until completion");
     });
@@ -281,7 +283,7 @@ fn sky_uniform_values() -> [f32; UNIFORM_FLOATS] {
         0.0,
     );
     let mut values = [0.0; UNIFORM_FLOATS];
-    values[..16].copy_from_slice(&math::Mat4::IDENTITY.to_cols_array());
+    values[..16].copy_from_slice(&Mat4::IDENTITY.to_cols_array());
     let mut atmosphere = atmosphere_values(Some(&environment));
     atmosphere[24 + 3] = 0.25;
     atmosphere[40 + 1] = 0.0;
@@ -401,7 +403,7 @@ fn render_sky_fragment(
         Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
     );
     queue.submit([encoder.finish()]);
-    let (send, receive) = std::sync::mpsc::channel();
+    let (send, receive) = mpsc::channel();
     readback.slice(..).map_async(MapMode::Read, move |result| {
         send.send(result).expect("readback receiver remains alive until completion");
     });

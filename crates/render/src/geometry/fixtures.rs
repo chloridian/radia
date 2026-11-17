@@ -1,5 +1,4 @@
-use std::assert_matches;
-use std::{num::NonZeroU32, sync::mpsc, time::Instant};
+use std::{assert_matches, num::NonZeroU32, sync::mpsc, time::Instant};
 
 use futures::executor::block_on;
 use math::{DVec3, Quat, Vec3};
@@ -19,7 +18,7 @@ use crate::{
     FrameInput,
     environment::Evaluated,
     pipeline::{PostProcess, SCENE_CLEAR, camera_view, projection},
-    scene::{Budget, Camera, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView},
+    scene::{Budget, Camera, ReadFailure, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView},
     texture::CompressionQuality,
 };
 
@@ -232,7 +231,7 @@ pub(super) fn settle(world: &World, scene: &mut Reconciler, view: &mut SceneView
                     ReadQuery::Terrain(region, cursor) => world.terrain_page(*region, *cursor, 8).map(ReadReply::Terrain),
                     ReadQuery::Environment(region) => Ok(ReadReply::Environment(world.environment(*region))),
                 };
-                scene.complete_read(job, result.map_err(crate::scene::ReadFailure::World), now);
+                scene.complete_read(job, result.map_err(ReadFailure::World), now);
             }
             ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
             ReconcileStep::Publish(batch) => {

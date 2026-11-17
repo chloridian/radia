@@ -1,9 +1,14 @@
-use std::assert_matches;
+use std::{array, assert_matches, iter, num::NonZeroU32, time::Instant};
+
+use math::{DVec3, Vec3};
+use test_support::mesh;
+use world::{OrderEvidence, RegionInfo, RegionSummary, TerrainSettings, World, WorldLimits};
 
 use super::*;
-use crate::scene::RegionData;
-use math::{DVec3, Vec3};
-use world::{OrderEvidence, RegionInfo, RegionSummary, TerrainSettings, World, WorldLimits};
+use crate::{
+    scene::{RegionData, model::Change},
+    test_support::{registered_region, registered_regions},
+};
 
 fn settings(textures: [Uuid; 4]) -> TerrainSettings {
     TerrainSettings::new(textures, [0.0; 4], [64.0; 4]).unwrap()
@@ -25,7 +30,7 @@ fn camera() -> Camera {
 }
 
 fn ids(seed: u128) -> [Uuid; 4] {
-    std::array::from_fn(|index| Uuid::from_u128(seed + index as u128))
+    array::from_fn(|index| Uuid::from_u128(seed + index as u128))
 }
 
 fn process(demand: &mut AssetDemand, mirror: &Mirror) {
@@ -33,12 +38,12 @@ fn process(demand: &mut AssetDemand, mirror: &Mirror) {
 }
 
 fn ready_header_status(asset: AssetId) -> Status {
-    let now = std::time::Instant::now();
+    let now = Instant::now();
     let mut store = assets::Store::new(assets::Budget::default());
     let route = store.register_route().expect("fixture route registers");
     let demand = store.request(route, Request::MeshHeader(asset), Priority::Visible, now).expect("fixture header request registers");
     let Some(assets::LoadJob::Fetch(job)) = store.next_job(now) else { panic!("fixture header fetch starts") };
-    let input = job.complete(Ok(test_support::mesh::asset(&[0, 1, 2, 3], 1))).expect("fixture header response fits");
+    let input = job.complete(Ok(mesh::asset(&[0, 1, 2, 3], 1))).expect("fixture header response fits");
     let completion = store.start_decode(input).expect("fixture header decode starts").run();
     assert!(store.complete(completion, now).is_empty());
     demand.status()
@@ -80,7 +85,7 @@ fn mesh_scene(count: u32) -> (Budget, Mirror, BTreeMap<Uuid, Entity>) {
         let mut observation = world::ObjectObservation::new(
             world::UpdateSource::new(region, local_id, OrderEvidence::Ordered(u64::from(local_id)), 0),
             Uuid::from_u128(u128::from(local_id)),
-            std::num::NonZeroU32::new(local_id).expect("fixture local ID is nonzero"),
+            NonZeroU32::new(local_id).expect("fixture local ID is nonzero"),
             world::Kind::Object,
             world::ParentUpdate::Root,
         );
@@ -99,7 +104,7 @@ fn mesh_scene(count: u32) -> (Budget, Mirror, BTreeMap<Uuid, Entity>) {
         for item in page.objects {
             let detail = world.object_detail(item.entity).expect("fixture object detail reads");
             let lease = budget.reserve(detail.owned_bytes() + 32).expect("fixture object fits budget");
-            mirror.apply(crate::scene::model::Change::Object(crate::scene::Object::new(detail, lease)));
+            mirror.apply(Change::Object(Object::new(detail, lease)));
             identities.insert(item.id, item.entity);
         }
         let Some(next) = next else { break };
@@ -141,7 +146,7 @@ fn textured_scene(
         let mut observation = world::ObjectObservation::new(
             world::UpdateSource::new(region, local_id, OrderEvidence::Ordered(u64::from(local_id)), 0),
             Uuid::from_u128(u128::from(local_id)),
-            std::num::NonZeroU32::new(local_id).expect("fixture local ID is nonzero"),
+            NonZeroU32::new(local_id).expect("fixture local ID is nonzero"),
             world::Kind::Object,
             world::ParentUpdate::Root,
         );
@@ -165,7 +170,7 @@ fn textured_scene(
         for item in page.objects {
             let detail = world.object_detail(item.entity).expect("fixture object detail reads");
             let lease = budget.reserve(detail.owned_bytes() + 32).expect("fixture object fits budget");
-            mirror.apply(crate::scene::model::Change::Object(crate::scene::Object::new(detail, lease)));
+            mirror.apply(Change::Object(Object::new(detail, lease)));
             identities.insert(item.id, item.entity);
         }
         let Some(next) = next else { break };
@@ -192,7 +197,7 @@ fn assert_updates(demand: &mut AssetDemand, ticket: AssetTicket, size: TextureSi
 }
 
 fn mesh_requests(demand: &mut AssetDemand) -> Vec<(AssetId, AssetTicket)> {
-    std::iter::from_fn(|| demand.event())
+    iter::from_fn(|| demand.event())
         .filter_map(|change| match change {
             AssetChange::Request(request) => match request.request {
                 Request::MeshHeader(asset) => Some((asset, request.ticket)),
@@ -209,7 +214,7 @@ fn mesh_requests(demand: &mut AssetDemand) -> Vec<(AssetId, AssetTicket)> {
 #[test]
 fn texture_change_replaces_demands() {
     let budget = Budget::default();
-    let (_region_world, region) = crate::test_support::registered_region();
+    let (_region_world, region) = registered_region();
     let original = ids(10);
     let replacement = ids(20);
     let mut mirror = Mirror::default();
@@ -218,7 +223,7 @@ fn texture_change_replaces_demands() {
     demand.set_camera(camera());
     demand.invalidate_region(region);
     process(&mut demand, &mirror);
-    let old_tickets: Vec<_> = std::iter::from_fn(|| demand.event())
+    let old_tickets: Vec<_> = iter::from_fn(|| demand.event())
         .filter_map(|change| match change {
             AssetChange::Request(request) => Some(request.ticket),
             AssetChange::Release(_)
@@ -256,7 +261,7 @@ fn texture_change_replaces_demands() {
 #[test]
 fn failed_details_keep_neutral_fallback() {
     let budget = Budget::default();
-    let (_region_world, region) = crate::test_support::registered_region();
+    let (_region_world, region) = registered_region();
     let textures = ids(30);
     let mut mirror = Mirror::default();
     mirror.regions.insert(region, region_data(&budget, region, DVec3::ZERO, textures));
@@ -265,7 +270,7 @@ fn failed_details_keep_neutral_fallback() {
     demand.invalidate_region(region);
     process(&mut demand, &mirror);
     assert!(demand.terrain_textures(region).iter().all(Option::is_none));
-    let tickets: Vec<_> = std::iter::from_fn(|| demand.event())
+    let tickets: Vec<_> = iter::from_fn(|| demand.event())
         .filter_map(|change| match change {
             AssetChange::Request(request) => Some(request.ticket),
             AssetChange::Release(_)
@@ -286,7 +291,7 @@ fn failed_details_keep_neutral_fallback() {
 #[test]
 fn neighbors_keep_separate_details() {
     let budget = Budget::default();
-    let (_region_world, regions) = crate::test_support::registered_regions(2);
+    let (_region_world, regions) = registered_regions(2);
     let [south, east] = regions.as_slice() else { unreachable!() };
     let (south, east) = (*south, *east);
     let south_textures = ids(40);
@@ -309,7 +314,7 @@ fn neighbors_keep_separate_details() {
 #[test]
 fn nearby_details_refine_size() {
     let budget = Budget::default();
-    let (_region_world, region) = crate::test_support::registered_region();
+    let (_region_world, region) = registered_region();
     let mut mirror = Mirror::default();
     mirror.regions.insert(region, region_data(&budget, region, DVec3::ZERO, ids(60)));
     let close = camera().with_quality(64.0, 1.0).unwrap();
@@ -328,7 +333,7 @@ fn nearby_details_refine_size() {
 #[test]
 fn terrain_background_keeps_resolution() {
     let budget = Budget::default();
-    let (_region_world, region) = crate::test_support::registered_region();
+    let (_region_world, region) = registered_region();
     let textures = ids(70);
     let mut mirror = Mirror::default();
     mirror.regions.insert(region, region_data(&budget, region, DVec3::ZERO, textures));
@@ -341,7 +346,7 @@ fn terrain_background_keeps_resolution() {
     let visible_size = demand.terrain_targets[&region].size;
     assert!(visible_size.edge() > 128, "a nearby region requests more than its baseline detail");
     assert_eq!(demand.terrain_targets[&region].priority, Priority::Visible);
-    let initial_tickets: Vec<_> = std::iter::from_fn(|| demand.event())
+    let initial_tickets: Vec<_> = iter::from_fn(|| demand.event())
         .filter_map(|change| match change {
             AssetChange::Request(request) => {
                 let Request::Texture { id, size } = request.request else { panic!("terrain uses texture requests") };
@@ -367,7 +372,7 @@ fn terrain_background_keeps_resolution() {
     process(&mut demand, &mirror);
     assert_eq!(demand.terrain_targets[&region].size, visible_size, "an unknown origin keeps the last regional texture size");
     assert_eq!(demand.terrain_targets[&region].priority, Priority::Background);
-    let background_updates: Vec<_> = std::iter::from_fn(|| demand.event())
+    let background_updates: Vec<_> = iter::from_fn(|| demand.event())
         .map(|change| match change {
             AssetChange::UpdatePriority { ticket, priority } => (ticket, priority),
             AssetChange::Request(_) | AssetChange::Release(_) | AssetChange::UpdateImportance { .. } | AssetChange::UpdateSize { .. } => {
@@ -384,7 +389,7 @@ fn terrain_background_keeps_resolution() {
     process(&mut demand, &mirror);
     assert_eq!(demand.terrain_targets[&region].size, visible_size);
     assert_eq!(demand.terrain_targets[&region].priority, Priority::Visible);
-    let visible_updates: Vec<_> = std::iter::from_fn(|| demand.event())
+    let visible_updates: Vec<_> = iter::from_fn(|| demand.event())
         .map(|change| match change {
             AssetChange::UpdatePriority { ticket, priority } => (ticket, priority),
             AssetChange::Request(_) | AssetChange::Release(_) | AssetChange::UpdateImportance { .. } | AssetChange::UpdateSize { .. } => {
@@ -397,7 +402,7 @@ fn terrain_background_keeps_resolution() {
     assert!(visible_updates.iter().all(|(ticket, _)| initial_tickets.contains(ticket)));
 
     demand.remove_region(region);
-    let released: HashSet<_> = std::iter::from_fn(|| demand.event())
+    let released: HashSet<_> = iter::from_fn(|| demand.event())
         .map(|change| match change {
             AssetChange::Release(ticket) => ticket,
             AssetChange::Request(_)
@@ -415,14 +420,14 @@ fn terrain_background_keeps_resolution() {
 #[test]
 fn mesh_importance_keeps_its_ticket() {
     let budget = Budget::default();
-    let mut world = world::World::new(world::WorldLimits {
+    let mut world = World::new(WorldLimits {
         max_regions: 1,
         max_entities: 1,
         max_entities_per_region: 1,
         max_tombstones_per_region: 1,
         max_tombstones: 1,
-        max_tombstone_bytes_per_region: world::WorldLimits::tombstone_bytes_for_count(1),
-        max_tombstone_bytes: world::WorldLimits::tombstone_bytes_for_count(1),
+        max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(1),
+        max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(1),
         max_journal_entries: 8,
         max_journal_changes: 16,
         max_region_name_bytes: 64,
@@ -433,9 +438,9 @@ fn mesh_importance_keeps_its_ticket() {
         world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("fixture origin applies");
     let asset = AssetId::new(Uuid::from_u128(90));
     let mut observation = world::ObjectObservation::new(
-        world::UpdateSource::new(region, 1, world::OrderEvidence::Ordered(1), 0),
+        world::UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0),
         Uuid::from_u128(91),
-        std::num::NonZeroU32::new(1).expect("fixture local ID"),
+        NonZeroU32::new(1).expect("fixture local ID"),
         world::Kind::Object,
         world::ParentUpdate::Root,
     );
@@ -447,14 +452,14 @@ fn mesh_importance_keeps_its_ticket() {
     let detail = world.object_detail(item.entity).expect("fixture detail");
     let lease = budget.reserve(detail.owned_bytes() + 32).expect("fixture detail fits");
     let mut mirror = Mirror::default();
-    mirror.apply(crate::scene::model::Change::Object(crate::scene::Object::new(detail, lease)));
+    mirror.apply(Change::Object(Object::new(detail, lease)));
     let identities = BTreeMap::from([(item.id, item.entity)]);
 
     let mut demand = AssetDemand::new(budget);
     let first_camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1280, 720]).expect("first camera");
     demand.set_camera(first_camera);
     let _ = demand.step(&mirror, &identities);
-    let ticket = std::iter::from_fn(|| demand.event())
+    let ticket = iter::from_fn(|| demand.event())
         .find_map(|change| match change {
             AssetChange::Request(request) if matches!(request.request, Request::MeshHeader(id) if id == asset) => Some(request.ticket),
             _ => None,
@@ -479,7 +484,7 @@ fn mesh_importance_keeps_its_ticket() {
 
 #[test]
 fn priority_keeps_ticket_until_resize() {
-    let (_region_world, region) = crate::test_support::registered_region();
+    let (_region_world, region) = registered_region();
     let id = AssetId::new(Uuid::from_u128(100));
     let size = TextureSize::new(128);
     let user = AssetUser::Terrain(region);
@@ -584,12 +589,10 @@ fn object_terrain_share_ticket() {
     process_all(&mut demand, &mirror, &identities);
     let key = AssetKey { region, resource: Resource { id: texture, kind: Kind::Texture }, unit: AssetUnit::Whole };
     let ticket = demand.entries.get(&key).expect("shared texture entry exists").ticket;
-    assert!(
-        std::iter::from_fn(|| demand.event()).any(|change| matches!(change, AssetChange::Request(request) if request.ticket == ticket))
-    );
+    assert!(iter::from_fn(|| demand.event()).any(|change| matches!(change, AssetChange::Request(request) if request.ticket == ticket)));
 
     demand.remove(entity);
-    assert!(std::iter::from_fn(|| demand.event()).all(|change| !matches!(change, AssetChange::Release(released) if released == ticket)));
+    assert!(iter::from_fn(|| demand.event()).all(|change| !matches!(change, AssetChange::Release(released) if released == ticket)));
     assert_eq!(demand.tickets.get(&ticket), Some(&key));
 
     demand.remove_region(region);
@@ -626,7 +629,7 @@ fn visible_demand_displaces_background() {
                 return;
             }
             for change in demand.step(mirror, &identities) {
-                mirror.apply(crate::scene::model::Change::Material(change));
+                mirror.apply(Change::Material(change));
             }
         }
         panic!("bounded fixture scan finishes");
@@ -678,9 +681,7 @@ fn camera_rescan_keeps_demand() {
         unit: AssetUnit::Whole,
     };
     let ticket = demand.entries.get(&key).expect("shared texture entry exists").ticket;
-    assert!(
-        std::iter::from_fn(|| demand.event()).any(|change| matches!(change, AssetChange::Request(request) if request.ticket == ticket))
-    );
+    assert!(iter::from_fn(|| demand.event()).any(|change| matches!(change, AssetChange::Request(request) if request.ticket == ticket)));
 
     demand.set_camera(next_camera);
     process_all(&mut demand, &mirror, &identities);
@@ -703,7 +704,7 @@ fn shared_texture_work(count: u32) -> [usize; 3] {
     let ticket = entry.ticket;
     let initial_work = entry.extrema.work;
     assert!(initial_work <= 3 * identities.len(), "registration work stays bounded by user count");
-    let initial_events: Vec<_> = std::iter::from_fn(|| demand.event()).collect();
+    let initial_events: Vec<_> = iter::from_fn(|| demand.event()).collect();
     assert_eq!(initial_events.len(), 1, "all objects share one request");
     assert_matches!(&initial_events[0], AssetChange::Request(request) if request.ticket == ticket);
 
@@ -724,7 +725,7 @@ fn shared_texture_work(count: u32) -> [usize; 3] {
     let reverse_work =
         reverse_entry.extrema.work.checked_sub(initial_work + rescan_work).expect("aggregate work grows during reverse transitions");
     demand.remove(entities.next().expect("one fixture user remains"));
-    let releases: Vec<_> = std::iter::from_fn(|| demand.event()).collect();
+    let releases: Vec<_> = iter::from_fn(|| demand.event()).collect();
     assert_eq!(releases.len(), 1, "the final user releases the shared ticket once");
     assert_matches!(&releases[0], AssetChange::Release(released) if *released == ticket);
     assert!(!demand.entries.contains_key(&key));
@@ -766,7 +767,7 @@ fn scan_exhaustion_keeps_dirty_work() {
         demand.invalidate(mirror.objects.get(&entity).expect("fixture object remains in the scene"));
     }
     let _ = demand.step(&mirror, &identities);
-    let updates: Vec<_> = std::iter::from_fn(|| demand.event())
+    let updates: Vec<_> = iter::from_fn(|| demand.event())
         .map(|change| match change {
             AssetChange::UpdateImportance { ticket, .. } => ticket,
             AssetChange::Request(_) | AssetChange::Release(_) | AssetChange::UpdatePriority { .. } | AssetChange::UpdateSize { .. } => {
@@ -856,7 +857,7 @@ fn camera_scan_reaches_target() {
         let mut observation = world::ObjectObservation::new(
             world::UpdateSource::new(region, local_id, OrderEvidence::Ordered(u64::from(local_id)), 0),
             id,
-            std::num::NonZeroU32::new(local_id).expect("fixture local ID is nonzero"),
+            NonZeroU32::new(local_id).expect("fixture local ID is nonzero"),
             world::Kind::Object,
             world::ParentUpdate::Root,
         );
@@ -875,7 +876,7 @@ fn camera_scan_reaches_target() {
         for item in page.objects {
             let detail = world.object_detail(item.entity).expect("fixture object detail reads");
             let lease = budget.reserve(detail.owned_bytes() + 32).expect("fixture object fits budget");
-            mirror.apply(crate::scene::model::Change::Object(crate::scene::Object::new(detail, lease)));
+            mirror.apply(Change::Object(Object::new(detail, lease)));
             identities.insert(item.id, item.entity);
         }
         let Some(next) = next else { break };
@@ -885,7 +886,7 @@ fn camera_scan_reaches_target() {
 
     let first_camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1280, 720]).expect("first camera");
     let high_camera = Camera::new(DVec3::new(99.5, 0.0, 0.0), Vec3::X, 1.0, [1280, 720]).expect("high camera");
-    assert_eq!(high_camera.mesh_lod(DVec3::new(100.0, 0.0, 0.0), Vec3::ONE, None), Some(assets::mesh::MeshLod::High));
+    assert_eq!(high_camera.mesh_lod(DVec3::new(100.0, 0.0, 0.0), Vec3::ONE, None), Some(MeshLod::High));
 
     let mut demand = AssetDemand::new(budget.clone());
     demand.set_camera(first_camera);
@@ -907,7 +908,7 @@ fn camera_scan_reaches_target() {
 
     demand.set_camera(high_camera);
     let ready_header = ready_header_status(mesh_asset);
-    assert_matches!(&ready_header, Status::Ready(assets::Content::MeshHeader(_)));
+    assert_matches!(&ready_header, Status::Ready(Content::MeshHeader(_)));
     assert_eq!(invalidate_completed(&mut demand, &mirror, shared_header_ticket, ready_header), LOW_USERS as usize);
 
     let mut update_order = u64::from(TARGET_LOCAL_ID);
@@ -924,15 +925,15 @@ fn camera_scan_reaches_target() {
                     OrderEvidence::Ordered(update_order),
                     0,
                 ),
-                std::num::NonZeroU32::new(local_id).expect("fixture local ID is nonzero"),
+                NonZeroU32::new(local_id).expect("fixture local ID is nonzero"),
             );
             let x = if turn % 2 == 0 { 201.0 } else { 200.0 };
             patch.pose = Some(world::Pose { position: Some(Vec3::new(x, 0.0, 0.0)), rotation: Some(math::Quat::IDENTITY) });
             let _applied = world.patch_object(patch).expect("ordered fixture pose update applies");
             let detail = world.object_detail(entity).expect("updated fixture detail reads");
             let lease = budget.reserve(detail.owned_bytes() + 32).expect("updated fixture object fits budget");
-            let object = crate::scene::Object::new(detail, lease);
-            mirror.apply(crate::scene::model::Change::Object(object.clone()));
+            let object = Object::new(detail, lease);
+            mirror.apply(Change::Object(object.clone()));
             demand.invalidate(&object);
         }
 
@@ -940,7 +941,7 @@ fn camera_scan_reaches_target() {
         while let Some(change) = demand.event() {
             if let AssetChange::Request(request) = change
                 && let Request::MeshLod(lod) = request.request
-                && lod.lod() == assets::mesh::MeshLod::High
+                && lod.lod() == MeshLod::High
             {
                 assert_eq!(request.priority, Priority::Visible);
                 assert_eq!(lod.asset_id(), mesh_asset);

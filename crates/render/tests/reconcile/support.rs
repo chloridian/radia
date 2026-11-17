@@ -1,3 +1,4 @@
+use std::f64::consts::FRAC_PI_2;
 pub(super) use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU32,
@@ -6,7 +7,7 @@ pub(super) use std::{
 
 pub(super) use assets::{FetchResponse, Priority, Request, mesh::Mesh};
 pub(super) use math::{DVec3, Quat, Vec3};
-pub(super) use proptest::prelude::{ProptestConfig, prop, prop_assert_eq, proptest};
+pub(super) use proptest::prelude::{ProptestConfig, prop_assert_eq, proptest};
 pub(super) use render::scene::{
     AssetChange, AssetRequest, AssetTicket, Budget, Camera, Detail, DrawnMeshKey, EnvironmentChoice, EnvironmentProperty, EnvironmentPush,
     LocalChoice, MeshJob, Placement, PreparedMesh, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, RecoveryReason,
@@ -223,5 +224,5 @@ pub(super) fn positions(view: &SceneView) -> BTreeMap<u128, f64> {
 }
 
 pub(super) fn camera(x: f64) -> Camera {
-    Camera::new(DVec3::new(x, 0.0, 0.0), Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap()
+    Camera::new(DVec3::new(x, 0.0, 0.0), Vec3::X, FRAC_PI_2, [1000, 1000]).unwrap()
 }

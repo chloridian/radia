@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{mem, sync::Arc};
 
 use math::{DVec3, Mat4, Quat, Vec3, normal_matrix};
 use wgpu::{
@@ -61,11 +61,11 @@ impl InstanceBuffers {
         let (instances, face_indices, indirect) = allocate(device, capacity);
         let old = (
             [
-                std::mem::replace(&mut self.instances, instances),
-                std::mem::replace(&mut self.face_indices, face_indices),
-                std::mem::replace(&mut self.indirect, indirect),
+                mem::replace(&mut self.instances, instances),
+                mem::replace(&mut self.face_indices, face_indices),
+                mem::replace(&mut self.indirect, indirect),
             ],
-            std::mem::replace(&mut self.lease, memory.charge(capacity * SLOT_BYTES)),
+            mem::replace(&mut self.lease, memory.charge(capacity * SLOT_BYTES)),
         );
         queue.on_submitted_work_done(move || drop(old));
         self.capacity = capacity;
@@ -134,6 +134,8 @@ pub(super) fn parameter_part(params: &FaceParams, scale: Vec3) -> [u8; PARAMETER
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::FRAC_PI_2;
+
     use math::Mat3;
     use wgpu::naga::{TypeInner, front::wgsl, proc::Layouter};
 
@@ -180,7 +182,7 @@ mod tests {
     }
     #[test]
     fn nonuniform_normals_upload() {
-        let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let rotation = Quat::from_rotation_z(FRAC_PI_2);
         let scale = Vec3::new(2.0, 3.0, 4.0);
         let bytes = instance_base(DVec3::ZERO, rotation, scale, false, DVec3::ZERO);
         let column = |index: usize| {

@@ -1,10 +1,14 @@
-use std::{assert_matches, f64::consts::PI, num::NonZeroU32, time::Instant};
+use std::{array, assert_matches, collections::HashMap, f64::consts::PI, num::NonZeroU32, time::Instant};
 
-use assets::{Budget as AssetBudget, Content, FetchResponse, LoadJob, Priority, Request, Status as AssetStatus, Store, TextureSize};
+use assets::{Content, FetchResponse, LoadJob, Priority, Request, Store, TextureSize, mesh::MeshLod};
 use math::{DVec3, Quat, Vec3};
 use render::scene::{
     AssetChange, AssetRequest, AssetTicket, Budget, Camera, Detail, DrawnMeshKey, MeshJob, ReadFailure, ReadJob, ReadQuery, ReadReply,
     ReconcileStep, Reconciler, SceneView, Status,
+};
+use test_support::{
+    mesh,
+    texture::{GRAY_4096_J2C, RGB_J2C},
 };
 use utils::AssetId;
 use uuid::Uuid;
@@ -26,7 +30,7 @@ pub struct Row {
 pub struct BenchmarkTextures {
     pub store: Store,
     pub route: assets::Route,
-    pub textures: std::collections::HashMap<AssetId, assets::TextureHandle>,
+    pub textures: HashMap<AssetId, assets::TextureHandle>,
 }
 
 pub struct AssetWork {
@@ -54,8 +58,8 @@ pub fn live_prepare_world_with_regions(count: usize, mesh_count: usize, texture_
     (world, rows)
 }
 
-pub fn add_meshes(world: &mut World, rows: &[Row], count: usize, order: &mut u64) -> std::collections::HashMap<AssetId, Vec<u8>> {
-    let mut assets = std::collections::HashMap::with_capacity(count);
+pub fn add_meshes(world: &mut World, rows: &[Row], count: usize, order: &mut u64) -> HashMap<AssetId, Vec<u8>> {
+    let mut assets = HashMap::with_capacity(count);
     for (index, row) in rows.iter().take(count).enumerate() {
         let id = AssetId::new(Uuid::from_u128(50_000_000 + index as u128));
         let current = *order;
@@ -69,7 +73,7 @@ pub fn add_meshes(world: &mut World, rows: &[Row], count: usize, order: &mut u64
         let _applied = world.patch_object(patch).expect("benchmark mesh shape update");
         let vertices = 300 + index * 3;
         let faces = if index < 8 { 2 } else { 1 };
-        let bytes = test_support::mesh::asset_with_lod_geometry(&[(3, faces, vertices, vertices)]);
+        let bytes = mesh::asset_with_lod_geometry(&[(3, faces, vertices, vertices)]);
         assets.insert(id, bytes);
     }
     assets
@@ -168,7 +172,7 @@ fn scene_world_with(
             .expect("benchmark region metadata");
         if terrain && index == 0 {
             let first = terrain_texture_start.unwrap_or_else(|| texture_count.saturating_sub(4));
-            let texture_ids = std::array::from_fn(|slot| Uuid::from_u128(DEFAULT_TEXTURE_ID + (first + slot) as u128));
+            let texture_ids = array::from_fn(|slot| Uuid::from_u128(DEFAULT_TEXTURE_ID + (first + slot) as u128));
             let settings = TerrainSettings::new(texture_ids, [0.0; 4], [64.0; 4]).expect("benchmark terrain settings");
             let order = INITIAL_ORDER - 1;
             let _settings = world
@@ -246,7 +250,7 @@ pub fn prim_job(shape: PrimShape, detail: Detail) -> (Reconciler, MeshJob) {
             ReconcileStep::Continue => {}
             ReconcileStep::Wait(until) => now = until,
             ReconcileStep::Asset(AssetChange::Request(request)) if request.request.resource().kind == assets::Kind::Texture => {
-                reconciler.complete_asset(request.ticket, AssetStatus::Ready(Content::Texture(texture.clone())));
+                reconciler.complete_asset(request.ticket, assets::Status::Ready(Content::Texture(texture.clone())));
             }
             ReconcileStep::Asset(_) => {}
             ReconcileStep::Idle => panic!("prim benchmark has no mesh work"),
@@ -262,9 +266,9 @@ fn benchmark_texture() -> assets::TextureHandle {
 
 pub fn benchmark_textures(count: usize) -> BenchmarkTextures {
     let now = Instant::now();
-    let mut store = Store::new(AssetBudget::default());
+    let mut store = Store::new(assets::Budget::default());
     let route = store.register_route().expect("benchmark texture route");
-    let mut textures = std::collections::HashMap::with_capacity(count);
+    let mut textures = HashMap::with_capacity(count);
     for index in 0..count {
         let id = texture_asset(index);
         let demand = store
@@ -273,10 +277,10 @@ pub fn benchmark_textures(count: usize) -> BenchmarkTextures {
         let LoadJob::Fetch(fetch) = store.next_job(now).expect("benchmark texture fetch") else {
             panic!("unexpected benchmark texture job")
         };
-        let input = fetch.complete(Ok(test_support::texture::GRAY_4096_J2C.to_vec())).expect("benchmark texture response");
+        let input = fetch.complete(Ok(GRAY_4096_J2C.to_vec())).expect("benchmark texture response");
         let decode = store.start_decode(input).expect("benchmark texture decode");
         store.complete(decode.run(), now);
-        let AssetStatus::Ready(Content::Texture(texture)) = demand.status() else { panic!("benchmark texture did not decode") };
+        let assets::Status::Ready(Content::Texture(texture)) = demand.status() else { panic!("benchmark texture did not decode") };
         textures.insert(id, texture);
     }
     BenchmarkTextures { store, route, textures }
@@ -291,11 +295,11 @@ pub fn complete_texture_refinements(fixture: &mut BenchmarkTextures, indexes: [u
             .request(fixture.route, Request::Texture { id, size: TextureSize::new(size) }, Priority::Visible, now)
             .expect("benchmark texture refinement request");
         let Some(job) = fixture.store.next_job(now) else {
-            assert_matches!(demand.status(), AssetStatus::Ready(_), "benchmark texture refinement has no job or ready content");
+            assert_matches!(demand.status(), assets::Status::Ready(_), "benchmark texture refinement has no job or ready content");
             continue;
         };
         complete_benchmark_texture_job(&mut fixture.store, job, now);
-        assert_matches!(demand.status(), AssetStatus::Ready(_), "benchmark texture refinement did not complete");
+        assert_matches!(demand.status(), assets::Status::Ready(_), "benchmark texture refinement did not complete");
         completed += 1;
     }
     completed
@@ -308,7 +312,7 @@ fn complete_benchmark_texture_job(store: &mut Store, mut job: LoadJob, now: Inst
                 job = store.complete_cache_read(cache.run(), now).expect("benchmark cache read continuation");
             }
             LoadJob::Fetch(fetch) => {
-                let input = fetch.complete(Ok(test_support::texture::GRAY_4096_J2C.to_vec())).expect("benchmark texture response");
+                let input = fetch.complete(Ok(GRAY_4096_J2C.to_vec())).expect("benchmark texture response");
                 let completion = store.start_decode(input).expect("benchmark texture decode admission").run();
                 store.complete(completion, now);
                 return;
@@ -324,16 +328,16 @@ fn complete_benchmark_texture_job(store: &mut Store, mut job: LoadJob, now: Inst
 
 fn benchmark_texture_for(id: AssetId) -> assets::TextureHandle {
     let now = Instant::now();
-    let mut store = Store::new(AssetBudget::default());
+    let mut store = Store::new(assets::Budget::default());
     let route = store.register_route().expect("benchmark texture route");
     let demand = store
         .request(route, Request::Texture { id, size: TextureSize::new(64) }, Priority::Visible, now)
         .expect("benchmark texture request");
     let LoadJob::Fetch(fetch) = store.next_job(now).expect("benchmark texture fetch") else { panic!("texture cache is empty") };
-    let input = fetch.complete(Ok(test_support::texture::RGB_J2C.to_vec())).expect("benchmark texture response");
+    let input = fetch.complete(Ok(RGB_J2C.to_vec())).expect("benchmark texture response");
     let decode = store.start_decode(input).expect("benchmark texture decode");
     store.complete(decode.run(), now);
-    let AssetStatus::Ready(Content::Texture(texture)) = demand.status() else { panic!("benchmark texture did not decode") };
+    let assets::Status::Ready(Content::Texture(texture)) = demand.status() else { panic!("benchmark texture did not decode") };
     texture
 }
 
@@ -402,7 +406,7 @@ pub fn settle_with_camera(world: &World, expected_objects: usize, camera: Camera
             ReconcileStep::Continue => {}
             ReconcileStep::Wait(until) => now = until,
             ReconcileStep::Asset(AssetChange::Request(request)) if request.request.resource().kind == assets::Kind::Texture => {
-                reconciler.complete_asset(request.ticket, AssetStatus::Ready(Content::Texture(texture.clone())));
+                reconciler.complete_asset(request.ticket, assets::Status::Ready(Content::Texture(texture.clone())));
             }
             ReconcileStep::Asset(_) => {}
             ReconcileStep::Idle => {
@@ -420,17 +424,17 @@ pub fn settle_with_textures(
     world: &World,
     expected_objects: usize,
     camera: Camera,
-    textures: &std::collections::HashMap<AssetId, assets::TextureHandle>,
+    textures: &HashMap<AssetId, assets::TextureHandle>,
 ) -> (Reconciler, SceneView, Instant) {
-    settle_with_assets(world, expected_objects, camera, textures, &std::collections::HashMap::new())
+    settle_with_assets(world, expected_objects, camera, textures, &HashMap::new())
 }
 
 pub fn settle_with_assets(
     world: &World,
     expected_objects: usize,
     camera: Camera,
-    textures: &std::collections::HashMap<AssetId, assets::TextureHandle>,
-    meshes: &std::collections::HashMap<AssetId, Vec<u8>>,
+    textures: &HashMap<AssetId, assets::TextureHandle>,
+    meshes: &HashMap<AssetId, Vec<u8>>,
 ) -> (Reconciler, SceneView, Instant) {
     let (mut reconciler, mut view) = Reconciler::new(Budget::default());
     reconciler.set_camera(camera);
@@ -448,7 +452,7 @@ pub fn settle_with_assets(
             ReconcileStep::Asset(AssetChange::Request(request)) => match request.request {
                 Request::Texture { id, .. } => {
                     let texture = textures.get(&id).expect("benchmark texture fixture contains requested asset").clone();
-                    reconciler.complete_asset(request.ticket, AssetStatus::Ready(Content::Texture(texture)));
+                    reconciler.complete_asset(request.ticket, assets::Status::Ready(Content::Texture(texture)));
                 }
                 Request::MeshHeader(_) | Request::MeshLod(_) => {
                     let bytes = meshes.get(&request.request.resource().id).expect("benchmark mesh fixture contains requested asset");
@@ -590,7 +594,7 @@ pub fn ready_distinct_mesh_scene(count: usize) -> (Reconciler, SceneView, World,
     let (mut reconciler, mut view) = Reconciler::new(Budget::default());
     reconciler.set_camera(mesh_camera(false));
     let mut now = Instant::now();
-    let bytes = test_support::mesh::asset(&[2, 3], 1);
+    let bytes = mesh::asset(&[2, 3], 1);
 
     let work = mesh_asset_work(&mut reconciler, &mut view, &world, &mut now);
     let headers: Vec<_> = work.requested.into_iter().filter(|request| matches!(request.request, Request::MeshHeader(_))).collect();
@@ -604,12 +608,12 @@ pub fn ready_distinct_mesh_scene(count: usize) -> (Reconciler, SceneView, World,
         .requested
         .iter()
         .copied()
-        .filter(|request| matches!(request.request, Request::MeshLod(block) if block.lod() == assets::mesh::MeshLod::High))
+        .filter(|request| matches!(request.request, Request::MeshLod(block) if block.lod() == MeshLod::High))
         .collect();
     let mediums = work
         .requested
         .iter()
-        .filter(|request| matches!(request.request, Request::MeshLod(block) if block.lod() == assets::mesh::MeshLod::Medium))
+        .filter(|request| matches!(request.request, Request::MeshLod(block) if block.lod() == MeshLod::Medium))
         .count();
     assert_eq!(highs.len(), count, "each distinct mesh object requests its selected LOD");
     assert_eq!(mediums, count, "each distinct mesh object requests its fallback LOD");
@@ -618,10 +622,7 @@ pub fn ready_distinct_mesh_scene(count: usize) -> (Reconciler, SceneView, World,
     }
     let work = mesh_asset_work(&mut reconciler, &mut view, &world, &mut now);
     assert_eq!(work.released.len(), 2 * count, "decoded LODs release their fetch requests");
-    assert!(
-        view.objects()
-            .all(|object| matches!(object.mesh().map(|(key, _)| key), Some(DrawnMeshKey::Asset { lod: assets::mesh::MeshLod::High, .. })))
-    );
+    assert!(view.objects().all(|object| matches!(object.mesh().map(|(key, _)| key), Some(DrawnMeshKey::Asset { lod: MeshLod::High, .. }))));
     (reconciler, view, world, now)
 }
 
@@ -697,7 +698,7 @@ fn mesh_asset_work(reconciler: &mut Reconciler, view: &mut SceneView, world: &Wo
 
 fn prepared_asset(request: Request, bytes: &[u8]) -> assets::Status {
     let now = Instant::now();
-    let mut store = Store::new(AssetBudget::default());
+    let mut store = Store::new(assets::Budget::default());
     let route = store.register_route().expect("mesh benchmark asset route");
     let demand = store.request(route, request, Priority::Visible, now).expect("mesh benchmark asset demand");
     let LoadJob::Fetch(fetch) = store.next_job(now).expect("mesh benchmark asset fetch") else {

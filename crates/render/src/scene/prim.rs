@@ -1,5 +1,5 @@
 use std::{
-    f32::consts::{PI, TAU},
+    f32::consts::{FRAC_1_SQRT_2, PI, TAU},
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -312,7 +312,7 @@ fn polygon(sides: usize, offset: f32, span: f32, cut: [f32; 2], split: usize, fa
     let full_sides = (sides as f32 / span).round() as usize;
     let radius = match full_sides {
         3 => 0.5,
-        4 => std::f32::consts::FRAC_1_SQRT_2,
+        4 => FRAC_1_SQRT_2,
         5 => 0.53,
         6 => 0.525,
         7 => 0.5,
@@ -474,7 +474,7 @@ fn path(params: &Params, detail: Detail) -> (Vec<Ring>, bool) {
     };
     let radius = match sides {
         3 => 0.5,
-        4 => std::f32::consts::FRAC_1_SQRT_2,
+        4 => FRAC_1_SQRT_2,
         5 => 0.53,
         6 => 0.525,
         _ => 0.5,
@@ -727,16 +727,16 @@ fn cube_cap(mesh: &mut Builder, profile: &Profile, ring: &Ring, top: bool) -> Re
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches;
     use std::{
+        assert_matches,
         collections::HashMap,
         f32::consts::{PI, TAU},
         sync::atomic::AtomicBool,
     };
 
-    use assets::mesh::{MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh};
+    use assets::mesh::{MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh, Vertex};
     use math::{Quat, Vec2, Vec3};
-    use proptest::prelude::*;
+    use proptest::{array, prelude::*, sample, test_runner::TestCaseResult};
     use world::PrimShape;
 
     use super::{Builder, Detail, MeshBuildError, Point, Profile, Ring, cap, tessellate};
@@ -749,7 +749,7 @@ mod tests {
         generate_at(shape, Detail::High)
     }
 
-    fn vertex_at(mesh: &Mesh, slot: usize, uv: Vec2) -> assets::mesh::Vertex {
+    fn vertex_at(mesh: &Mesh, slot: usize, uv: Vec2) -> Vertex {
         let face = &mesh.faces()[slot];
         mesh.indices()[face.indices.start as usize..face.indices.end as usize]
             .iter()
@@ -801,7 +801,7 @@ mod tests {
         }
     }
 
-    fn assert_lod_invariants(mesh: &Mesh, detail: Detail) -> prop::test_runner::TestCaseResult {
+    fn assert_lod_invariants(mesh: &Mesh, detail: Detail) -> TestCaseResult {
         prop_assert!(mesh.vertices().len() <= MAX_MESH_VERTICES, "{detail:?} vertex budget");
         prop_assert!(
             !mesh.indices().is_empty() && mesh.indices().len().is_multiple_of(3) && mesh.indices().len() / 3 <= MAX_MESH_INDICES / 3,
@@ -1270,13 +1270,13 @@ mod tests {
         fn valid_prim_lods_stay_bounded(
             profile in 0u8..6,
             hole in 0u8..4,
-            path in prop::sample::select(vec![0x10u8, 0x20, 0x30, 0x40, 0x80]),
-            cuts in prop::array::uniform4(0u16..20000),
+            path in sample::select(vec![0x10u8, 0x20, 0x30, 0x40, 0x80]),
+            cuts in array::uniform4(0u16..20000),
             hollow in 0u16..=30000,
-            scales in prop::array::uniform2(25u8..176),
-            shear in prop::array::uniform2(-50i8..=50),
-            twist in prop::array::uniform2(-100i8..=100),
-            taper in prop::array::uniform2(-80i8..=80),
+            scales in array::uniform2(25u8..176),
+            shear in array::uniform2(-50i8..=50),
+            twist in array::uniform2(-100i8..=100),
+            taper in array::uniform2(-80i8..=80),
             radius in -80i8..=80,
             revolutions in 0u8..=200,
             skew in -95i8..=95,
@@ -1291,7 +1291,7 @@ mod tests {
             };
             for detail in [Detail::Lowest, Detail::Low, Detail::Medium, Detail::High] {
                 let mesh = tessellate(shape, detail, &AtomicBool::new(false))
-                    .map_err(|error| prop::test_runner::TestCaseError::fail(format!("valid shape {shape:?} failed at {detail:?}: {error:?}")))?;
+                    .map_err(|error| TestCaseError::fail(format!("valid shape {shape:?} failed at {detail:?}: {error:?}")))?;
                 assert_lod_invariants(&mesh, detail)?;
             }
         }

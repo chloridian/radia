@@ -17,12 +17,14 @@ use wgpu::{
     RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureFormat, TextureViewDescriptor,
 };
 
-use crate::environment::Evaluated;
-use crate::geometry::{GeometryRenderer, PickError, Stats};
-use crate::gpu_timing::GpuTimings;
-use crate::pipeline::{PostProcess, SCENE_CLEAR, camera_view, projection};
-use crate::scene::{AgentPose, Camera, SceneView};
-use crate::texture::{TextureCompletion, TextureJob};
+use crate::{
+    environment::Evaluated,
+    geometry::{GeometryRenderer, PickError, Stats},
+    gpu_timing::GpuTimings,
+    pipeline::{PostProcess, SCENE_CLEAR, camera_view, projection},
+    scene::{AgentPose, Camera, SceneView},
+    texture::{TextureCompletion, TextureJob},
+};
 
 const MAX_STORAGE_BUFFER_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -460,7 +462,7 @@ fn scene_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
 #[cfg(test)]
 mod tests {
     use wgpu::naga::{
-        AddressSpace, ImageClass, TypeInner,
+        AddressSpace, ImageClass, Module, TypeInner,
         front::wgsl,
         proc::Layouter,
         valid::{Capabilities, ValidationFlags, Validator},
@@ -510,7 +512,7 @@ mod tests {
         }
     }
 
-    fn validate_default_limits(name: &str, module: &wgpu::naga::Module) {
+    fn validate_default_limits(name: &str, module: &Module) {
         let limits = wgpu::Limits::default();
         let mut bindings_per_group = vec![0_u32; limits.max_bind_groups as usize];
         let mut sampled_textures = 0_u32;

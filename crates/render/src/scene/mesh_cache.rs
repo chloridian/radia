@@ -1,7 +1,7 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, HashMap},
-    mem::size_of,
+    mem,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
@@ -307,7 +307,7 @@ impl MeshCache {
 
     pub(in crate::scene) fn start(&mut self) -> Option<PrimJob> {
         let mut running = Vec::with_capacity(self.running.len());
-        for key in std::mem::take(&mut self.running) {
+        for key in mem::take(&mut self.running) {
             let Some(entry) = self.entries.get_mut(&key) else { continue };
             if let State::Running(cancelled) = &entry.state {
                 if cancelled.upgrade().is_some() {
@@ -355,11 +355,11 @@ impl MeshCache {
     }
 
     pub(in crate::scene) fn take_evicted(&mut self) -> Vec<MeshKey> {
-        std::mem::take(&mut self.evicted)
+        mem::take(&mut self.evicted)
     }
 
     pub(in crate::scene) fn take_updated(&mut self) -> Vec<MeshKey> {
-        std::mem::take(&mut self.updated)
+        mem::take(&mut self.updated)
     }
 
     pub(in crate::scene) fn complete(&mut self, mut completion: PrimCompletion) {

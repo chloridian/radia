@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    mem::size_of,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -8,11 +7,13 @@ use std::{
 use assets::{Content, Environment, EnvironmentDescription, Priority, Request, Status};
 use world::{EnvironmentAssignment, EnvironmentRead, EnvironmentSource, Region};
 
-use crate::environment::Schedule;
-use crate::scene::{
-    AssetChange, AssetRequest, AssetTicket, Budget, MAX_REGIONS,
-    budget::{Lease, MeshWork},
-    model::SceneLifetime,
+use crate::{
+    environment::Schedule,
+    scene::{
+        AssetChange, AssetRequest, AssetTicket, Budget, MAX_REGIONS,
+        budget::{Lease, MeshWork},
+        model::SceneLifetime,
+    },
 };
 
 #[derive(Clone)]

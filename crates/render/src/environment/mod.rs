@@ -3,7 +3,7 @@ mod runtime;
 mod stars;
 mod transition;
 
-use std::f32::consts::PI;
+use std::{array, cmp, f32::consts::PI};
 
 use assets::{
     CelestialBody, DayCycle, EnvironmentDescription, EnvironmentSettings, Haze, HazeProvenance, Keyframe, Sky, TextureRef, Water,
@@ -12,9 +12,8 @@ use math::{Quat, Vec3};
 use utils::AssetId;
 use uuid::Uuid;
 
-pub use runtime::ActiveEnvironment;
-pub(crate) use stars::{STAR_COUNT, star_brightness, stars};
-pub use transition::Transition;
+pub(crate) use self::stars::{STAR_COUNT, star_brightness, stars};
+pub use self::{runtime::ActiveEnvironment, transition::Transition};
 
 const DEFAULT_DAY_LENGTH: f64 = 14_400.0;
 const MIN_DAY_LENGTH: f64 = 14_400.0;
@@ -222,7 +221,7 @@ fn day_position(schedule: Schedule, utc_seconds: f64) -> f64 {
 
 fn selected_track(altitude: f64, altitudes: [f32; 3]) -> u8 {
     for (index, threshold) in altitudes.iter().enumerate() {
-        if altitude.partial_cmp(&f64::from(*threshold)) != Some(std::cmp::Ordering::Greater) {
+        if altitude.partial_cmp(&f64::from(*threshold)) != Some(cmp::Ordering::Greater) {
             return index as u8 + 1;
         }
     }
@@ -914,7 +913,7 @@ fn lerp(start: f32, end: f32, factor: f32) -> f32 {
 }
 
 fn blend_array<const N: usize>(start: [f32; N], end: [f32; N], factor: f32) -> [f32; N] {
-    std::array::from_fn(|index| lerp(start[index], end[index], factor))
+    array::from_fn(|index| lerp(start[index], end[index], factor))
 }
 
 #[cfg(test)]

@@ -1,17 +1,19 @@
+use std::array;
+
 use assets::Sampler;
 use math::{Mat4, Quat, Vec3};
-use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
     BindingType, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages,
     ColorTargetState, ColorWrites, CompareFunction, DepthStencilState, Device, FragmentState, MultisampleState, PipelineLayoutDescriptor,
     PrimitiveState, Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, SamplerBindingType, ShaderModuleDescriptor, ShaderSource,
     ShaderStages, TextureFormat, TextureSampleType, TextureView, TextureViewDimension, VertexState,
+    util::{BufferInitDescriptor, DeviceExt},
 };
 
 use super::atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values};
 use crate::{
-    environment::{Evaluated, STAR_COUNT, TextureBlend, star_brightness, stars},
+    environment::{CelestialBodyState, Evaluated, STAR_COUNT, TextureBlend, star_brightness, stars},
     scene::SceneView,
     texture::{TextureKey, TextureViewState, Textures},
 };
@@ -465,7 +467,7 @@ fn sky_texture_binding(
     keys: [Option<TextureKey>; 12],
     celestial_sampler: &wgpu::Sampler,
 ) -> BindGroup {
-    let views = std::array::from_fn(|binding| {
+    let views = array::from_fn(|binding| {
         let key = keys[binding];
         sky_texture_view(binding, textures.view(key), textures.raw_view(key))
     });
@@ -524,7 +526,7 @@ fn resident(key: Option<TextureKey>) -> f32 {
     if key.is_some() { 1.0 } else { 0.0 }
 }
 
-fn body_basis(body: &crate::environment::CelestialBodyState) -> (Vec3, Vec3) {
+fn body_basis(body: &CelestialBodyState) -> (Vec3, Vec3) {
     let direction = (Quat::from_array(body.rotation) * Vec3::X).normalize();
     if direction.z > 0.99 {
         let rotation = Quat::from_array(body.rotation);

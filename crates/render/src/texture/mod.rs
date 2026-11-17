@@ -2,9 +2,8 @@ mod compression;
 mod job;
 mod upload;
 
-pub use compression::CompressionQuality;
-
 use std::{
+    array,
     collections::{HashMap, HashSet, VecDeque},
     mem::{replace, take},
     sync::{
@@ -28,6 +27,8 @@ use wgpu::{
     TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension, VertexState,
 };
 use world::Region;
+
+pub use self::compression::CompressionQuality;
 
 const DEFAULT_SOFT_CAP: usize = 1024 * 1024 * 1024;
 const STAGING_BYTES: usize = 48 * 1024 * 1024;
@@ -815,18 +816,17 @@ impl Textures {
         textures: &[Option<TextureHandle>; 4],
         epoch: u64,
     ) -> bool {
-        let key = std::array::from_fn(|index| {
+        let key = array::from_fn(|index| {
             let texture = textures[index].as_ref()?;
             self.request(texture, epoch, Priority::Visible);
             Some(TextureKey { id: texture.id(), sampler: Sampler::default() })
         });
-        let revisions = std::array::from_fn(|index| {
-            key[index].and_then(|key| self.entries.get(&key.id).map(|entry| entry.state_revision)).unwrap_or(0)
-        });
+        let revisions =
+            array::from_fn(|index| key[index].and_then(|key| self.entries.get(&key.id).map(|entry| entry.state_revision)).unwrap_or(0));
         if self.terrain_bindings.get(&region).is_some_and(|binding| binding.key == key && binding.revisions == revisions) {
             return false;
         }
-        let views: [TextureView; 4] = std::array::from_fn(|index| {
+        let views: [TextureView; 4] = array::from_fn(|index| {
             key[index].and_then(|key| self.texture_view(key).cloned()).unwrap_or_else(|| self.terrain_fallback.clone())
         });
         let mut entries: Vec<_> = views
@@ -883,7 +883,7 @@ impl Textures {
     }
 
     pub(crate) fn take_changed_ids(&mut self) -> HashSet<TextureId> {
-        std::mem::take(&mut self.changed_ids)
+        take(&mut self.changed_ids)
     }
 
     fn texture_view(&self, key: TextureKey) -> Option<&TextureView> {
@@ -1145,12 +1145,14 @@ fn make_sampler(device: &Device, settings: Sampler) -> wgpu::Sampler {
 
 #[cfg(test)]
 mod fixtures {
-    use super::*;
-    use assets::{Budget, Content, Kind, LoadJob, Request, Resource, Status};
     use std::time::Instant;
+
+    use assets::{Budget, Content, Kind, LoadJob, Request, Resource, Status};
     use test_support::texture::{GRAY_ALPHA_J2C, RGBA_J2C};
     use utils::AssetId;
     use uuid::Uuid;
+
+    use super::*;
 
     pub(super) fn loaded(id: u128, rgba: bool) -> TextureHandle {
         let bytes: &[u8] = if rgba { RGBA_J2C } else { GRAY_ALPHA_J2C };
@@ -1186,8 +1188,7 @@ mod fixtures {
 }
 #[cfg(test)]
 mod tests {
-    use super::fixtures::descriptor;
-    use super::*;
+    use super::{fixtures::descriptor, *};
 
     #[test]
     fn descriptor_storage_includes_mips() {

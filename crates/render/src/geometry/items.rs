@@ -4,10 +4,12 @@ use assets::TextureHandle;
 use math::{Bounds, Quat, Vec3};
 use world::{Entity, FaceAppearance, Region, SurfaceAppearance};
 
-use super::draw_list::{DrawKey, DrawList, FaceOrder, FaceSlot, LayoutId};
-use super::instance::parameter_part;
-use super::texture_bindings::MaterialImages;
-use super::{ShadingMode, TRANSFORM_BYTES};
+use super::{
+    ShadingMode, TRANSFORM_BYTES,
+    draw_list::{DrawKey, DrawList, FaceOrder, FaceSlot, LayoutId},
+    instance::{PARAMETER_BYTES, parameter_part},
+    texture_bindings::MaterialImages,
+};
 use crate::{
     material::{FaceMaterial, FaceParams},
     pipeline::Pipeline,
@@ -35,7 +37,7 @@ pub(super) struct CachedFace {
     pub(super) texture_entry_transform: math::UvTransform,
     pub(super) group: u32,
     pub(super) blended: bool,
-    pub(super) parameter_bytes: [u8; super::instance::PARAMETER_BYTES],
+    pub(super) parameter_bytes: [u8; PARAMETER_BYTES],
     pub(super) slot: Option<u32>,
     pub(super) blended_index: Option<usize>,
     pub(super) layout: LayoutId,
@@ -275,13 +277,13 @@ mod tests {
 
     use super::*;
     use crate::{
-        geometry::{draw_list::DrawList, instance::instance_base},
+        geometry::{draw_list::DrawList, fixtures, instance::instance_base},
         pipeline::Pipeline,
     };
 
     #[test]
     fn first_face_pipeline_follows_flips() {
-        let (_scene, view, _) = crate::geometry::fixtures::scene(255);
+        let (_scene, view, _) = fixtures::scene(255);
         let object = view.objects().next().expect("mesh fixture object");
         let (_, mesh) = object.mesh().expect("mesh fixture geometry");
         let info = mesh_info(mesh);

@@ -8,7 +8,7 @@ use intel_tex_2::{RgbaSurface, bc1, bc3, bc7};
 #[allow(unused_imports)]
 mod texture_compression;
 
-use texture_compression::{CompressionFormat, CompressionQuality};
+use self::texture_compression::{CompressionFormat, CompressionQuality};
 
 pub(crate) fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("texture/compression");

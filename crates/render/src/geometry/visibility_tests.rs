@@ -1,3 +1,5 @@
+use std::f32::consts::FRAC_PI_2;
+
 use math::{Bounds, DVec3, Frustum, Quat, Vec3};
 
 use super::WorldSphere;
@@ -28,15 +30,9 @@ fn negative_scale_stays_visible() {
     let frustum = Frustum::from_clip_matrix(projection(camera, SIZE));
 
     assert!(
-        WorldSphere::new(
-            DVec3::new(10.0, -7.5, 0.0),
-            Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2),
-            Vec3::new(-1.0, 1.0, 1.0),
-            bounds,
-            camera,
-        )
-        .expect("finite transformed bounds")
-        .visible(ShadingMode::Surface, camera, &frustum)
+        WorldSphere::new(DVec3::new(10.0, -7.5, 0.0), Quat::from_rotation_z(-FRAC_PI_2), Vec3::new(-1.0, 1.0, 1.0), bounds, camera,)
+            .expect("finite transformed bounds")
+            .visible(ShadingMode::Surface, camera, &frustum)
     );
 }
 
