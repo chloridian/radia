@@ -1,6 +1,6 @@
-use ::inventory::{CategoryKey, InventoryOwner};
+use inventory::{CategoryKey, InventoryOwner, Item};
 use network::capabilities::{CapabilityUrl, Client};
-use protocol::inventory::{self, DecodeError};
+use protocol::inventory::{DecodeError, decode_ais_children, decode_ais_item};
 use utils::FolderId;
 
 use super::{
@@ -21,7 +21,7 @@ pub(super) async fn fetch_once(
         .with_query_pair("depth", &depth.min(MAX_AIS_DEPTH).to_string());
     let body =
         client.get_bytes_with_accept(&url, "application/llsd+xml", MAX_FETCH_RESPONSE_BYTES).await.map_err(classify_request_error)?;
-    let category = inventory::decode_ais_children(&body, folder.id().uuid(), folder.owner().id()).map_err(classify_decode_error)?;
+    let category = decode_ais_children(&body, folder.id().uuid(), folder.owner().id()).map_err(classify_decode_error)?;
     ais_folders(&category, folder).map_err(|error| match error {
         InventoryFetchError::FolderTooLarge => RequestFailure::FolderTooLarge,
         _ => RequestFailure::InvalidResponse,
@@ -33,12 +33,12 @@ pub(super) async fn fetch_item_once(
     capability: &CapabilityUrl,
     owner: InventoryOwner,
     item_id: uuid::Uuid,
-) -> Result<::inventory::Item, RequestFailure> {
+) -> Result<Item, RequestFailure> {
     let item_id_text = item_id.to_string();
     let url = capability.with_path_segments(&["item", &item_id_text]).map_err(|_| RequestFailure::Failed)?;
     let body =
         client.get_bytes_with_accept(&url, "application/llsd+xml", MAX_FETCH_RESPONSE_BYTES).await.map_err(classify_request_error)?;
-    let item = inventory::decode_ais_item(&body, item_id, owner.id()).map_err(classify_decode_error)?;
+    let item = decode_ais_item(&body, item_id, owner.id()).map_err(classify_decode_error)?;
     let parent = item.parent_id.ok_or(RequestFailure::InvalidResponse)?;
     to_item(&item, owner, CategoryKey::new(owner, FolderId::new(parent))).map_err(|_| RequestFailure::InvalidResponse)
 }

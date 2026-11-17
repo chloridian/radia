@@ -1,7 +1,9 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    io,
     sync::{Arc, mpsc as std_mpsc},
-    thread::JoinHandle,
+    thread,
+    thread::{Builder, JoinHandle},
     time::Duration,
 };
 
@@ -16,11 +18,11 @@ use tokio::{
     sync::{mpsc::OwnedPermit, watch},
 };
 
-use super::storage::{make_delete_entries_batches, make_scope_delete_submission, make_write_batches};
 use super::{
     CacheEntryVersions, CacheScope, EncodedEntry, MAX_OBJECT_CACHE_ENTRY_BYTES, MAX_PENDING_BYTES, MAX_PENDING_CACHE_WRITES,
     MAX_PENDING_INVALIDATION_IDS, MAX_PENDING_INVALIDATION_SCOPES, MAX_PENDING_SUBMISSIONS, MIN_OBJECT_CACHE_ENTRY_BYTES, ObjectCacheEvent,
     ObjectCacheSession, ScopeInvalidation,
+    store::{make_delete_entries_batches, make_scope_delete_submission, make_write_batches},
 };
 
 pub(super) struct CacheWriteJob {
@@ -68,10 +70,10 @@ impl Drop for WorkerStopped {
 }
 
 impl CacheWriteWorker {
-    pub(super) fn start(db: Arc<SqliteDb>, runtime: Handle) -> std::io::Result<Self> {
+    pub(super) fn start(db: Arc<SqliteDb>, runtime: Handle) -> io::Result<Self> {
         let (sender, receiver) = std_mpsc::sync_channel(MAX_PENDING_SUBMISSIONS);
         let (stopped_sender, stopped) = watch::channel(true);
-        let thread = std::thread::Builder::new().name("object-cache-write".to_owned()).spawn(move || {
+        let thread = Builder::new().name("object-cache-write".to_owned()).spawn(move || {
             let _stopped = WorkerStopped(stopped_sender);
             let mut invalidation_failed = false;
             while let Ok(job) = receiver.recv() {
@@ -477,14 +479,14 @@ fn submit_invalidation(db: &SqliteDb, runtime: &Handle, mut batches: impl FnMut(
         let receipt = match db.submit_batches(batches()) {
             Ok(receipt) => receipt,
             Err(SqliteError::Busy | SqliteError::QueueFull) => {
-                std::thread::sleep(Duration::from_millis(10));
+                thread::sleep(Duration::from_millis(10));
                 continue;
             }
             Err(_) => return false,
         };
         match runtime.block_on(receipt.wait()) {
             Ok(()) => return true,
-            Err(SqliteError::Busy | SqliteError::QueueFull) => std::thread::sleep(Duration::from_millis(10)),
+            Err(SqliteError::Busy | SqliteError::QueueFull) => thread::sleep(Duration::from_millis(10)),
             Err(_) => return false,
         }
     }
@@ -545,16 +547,24 @@ fn encode_entries(message: &Message) -> Vec<EncodedEntry> {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::{Arc, mpsc},
+        time::Duration,
+    };
 
     use network::{Grid, SimulatorId};
     use protocol::lludp::Message;
-    use tokio::runtime::Handle;
+    use tokio::{runtime::Handle, time};
 
     use super::CacheWriteWorker;
-    use crate::session::object_cache::storage::open_at;
-    use crate::session::object_cache::test_support::*;
-    use crate::session::object_cache::{CacheWriteJob, CacheWriteOperation, MAX_REGION_ENTRIES, ObjectCacheEvent, ObjectCacheSession};
+    use crate::session::object_cache::{
+        CacheWriteJob, CacheWriteOperation, MAX_REGION_ENTRIES, ObjectCacheEvent, ObjectCacheSession,
+        store::open_at,
+        test_support::{
+            CACHE_ID, NEXT_CACHE_ID, SIMULATOR, cache_count, cache_scope_entry_count, fixture_message, flush, open_cache, region_handshake,
+            vectors,
+        },
+    };
     #[tokio::test]
     async fn region_reset_drops_queued_writes() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
@@ -621,8 +631,8 @@ mod tests {
         assert_eq!(cache_scope_entry_count(db, &affected_scope).await, 1);
         assert_eq!(cache_scope_entry_count(db, &other_scope).await, 1);
 
-        let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(1);
-        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
+        let (started_sender, started_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
         let permit = cache.event_sender.clone().try_reserve_owned().expect("reserve stalled writer completion");
         assert_eq!(
             cache
@@ -662,6 +672,6 @@ mod tests {
             panic!("test writer should accept the injected panic job");
         }
 
-        tokio::time::timeout(Duration::from_secs(1), cache.close()).await.expect("cache close completes after writer panic");
+        time::timeout(Duration::from_secs(1), cache.close()).await.expect("cache close completes after writer panic");
     }
 }

@@ -1,5 +1,5 @@
 use std::{
-    assert_matches,
+    assert_matches, io,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     str::from_utf8,
@@ -13,9 +13,10 @@ use llsd::{Value, xml};
 use network::capabilities::Client;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener as AsyncTcpListener,
+    net,
     runtime::Runtime,
     sync::oneshot,
+    task::JoinHandle,
     time::timeout,
 };
 use url::Url;
@@ -241,7 +242,7 @@ fn landmark_folder_response(asset_count: usize) -> String {
 struct ConcurrentAssetServer {
     address: SocketAddr,
     first_batch: oneshot::Receiver<usize>,
-    worker: tokio::task::JoinHandle<(Vec<Vec<u8>>, usize)>,
+    worker: JoinHandle<(Vec<Vec<u8>>, usize)>,
 }
 
 impl ConcurrentAssetServer {
@@ -250,7 +251,7 @@ impl ConcurrentAssetServer {
     }
 
     async fn start_with_failure(folder_response: String, asset_count: usize, failed_asset_index: Option<usize>) -> Self {
-        let listener = AsyncTcpListener::bind("127.0.0.1:0").await.expect("bind local HTTP server");
+        let listener = net::TcpListener::bind("127.0.0.1:0").await.expect("bind local HTTP server");
         let address = listener.local_addr().expect("read local server address");
         let (first_batch_sender, first_batch) = oneshot::channel();
         let worker = tokio::spawn(async move {
@@ -357,22 +358,17 @@ fn write_response(stream: &mut TcpStream, body: &str, content_type: &str) {
     write_status_response(stream, "200 OK", body, content_type).expect("write local response");
 }
 
-fn write_status_response(stream: &mut TcpStream, status: &str, body: &str, content_type: &str) -> std::io::Result<()> {
+fn write_status_response(stream: &mut TcpStream, status: &str, body: &str, content_type: &str) -> io::Result<()> {
     let response =
         format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
     stream.write_all(response.as_bytes())
 }
 
-async fn write_async_response(stream: &mut tokio::net::TcpStream, body: &str, content_type: &str) -> std::io::Result<()> {
+async fn write_async_response(stream: &mut net::TcpStream, body: &str, content_type: &str) -> io::Result<()> {
     write_async_status_response(stream, "200 OK", body, content_type).await
 }
 
-async fn write_async_status_response(
-    stream: &mut tokio::net::TcpStream,
-    status: &str,
-    body: &str,
-    content_type: &str,
-) -> std::io::Result<()> {
+async fn write_async_status_response(stream: &mut net::TcpStream, status: &str, body: &str, content_type: &str) -> io::Result<()> {
     let response =
         format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
     stream.write_all(response.as_bytes()).await
@@ -441,7 +437,7 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
     }
 }
 
-async fn read_async_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+async fn read_async_request(stream: &mut net::TcpStream) -> Vec<u8> {
     let mut request = Vec::new();
     let mut chunk = [0; 4096];
     loop {

@@ -4,14 +4,13 @@ use std::{
     sync::Arc,
 };
 
-use ::storage::sqlite::SqliteReceipt;
-use ::storage::{
-    default_cache_dir,
-    sqlite::{MAX_BATCH_BYTES, MAX_BATCH_ROWS, MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError},
-};
 #[cfg(test)]
 use network::Grid;
-use rusqlite::{Connection, Error as RusqliteError, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use storage::{
+    default_cache_dir,
+    sqlite::{MAX_BATCH_BYTES, MAX_BATCH_ROWS, MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError, SqliteReceipt},
+};
 #[cfg(test)]
 use tokio::runtime::Handle;
 use uuid::Uuid;
@@ -186,7 +185,7 @@ pub(super) fn queue_scope_load(db: &SqliteDb, scope: CacheScope) -> Result<Sqlit
     })
 }
 
-fn load_entries(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<HashMap<u32, StoredEntry>, RusqliteError> {
+fn load_entries(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<HashMap<u32, StoredEntry>, rusqlite::Error> {
     let (row_count, bytes) = scope_stats(transaction, scope)?;
     if row_count > MAX_REGION_ENTRIES || bytes > MAX_REGION_BYTES {
         return Ok(HashMap::new());
@@ -224,7 +223,7 @@ fn load_entries(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<Has
     Ok(entries)
 }
 
-fn load_overrides(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<HashMap<u32, StoredOverride>, RusqliteError> {
+fn load_overrides(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<HashMap<u32, StoredOverride>, rusqlite::Error> {
     let (row_count, bytes) = scope_override_stats(transaction, scope)?;
     if row_count > MAX_REGION_OVERRIDES || bytes > MAX_REGION_OVERRIDE_BYTES {
         return Ok(HashMap::new());
@@ -284,7 +283,7 @@ fn write_entry_chunk(
     entries: &[EncodedEntry],
     start: usize,
     count: usize,
-) -> Result<(), RusqliteError> {
+) -> Result<(), rusqlite::Error> {
     for entry in entries.iter().skip(start).take(count) {
         transaction.execute(
             "INSERT INTO object_entries (grid_id, region_id, cache_id, local_id, crc, update_kind, update_flags, payload)
@@ -395,7 +394,7 @@ fn write_override_chunk(
     scope: &CacheScope,
     writes: &[OverrideWrite],
     last_used: i64,
-) -> Result<(), RusqliteError> {
+) -> Result<(), rusqlite::Error> {
     if writes.iter().any(|write| matches!(write, OverrideWrite::Upsert(..))) {
         upsert_scope(transaction, scope, last_used)?;
     }
@@ -449,7 +448,7 @@ fn write_override_chunk(
     remove_empty_scope(transaction, scope)
 }
 
-fn upsert_scope(transaction: &Transaction<'_>, scope: &CacheScope, last_used: i64) -> Result<(), RusqliteError> {
+fn upsert_scope(transaction: &Transaction<'_>, scope: &CacheScope, last_used: i64) -> Result<(), rusqlite::Error> {
     transaction.execute(
         "INSERT INTO region_scopes (grid_id, region_id, cache_id, last_used) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT (grid_id, region_id, cache_id) DO UPDATE SET last_used = MAX(last_used, excluded.last_used)",
@@ -458,7 +457,7 @@ fn upsert_scope(transaction: &Transaction<'_>, scope: &CacheScope, last_used: i6
     Ok(())
 }
 
-fn prune_scope(transaction: &Transaction<'_>, scope: &CacheScope, max_rows: usize, max_bytes: usize) -> Result<(), RusqliteError> {
+fn prune_scope(transaction: &Transaction<'_>, scope: &CacheScope, max_rows: usize, max_bytes: usize) -> Result<(), rusqlite::Error> {
     let (rows, bytes) = scope_stats(transaction, scope)?;
     if rows <= max_rows && bytes <= max_bytes {
         return Ok(());
@@ -483,7 +482,7 @@ fn prune_scope(transaction: &Transaction<'_>, scope: &CacheScope, max_rows: usiz
     Ok(())
 }
 
-fn prune_global_chunk(transaction: &Transaction<'_>) -> Result<(), RusqliteError> {
+fn prune_global_chunk(transaction: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     let (rows, bytes) = global_stats(transaction)?;
     let rows = i64::try_from(rows).unwrap_or(i64::MAX);
     let bytes = i64::try_from(bytes).unwrap_or(i64::MAX);
@@ -546,7 +545,7 @@ fn prune_global_chunk(transaction: &Transaction<'_>) -> Result<(), RusqliteError
     Ok(())
 }
 
-fn global_stats(transaction: &Transaction<'_>) -> Result<(usize, usize), RusqliteError> {
+fn global_stats(transaction: &Transaction<'_>) -> Result<(usize, usize), rusqlite::Error> {
     let (rows, bytes): (i64, i64) =
         transaction.query_row("SELECT entry_count, payload_bytes FROM object_cache_totals WHERE singleton = 1", [], |row| {
             Ok((row.get(0)?, row.get(1)?))
@@ -554,7 +553,7 @@ fn global_stats(transaction: &Transaction<'_>) -> Result<(usize, usize), Rusqlit
     Ok((usize::try_from(rows).unwrap_or(usize::MAX), usize::try_from(bytes).unwrap_or(usize::MAX)))
 }
 
-fn delete_scope_chunk(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(), RusqliteError> {
+fn delete_scope_chunk(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(), rusqlite::Error> {
     let mut statement = transaction.prepare(
         "SELECT local_id FROM object_entries WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3 ORDER BY local_id LIMIT 255",
     )?;
@@ -579,11 +578,11 @@ fn delete_scope_chunk(transaction: &Transaction<'_>, scope: &CacheScope) -> Resu
     Ok(())
 }
 
-fn remove_empty_scope(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(), RusqliteError> {
+fn remove_empty_scope(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(), rusqlite::Error> {
     remove_empty_scope_key(transaction, &scope.grid_id, scope.region_id.as_bytes(), scope.cache_id.as_bytes())
 }
 
-fn remove_empty_scope_key(transaction: &Transaction<'_>, grid_id: &str, region_id: &[u8], cache_id: &[u8]) -> Result<(), RusqliteError> {
+fn remove_empty_scope_key(transaction: &Transaction<'_>, grid_id: &str, region_id: &[u8], cache_id: &[u8]) -> Result<(), rusqlite::Error> {
     transaction.execute(
         "DELETE FROM region_scopes WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3
          AND NOT EXISTS (
@@ -599,7 +598,7 @@ fn remove_empty_scope_key(transaction: &Transaction<'_>, grid_id: &str, region_i
     Ok(())
 }
 
-fn scope_override_stats(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(usize, usize), RusqliteError> {
+fn scope_override_stats(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(usize, usize), rusqlite::Error> {
     let (rows, bytes): (i64, i64) = transaction.query_row(
         "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) FROM pbr_overrides
          WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3",
@@ -609,7 +608,7 @@ fn scope_override_stats(transaction: &Transaction<'_>, scope: &CacheScope) -> Re
     Ok((usize::try_from(rows).unwrap_or(usize::MAX), usize::try_from(bytes).unwrap_or(usize::MAX)))
 }
 
-fn scope_stats(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(usize, usize), RusqliteError> {
+fn scope_stats(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(usize, usize), rusqlite::Error> {
     let (rows, bytes): (i64, i64) = transaction.query_row(
         "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) FROM object_entries
          WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3",
@@ -621,8 +620,14 @@ fn scope_stats(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(usi
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
+    use storage::sqlite::RecoveryReason;
+
     use super::*;
-    use crate::session::object_cache::test_support::*;
+    use crate::session::object_cache::test_support::{
+        CACHE_ID, REGION_ID, SIMULATOR, cache_totals, cached_references, fixture_message, flush, open_cache, override_rows, vectors,
+    };
     #[test]
     fn damaged_schema_recreates_database() {
         for (case, foreign_version, damage) in [
@@ -654,7 +659,7 @@ mod tests {
 
             let (db, status) = open_at(&path).expect("recreate damaged database");
 
-            std::assert_matches!(status, OpenStatus::Recreated(::storage::sqlite::RecoveryReason::SchemaMismatch), "{case}");
+            assert_matches!(status, OpenStatus::Recreated(RecoveryReason::SchemaMismatch), "{case}");
             db.shutdown().expect("close recreated database");
             let connection = Connection::open(&path).expect("reopen recreated database");
             let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).expect("read schema version");

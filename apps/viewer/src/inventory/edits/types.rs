@@ -1,4 +1,4 @@
-use ::inventory::{CategoryKey, FolderType, InventoryNodeKey, ItemKey};
+use inventory::{CategoryKey, FolderType, InventoryNodeKey, ItemKey};
 use tokio::sync::oneshot;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -108,13 +108,16 @@ fn decode_terrain_patches(source: UpdateSource, data: &[u8], cancelled: &AtomicB
 
 #[cfg(test)]
 mod tests {
-    use crate::test_helpers::simulator_id;
     use futures::channel::oneshot;
     use protocol::messages::LayerData;
     use world::{OrderEvidence, Region};
 
     use super::*;
-    use crate::session::world::{SessionWorld, viewer_world_limits};
+    use crate::{
+        session::world::{SessionWorld, viewer_world_limits},
+        test_helpers,
+        test_helpers::simulator_id,
+    };
 
     fn source(region: Region, order: u32) -> UpdateSource {
         UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0)
@@ -130,7 +133,7 @@ mod tests {
 
     #[tokio::test]
     async fn ordered_jobs_cancel_safely() {
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         let mut work = TerrainDecodeQueue::default();
         let mut release = Vec::new();
         for order in 1..=MAX_TERRAIN_JOBS as u32 {

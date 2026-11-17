@@ -1,19 +1,21 @@
 use std::{
     collections::HashSet,
-    mem::size_of,
+    fmt::Display,
+    mem,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-use ::inventory::{
+use inventory::{
     Category, CategoryKey, ChangeSet, Inventory, InventoryCache, InventoryCacheOpenStatus, InventoryCacheRestore, InventorySnapshot,
 };
 use network::Grid;
 use tokio::{
     runtime::Handle,
     sync::{mpsc, oneshot},
+    task,
     task::JoinHandle,
 };
 use uuid::Uuid;
@@ -138,7 +140,7 @@ impl InventoryCacheSession {
         let (reclaimer_sender, mut reclaimer_receiver) = mpsc::channel(RECLAIMER_QUEUE_CAPACITY);
         let reclaimer_task = runtime.spawn(async move {
             while let Some(reclaim) = reclaimer_receiver.recv().await {
-                if let Err(error) = tokio::task::spawn_blocking(reclaim).await {
+                if let Err(error) = task::spawn_blocking(reclaim).await {
                     tracing::error!(%error, "inventory payload reclaimer failed");
                 }
             }
@@ -177,7 +179,7 @@ impl InventoryCacheSession {
         &mut self,
         runtime: &Handle,
         inventory: &Inventory,
-        open: impl FnOnce() -> Result<(InventoryCache, InventoryCacheOpenStatus), ::inventory::InventoryCacheError> + Send + 'static,
+        open: impl FnOnce() -> Result<(InventoryCache, InventoryCacheOpenStatus), inventory::InventoryCacheError> + Send + 'static,
     ) {
         if !matches!(&self.lifecycle, CacheLifecycle::Dormant) {
             return;
@@ -194,7 +196,7 @@ impl InventoryCacheSession {
         let sender = self.event_sender.clone();
         self.open_task = Some(runtime.spawn(async move {
             let mut disposal = Some(disposal);
-            let opened = tokio::task::spawn_blocking(open).await;
+            let opened = task::spawn_blocking(open).await;
             let event = match opened {
                 Ok(Ok((cache, status))) => {
                     if invalidate_cache && let Err(error) = cache.discard().await {
@@ -202,7 +204,7 @@ impl InventoryCacheSession {
                     } else {
                         match cache.load(&inventory).await {
                             Ok(load) => {
-                                let prepared = tokio::task::spawn_blocking(move || load.prepare_restore(&skeleton)).await;
+                                let prepared = task::spawn_blocking(move || load.prepare_restore(&skeleton)).await;
                                 match prepared {
                                     Ok(Ok(restore)) => InventoryCacheEvent::Ready {
                                         cache,
@@ -435,7 +437,7 @@ impl InventoryCacheSession {
         }
         self.clear_pending_writes();
         self.discard_restore();
-        let writer = match std::mem::replace(&mut self.lifecycle, CacheLifecycle::Disabled { writer: None }) {
+        let writer = match mem::replace(&mut self.lifecycle, CacheLifecycle::Disabled { writer: None }) {
             CacheLifecycle::Active { writer } | CacheLifecycle::Disabled { writer: Some(writer) } => Some(writer),
             CacheLifecycle::Dormant | CacheLifecycle::Opening { .. } | CacheLifecycle::Disabled { writer: None } => None,
         };
@@ -476,7 +478,7 @@ impl InventoryCacheSession {
         disposal: InventoryDisposalPermit,
         inventory: &mut Inventory,
     ) -> InventoryCacheEventOutcome {
-        let pending_writes = match std::mem::replace(&mut self.lifecycle, CacheLifecycle::Disabled { writer: None }) {
+        let pending_writes = match mem::replace(&mut self.lifecycle, CacheLifecycle::Disabled { writer: None }) {
             CacheLifecycle::Opening { pending_writes } => pending_writes,
             lifecycle => {
                 self.lifecycle = lifecycle;
@@ -547,7 +549,7 @@ impl InventoryCacheSession {
 
     fn clear_pending_writes(&mut self) {
         let pending_writes = match &mut self.lifecycle {
-            CacheLifecycle::Opening { pending_writes } => std::mem::take(pending_writes),
+            CacheLifecycle::Opening { pending_writes } => mem::take(pending_writes),
             CacheLifecycle::Dormant | CacheLifecycle::Active { .. } | CacheLifecycle::Disabled { .. } => Vec::new(),
         };
         self.reclaim_pending_writes(pending_writes);
@@ -572,7 +574,7 @@ impl InventoryCacheSession {
     }
 
     fn disable(&mut self) {
-        self.lifecycle = match std::mem::replace(&mut self.lifecycle, CacheLifecycle::Disabled { writer: None }) {
+        self.lifecycle = match mem::replace(&mut self.lifecycle, CacheLifecycle::Disabled { writer: None }) {
             CacheLifecycle::Dormant => CacheLifecycle::Disabled { writer: None },
             CacheLifecycle::Opening { pending_writes } => {
                 self.reclaim_pending_writes(pending_writes);
@@ -608,7 +610,7 @@ impl InventoryCacheSession {
         }));
     }
 
-    fn warn_once(&self, error: &impl std::fmt::Display) {
+    fn warn_once(&self, error: &impl Display) {
         if !self.warning_emitted.swap(true, Ordering::Relaxed) {
             tracing::warn!(%error, "inventory cache is unavailable for this session");
         }
@@ -621,7 +623,7 @@ impl InventoryCacheSession {
     }
 
     fn take_restore(&mut self) -> Option<PendingRestore> {
-        match std::mem::replace(&mut self.restore, RestoreLifecycle::Available) {
+        match mem::replace(&mut self.restore, RestoreLifecycle::Available) {
             RestoreLifecycle::Applying(restore) => Some(restore),
             lifecycle => {
                 self.restore = lifecycle;
@@ -674,7 +676,7 @@ fn start_cache_writer(runtime: &Handle, cache: InventoryCache, sender: mpsc::Unb
                         disposal.reclaim((changes, before, after));
                         break;
                     };
-                    let encoded = tokio::task::spawn_blocking(move || {
+                    let encoded = task::spawn_blocking(move || {
                         let result = current.submit_changeset(&changes, &before, &after);
                         (current, result)
                     })
@@ -721,7 +723,7 @@ fn start_cache_writer(runtime: &Handle, cache: InventoryCache, sender: mpsc::Unb
                         disposal.reclaim(snapshot);
                         break;
                     };
-                    let encoded = tokio::task::spawn_blocking(move || {
+                    let encoded = task::spawn_blocking(move || {
                         let result = current.submit_bootstrap(&snapshot);
                         (current, result)
                     })
@@ -788,15 +790,24 @@ fn start_cache_writer(runtime: &Handle, cache: InventoryCache, sender: mpsc::Unb
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, path::Path, sync::Arc};
+    use std::{
+        collections::HashSet,
+        fs,
+        path::Path,
+        sync::{Arc, mpsc as std_mpsc},
+        thread,
+        thread::ThreadId,
+    };
 
-    use ::inventory::{
+    use inventory::{
         AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryLimits, InventoryOwner, InventoryType, Item,
         ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
     };
     use tempfile::tempdir;
-    use tokio::runtime::Handle;
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::{
+        runtime::Handle,
+        sync::{mpsc, oneshot},
+    };
     use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
     use uuid::Uuid;
 
@@ -811,9 +822,9 @@ mod tests {
         version: ServerVersion,
         descendent_count: Option<u32>,
         children: Vec<InventoryChild>,
-    ) -> Result<::inventory::ChangeSet, ::inventory::InventoryError> {
+    ) -> Result<inventory::ChangeSet, inventory::InventoryError> {
         let prepared = inventory.snapshot().prepare_folder_fetch(folder, version, descendent_count, children)?;
-        let ::inventory::FolderFetchCommit::Applied(changes) = inventory.commit_folder_fetch(prepared)? else {
+        let inventory::FolderFetchCommit::Applied(changes) = inventory.commit_folder_fetch(prepared)? else {
             panic!("single-owner fetch preparation became stale before commit");
         };
         Ok(changes)
@@ -891,12 +902,12 @@ mod tests {
         owner: InventoryOwner,
         root: CategoryKey,
         inventory: &mut Inventory,
-    ) -> (InventoryCacheSession, std::sync::mpsc::Sender<()>) {
+    ) -> (InventoryCacheSession, std_mpsc::Sender<()>) {
         let runtime = Handle::current();
         let mut session = InventoryCacheSession::new(&runtime);
         let cache_root = cache_root.to_path_buf();
         let (opened_tx, opened_rx) = oneshot::channel();
-        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std_mpsc::channel();
         session.start_with_open(&runtime, inventory, move || {
             opened_tx.send(()).expect("open worker started");
             continue_rx.recv().expect("test releases cache open");
@@ -1008,7 +1019,7 @@ mod tests {
         let after_root = seeded.snapshot();
         cache.submit_changeset(&root_changes, &before, &after_root).expect("write root folder").wait().await.expect("root write completes");
         let before_child = seeded.snapshot();
-        let item_key = ItemKey::new(owner, utils::ItemId::new(uuid(111)));
+        let item_key = ItemKey::new(owner, ItemId::new(uuid(111)));
         let child_changes =
             apply_fetch(&mut seeded, child, ServerVersion::from_raw(4), Some(1), vec![InventoryChild::Item(item(owner, 111, child))])
                 .expect("complete nested folder");
@@ -1198,7 +1209,7 @@ mod tests {
     async fn failed_open_rejects_changes() {
         let directory = tempdir().expect("create inventory cache directory");
         let cache_file = directory.path().join("not-a-directory");
-        std::fs::write(&cache_file, b"file").expect("create invalid cache root");
+        fs::write(&cache_file, b"file").expect("create invalid cache root");
         let owner = InventoryOwner::new(uuid(46));
         let (mut inventory, root, _) = cache_skeleton(owner);
         let runtime = Handle::current();
@@ -1236,7 +1247,7 @@ mod tests {
         let mut session = InventoryCacheSession::new(&runtime);
         let cache_root = directory.path().to_path_buf();
         let (opened_tx, opened_rx) = oneshot::channel();
-        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std_mpsc::channel();
         session.start_with_open(&runtime, &inventory, move || {
             opened_tx.send(()).expect("open worker started");
             continue_rx.recv().expect("test releases cache open");
@@ -1352,16 +1363,16 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_reclaims_off_owner() {
-        struct DropThread(std::sync::mpsc::Sender<std::thread::ThreadId>);
+        struct DropThread(std_mpsc::Sender<ThreadId>);
 
         impl Drop for DropThread {
             fn drop(&mut self) {
-                self.0.send(std::thread::current().id()).expect("test waits for payload destruction");
+                self.0.send(thread::current().id()).expect("test waits for payload destruction");
             }
         }
 
-        let owner_thread = std::thread::current().id();
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let owner_thread = thread::current().id();
+        let (sender, receiver) = std_mpsc::channel();
         InventoryCacheSession::new(&Handle::current()).close_with_payload(DropThread(sender)).await;
 
         assert_ne!(receiver.recv().expect("shutdown awaits payload destruction"), owner_thread);

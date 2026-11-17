@@ -14,16 +14,14 @@ use std::{
 };
 
 use futures::channel::mpsc::{Receiver, Sender, channel};
-use render::Retirement;
-use render::scene;
-use tokio::runtime::Handle;
-use tokio::sync::watch;
-use winit::application::ApplicationHandler;
+use render::{Retirement, scene};
+use tokio::{runtime::Handle, sync::watch};
 #[cfg(target_os = "linux")]
 use winit::platform::wayland::EventLoopBuilderExtWayland;
 #[cfg(target_os = "windows")]
 use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::{
+    application::ApplicationHandler,
     event::{DeviceEvent, DeviceId, ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, NamedKey},
@@ -31,14 +29,18 @@ use winit::{
 };
 
 use self::window::{MAX_RECOVERIES, SceneWindow, SceneWindowError};
-use crate::{agent_movement::MovementObservation, scene_feed::SceneFeed, session::AgentMotionSample};
+use crate::{
+    agent_movement::MovementObservation,
+    scene_feed::{SceneFeed, SceneSources},
+    session::AgentMotionSample,
+};
 
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
 #[derive(Debug)]
 pub(crate) enum ViewportError {
     SceneWindow(SceneWindowError),
-    ScenePublication(render::scene::ApplyError),
+    ScenePublication(scene::ApplyError),
     WorkerStart(io::Error),
     WorkerStopped,
     WorkerUnavailable,
@@ -196,7 +198,7 @@ impl Viewport {
     pub(crate) fn connect_world(
         &self,
         generation: u64,
-        sources: crate::scene_feed::SceneSources,
+        sources: SceneSources,
         agent_id: uuid::Uuid,
         camera: watch::Sender<Option<scene::Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
@@ -452,7 +454,7 @@ impl ApplicationHandler for WindowApp {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{assert_matches, sync::Arc};
 
     use futures::channel::mpsc::channel;
 
@@ -471,9 +473,9 @@ mod tests {
         };
         app.events.try_send(ViewportEvent::Ready(1)).unwrap();
         app.request_chat(1);
-        std::assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Ready(1)));
+        assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Ready(1)));
         app.request_chat(1);
-        std::assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Chat(1)), "a rejected request must not suppress a later request");
+        assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Chat(1)), "a rejected request must not suppress a later request");
         app.request_chat(1);
         assert!(incoming.try_recv().is_err(), "an accepted request must coalesce until received");
     }

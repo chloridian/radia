@@ -5,6 +5,7 @@ use std::{
 };
 
 use network::{SimulatorId, capabilities::Client};
+use tracing::field;
 use utils::Summary;
 use world::{ApplyError, Entity};
 
@@ -37,8 +38,8 @@ impl MediaSummary {
             sample_simulator = sample.simulator_id.get(),
             sample_object = %sample.binding.object_id(),
             sample_local_id = sample.binding.address().local_id().get(),
-            last_rejection = self.last_rejection.map(tracing::field::display),
-            last_load_error = self.last_load_error.map(tracing::field::debug),
+            last_rejection = self.last_rejection.map(field::display),
+            last_load_error = self.last_load_error.map(field::debug),
             "object media summary"
         );
     }
@@ -324,6 +325,7 @@ impl ObjectMediaIntake {
 #[cfg(test)]
 mod tests {
     use std::{
+        future,
         future::{pending, ready},
         num::NonZeroU32,
     };
@@ -331,22 +333,24 @@ mod tests {
     use futures::{StreamExt, channel::oneshot, stream};
     use network::{Event, SimulatorId};
     use protocol::{lludp::Message::KillObject, messages::object::kill_object};
-    use tokio::runtime::Handle;
-
-    use crate::test_helpers::simulator_id;
+    use tokio::{runtime::Handle, time};
     use uuid::Uuid;
     use world::{Appearance, ApplyOutcome::Introduced, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, UpdateSource};
 
     use super::*;
-    use crate::session::coordinator::input::{self, select_drain_input};
-    use crate::session::coordinator::tests::apply_world_event;
-    use crate::session::coordinator::tests::simulator_message;
-    use crate::session::world::{SessionWorld, viewer_world_limits};
-    use crate::session::{
-        inbound::{ObjectBatch, ObjectOperation},
-        object_media::{FetchError, ObjectMediaFetcher, ObjectMediaTarget},
+    use crate::{
+        session::{
+            coordinator::{
+                input::{self, select_drain_input},
+                tests::{apply_world_event, simulator_message},
+            },
+            inbound::{ObjectBatch, ObjectOperation},
+            object_media::{FetchError, ObjectMediaFetcher, ObjectMediaTarget},
+            world::{SessionWorld, viewer_world_limits},
+        },
+        test_helpers::simulator_id,
+        world_reader::WorldReadHost,
     };
-    use crate::world_reader::WorldReadHost;
 
     fn object_media_target(world: &mut SessionWorld, simulator_id: SimulatorId, order: u32, version: u32) -> ObjectMediaTarget {
         let region = world.register_simulator(simulator_id, None).expect("register simulator");
@@ -424,7 +428,7 @@ mod tests {
             pending(),
             pending(),
             pending(),
-            ready(tokio::time::Instant::now()),
+            ready(time::Instant::now()),
             pending(),
             pending(),
         )
@@ -510,14 +514,14 @@ mod tests {
             while event_count < 128 {
                 match select_drain_input(
                     &mut reads,
-                    std::future::ready(Some(Event::SimulatorConnected { simulator_id, region_handle: None, endpoint })),
+                    ready(Some(Event::SimulatorConnected { simulator_id, region_handle: None, endpoint })),
                     media.next(),
-                    std::future::pending(),
-                    std::future::pending(),
-                    std::future::pending(),
-                    std::future::pending(),
-                    std::future::pending(),
-                    std::future::pending(),
+                    future::pending(),
+                    future::pending(),
+                    future::pending(),
+                    future::pending(),
+                    future::pending(),
+                    future::pending(),
                 )
                 .await
                 {

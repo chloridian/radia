@@ -4,8 +4,8 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-use ::inventory::InventorySnapshot;
 use futures::{channel::mpsc, stream::StreamExt};
+use inventory::InventorySnapshot;
 use network::{AgentSession, Grid, MfaChallenge};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use render::scene::Camera;
@@ -237,18 +237,23 @@ pub(crate) enum ViewerUpdate {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
+    use futures::executor;
     use network::PacketOrder::Ordered;
 
-    use crate::test_helpers::simulator_id;
-
-    use crate::session::coordinator::events::{SimulatorScope, decode_simulator_world_update, handle_simulator_message};
-    use crate::session::coordinator::tests::{chat_message, region_handshake};
-    use crate::session::{
-        ChatMessage,
-        world::{SessionWorld, viewer_world_limits},
-    };
-
     use super::*;
+    use crate::{
+        session::{
+            ChatMessage,
+            coordinator::{
+                events::{SimulatorScope, decode_simulator_world_update, handle_simulator_message},
+                tests::{chat_message, region_handshake},
+            },
+            world::{SessionWorld, viewer_world_limits},
+        },
+        test_helpers::simulator_id,
+    };
 
     #[test]
     fn updates_coalesce_within_bounds() {
@@ -260,7 +265,7 @@ mod tests {
             mailbox.publish(ViewerUpdate::ChatMessage(ChatMessage { from_name: format!("Agent {index}"), message: "Hello".into() }));
         }
 
-        let snapshot = futures::executor::block_on(receiver.next()).expect("presentation wake");
+        let snapshot = executor::block_on(receiver.next()).expect("presentation wake");
         assert_eq!(snapshot.generation, 7);
         assert_eq!(snapshot.region_name.as_deref(), Some("Region 999"));
         assert_eq!(snapshot.chat_messages.len(), MAX_PENDING_CHAT_MESSAGES);
@@ -279,7 +284,7 @@ mod tests {
         mailbox.publish(ViewerUpdate::Failed("connection closed".into()));
         mailbox.publish(ViewerUpdate::Ended);
 
-        let snapshot = futures::executor::block_on(receiver.next()).expect("failure wake");
+        let snapshot = executor::block_on(receiver.next()).expect("failure wake");
         assert!(snapshot.chat_messages.is_empty());
         assert_eq!(snapshot.session_end, Some(SessionEnd::Failed("connection closed".into())));
     }
@@ -293,18 +298,10 @@ mod tests {
         let address = "127.0.0.1:13000".parse().unwrap();
         for (order, name) in [(10, "Initial"), (20, "Renamed"), (15, "Stale")] {
             let message = region_handshake(name);
-            decode_simulator_world_update(
-                &mut world,
-                simulator,
-                order,
-                Ordered(u64::from(order)),
-                std::time::Instant::now(),
-                None,
-                &message,
-            );
+            decode_simulator_world_update(&mut world, simulator, order, Ordered(u64::from(order)), Instant::now(), None, &message);
             handle_simulator_message(SimulatorScope::Primary, address, &message, None, None, world.region_name(simulator), &mailbox);
         }
-        let snapshot = futures::executor::block_on(receiver.next()).expect("presentation wake");
+        let snapshot = executor::block_on(receiver.next()).expect("presentation wake");
         assert_eq!(snapshot.region_name.as_deref(), Some("Renamed"));
         assert_eq!(world.region_name(simulator), Some("Renamed"));
     }
@@ -337,7 +334,7 @@ mod tests {
             handle_simulator_message(SimulatorScope::Primary, source, &chat_message("Primary"), None, None, None, &mailbox);
         }
 
-        let snapshot = futures::executor::block_on(receiver.next()).expect("presentation wake");
+        let snapshot = executor::block_on(receiver.next()).expect("presentation wake");
         assert_eq!(snapshot.region_name.as_deref(), Some("Primary 99"));
         assert_eq!(snapshot.chat_messages.len(), MAX_PENDING_CHAT_MESSAGES);
         let names = snapshot.chat_messages.iter().map(|message| message.from_name.as_str()).collect::<Vec<_>>();

@@ -2,6 +2,7 @@ use std::future::Future;
 
 use futures::{FutureExt, pin_mut};
 use network::Event;
+use tokio::time::Instant;
 
 use crate::{
     inventory::InventoryFetchEvent,
@@ -46,7 +47,7 @@ where
     T: Future<Output = DecodedTerrain>,
     N: Future<Output = Option<Box<Completion>>>,
     C: Future<Output = ()> + Clone,
-    Q: Future<Output = tokio::time::Instant>,
+    Q: Future<Output = Instant>,
     R: Future<Output = RecoveryCompletion>,
     I: Future<Output = Option<InventoryFetchEvent>>,
 {
@@ -73,7 +74,7 @@ where
     T: Future<Output = DecodedTerrain>,
     N: Future<Output = Option<Box<Completion>>>,
     C: Future<Output = ()> + Clone,
-    Q: Future<Output = tokio::time::Instant>,
+    Q: Future<Output = Instant>,
     R: Future<Output = RecoveryCompletion>,
     I: Future<Output = Option<InventoryFetchEvent>>,
 {
@@ -134,7 +135,10 @@ where
 
 #[cfg(test)]
 mod inventory_intake_progress {
-    use std::future::{pending, ready};
+    use std::{
+        future::{pending, ready},
+        time,
+    };
 
     use futures::{
         FutureExt,
@@ -148,18 +152,22 @@ mod inventory_intake_progress {
     use tokio::{
         runtime::Handle,
         sync::{mpsc, oneshot},
-    };
-
-    use crate::{
-        inventory::InventoryFetchEvent,
-        session::coordinator::driver::{MAX_DEFERRED_INVENTORY_EVENTS, inventory_queue_is_full},
-        session::coordinator::events::WorldHandoff,
-        session::world::{SessionWorld, viewer_world_limits},
-        test_helpers::simulator_id,
-        world_reader::{MAX_INTAKE_TURNS, WorldReadHost},
+        time::Instant,
     };
 
     use super::{Input, OrdinaryInputTurn, select_drain_input_fair};
+    use crate::{
+        inventory::InventoryFetchEvent,
+        session::{
+            coordinator::{
+                driver::{MAX_DEFERRED_INVENTORY_EVENTS, inventory_queue_is_full},
+                events::WorldHandoff,
+            },
+            world::{SessionWorld, viewer_world_limits},
+        },
+        test_helpers::simulator_id,
+        world_reader::{MAX_INTAKE_TURNS, WorldReadHost},
+    };
 
     type Cancellation = Shared<BoxFuture<'static, ()>>;
 
@@ -248,7 +256,7 @@ mod inventory_intake_progress {
             source: "127.0.0.1:13000".parse().expect("test endpoint"),
             sequence: 1,
             packet_order: PacketOrder::Ordered(1),
-            received_at: std::time::Instant::now(),
+            received_at: time::Instant::now(),
             ping_delay: None,
             message: Message::RegionHandshake(RegionHandshake {
                 region_info1: RegionInfo1 { sim_name: "inventory-pressure".into(), ..RegionInfo1::default() },
@@ -345,7 +353,7 @@ mod inventory_intake_progress {
             pending(),
             pending(),
             idle_cancellation(),
-            ready(tokio::time::Instant::now()),
+            ready(Instant::now()),
             pending(),
             ready(Some(InventoryFetchEvent::BackgroundDone)),
             &mut turn,

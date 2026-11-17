@@ -1,18 +1,19 @@
 use std::{
+    assert_matches,
     collections::{HashMap, HashSet},
     fmt::Write as _,
     sync::Arc,
     time::Instant,
 };
 
-use ::inventory::{
-    AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryDelta, InventoryLimits, InventoryOwner,
-    InventoryType, Item, ItemKey, LinkResolution, MAX_FOLDER_FETCH_CHILDREN, MAX_INVENTORY_ITEMS, PermissionMask, Permissions, SaleInfo,
-    SaleType, ServerVersion,
-};
 use futures::{
     FutureExt,
     future::{BoxFuture, Shared},
+};
+use inventory::{
+    AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryDelta, InventoryLimits, InventoryOwner,
+    InventoryType, Item, ItemKey, LinkResolution, MAX_FOLDER_FETCH_CHILDREN, MAX_INVENTORY_ITEMS, PermissionMask, Permissions, SaleInfo,
+    SaleType, ServerVersion,
 };
 use llsd::{Map, Value, xml};
 use network::capabilities::{CapabilityUrl, Client};
@@ -28,16 +29,22 @@ use super::{
     BACKGROUND_CONCURRENCY, ForegroundRequest, InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequests, InventoryLoadingStatus,
     MAX_AIS_DEPTH, REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, run_scheduler,
 };
-use crate::inventory::fetch::{
-    FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais, legacy,
+use crate::{
+    inventory::{
+        InventoryEditController,
+        fetch::{
+            FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES,
+            ais, legacy,
+        },
+        test_support::{LoopbackPeer, TEST_TIMEOUT},
+    },
+    session::{FolderFetchApply, apply_inventory_fetch},
 };
-use crate::inventory::test_support::{LoopbackPeer, TEST_TIMEOUT};
-use crate::session::{FolderFetchApply, apply_inventory_fetch};
 
 type SchedulerTask = (
     InventoryFetchRequests,
     mpsc::Receiver<InventoryFetchEvent>,
-    watch::Sender<Option<::inventory::InventorySnapshot>>,
+    watch::Sender<Option<inventory::InventorySnapshot>>,
     JoinHandle<()>,
     oneshot::Sender<()>,
     oneshot::Sender<()>,
@@ -311,7 +318,7 @@ fn legacy_folder_response(folder: CategoryKey, descendent_count: i32, items: Vec
     xml::to_vec(&response).expect("encode legacy folder fixture")
 }
 
-fn scheduler(client: Client, snapshot: ::inventory::InventorySnapshot) -> SchedulerTask {
+fn scheduler(client: Client, snapshot: inventory::InventorySnapshot) -> SchedulerTask {
     let (request_sender, requests_rx) = mpsc::channel(REQUEST_CAPACITY);
     let (events_tx, events_rx) = mpsc::channel(RESULT_CAPACITY);
     let (model_tx, model_rx) = watch::channel(Some(snapshot.clone()));
@@ -332,7 +339,7 @@ fn fetch_handle(requests: InventoryFetchRequests) -> InventoryFetchHandle {
     InventoryFetchHandle {
         requests,
         status: watch::channel(InventoryLoadingStatus::default()).1,
-        edits: crate::inventory::InventoryEditController::new().handle(),
+        edits: InventoryEditController::new().handle(),
     }
 }
 
@@ -352,10 +359,10 @@ fn take_folder_event(event: InventoryFetchEvent, expected: CategoryKey) -> (Fold
 
 fn apply_and_acknowledge(
     inventory: &mut Inventory,
-    model: &watch::Sender<Option<::inventory::InventorySnapshot>>,
+    model: &watch::Sender<Option<inventory::InventorySnapshot>>,
     fetch: FolderFetch,
     applied: oneshot::Sender<FolderApplyOutcome>,
-) -> Result<FolderFetchApply, ::inventory::InventoryError> {
+) -> Result<FolderFetchApply, inventory::InventoryError> {
     let result = apply_inventory_fetch(inventory, fetch);
     let outcome = match &result {
         Ok(FolderFetchApply::Applied(_)) => {
@@ -595,8 +602,8 @@ async fn legacy_mapping_omits_auxiliary_targets() {
     let mut inventory = Inventory::new(category(root, None), None, InventoryLimits::default()).expect("valid inventory root");
     inventory.upsert_category(category(source, Some(root))).expect("add source folder");
     inventory.upsert_category(category(target_parent, Some(root))).expect("add target parent");
-    let target_key = ItemKey::new(owner, utils::ItemId::new(target_id));
-    let sibling_key = ItemKey::new(owner, utils::ItemId::new(Uuid::from_u128(15)));
+    let target_key = ItemKey::new(owner, ItemId::new(target_id));
+    let sibling_key = ItemKey::new(owner, ItemId::new(Uuid::from_u128(15)));
     inventory.upsert_item(item(target_key, target_parent, "existing target", "before fetch", 0)).expect("add existing link target");
     inventory.upsert_item(item(sibling_key, target_parent, "target sibling", "keep sibling", 0)).expect("add target sibling");
     let FolderFetchApply::Applied(_) = apply_inventory_fetch(&mut inventory, fetch).expect("apply direct folder children") else {
@@ -604,11 +611,11 @@ async fn legacy_mapping_omits_auxiliary_targets() {
     };
     let snapshot = inventory.snapshot();
     assert!(snapshot.is_complete(source));
-    let link_key = ItemKey::new(owner, utils::ItemId::new(link_id));
+    let link_key = ItemKey::new(owner, ItemId::new(link_id));
     assert_eq!(snapshot.item(link_key).map(|item| item.parent), Some(source));
     assert_eq!(
         snapshot.link_resolution(link_key),
-        Some(LinkResolution::Resolved(::inventory::InventoryNodeKey::new(owner, ::inventory::InventoryNodeId::Item(target_key.id()),)))
+        Some(LinkResolution::Resolved(inventory::InventoryNodeKey::new(owner, inventory::InventoryNodeId::Item(target_key.id()),)))
     );
     assert_eq!(snapshot.item(target_key).map(|item| item.parent), Some(target_parent));
     assert_eq!(snapshot.item(target_key).map(|item| item.name.as_ref()), Some("existing target"));
@@ -645,7 +652,7 @@ async fn captured_listings_complete_foreground_fetches() {
 
         let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
         peer.grant(&[("FetchInventoryDescendents2", "/legacy")]).await;
-        std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+        assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
 
         for folder in [source, target_parent] {
             let mut updated = inventory.snapshot().category(folder).expect("folder exists").clone();
@@ -714,7 +721,7 @@ async fn captured_listings_complete_foreground_fetches() {
         assert_eq!(snapshot.item(target_key).map(|item| item.parent), Some(target_parent), "fixture: {fixture}");
         assert_eq!(
             snapshot.link_resolution(link_key),
-            Some(LinkResolution::Resolved(::inventory::InventoryNodeKey::new(owner, ::inventory::InventoryNodeId::Item(target_key.id()),))),
+            Some(LinkResolution::Resolved(inventory::InventoryNodeKey::new(owner, inventory::InventoryNodeId::Item(target_key.id()),))),
             "fixture: {fixture}"
         );
 
@@ -752,7 +759,7 @@ async fn foreground_aux_target_resolves_later() {
 
     let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
     peer.grant(&[("FetchInventoryDescendents2", "/legacy")]).await;
-    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+    assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
 
     for folder in [source, target_parent] {
         let mut updated = inventory.snapshot().category(folder).expect("folder exists").clone();
@@ -786,8 +793,8 @@ async fn foreground_aux_target_resolves_later() {
     assert_eq!(fetch.children.len(), 1);
     apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply direct link without auxiliary target");
 
-    let link_key = ItemKey::new(owner, utils::ItemId::new(link_id));
-    let target_key = ItemKey::new(owner, utils::ItemId::new(target_id));
+    let link_key = ItemKey::new(owner, ItemId::new(link_id));
+    let target_key = ItemKey::new(owner, ItemId::new(target_id));
     assert_eq!(source_completion.await.expect("source fetch reaches a terminal outcome"), InventoryFetchOutcome::Failed);
     assert!(!inventory.snapshot().is_complete(source));
     assert!(inventory.snapshot().item(target_key).is_none());
@@ -815,7 +822,7 @@ async fn foreground_aux_target_resolves_later() {
     assert_eq!(inventory.snapshot().item(target_key).map(|item| item.parent), Some(target_parent));
     assert_eq!(
         inventory.snapshot().link_resolution(link_key),
-        Some(LinkResolution::Resolved(::inventory::InventoryNodeKey::new(owner, ::inventory::InventoryNodeId::Item(target_key.id()),)))
+        Some(LinkResolution::Resolved(inventory::InventoryNodeKey::new(owner, inventory::InventoryNodeId::Item(target_key.id()),)))
     );
 
     let source_retry = handle.request_folder(source).expect("retry incomplete source folder");
@@ -939,7 +946,7 @@ async fn depth_zero_403_too_large() {
         request.respond(403, "").await;
     });
 
-    std::assert_matches!(fetch_ais(&client, &capability, root, 0).await, Err(InventoryFetchError::FolderTooLarge));
+    assert_matches!(fetch_ais(&client, &capability, root, 0).await, Err(InventoryFetchError::FolderTooLarge));
     responder.await.expect("peer responder");
 }
 
@@ -1004,7 +1011,7 @@ async fn missing_folder_keeps_walk_retryable() {
         match next_event(&mut events).await {
             InventoryFetchEvent::Failed { folder, error } => {
                 assert_eq!(folder, missing);
-                std::assert_matches!(error, InventoryFetchError::RequestFailed);
+                assert_matches!(error, InventoryFetchError::RequestFailed);
                 missing_reported = true;
             }
             InventoryFetchEvent::Folder { fetch, applied } => {
@@ -1021,8 +1028,7 @@ async fn missing_folder_keeps_walk_retryable() {
     assert!(!inventory.snapshot().is_complete(missing));
 
     let (_status_sender, status) = watch::channel(InventoryLoadingStatus::default());
-    let handle =
-        InventoryFetchHandle { requests: requests.clone(), status, edits: crate::inventory::InventoryEditController::new().handle() };
+    let handle = InventoryFetchHandle { requests: requests.clone(), status, edits: InventoryEditController::new().handle() };
     for _ in 0..2 {
         let completion = handle.request_folder(missing).expect("queue folder retry");
         let retry = peer.next().await;
@@ -1031,7 +1037,7 @@ async fn missing_folder_keeps_walk_retryable() {
         match next_event(&mut events).await {
             InventoryFetchEvent::Failed { folder, error } => {
                 assert_eq!(folder, missing);
-                std::assert_matches!(error, InventoryFetchError::RequestFailed);
+                assert_matches!(error, InventoryFetchError::RequestFailed);
             }
             event => panic!("expected failed folder retry, received {event:?}"),
         }
@@ -1079,12 +1085,11 @@ async fn stale_response_requeues_folder() {
         panic!("expected initial background failure");
     };
     assert_eq!(folder, root);
-    std::assert_matches!(error, InventoryFetchError::RequestFailed);
-    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+    assert_matches!(error, InventoryFetchError::RequestFailed);
+    assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
 
     let (_status_sender, status) = watch::channel(InventoryLoadingStatus::default());
-    let handle =
-        InventoryFetchHandle { requests: requests.clone(), status, edits: crate::inventory::InventoryEditController::new().handle() };
+    let handle = InventoryFetchHandle { requests: requests.clone(), status, edits: InventoryEditController::new().handle() };
     let completion = handle.request_folder(root).expect("queue foreground retry");
     let request = peer.next().await;
     assert_eq!(request.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));
@@ -1105,7 +1110,7 @@ async fn stale_response_requeues_folder() {
         panic!("live update should make the response stale");
     };
     assert_eq!(completion.await.expect("foreground outcome delivered"), InventoryFetchOutcome::Failed);
-    assert!(inventory.snapshot().item(::inventory::ItemKey::new(owner, utils::ItemId::new(Uuid::from_u128(44_000)))).is_none());
+    assert!(inventory.snapshot().item(ItemKey::new(owner, ItemId::new(Uuid::from_u128(44_000)))).is_none());
     assert_eq!(inventory.snapshot().category(root).map(|category| category.server_version), Some(ServerVersion::from_raw(8)));
     assert!(!inventory.snapshot().is_complete(root));
 
@@ -1116,7 +1121,7 @@ async fn stale_response_requeues_folder() {
     let FolderFetchApply::Applied(_) = apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply retry") else {
         panic!("retry response should apply");
     };
-    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+    assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
     assert!(inventory.snapshot().is_complete(root));
 
     drop(handle);
@@ -1166,7 +1171,7 @@ async fn unrelated_change_keeps_fetch_fresh() {
     };
     assert!(inventory.snapshot().is_complete(root));
     assert_eq!(inventory.snapshot().child_count(root), 1);
-    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+    assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
 
     drop(requests);
     stop.send(()).expect("stop scheduler");
@@ -1223,7 +1228,7 @@ async fn parent_update_stales_child() {
     else {
         panic!("parent update should stale the recursive child response");
     };
-    assert!(inventory.snapshot().item(::inventory::ItemKey::new(owner, utils::ItemId::new(item_id))).is_none());
+    assert!(inventory.snapshot().item(ItemKey::new(owner, ItemId::new(item_id))).is_none());
 
     let retry = peer.next().await;
     assert_eq!(retry.path, format!("/ais/category/{}/children?depth=0", child.id().uuid()));
@@ -1235,8 +1240,8 @@ async fn parent_update_stales_child() {
         panic!("child refetch should apply");
     };
     assert!(inventory.snapshot().is_complete(child));
-    assert!(inventory.snapshot().item(::inventory::ItemKey::new(owner, utils::ItemId::new(item_id))).is_some());
-    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+    assert!(inventory.snapshot().item(ItemKey::new(owner, ItemId::new(item_id))).is_some());
+    assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
 
     drop(requests);
     stop.send(()).expect("stop scheduler");
@@ -1260,7 +1265,7 @@ async fn rejected_folder_retries() {
         panic!("expected first folder response to fail validation");
     };
     assert_eq!(folder, root);
-    std::assert_matches!(error, InventoryFetchError::InvalidResponse);
+    assert_matches!(error, InventoryFetchError::InvalidResponse);
     assert!(!inventory.snapshot().is_complete(root));
 
     requests.sender.send(ForegroundRequest::background(root)).await.expect("queue retry after rejected folder response");
@@ -1298,19 +1303,16 @@ async fn refetch_signal_fetches_complete_folder() {
 
     let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
     peer.grant(&[("InventoryAPIv3", "/ais")]).await;
-    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+    assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
 
     let changes = inventory
         .apply_delta(InventoryDelta { updated_category_versions: vec![(root, ServerVersion::from_raw(0))], ..InventoryDelta::default() })
         .expect("older live version requests a refetch");
     assert_eq!(changes.refetch_categories, [root]);
     model.send_replace(Some(inventory.snapshot()));
-    let (_status, status_receiver) = tokio::sync::watch::channel(InventoryLoadingStatus::default());
-    let handle = InventoryFetchHandle {
-        requests: requests.clone(),
-        status: status_receiver,
-        edits: crate::inventory::InventoryEditController::new().handle(),
-    };
+    let (_status, status_receiver) = watch::channel(InventoryLoadingStatus::default());
+    let handle =
+        InventoryFetchHandle { requests: requests.clone(), status: status_receiver, edits: InventoryEditController::new().handle() };
     handle.refetch_folder(root).expect("queue live-update refetch");
     let request = peer.next().await;
     assert_eq!(request.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));
@@ -1374,7 +1376,7 @@ async fn parent_metadata_requeues_child() {
     let (fetch, applied) = take_folder_event(next_event(&mut events).await, child);
     apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply child retry");
     assert!(inventory.snapshot().is_complete(child));
-    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+    assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
 
     drop(requests);
     stop.send(()).expect("stop scheduler after child retry");
@@ -1417,7 +1419,7 @@ async fn foreground_preempts_background() {
     resumed_background.respond(200, empty_folder_response(second, 2)).await;
     let (fetch, applied) = take_folder_event(next_event(&mut events).await, second);
     apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply resumed background response");
-    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+    assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
 
     drop(requests);
     stop.send(()).expect("stop foreground scheduler");
@@ -1500,7 +1502,7 @@ async fn huge_inventory_stays_bounded() {
         };
         applied_folders.insert(folder);
     }
-    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+    assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
     let snapshot = inventory.snapshot();
     assert_eq!(snapshot.items().count(), ITEMS_PER_FOLDER * 2);
     assert_eq!(snapshot.categories().count(), 3);
@@ -1657,13 +1659,13 @@ async fn owner_refresh_reconciles_deep_folders() {
 
     let (requests, mut events, model, task, _cancel, stop) = scheduler(client, initial);
     peer.grant(&[("InventoryAPIv3", "/ais"), ("LibraryAPIv3", "/ais")]).await;
-    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+    assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
     inventory.invalidate_all_owners().expect("invalidate personal and Library contents");
     model.send_replace(Some(inventory.snapshot()));
     let handle = InventoryFetchHandle {
         requests: requests.clone(),
         status: watch::channel(InventoryLoadingStatus::default()).1,
-        edits: crate::inventory::InventoryEditController::new().handle(),
+        edits: InventoryEditController::new().handle(),
     };
     handle.refetch_incomplete().expect("request bounded owner refresh");
 

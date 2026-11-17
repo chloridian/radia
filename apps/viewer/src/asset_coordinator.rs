@@ -1,6 +1,8 @@
 use std::{
+    cmp::Reverse,
     collections::{HashMap, VecDeque},
     future::pending,
+    ops::Range,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, AtomicU8, Ordering},
@@ -12,17 +14,18 @@ use assets::{
     AdmissionError, Budget, CacheReadCompletion, DecodeInput, Demand, Failure, FetchJob, FetchResponse, Kind, LoadCompletion, LoadJob,
     MAX_RETRY_AFTER, MemoryStats, Priority, Request, Resource, Route, Store,
     cache::{AssetCache, AssetCacheStats, CacheWrite},
-    legacy_request, split_legacy_response,
+    legacy_request,
+    mesh::{MAX_MESH_HEADER_BYTES, MESH_HEADER_BYTES, MeshLodRequest, header_needs_more},
+    split_legacy_response,
 };
 use futures::{FutureExt, StreamExt, channel::oneshot, pin_mut, stream::FuturesUnordered};
 use network::{
     Error,
     capabilities::{CapabilityUrl, Client, ContentRange, HttpErrorKind, RangeResponse, RedirectPolicy},
 };
-use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, watch};
 use tokio::{
     runtime::Handle,
+    sync::{mpsc, mpsc::error::TrySendError, watch},
     task::{AbortHandle, JoinError, JoinHandle},
     time,
 };
@@ -103,8 +106,8 @@ impl CapabilityTransport {
         if force_full {
             return self.fetch_mesh_full(url, limit, false).await;
         }
-        let max_header = u64::try_from(assets::mesh::MAX_MESH_HEADER_BYTES).map_err(|_| Failure::TooLarge)?;
-        let mut range_end = u64::try_from(assets::mesh::MESH_HEADER_BYTES).map_err(|_| Failure::TooLarge)?;
+        let max_header = u64::try_from(MAX_MESH_HEADER_BYTES).map_err(|_| Failure::TooLarge)?;
+        let mut range_end = u64::try_from(MESH_HEADER_BYTES).map_err(|_| Failure::TooLarge)?;
         loop {
             let response = self
                 .client
@@ -126,7 +129,7 @@ impl CapabilityTransport {
             {
                 return Err(Failure::MalformedBlock);
             }
-            if assets::mesh::header_needs_more(&bytes) {
+            if header_needs_more(&bytes) {
                 if expected_end == total {
                     return Err(Failure::MalformedBlock);
                 }
@@ -154,7 +157,7 @@ impl CapabilityTransport {
     async fn fetch_mesh_lod(
         &self,
         url: &CapabilityUrl,
-        block: assets::mesh::MeshLodRequest,
+        block: MeshLodRequest,
         limit: usize,
         force_full: bool,
     ) -> Result<FetchResponse, Failure> {
@@ -288,7 +291,7 @@ async fn request_grant(client: &Client, name: &str, kind: Kind) -> Result<Capabi
     grants.remove(name).ok_or(Failure::MissingCapability)
 }
 
-fn content_range_matches(content_range: ContentRange, requested: &std::ops::Range<u64>, total: u64, body_len: usize) -> bool {
+fn content_range_matches(content_range: ContentRange, requested: &Range<u64>, total: u64, body_len: usize) -> bool {
     let Some(expected_length) = requested.end.checked_sub(requested.start) else {
         return false;
     };
@@ -307,7 +310,7 @@ pub enum RequestError {
 
 struct DemandRequest {
     region: Region,
-    resource: assets::Request,
+    resource: Request,
     priority: Priority,
     importance: u16,
     reply: oneshot::Sender<Result<Option<Demand>, RequestError>>,
@@ -337,7 +340,7 @@ impl AssetHandle {
     pub async fn request_with_importance(
         &self,
         region: Region,
-        resource: assets::Request,
+        resource: Request,
         priority: Priority,
         importance: u16,
     ) -> Result<Demand, RequestError> {
@@ -354,7 +357,7 @@ impl AssetHandle {
     async fn request_once(
         &self,
         region: Region,
-        resource: assets::Request,
+        resource: Request,
         priority: Priority,
         importance: u16,
     ) -> Result<Option<Demand>, RequestError> {
@@ -370,7 +373,7 @@ impl AssetHandle {
         let response = response.fuse();
         let deadline = {
             let _entered = self.runtime.enter();
-            tokio::time::sleep(Duration::from_secs(1))
+            time::sleep(Duration::from_secs(1))
         }
         .fuse();
         pin_mut!(response, deadline);
@@ -626,7 +629,7 @@ async fn run(
         while let Some(job) = fetches.pop_front() {
             spawn_fetch(job, &transports, &runtime, &mut jobs);
         }
-        waiting.make_contiguous().sort_by_key(|input| std::cmp::Reverse(store.priority(input)));
+        waiting.make_contiguous().sort_by_key(|input| Reverse(store.priority(input)));
         for _ in 0..waiting.len() {
             let input = waiting.pop_front().expect("queued decode input");
             if input.is_cancelled() {
@@ -664,7 +667,7 @@ async fn run(
             let delay = store.next_deadline(now).map(|at| at.saturating_duration_since(now));
             let timer = async {
                 match delay {
-                    Some(delay) => tokio::time::sleep(delay).await,
+                    Some(delay) => time::sleep(delay).await,
                     None => pending().await,
                 }
             }
@@ -803,23 +806,31 @@ fn spawn_cache_writes(writes: Vec<CacheWrite>, runtime: &Handle, jobs: &mut Futu
 mod tests {
     use std::{
         assert_matches,
-        sync::{Arc, atomic::AtomicUsize},
+        sync::{Arc, atomic::AtomicUsize, mpsc as std_mpsc},
+        task::Poll,
         time::Instant,
     };
 
-    use assets::{Budget, LoadJob, Priority, Store};
+    use assets::{
+        Budget, Content, LoadJob, MaterialDescription, PbrAlphaMode, Priority, Status, Store,
+        cache::AssetLookup,
+        mesh::{LodGeometry, MAX_MESH_HEADER_BYTES, MESH_HEADER_BYTES, MeshLod, MeshLodRequest, decode_header},
+    };
     use futures::future::join_all;
     use llsd::{Value, binary, xml};
     use tempfile::tempdir;
     use test_support::{
-        http_peer::LoopbackPeer as Peer,
+        http_peer::LoopbackPeer,
+        mesh,
         texture::{RGBA_J2C, RGBA_RAW},
     };
+    use tokio::task;
     use url::Url;
     use utils::AssetId;
     use uuid::Uuid;
 
     use super::*;
+    use crate::test_helpers;
 
     fn grants(base: &Url) -> Vec<u8> {
         xml::to_vec(&Value::Map(
@@ -900,8 +911,8 @@ mod tests {
         legacy_response(&ids.iter().map(|&id| (id, material(id))).collect::<Vec<_>>())
     }
 
-    fn resource(kind: Kind) -> assets::Resource {
-        assets::Resource { id: AssetId::new(Uuid::from_u128(1)), kind }
+    fn resource(kind: Kind) -> Resource {
+        Resource { id: AssetId::new(Uuid::from_u128(1)), kind }
     }
 
     fn mesh_fixture_integer(value: i32) -> Vec<u8> {
@@ -948,7 +959,7 @@ mod tests {
         vec![0x78, 0x01, 0x01, 0x06, 0x00, 0xf9, 0xff, 0x5b, 0x00, 0x00, 0x00, 0x00, 0x5d, 0x02, 0x85, 0x00, 0xb9]
     }
 
-    fn mesh_fixture_lod_request(id: AssetId) -> assets::mesh::MeshLodRequest {
+    fn mesh_fixture_lod_request(id: AssetId) -> MeshLodRequest {
         let mut bytes = b"<?llsd/binary?>\n".to_vec();
         bytes.extend(mesh_fixture_map(&[
             ("version", mesh_fixture_integer(1)),
@@ -960,7 +971,7 @@ mod tests {
             ("skin", mesh_fixture_block_entry(-1, 0)),
         ]));
         let total = u64::try_from(bytes.len() + 1).unwrap();
-        assets::mesh::decode_header(&bytes, total).unwrap().lod(id, assets::mesh::MeshLod::Low).unwrap()
+        decode_header(&bytes, total).unwrap().lod(id, MeshLod::Low).unwrap()
     }
 
     fn mesh_fixture_asset() -> (Vec<u8>, Vec<u8>, usize) {
@@ -1006,7 +1017,7 @@ mod tests {
     async fn adapter_builds_kind_requests() {
         let legacy = Value::Map([("Name".into(), Value::String("legacy".into()))].into());
         let expected_legacy = binary::to_vec(&legacy).unwrap();
-        let peer = Peer::new(4, move |index, request, base| {
+        let peer = LoopbackPeer::new(4, move |index, request, base| {
             let header = String::from_utf8_lossy(request);
             match index {
                 0 => {
@@ -1039,7 +1050,7 @@ mod tests {
             (Kind::PbrMaterial, b"pbr".as_slice()),
             (Kind::LegacyMaterial, expected_legacy.as_slice()),
         ] {
-            let demand = store.request(route, assets::Request::new(resource(kind)), Priority::Visible, Instant::now()).unwrap();
+            let demand = store.request(route, Request::new(resource(kind)), Priority::Visible, Instant::now()).unwrap();
             let asset_job = store.next_job(Instant::now()).unwrap();
             let LoadJob::Fetch(fetch) = &asset_job else { panic!("new request must start with a fetch") };
             let result = transport.fetch(fetch).await.unwrap();
@@ -1142,7 +1153,7 @@ mod tests {
     async fn header_range_accepts_full_fallback() {
         let asset = b"full mesh representation".to_vec();
         let response_asset = asset.clone();
-        let peer = Peer::new_with_headers(2, move |index, request, base| match index {
+        let peer = LoopbackPeer::new_with_headers(2, move |index, request, base| match index {
             0 => (200, Vec::new(), grants(base)),
             1 => {
                 let request = String::from_utf8_lossy(request).to_ascii_lowercase();
@@ -1169,11 +1180,11 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_header_retries_full() {
-        let asset = test_support::mesh::asset_with_seeded_lod_vertices(&[(0, 30_000)], 1, 0x89ab_cdef);
-        assert!(asset.len() > assets::mesh::MAX_MESH_HEADER_BYTES);
+        let asset = mesh::asset_with_seeded_lod_vertices(&[(0, 30_000)], 1, 0x89ab_cdef);
+        assert!(asset.len() > MAX_MESH_HEADER_BYTES);
         let range_asset = asset.clone();
         let retry_asset = asset.clone();
-        let peer = Peer::new_with_headers(3, move |index, request, base| match index {
+        let peer = LoopbackPeer::new_with_headers(3, move |index, request, base| match index {
             0 => (200, Vec::new(), grants(base)),
             1 => {
                 let request = String::from_utf8_lossy(request).to_ascii_lowercase();
@@ -1196,18 +1207,18 @@ mod tests {
             Budget::default(),
             None,
         );
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         let id = resource(Kind::Mesh).id;
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut demand = handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 1).await.unwrap();
         loop {
             match demand.status() {
-                assets::Status::Ready(assets::Content::MeshHeader(header)) => {
+                Status::Ready(Content::MeshHeader(header)) => {
                     assert_eq!(header.asset_length(), u64::try_from(asset.len()).unwrap());
                     break;
                 }
-                assets::Status::Failed { failure, .. } => panic!("unexpected mesh header failure: {failure:?}"),
+                Status::Failed { failure, .. } => panic!("unexpected mesh header failure: {failure:?}"),
                 _ => {
                     demand.changed().await;
                 }
@@ -1220,8 +1231,8 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_headers_use_reserved_limits() {
-        let body = vec![0; assets::mesh::MAX_MESH_HEADER_BYTES + 1];
-        let peer = Peer::new_parallel(std::time::Duration::ZERO, move |request, base| {
+        let body = vec![0; MAX_MESH_HEADER_BYTES + 1];
+        let peer = LoopbackPeer::new_parallel(Duration::ZERO, move |request, base| {
             if String::from_utf8_lossy(request).starts_with("POST /seed") {
                 (200, Vec::new(), grants(base))
             } else {
@@ -1244,11 +1255,11 @@ mod tests {
         let mut jobs = Vec::new();
         while let Some(job) = store.next_job(now) {
             let LoadJob::Fetch(fetch) = job else { panic!("uncached mesh headers use network fetches") };
-            assert_eq!(fetch.response_limit(), assets::mesh::MAX_MESH_HEADER_BYTES);
+            assert_eq!(fetch.response_limit(), MAX_MESH_HEADER_BYTES);
             jobs.push(fetch);
         }
         assert_eq!(jobs.len(), 32);
-        let reserved_bytes = jobs.iter().map(assets::FetchJob::response_limit).sum::<usize>();
+        let reserved_bytes = jobs.iter().map(FetchJob::response_limit).sum::<usize>();
         assert_eq!(budget.stats().charged_bytes, reserved_bytes);
         assert!(reserved_bytes <= assets::ASSET_WORK_BYTES);
         for response in join_all(jobs.iter().map(|job| transport.fetch(job))).await {
@@ -1260,7 +1271,7 @@ mod tests {
         drop(store);
         let (requests, response_bytes) = peer.finish_stats();
         assert_eq!(requests.len(), 33);
-        assert!(response_bytes <= u64::try_from(33 * (assets::mesh::MAX_MESH_HEADER_BYTES + 1)).unwrap());
+        assert!(response_bytes <= u64::try_from(33 * (MAX_MESH_HEADER_BYTES + 1)).unwrap());
     }
 
     #[tokio::test]
@@ -1269,7 +1280,7 @@ mod tests {
         let block = mesh_fixture_lod_request(id);
         let asset_length = block.asset_length();
         let range = block.range();
-        let peer = Peer::new_with_headers(2, move |index, request, base| match index {
+        let peer = LoopbackPeer::new_with_headers(2, move |index, request, base| match index {
             0 => (200, Vec::new(), grants(base)),
             1 => {
                 let request = String::from_utf8_lossy(request).to_ascii_lowercase();
@@ -1293,11 +1304,11 @@ mod tests {
     #[tokio::test]
     async fn demand_fetches_header_first() {
         let (asset, _compressed_empty_lod, header_size) = mesh_fixture_asset();
-        assert!(header_size > assets::mesh::MESH_HEADER_BYTES);
+        assert!(header_size > MESH_HEADER_BYTES);
         let asset_length = asset.len();
-        let initial_header_response = asset[..assets::mesh::MESH_HEADER_BYTES].to_vec();
+        let initial_header_response = asset[..MESH_HEADER_BYTES].to_vec();
         let header_response = asset.clone();
-        let peer = Peer::new_with_headers(3, move |index, request, base| match index {
+        let peer = LoopbackPeer::new_with_headers(3, move |index, request, base| match index {
             0 => (200, Vec::new(), grants(base)),
             1 => {
                 let request = String::from_utf8_lossy(request).to_ascii_lowercase();
@@ -1321,33 +1332,33 @@ mod tests {
             Budget::default(),
             None,
         );
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         let id = resource(Kind::Mesh).id;
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut header_demand = handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
         let mesh_header = loop {
             match header_demand.status() {
-                assets::Status::Ready(assets::Content::MeshHeader(header)) => break header,
-                assets::Status::Failed { failure, .. } => panic!("unexpected mesh header failure: {failure:?}"),
+                Status::Ready(Content::MeshHeader(header)) => break header,
+                Status::Failed { failure, .. } => panic!("unexpected mesh header failure: {failure:?}"),
                 _ => {
                     header_demand.changed().await;
                 }
             }
         };
-        let block = mesh_header.lod(id, assets::mesh::MeshLod::Low).unwrap();
+        let block = mesh_header.lod(id, MeshLod::Low).unwrap();
         let mut lod_demand = handle.request_with_importance(region, Request::MeshLod(block), Priority::Visible, 0).await.unwrap();
         let lod = loop {
             match lod_demand.status() {
-                assets::Status::Ready(assets::Content::Mesh(lod)) => break lod,
-                assets::Status::Failed { failure, .. } => panic!("unexpected mesh LOD failure: {failure:?}"),
+                Status::Ready(Content::Mesh(lod)) => break lod,
+                Status::Failed { failure, .. } => panic!("unexpected mesh LOD failure: {failure:?}"),
                 _ => {
                     lod_demand.changed().await;
                 }
             }
         };
-        assert_eq!(lod.lod(), assets::mesh::MeshLod::Low);
-        assert_matches!(lod.geometry(), assets::mesh::LodGeometry::Empty { face_count: 0 });
+        assert_eq!(lod.lod(), MeshLod::Low);
+        assert_matches!(lod.geometry(), LodGeometry::Empty { face_count: 0 });
         cancel.send(()).unwrap();
         service.stop().await;
         assert_eq!(peer.finish().len(), 3);
@@ -1365,7 +1376,7 @@ mod tests {
         let asset_length = u64::try_from(asset.len()).unwrap();
         let last_byte = asset_length.checked_sub(1).unwrap();
         let initial_asset = asset.clone();
-        let peer = Peer::new_with_headers(2, move |index, request, base| match index {
+        let peer = LoopbackPeer::new_with_headers(2, move |index, request, base| match index {
             0 => (200, Vec::new(), grants(base)),
             1 => {
                 let request = String::from_utf8_lossy(request).to_ascii_lowercase();
@@ -1375,7 +1386,7 @@ mod tests {
             _ => unreachable!(),
         });
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         let id = resource(Kind::Mesh).id;
         let service = AssetCoordinator::new(Handle::current(), pending(), Some(Arc::clone(&cache)));
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
@@ -1383,26 +1394,26 @@ mod tests {
         let mut header_demand = handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
         let header = loop {
             match header_demand.status() {
-                assets::Status::Ready(assets::Content::MeshHeader(header)) => break header,
-                assets::Status::Failed { failure, .. } => panic!("unexpected mesh header failure: {failure:?}"),
+                Status::Ready(Content::MeshHeader(header)) => break header,
+                Status::Failed { failure, .. } => panic!("unexpected mesh header failure: {failure:?}"),
                 _ => {
                     header_demand.changed().await;
                 }
             }
         };
         assert_eq!(usize::try_from(header.header_size()).unwrap(), header_size);
-        let block = header.lod(id, assets::mesh::MeshLod::Lowest).unwrap();
+        let block = header.lod(id, MeshLod::Lowest).unwrap();
         let mut lod_demand = handle.request_with_importance(region, Request::MeshLod(block), Priority::Visible, 0).await.unwrap();
         let lod = loop {
             match lod_demand.status() {
-                assets::Status::Ready(assets::Content::Mesh(lod)) => break lod,
-                assets::Status::Failed { failure, .. } => panic!("unexpected prefix LOD failure: {failure:?}"),
+                Status::Ready(Content::Mesh(lod)) => break lod,
+                Status::Failed { failure, .. } => panic!("unexpected prefix LOD failure: {failure:?}"),
                 _ => {
                     lod_demand.changed().await;
                 }
             }
         };
-        assert_eq!(lod.lod(), assets::mesh::MeshLod::Lowest);
+        assert_eq!(lod.lod(), MeshLod::Lowest);
         service.stop().await;
         assert_eq!(peer.finish().len(), 2, "the header response supplies the complete LOD block");
         drop(lod);
@@ -1413,7 +1424,7 @@ mod tests {
         Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("first cache handles released")).shutdown().unwrap();
 
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
-        let warm_peer = Peer::new(0, |_, _, _| panic!("persisted mesh assets must not make HTTP requests"));
+        let warm_peer = LoopbackPeer::new(0, |_, _, _| panic!("persisted mesh assets must not make HTTP requests"));
         let warm_service = AssetCoordinator::new(Handle::current(), pending(), Some(Arc::clone(&cache)));
         warm_service.register(region, Client::new(warm_peer.url().join("seed").unwrap()).unwrap());
         let warm_handle = warm_service.handle();
@@ -1421,26 +1432,26 @@ mod tests {
             warm_handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
         let warm_header = loop {
             match warm_header_demand.status() {
-                assets::Status::Ready(assets::Content::MeshHeader(header)) => break header,
-                assets::Status::Failed { failure, .. } => panic!("unexpected cached header failure: {failure:?}"),
+                Status::Ready(Content::MeshHeader(header)) => break header,
+                Status::Failed { failure, .. } => panic!("unexpected cached header failure: {failure:?}"),
                 _ => {
                     warm_header_demand.changed().await;
                 }
             }
         };
-        let warm_block = warm_header.lod(id, assets::mesh::MeshLod::Lowest).unwrap();
+        let warm_block = warm_header.lod(id, MeshLod::Lowest).unwrap();
         let mut warm_lod_demand =
             warm_handle.request_with_importance(region, Request::MeshLod(warm_block), Priority::Visible, 0).await.unwrap();
         let warm_lod = loop {
             match warm_lod_demand.status() {
-                assets::Status::Ready(assets::Content::Mesh(lod)) => break lod,
-                assets::Status::Failed { failure, .. } => panic!("unexpected cached LOD failure: {failure:?}"),
+                Status::Ready(Content::Mesh(lod)) => break lod,
+                Status::Failed { failure, .. } => panic!("unexpected cached LOD failure: {failure:?}"),
                 _ => {
                     warm_lod_demand.changed().await;
                 }
             }
         };
-        assert_eq!(warm_lod.lod(), assets::mesh::MeshLod::Lowest);
+        assert_eq!(warm_lod.lod(), MeshLod::Lowest);
         warm_service.stop().await;
         assert!(warm_peer.finish().is_empty());
         drop(warm_lod);
@@ -1456,7 +1467,7 @@ mod tests {
         let id = resource(Kind::Mesh).id;
         let block = mesh_fixture_lod_request(id);
         let range = block.range();
-        let peer = Peer::new_with_headers(2, move |index, request, base| match index {
+        let peer = LoopbackPeer::new_with_headers(2, move |index, request, base| match index {
             0 => (200, Vec::new(), grants(base)),
             1 => {
                 let headers = String::from_utf8_lossy(request).to_ascii_lowercase();
@@ -1473,14 +1484,14 @@ mod tests {
             _ => unreachable!(),
         });
         let service = AssetCoordinator::with_budget(Handle::current(), pending(), Budget::default(), None);
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut demand = handle.request_with_importance(region, Request::MeshLod(block), Priority::Visible, 0).await.unwrap();
         loop {
             match demand.status() {
-                assets::Status::Failed { failure: Failure::MalformedBlock, .. } => break,
-                assets::Status::Failed { failure, .. } => panic!("unexpected range failure: {failure:?}"),
+                Status::Failed { failure: Failure::MalformedBlock, .. } => break,
+                Status::Failed { failure, .. } => panic!("unexpected range failure: {failure:?}"),
                 _ => {
                     demand.changed().await;
                 }
@@ -1496,11 +1507,11 @@ mod tests {
     async fn new_session_serves_cached_mesh() {
         let directory = tempdir().unwrap();
         let (asset, _block, header_size) = mesh_fixture_asset();
-        assert!(header_size > assets::mesh::MESH_HEADER_BYTES);
+        assert!(header_size > MESH_HEADER_BYTES);
         let asset_length = asset.len();
-        let initial_header = asset.get(..assets::mesh::MESH_HEADER_BYTES).unwrap().to_vec();
+        let initial_header = asset.get(..MESH_HEADER_BYTES).unwrap().to_vec();
         let full_header = asset.clone();
-        let first_peer = Peer::new_with_headers(3, move |index, request, base| match index {
+        let first_peer = LoopbackPeer::new_with_headers(3, move |index, request, base| match index {
             0 => (200, Vec::new(), grants(base)),
             1 => {
                 assert!(String::from_utf8_lossy(request).to_ascii_lowercase().contains("range: bytes=0-4095"));
@@ -1510,7 +1521,7 @@ mod tests {
             _ => unreachable!(),
         });
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         let id = resource(Kind::Mesh).id;
         let (cancel_first, cancelled_first) = oneshot::channel();
         let first_service = AssetCoordinator::with_budget(
@@ -1527,26 +1538,26 @@ mod tests {
             first_handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
         let first_header = loop {
             match first_header_demand.status() {
-                assets::Status::Ready(assets::Content::MeshHeader(header)) => break header,
-                assets::Status::Failed { failure, .. } => panic!("unexpected first-session header failure: {failure:?}"),
+                Status::Ready(Content::MeshHeader(header)) => break header,
+                Status::Failed { failure, .. } => panic!("unexpected first-session header failure: {failure:?}"),
                 _ => {
                     first_header_demand.changed().await;
                 }
             }
         };
-        let first_request = first_header.lod(id, assets::mesh::MeshLod::Low).unwrap();
+        let first_request = first_header.lod(id, MeshLod::Low).unwrap();
         let mut first_lod_demand =
             first_handle.request_with_importance(region, Request::MeshLod(first_request), Priority::Visible, 0).await.unwrap();
         let first_lod = loop {
             match first_lod_demand.status() {
-                assets::Status::Ready(assets::Content::Mesh(lod)) => break lod,
-                assets::Status::Failed { failure, .. } => panic!("unexpected first-session LOD failure: {failure:?}"),
+                Status::Ready(Content::Mesh(lod)) => break lod,
+                Status::Failed { failure, .. } => panic!("unexpected first-session LOD failure: {failure:?}"),
                 _ => {
                     first_lod_demand.changed().await;
                 }
             }
         };
-        assert_eq!(first_lod.lod(), assets::mesh::MeshLod::Low);
+        assert_eq!(first_lod.lod(), MeshLod::Low);
         cancel_first.send(()).unwrap();
         first_service.stop().await;
         assert_eq!(first_peer.finish().len(), 3);
@@ -1558,7 +1569,7 @@ mod tests {
         Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("first cache handles released")).shutdown().unwrap();
 
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
-        let second_peer = Peer::new(0, |_, _, _| panic!("warm mesh blocks must not make HTTP requests"));
+        let second_peer = LoopbackPeer::new(0, |_, _, _| panic!("warm mesh blocks must not make HTTP requests"));
         let (cancel_second, cancelled_second) = oneshot::channel();
         let second_service = AssetCoordinator::with_budget(
             Handle::current(),
@@ -1574,26 +1585,26 @@ mod tests {
             second_handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
         let second_header = loop {
             match second_header_demand.status() {
-                assets::Status::Ready(assets::Content::MeshHeader(header)) => break header,
-                assets::Status::Failed { failure, .. } => panic!("unexpected second-session header failure: {failure:?}"),
+                Status::Ready(Content::MeshHeader(header)) => break header,
+                Status::Failed { failure, .. } => panic!("unexpected second-session header failure: {failure:?}"),
                 _ => {
                     second_header_demand.changed().await;
                 }
             }
         };
-        let second_request = second_header.lod(id, assets::mesh::MeshLod::Low).unwrap();
+        let second_request = second_header.lod(id, MeshLod::Low).unwrap();
         let mut second_lod_demand =
             second_handle.request_with_importance(region, Request::MeshLod(second_request), Priority::Visible, 0).await.unwrap();
         let second_lod = loop {
             match second_lod_demand.status() {
-                assets::Status::Ready(assets::Content::Mesh(lod)) => break lod,
-                assets::Status::Failed { failure, .. } => panic!("unexpected second-session LOD failure: {failure:?}"),
+                Status::Ready(Content::Mesh(lod)) => break lod,
+                Status::Failed { failure, .. } => panic!("unexpected second-session LOD failure: {failure:?}"),
                 _ => {
                     second_lod_demand.changed().await;
                 }
             }
         };
-        assert_eq!(second_lod.lod(), assets::mesh::MeshLod::Low);
+        assert_eq!(second_lod.lod(), MeshLod::Low);
         cancel_second.send(()).unwrap();
         second_service.stop().await;
         assert!(second_peer.finish().is_empty());
@@ -1613,9 +1624,9 @@ mod tests {
         let block = mesh_fixture_lod_request(id);
         let range = block.range();
         let content_range = format!("bytes {}-{}/{}", range.start, range.end - 1, block.asset_length());
-        let (request_seen, request_received) = std::sync::mpsc::channel();
-        let (release_response, response_released) = std::sync::mpsc::channel();
-        let peer = Peer::new_with_headers(2, move |index, _, base| match index {
+        let (request_seen, request_received) = std_mpsc::channel();
+        let (release_response, response_released) = std_mpsc::channel();
+        let peer = LoopbackPeer::new_with_headers(2, move |index, _, base| match index {
             0 => (200, Vec::new(), grants(base)),
             1 => {
                 request_seen.send(()).unwrap();
@@ -1638,7 +1649,7 @@ mod tests {
             (fetch, result)
         });
 
-        tokio::task::spawn_blocking(move || request_received.recv_timeout(Duration::from_secs(5)).expect("mesh LOD request reached peer"))
+        task::spawn_blocking(move || request_received.recv_timeout(Duration::from_secs(5)).expect("mesh LOD request reached peer"))
             .await
             .unwrap();
         drop(demand);
@@ -1659,7 +1670,7 @@ mod tests {
     #[tokio::test]
     async fn redirect_decodes_library_environment() {
         let settings = include_bytes!("../../../crates/assets/tests/fixtures/settings/Midday.dat").to_vec();
-        let peer = Peer::new_with_headers(3, move |index, request, base| {
+        let peer = LoopbackPeer::new_with_headers(3, move |index, request, base| {
             let headers = String::from_utf8_lossy(request);
             match index {
                 0 => (200, Vec::new(), grants(base)),
@@ -1684,15 +1695,15 @@ mod tests {
             Budget::default(),
             None,
         );
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
         let mut demand =
-            handle.request_with_importance(region, assets::Request::new(resource(Kind::Environment)), Priority::Visible, 0).await.unwrap();
+            handle.request_with_importance(region, Request::new(resource(Kind::Environment)), Priority::Visible, 0).await.unwrap();
         loop {
             match demand.status() {
-                assets::Status::Ready(assets::Content::Environment(_)) => break,
-                assets::Status::Failed { failure, .. } => panic!("unexpected environment failure: {failure:?}"),
+                Status::Ready(Content::Environment(_)) => break,
+                Status::Failed { failure, .. } => panic!("unexpected environment failure: {failure:?}"),
                 _ => {
                     demand.changed().await;
                 }
@@ -1709,7 +1720,7 @@ mod tests {
     async fn new_session_decodes_cached_texture() {
         let directory = tempdir().unwrap();
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
-        let first_peer = Peer::new(2, |index, _, base| if index == 0 { (200, grants(base)) } else { (200, RGBA_J2C.to_vec()) });
+        let first_peer = LoopbackPeer::new(2, |index, _, base| if index == 0 { (200, grants(base)) } else { (200, RGBA_J2C.to_vec()) });
         let (cancel_first, cancelled_first) = oneshot::channel();
         let first_service = AssetCoordinator::with_budget(
             Handle::current(),
@@ -1719,17 +1730,15 @@ mod tests {
             Budget::default(),
             Some(Arc::clone(&cache)),
         );
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         first_service.register(region, Client::new(first_peer.url().join("seed").unwrap()).unwrap());
         let first_handle = first_service.handle();
-        let mut first_demand = first_handle
-            .request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0)
-            .await
-            .unwrap();
+        let mut first_demand =
+            first_handle.request_with_importance(region, Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
         let first_texture = loop {
             match first_demand.status() {
-                assets::Status::Ready(assets::Content::Texture(texture)) => break texture,
-                assets::Status::Failed { failure, .. } => panic!("unexpected texture failure: {failure:?}"),
+                Status::Ready(Content::Texture(texture)) => break texture,
+                Status::Failed { failure, .. } => panic!("unexpected texture failure: {failure:?}"),
                 _ => {
                     first_demand.changed().await;
                 }
@@ -1744,7 +1753,7 @@ mod tests {
         drop(first_demand);
         drop(first_handle);
 
-        let second_peer = Peer::new(0, |_, _, _| panic!("warm cache must not make HTTP requests"));
+        let second_peer = LoopbackPeer::new(0, |_, _, _| panic!("warm cache must not make HTTP requests"));
         let (cancel_second, cancelled_second) = oneshot::channel();
         let second_service = AssetCoordinator::with_budget(
             Handle::current(),
@@ -1756,14 +1765,12 @@ mod tests {
         );
         second_service.register(region, Client::new(second_peer.url().join("seed").unwrap()).unwrap());
         let second_handle = second_service.handle();
-        let mut second_demand = second_handle
-            .request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0)
-            .await
-            .unwrap();
+        let mut second_demand =
+            second_handle.request_with_importance(region, Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
         let second_texture = loop {
             match second_demand.status() {
-                assets::Status::Ready(assets::Content::Texture(texture)) => break texture,
-                assets::Status::Failed { failure, .. } => panic!("unexpected warm texture failure: {failure:?}"),
+                Status::Ready(Content::Texture(texture)) => break texture,
+                Status::Failed { failure, .. } => panic!("unexpected warm texture failure: {failure:?}"),
                 _ => {
                     second_demand.changed().await;
                 }
@@ -1784,8 +1791,8 @@ mod tests {
     async fn corrupt_texture_is_refetched() {
         let directory = tempdir().unwrap();
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
-        cache.put_complete(assets::Request::new(resource(Kind::Texture)), b"bad".to_vec()).unwrap();
-        let peer = Peer::new(2, |index, _, base| if index == 0 { (200, grants(base)) } else { (200, RGBA_J2C.to_vec()) });
+        cache.put_complete(Request::new(resource(Kind::Texture)), b"bad".to_vec()).unwrap();
+        let peer = LoopbackPeer::new(2, |index, _, base| if index == 0 { (200, grants(base)) } else { (200, RGBA_J2C.to_vec()) });
         let (cancel, cancelled) = oneshot::channel();
         let service = AssetCoordinator::with_budget(
             Handle::current(),
@@ -1795,15 +1802,14 @@ mod tests {
             Budget::default(),
             Some(Arc::clone(&cache)),
         );
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
-        let mut demand =
-            handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
+        let mut demand = handle.request_with_importance(region, Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
         let texture = loop {
             match demand.status() {
-                assets::Status::Ready(assets::Content::Texture(texture)) => break texture,
-                assets::Status::Failed { failure, .. } => panic!("unexpected refetch failure: {failure:?}"),
+                Status::Ready(Content::Texture(texture)) => break texture,
+                Status::Failed { failure, .. } => panic!("unexpected refetch failure: {failure:?}"),
                 _ => {
                     demand.changed().await;
                 }
@@ -1814,7 +1820,7 @@ mod tests {
         service.stop().await;
         assert_eq!(peer.finish().len(), 2);
         assert_eq!(handle.cache_stats().unwrap().corrupt_entries, 1);
-        let assets::cache::AssetLookup::Hit(asset) = cache.lookup(assets::Request::new(resource(Kind::Texture))) else {
+        let AssetLookup::Hit(asset) = cache.lookup(Request::new(resource(Kind::Texture))) else {
             panic!("validated network content replaced the corrupt entry")
         };
         assert_eq!(asset.bytes, RGBA_J2C);
@@ -1829,7 +1835,8 @@ mod tests {
         for (response_status, body) in [(503, Vec::new()), (206, RGBA_J2C.to_vec()), (418, Vec::new())] {
             let directory = tempdir().unwrap();
             let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
-            let peer = Peer::new(2, move |index, _, base| if index == 0 { (200, grants(base)) } else { (response_status, body.clone()) });
+            let peer =
+                LoopbackPeer::new(2, move |index, _, base| if index == 0 { (200, grants(base)) } else { (response_status, body.clone()) });
             let (cancel, cancelled) = oneshot::channel();
             let service = AssetCoordinator::with_budget(
                 Handle::current(),
@@ -1839,14 +1846,14 @@ mod tests {
                 Budget::default(),
                 Some(Arc::clone(&cache)),
             );
-            let (_region_world, region) = crate::test_helpers::registered_region();
+            let (_region_world, region) = test_helpers::registered_region();
             service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
             let handle = service.handle();
             let mut demand =
-                handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
+                handle.request_with_importance(region, Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
             let failure = loop {
                 match demand.status() {
-                    assets::Status::Failed { failure, .. } => break failure,
+                    Status::Failed { failure, .. } => break failure,
                     _ => {
                         demand.changed().await;
                     }
@@ -1862,7 +1869,7 @@ mod tests {
             assert_eq!(peer.finish().len(), 2);
             assert_eq!(cache.stats().bytes_written, 0);
             assert_eq!(cache.stats().dropped_writes, 0);
-            assert_eq!(cache.lookup(assets::Request::new(resource(Kind::Texture))), assets::cache::AssetLookup::Miss);
+            assert_eq!(cache.lookup(Request::new(resource(Kind::Texture))), AssetLookup::Miss);
             drop(demand);
             drop(handle);
             Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handle released")).shutdown().unwrap();
@@ -1871,16 +1878,16 @@ mod tests {
 
     #[tokio::test]
     async fn missing_grants_and_discovery_retry() {
-        let peer = Peer::new(2, |index, _, _| if index == 0 { (503, Vec::new()) } else { (200, b"<llsd><map/></llsd>".to_vec()) });
+        let peer = LoopbackPeer::new(2, |index, _, _| if index == 0 { (503, Vec::new()) } else { (200, b"<llsd><map/></llsd>".to_vec()) });
         let transport = CapabilityTransport::new(Client::new(peer.url().join("seed").unwrap()).unwrap());
         let mut store = Store::new(Budget::default());
         let route = store.register_route().unwrap();
         let now = Instant::now();
-        let _demand = store.request(route, assets::Request::new(resource(Kind::Texture)), Priority::Visible, now).unwrap();
+        let _demand = store.request(route, Request::new(resource(Kind::Texture)), Priority::Visible, now).unwrap();
         let job = store.next_job(now).unwrap();
         let LoadJob::Fetch(fetch) = &job else { panic!("new request must start with a fetch") };
         let failure = transport.fetch(fetch).await.expect_err("discovery fails transiently");
-        std::assert_matches!(failure, Failure::Transient { .. });
+        assert_matches!(failure, Failure::Transient { .. });
         store.complete(job.fail(failure), now);
         let job = store.next_job(now + Duration::from_secs(1)).unwrap();
         let LoadJob::Fetch(fetch) = &job else { panic!("retry must start with a fetch") };
@@ -1892,9 +1899,7 @@ mod tests {
 
     #[tokio::test]
     async fn late_route_material_loads() {
-        use assets::{Content, MaterialDescription, PbrAlphaMode, Status};
-
-        let peer = Peer::new(2, |index, _, base| {
+        let peer = LoopbackPeer::new(2, |index, _, base| {
             if index == 0 {
                 return (200, grants(base));
             }
@@ -1922,9 +1927,9 @@ mod tests {
             budget.clone(),
             None,
         );
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         let handle = service.handle();
-        let request = assets::Request::new(resource(Kind::PbrMaterial));
+        let request = Request::new(resource(Kind::PbrMaterial));
         let mut requesting = Box::pin(handle.request_with_importance(region, request, Priority::Visible, 0));
         assert!(futures::poll!(&mut requesting).is_pending());
         assert!(futures::poll!(&mut requesting).is_pending(), "a request must wait for its region's route");
@@ -1954,8 +1959,8 @@ mod tests {
     async fn pending_route_closes_with_session() {
         let service = AssetCoordinator::with_budget(Handle::current(), pending(), Budget::default(), None);
         let handle = service.handle();
-        let (_region_world, region) = crate::test_helpers::registered_region();
-        let request = assets::Request::new(resource(Kind::Texture));
+        let (_region_world, region) = test_helpers::registered_region();
+        let request = Request::new(resource(Kind::Texture));
         let mut requesting = Box::pin(handle.request_with_importance(region, request, Priority::Visible, 0));
         assert!(futures::poll!(&mut requesting).is_pending());
         assert!(futures::poll!(&mut requesting).is_pending());
@@ -1968,8 +1973,8 @@ mod tests {
     async fn shared_images_outlive_session() {
         let (started, received) = oneshot::channel();
         let mut started = Some(started);
-        let (release, hold) = std::sync::mpsc::channel();
-        let peer = Peer::new(2, move |index, _, base| {
+        let (release, hold) = std_mpsc::channel();
+        let peer = LoopbackPeer::new(2, move |index, _, base| {
             if index == 0 {
                 return (200, grants(base));
             }
@@ -1988,21 +1993,19 @@ mod tests {
             budget.clone(),
             None,
         );
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         service.register(region, client);
         let handle = service.handle();
-        let first =
-            handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
-        let mut second =
-            handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
+        let first = handle.request_with_importance(region, Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
+        let mut second = handle.request_with_importance(region, Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
         received.await.unwrap();
         drop(first);
         assert_eq!(budget.stats().charged_bytes, Kind::Texture.max_response_bytes(), "the remaining face still owns the active fetch");
         release.send(()).unwrap();
         let blob = loop {
             match second.status() {
-                assets::Status::Ready(assets::Content::Texture(blob)) => break blob,
-                assets::Status::Failed { failure, .. } => panic!("unexpected {failure:?}"),
+                Status::Ready(Content::Texture(blob)) => break blob,
+                Status::Failed { failure, .. } => panic!("unexpected {failure:?}"),
                 _ => {}
             }
             second.changed().await;
@@ -2011,10 +2014,10 @@ mod tests {
         assert_eq!(budget.stats().high_water_bytes, 192 * 1024 * 1024);
         cancel.send(()).unwrap();
         service.stop().await;
-        std::assert_matches!(second.status(), assets::Status::StaleSession);
+        assert_matches!(second.status(), Status::StaleSession);
         assert_eq!(budget.stats().resident_bytes, blob.image().unwrap().pixels().len() + RGBA_J2C.len());
         assert!(matches!(
-            handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await,
+            handle.request_with_importance(region, Request::new(resource(Kind::Texture)), Priority::Visible, 0).await,
             Err(RequestError::Closed)
         ));
         drop(second);
@@ -2027,8 +2030,8 @@ mod tests {
     async fn shutdown_cancels_active_fetch() {
         let (started, received) = oneshot::channel();
         let mut started = Some(started);
-        let (release, hold) = std::sync::mpsc::channel();
-        let peer = Peer::new(2, move |index, _, base| {
+        let (release, hold) = std_mpsc::channel();
+        let peer = LoopbackPeer::new(2, move |index, _, base| {
             if index == 0 {
                 return (200, grants(base));
             }
@@ -2047,13 +2050,10 @@ mod tests {
             budget.clone(),
             None,
         );
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         service.register(region, client);
-        let demand = service
-            .handle()
-            .request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0)
-            .await
-            .unwrap();
+        let demand =
+            service.handle().request_with_importance(region, Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
         received.await.unwrap();
         assert_eq!(budget.stats().charged_bytes, Kind::Texture.max_response_bytes());
         drop(demand);
@@ -2068,12 +2068,12 @@ mod tests {
     async fn shutdown_drains_blocked_cache_write() {
         let directory = tempdir().unwrap();
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
-        let peer = Peer::new(2, |index, _, base| if index == 0 { (200, grants(base)) } else { (200, RGBA_J2C.to_vec()) });
+        let peer = LoopbackPeer::new(2, |index, _, base| if index == 0 { (200, grants(base)) } else { (200, RGBA_J2C.to_vec()) });
         let (write_started, write_started_receive) = oneshot::channel();
         let mut write_started = Some(write_started);
         let (write_finished, write_finished_receive) = oneshot::channel();
         let mut write_finished = Some(write_finished);
-        let (release_write, hold_write) = std::sync::mpsc::sync_channel(0);
+        let (release_write, hold_write) = std_mpsc::sync_channel(0);
         let mut hold_write = Some(hold_write);
         let (shutdown_drain_started, shutdown_drain_started_receive) = oneshot::channel();
         let service = AssetCoordinator::build(
@@ -2097,16 +2097,15 @@ mod tests {
             }),
             Box::new(move || shutdown_drain_started.send(()).expect("signal cache write drain started")),
         );
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
         let handle = service.handle();
-        let mut demand =
-            handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        let mut demand = handle.request_with_importance(region, Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
+        time::timeout(Duration::from_secs(5), async {
             loop {
                 match demand.status() {
-                    assets::Status::Ready(_) => break,
-                    assets::Status::Failed { failure, .. } => panic!("unexpected texture failure: {failure:?}"),
+                    Status::Ready(_) => break,
+                    Status::Failed { failure, .. } => panic!("unexpected texture failure: {failure:?}"),
                     _ => {
                         demand.changed().await;
                     }
@@ -2115,24 +2114,24 @@ mod tests {
         })
         .await
         .expect("texture decode completes");
-        tokio::time::timeout(Duration::from_secs(5), write_started_receive).await.expect("cache write starts").unwrap();
+        time::timeout(Duration::from_secs(5), write_started_receive).await.expect("cache write starts").unwrap();
 
         let stop = service.stop();
         tokio::pin!(stop);
-        assert_matches!(futures::poll!(stop.as_mut()), std::task::Poll::Pending);
-        tokio::time::timeout(Duration::from_secs(5), shutdown_drain_started_receive)
+        assert_matches!(futures::poll!(stop.as_mut()), Poll::Pending);
+        time::timeout(Duration::from_secs(5), shutdown_drain_started_receive)
             .await
             .expect("coordinator entered cache write drain")
             .unwrap();
         let stop_state = futures::poll!(stop.as_mut());
-        if let std::task::Poll::Ready(()) = stop_state {
+        if let Poll::Ready(()) = stop_state {
             release_write.send(()).expect("release cache write after early shutdown");
             write_finished_receive.await.expect("cache write finishes after early shutdown");
             panic!("coordinator completed while cache write remained blocked");
         }
-        assert_matches!(stop_state, std::task::Poll::Pending);
+        assert_matches!(stop_state, Poll::Pending);
         release_write.send(()).expect("resume cache write");
-        tokio::time::timeout(Duration::from_secs(5), stop.as_mut()).await.expect("coordinator drains cache write");
+        time::timeout(Duration::from_secs(5), stop.as_mut()).await.expect("coordinator drains cache write");
         write_finished_receive.await.unwrap();
         assert_eq!(handle.cache_stats().unwrap().dropped_writes, 0);
         assert!(handle.cache_stats().unwrap().bytes_written > 0);
@@ -2142,7 +2141,7 @@ mod tests {
         Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().unwrap();
 
         let reopened = AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap();
-        assert_matches!(reopened.lookup(assets::Request::new(resource(Kind::Texture))), assets::cache::AssetLookup::Hit(_));
+        assert_matches!(reopened.lookup(Request::new(resource(Kind::Texture))), AssetLookup::Hit(_));
         reopened.shutdown().unwrap();
     }
 }

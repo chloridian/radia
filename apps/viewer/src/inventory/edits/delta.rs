@@ -1,14 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 
-use ::inventory::{Category, CategoryKey, FolderType, InventoryDelta, InventoryOwner, InventorySnapshot, Item, ItemKey, ServerVersion};
-use protocol::inventory::{AisEditResponse, Category as WireCategory, Child, DecodeError, Item as WireItem};
+use inventory::{CategoryKey, FolderType, InventoryDelta, InventoryOwner, InventorySnapshot, ItemKey, ServerVersion};
+use protocol::inventory::{AisEditResponse, Category, Child, DecodeError, Item};
 use utils::{FolderId, ItemId};
 use uuid::Uuid;
 
-use crate::inventory::fetch::{category_from_wire, item_from_wire};
-
-use super::controller::affected_folders;
-use super::types::EditOperation;
+use super::{controller::affected_folders, types::EditOperation};
+use crate::inventory::fetch::{to_category, to_item};
 
 pub(crate) struct AisDelta {
     pub(super) delta: InventoryDelta,
@@ -28,14 +26,14 @@ impl AisDelta {
     pub(crate) fn estimated_heap_bytes(&self) -> usize {
         let confirmed_name_bytes = match &self.confirmed_name {
             Some(ConfirmedName::Category { name, .. } | ConfirmedName::Item { name, .. }) => {
-                name.capacity().saturating_add(std::mem::size_of::<usize>())
+                name.capacity().saturating_add(size_of::<usize>())
             }
             None => 0,
         };
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             .saturating_add(self.delta.estimated_heap_bytes())
             .saturating_add(confirmed_name_bytes)
-            .saturating_add(self.refetch_folders.capacity().saturating_mul(std::mem::size_of::<CategoryKey>()))
+            .saturating_add(self.refetch_folders.capacity().saturating_mul(size_of::<CategoryKey>()))
     }
 
     pub(crate) fn is_current(&self, current: &InventorySnapshot) -> bool {
@@ -144,7 +142,7 @@ pub(super) fn delta_from_ais_response(
                     return Err(DecodeError::InvalidResponse);
                 }
             } else {
-                delta.created_categories.push(Category {
+                delta.created_categories.push(inventory::Category {
                     key,
                     parent: Some(*parent),
                     preferred_folder_type: *preferred_type,
@@ -256,15 +254,15 @@ pub(super) fn delta_from_ais_response(
 }
 
 fn append_category(
-    wire: &WireCategory,
+    wire: &Category,
     parent: Option<CategoryKey>,
     owner: InventoryOwner,
-    categories: &mut HashMap<Uuid, Category>,
+    categories: &mut HashMap<Uuid, inventory::Category>,
     category_order: &mut Vec<Uuid>,
-    items: &mut HashMap<Uuid, Item>,
+    items: &mut HashMap<Uuid, inventory::Item>,
     item_order: &mut Vec<Uuid>,
 ) -> Result<(), DecodeError> {
-    let category = category_from_wire(wire, owner, parent).map_err(|_| DecodeError::InvalidResponse)?;
+    let category = to_category(wire, owner, parent).map_err(|_| DecodeError::InvalidResponse)?;
     let key = category.key;
     if insert_unique(categories, wire.id, category)? {
         category_order.push(wire.id);
@@ -279,15 +277,15 @@ fn append_category(
 }
 
 fn append_item(
-    wire: &WireItem,
+    wire: &Item,
     parent: Option<CategoryKey>,
     owner: InventoryOwner,
-    items: &mut HashMap<Uuid, Item>,
+    items: &mut HashMap<Uuid, inventory::Item>,
     item_order: &mut Vec<Uuid>,
 ) -> Result<(), DecodeError> {
     let parent =
         parent.or_else(|| wire.parent_id.map(|id| CategoryKey::new(owner, FolderId::new(id)))).ok_or(DecodeError::InvalidResponse)?;
-    let item = item_from_wire(wire, owner, parent).map_err(|_| DecodeError::InvalidResponse)?;
+    let item = to_item(wire, owner, parent).map_err(|_| DecodeError::InvalidResponse)?;
     if insert_unique(items, wire.id, item)? {
         item_order.push(wire.id);
     }
@@ -296,17 +294,17 @@ fn append_item(
 
 fn insert_unique<T: PartialEq>(values: &mut HashMap<Uuid, T>, id: Uuid, value: T) -> Result<bool, DecodeError> {
     match values.entry(id) {
-        std::collections::hash_map::Entry::Vacant(entry) => {
+        Entry::Vacant(entry) => {
             entry.insert(value);
             Ok(true)
         }
-        std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &value => Ok(false),
-        std::collections::hash_map::Entry::Occupied(_) => Err(DecodeError::InvalidResponse),
+        Entry::Occupied(entry) if entry.get() == &value => Ok(false),
+        Entry::Occupied(_) => Err(DecodeError::InvalidResponse),
     }
 }
 
 fn root_category_parent(
-    category: &WireCategory,
+    category: &Category,
     operation: &EditOperation,
     snapshot: &InventorySnapshot,
     owner: InventoryOwner,
@@ -318,19 +316,14 @@ fn root_category_parent(
     }
 }
 
-fn root_item_parent(
-    item: &WireItem,
-    operation: &EditOperation,
-    snapshot: &InventorySnapshot,
-    owner: InventoryOwner,
-) -> Option<CategoryKey> {
+fn root_item_parent(item: &Item, operation: &EditOperation, snapshot: &InventorySnapshot, owner: InventoryOwner) -> Option<CategoryKey> {
     match operation {
         EditOperation::RenameItem { item: key, .. } if item.id == key.id().uuid() => snapshot.item(*key).map(|item| item.parent),
         _ => item.parent_id.map(|id| CategoryKey::new(owner, FolderId::new(id))),
     }
 }
 
-fn category_parent_key(category: &WireCategory, owner: InventoryOwner) -> Option<CategoryKey> {
+fn category_parent_key(category: &Category, owner: InventoryOwner) -> Option<CategoryKey> {
     category.parent_id.map(|id| CategoryKey::new(owner, FolderId::new(id)))
 }
 
@@ -340,9 +333,9 @@ pub(super) fn trash_folder(snapshot: &InventorySnapshot, owner: InventoryOwner) 
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{assert_matches, collections::BTreeMap, sync::Arc};
 
-    use ::inventory::{
+    use inventory::{
         AssetType, Inventory, InventoryChild, InventoryDelta, InventoryLimits, InventoryNodeId, InventoryNodeKey, InventoryType,
         PermissionMask, Permissions, SaleInfo, SaleType,
     };
@@ -354,8 +347,8 @@ mod tests {
         CategoryKey::new(owner, FolderId::new(Uuid::from_u128(id)))
     }
 
-    fn category(key: CategoryKey, parent: Option<CategoryKey>, name: &str) -> Category {
-        Category {
+    fn category(key: CategoryKey, parent: Option<CategoryKey>, name: &str) -> inventory::Category {
+        inventory::Category {
             key,
             parent,
             preferred_folder_type: FolderType::None,
@@ -365,8 +358,8 @@ mod tests {
         }
     }
 
-    fn wire_category(id: Uuid, owner: Uuid, parent: Option<Uuid>, name: &str, children: Vec<Child>) -> WireCategory {
-        WireCategory {
+    fn wire_category(id: Uuid, owner: Uuid, parent: Option<Uuid>, name: &str, children: Vec<Child>) -> Category {
+        Category {
             id,
             owner_id: Some(owner),
             parent_id: parent,
@@ -439,7 +432,7 @@ mod tests {
         inventory.upsert_category(category(second, Some(root), "second")).expect("add second folder");
         inventory.upsert_category(category(folder, Some(first), "before folder")).expect("add renamed folder");
         inventory
-            .upsert_item(Item {
+            .upsert_item(inventory::Item {
                 key: item,
                 parent: first,
                 asset_id: AssetId::new(Uuid::from_u128(17)),
@@ -528,7 +521,7 @@ mod tests {
         root_category.server_version = ServerVersion::from_raw(1);
         root_category.server_descendent_count = Some(1);
         let mut inventory = Inventory::new(root_category, None, InventoryLimits::default()).expect("valid root");
-        let item = Item {
+        let item = inventory::Item {
             key: item_key,
             parent: root,
             asset_id: AssetId::new(Uuid::from_u128(24)),
@@ -583,7 +576,7 @@ mod tests {
         let prepared = current
             .prepare_folder_fetch(root, ServerVersion::from_raw(2), Some(1), vec![InventoryChild::Item(refreshed_item)])
             .expect("prepare refreshed folder");
-        std::assert_matches!(inventory.commit_folder_fetch(prepared), Ok(::inventory::FolderFetchCommit::Applied(_)));
+        assert_matches!(inventory.commit_folder_fetch(prepared), Ok(inventory::FolderFetchCommit::Applied(_)));
         let current = inventory.snapshot();
 
         assert!(!confirmation.is_current(&current));
