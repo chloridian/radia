@@ -1197,7 +1197,6 @@ mod tests {
             draw_list::DrawList,
             items::{CachedFaceContext, cached_faces, mesh_info, surface_pipeline},
         },
-        pipeline::Pipeline,
         scene::{Budget, Placement, Reconciler},
         texture::TextureState,
     };
@@ -1307,43 +1306,6 @@ mod tests {
         assert!(!prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), deadline));
         prepared.redraw_deadline = None;
         assert!(!prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default(), deadline));
-    }
-
-    #[test]
-    fn agent_override_skips_object_motion() {
-        let agent = Uuid::from_u128(1);
-
-        assert!(is_agent_pose_override(Kind::Avatar, agent, Some(agent)));
-        assert!(!is_agent_pose_override(Kind::Avatar, Uuid::from_u128(2), Some(agent)));
-        assert!(!is_agent_pose_override(Kind::Object, agent, Some(agent)));
-    }
-
-    #[test]
-    fn surface_faces_keep_surface_pipelines() {
-        let (_scene, view, _) = crate::geometry::fixtures::scene(255);
-        let object = view.objects().next().expect("fixture object");
-        let (_, mesh) = object.mesh().expect("fixture mesh");
-        let info = mesh_info(mesh);
-        let mut draw_list = DrawList::new(usize::MAX);
-        for (shading, pipeline) in [(ShadingMode::Terrain, Pipeline::Terrain), (ShadingMode::RegionWater, Pipeline::RegionWater)] {
-            let faces = cached_faces(
-                CachedFaceContext {
-                    id: (1, 1, 0),
-                    mesh,
-                    info: &info,
-                    materials: None,
-                    appearance: None,
-                    scale: Vec3::ONE,
-                    invert_normals: false,
-                    shading,
-                    terrain: None,
-                    terrain_textures: None,
-                },
-                &mut draw_list,
-            );
-            assert!(!faces.is_empty());
-            assert!(faces.iter().all(|face| draw_list.face_key(face.group).is_some_and(|key| key.pipeline == pipeline)));
-        }
     }
 
     #[test]

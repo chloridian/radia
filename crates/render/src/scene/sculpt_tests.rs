@@ -186,25 +186,26 @@ fn resolution_follows_detail_aspect() {
 }
 
 #[test]
-fn degenerate_map_uses_placeholder() {
-    let rgba = vec![127; 8 * 8 * 4];
-    let mesh = tessellate_sculpt([8, 8], &rgba, SculptType::Cylinder, SculptFlags::default(), Detail::High).unwrap();
-    assert_placeholder_normals(&mesh, SculptType::Cylinder);
-    close(mesh.vertices()[0].position, Vec3::new(0.0, 0.0, 0.3));
-    assert!(mesh.vertices().iter().all(|vertex| vertex.position.length() <= 0.300001));
-}
-
-#[test]
-fn excessive_surface_area_uses_placeholder() {
-    let rgba = map([64, 64], |x, y| {
+fn unusable_maps_use_placeholder() {
+    let checker = map([64, 64], |x, y| {
         let x = (x / 2) % 2 != 0;
         let y = (y / 2) % 2 != 0;
         let z = x ^ y;
         [if x { 255 } else { 0 }, if y { 255 } else { 0 }, if z { 255 } else { 0 }, 255]
     });
-    let mesh = tessellate_sculpt([64, 64], &rgba, SculptType::Plane, SculptFlags::default(), Detail::High).unwrap();
-    close(mesh.vertices()[0].position, Vec3::new(0.0, 0.0, 0.3));
-    assert!(mesh.vertices().iter().all(|vertex| vertex.position.length() <= 0.300001));
+    let cases = [
+        ("degenerate", [8, 8], vec![127; 8 * 8 * 4], SculptType::Cylinder, true),
+        ("excessive surface area", [64, 64], checker, SculptType::Plane, false),
+    ];
+    for (case, size, rgba, sculpt_type, check_normals) in cases {
+        let mesh = tessellate_sculpt(size, &rgba, sculpt_type, SculptFlags::default(), Detail::High).unwrap();
+        if check_normals {
+            assert_placeholder_normals(&mesh, sculpt_type);
+        }
+        let first = mesh.vertices()[0].position;
+        assert!(first.distance(Vec3::new(0.0, 0.0, 0.3)) < 1e-5, "{case}: first vertex {first:?}");
+        assert!(mesh.vertices().iter().all(|vertex| vertex.position.length() <= 0.300001), "{case}");
+    }
 }
 
 #[test]
