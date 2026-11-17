@@ -237,21 +237,14 @@ mod tests {
 
     #[test]
     fn stepped_deadline_tracks_frame_boundary() {
-        let first = next_update_after(animation(0x03, [2, 2], 0.0, 0.0, 0.5), 1.0, 0.0).expect("loop keeps changing");
-        assert!(first < Duration::from_millis(980));
-        assert!(first > Duration::from_millis(979));
-        let between = next_update_after(animation(0x03, [2, 2], 0.0, 0.0, 0.5), 1.5, 0.0).expect("loop keeps changing");
-        assert!(between < Duration::from_millis(480));
-        assert!(between > Duration::from_millis(479));
+        for (case, rate, time, min_ms, max_ms) in
+            [("forward", 0.5, 1.0, 979, 980), ("forward between frames", 0.5, 1.5, 479, 480), ("reverse", -0.5, 1.0, 1019, 1020)]
+        {
+            let delay = next_update_after(animation(0x03, [2, 2], 0.0, 0.0, rate), time, 0.0).expect("loop keeps changing");
+            assert!(delay > Duration::from_millis(min_ms) && delay < Duration::from_millis(max_ms), "{case}: {delay:?}");
+        }
         assert_eq!(next_update_after(animation(0x03, [2, 2], 0.0, 0.0, 0.0), 1.0, 0.0), None);
         assert_eq!(next_update_after(animation(0x01, [2, 2], 0.0, 0.0, 1.0), 4.0, 0.0), None);
-    }
-
-    #[test]
-    fn negative_rate_tracks_reverse_boundary() {
-        let delay = next_update_after(animation(0x03, [2, 2], 0.0, 0.0, -0.5), 1.0, 0.0).expect("loop keeps changing");
-        assert!(delay < Duration::from_millis(1020));
-        assert!(delay > Duration::from_millis(1019));
     }
 
     #[test]

@@ -567,24 +567,12 @@ mod tests {
     fn omega_uses_parent_frame() {
         let (_region_world, region) = crate::test_support::registered_region();
         let now = Instant::now();
-        let mut sample = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z * 2.0, false);
-        sample.local_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-        let state = MotionState::new(now);
-        let actual = state.local_rotation(sample, now + Duration::from_millis(250));
-        let expected = Quat::from_xyzw(0.685_124_5, 0.174_941, 0.174_941, 0.685_124_5);
-        close_rotation(actual, expected);
-    }
-
-    #[test]
-    fn negative_omega_reverses_rotation() {
-        let (_region_world, region) = crate::test_support::registered_region();
-        let now = Instant::now();
-        let mut sample = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z * -2.0, false);
-        sample.local_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-        let state = MotionState::new(now);
-        let actual = state.local_rotation(sample, now + Duration::from_millis(250));
-        let expected = Quat::from_xyzw(0.685_124_5, -0.174_941, -0.174_941, 0.685_124_5);
-        close_rotation(actual, expected);
+        for (omega, side) in [(2.0, 0.174_941), (-2.0, -0.174_941)] {
+            let mut sample = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z * omega, false);
+            sample.local_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+            let actual = MotionState::new(now).local_rotation(sample, now + Duration::from_millis(250));
+            close_rotation(actual, Quat::from_xyzw(0.685_124_5, side, side, 0.685_124_5));
+        }
     }
 
     #[test]
@@ -856,44 +844,23 @@ mod tests {
     }
 
     #[test]
-    fn falling_avatar_clamps_to_terrain() {
+    fn prediction_height_limits() {
         let (world, _scene, view) = child_scene(None);
         let region = world.region_page(None, 64).expect("fixture region page").regions[0].region;
         let now = Instant::now();
         let mut falling = sample(region, DVec3::new(20.0, 1.0, -10.0), Vec3::NEG_Z * 20.0, Vec3::ZERO, Vec3::ZERO, false);
         falling.kind = world::Kind::Avatar;
         falling.transform.scale.z = 2.0;
-        let state = MotionState::new(now);
-
-        let position = linear_position_with_view(&view, falling, state, now + Duration::from_secs(1), &[]);
-
-        assert_eq!(position.z, 1.0);
-    }
-
-    #[test]
-    fn prediction_clamps_to_max_height() {
-        let (world, _scene, view) = child_scene(None);
-        let region = world.region_page(None, 64).expect("fixture region page").regions[0].region;
-        let now = Instant::now();
         let high = sample(region, DVec3::new(20.0, 1.0, 5000.0), Vec3::Z, Vec3::ZERO, Vec3::ZERO, false);
-        let state = MotionState::new(now);
-
-        let position = linear_position_with_view(&view, high, state, now + Duration::from_secs(1), &[]);
-
-        assert_eq!(position.z, 4096.0);
-    }
-
-    #[test]
-    fn angular_only_keeps_height() {
-        let (world, _scene, view) = child_scene(None);
-        let region = world.region_page(None, 64).expect("fixture region page").regions[0].region;
-        let now = Instant::now();
         let spinning = sample(region, DVec3::new(20.0, 1.0, -10.0), Vec3::ZERO, Vec3::ZERO, Vec3::Z, false);
-        let state = MotionState::new(now);
-
-        let position = linear_position_with_view(&view, spinning, state, now + Duration::from_secs(1), &[]);
-
-        assert_eq!(position.z, -10.0);
+        for (case, moving, expected_z) in [
+            ("falling avatar clamps to terrain", falling, 1.0),
+            ("max height", high, 4096.0),
+            ("angular only keeps height", spinning, -10.0),
+        ] {
+            let position = linear_position_with_view(&view, moving, MotionState::new(now), now + Duration::from_secs(1), &[]);
+            assert_eq!(position.z, expected_z, "{case}");
+        }
     }
 
     #[test]
@@ -909,59 +876,25 @@ mod tests {
     }
 
     #[test]
-    fn crossing_stops_at_one_second() {
+    fn crossing_extrapolation_clips() {
         let (_region_world, regions) = crate::test_support::registered_regions(2);
         let region = regions[0];
-        let second_region = regions[1];
         let now = Instant::now();
-        let moving = sample(region, DVec3::new(255.0, 20.0, 0.0), Vec3::X * 100.0, Vec3::ZERO, Vec3::ZERO, false);
-        let state = MotionState::new(now);
-        let regions = [
+        let both = [
             kinematics::RegionBounds { region_id: region.get(), origin: DVec3::ZERO },
-            kinematics::RegionBounds { region_id: second_region.get(), origin: DVec3::new(256.0, 0.0, 0.0) },
+            kinematics::RegionBounds { region_id: regions[1].get(), origin: DVec3::new(256.0, 0.0, 0.0) },
         ];
-        close_vec(linear_position(moving, state, now + Duration::from_millis(1500), &regions), DVec3::new(356.0, 20.0, 0.0));
-    }
-
-    #[test]
-    fn loaded_neighbor_clips_next_missing() {
-        let (_region_world, regions) = crate::test_support::registered_regions(2);
-        let region = regions[0];
-        let second_region = regions[1];
-        let now = Instant::now();
-        let moving = sample(region, DVec3::new(255.0, 20.0, 0.0), Vec3::X * 300.0, Vec3::ZERO, Vec3::ZERO, false);
-        let state = MotionState::new(now);
-        let regions = [
-            kinematics::RegionBounds { region_id: region.get(), origin: DVec3::ZERO },
-            kinematics::RegionBounds { region_id: second_region.get(), origin: DVec3::new(256.0, 0.0, 0.0) },
+        let cases = [
+            ("crossing stops at one second", 255.0, 100.0, 1500, &both[..], 356.0),
+            ("loaded neighbor clips next missing", 255.0, 300.0, 900, &both[..], 512.0),
+            ("outside sample starts from neighbor", 300.0, 300.0, 900, &both[..], 512.0),
+            ("missing neighbor clips edge", 255.0, 100.0, 1500, &both[..1], 256.0),
         ];
-
-        close_vec(linear_position(moving, state, now + Duration::from_millis(900), &regions), DVec3::new(512.0, 20.0, 0.0));
-    }
-
-    #[test]
-    fn outside_sample_starts_from_neighbor() {
-        let (_region_world, regions) = crate::test_support::registered_regions(2);
-        let region = regions[0];
-        let second_region = regions[1];
-        let now = Instant::now();
-        let moving = sample(region, DVec3::new(300.0, 20.0, 0.0), Vec3::X * 300.0, Vec3::ZERO, Vec3::ZERO, false);
-        let state = MotionState::new(now);
-        let regions = [
-            kinematics::RegionBounds { region_id: region.get(), origin: DVec3::ZERO },
-            kinematics::RegionBounds { region_id: second_region.get(), origin: DVec3::new(256.0, 0.0, 0.0) },
-        ];
-
-        close_vec(linear_position(moving, state, now + Duration::from_millis(900), &regions), DVec3::new(512.0, 20.0, 0.0));
-    }
-
-    #[test]
-    fn missing_neighbor_clips_edge() {
-        let (_region_world, region) = crate::test_support::registered_region();
-        let now = Instant::now();
-        let moving = sample(region, DVec3::new(255.0, 20.0, 0.0), Vec3::X * 100.0, Vec3::ZERO, Vec3::ZERO, false);
-        let state = MotionState::new(now);
-        let regions = [kinematics::RegionBounds { region_id: region.get(), origin: DVec3::ZERO }];
-        close_vec(linear_position(moving, state, now + Duration::from_millis(1500), &regions), DVec3::new(256.0, 20.0, 0.0));
+        for (case, start_x, speed, elapsed_ms, bounds, expected_x) in cases {
+            let moving = sample(region, DVec3::new(start_x, 20.0, 0.0), Vec3::X * speed, Vec3::ZERO, Vec3::ZERO, false);
+            let actual = linear_position(moving, MotionState::new(now), now + Duration::from_millis(elapsed_ms), bounds);
+            let expected = DVec3::new(expected_x, 20.0, 0.0);
+            assert!(actual.distance(expected) < 0.000_01, "{case}: expected {expected:?}, got {actual:?}");
+        }
     }
 }
