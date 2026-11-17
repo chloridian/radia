@@ -1373,7 +1373,7 @@ fn blocked_mesh_yields_to_material() {
 }
 
 #[test]
-fn shared_detail_refines_and_releases() {
+fn shared_detail_follows_demand() {
     let budget = Budget::default();
     let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(budget.clone());
     let id = resource(1).id;
@@ -1720,7 +1720,7 @@ fn route_failures_share_success() {
 }
 
 #[test]
-fn retry_limits_and_server_delays() {
+fn retry_bursts_honour_capped_delays() {
     let StoreHarness { mut now, mut store, route, .. } = StoreHarness::new();
     let demand = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
     for attempt in 1..=3 {
