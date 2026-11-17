@@ -98,8 +98,7 @@ Source has no comments or doc comments, and that includes safety comments on `un
 - Commit with one Conventional Commit subject line, `<type>(<scope>): <subject>`, and no body. Omit the scope only for repository-wide changes.
 - Name branches by type prefix and change (`feat/scene-environments`).
 - Title PRs with an imperative sentence in sentence case and no type prefix (`Share one inventory cache database across grids and agents`).
-- Open a PR body with the problem in plain prose, then the solution in a sentence or two. End with a `Verification:` paragraph that reports only checks that ran. No `## Summary` headings and no implementation inventory. Call the reference client the official Second Life viewer and name no third-party viewer.
-- Keep issue IDs out of branch names, commits, and PR titles and bodies.
+- Open a PR body with the problem in plain prose, then the solution in a sentence or two. End with a `Verification:` paragraph that reports only checks that ran. No `## Summary` headings and no implementation inventory.
 
 ## Documentation
 
