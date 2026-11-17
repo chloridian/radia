@@ -1,6 +1,12 @@
-use super::*;
-use crate::schema::{BlockSchema, MessageEncoding, MessageTrust};
+use std::iter::repeat_n;
+
 use proptest::prelude::*;
+
+use super::*;
+use crate::{
+    lludp::MAX_PACKET_RETAINED_CAPACITY_BYTES,
+    schema::{BlockSchema, MessageEncoding, MessageTrust},
+};
 
 static PREFLIGHT_FIXED_FIELDS: &[FieldSchema] = &[FieldSchema { name: "Data", kind: FieldKind::Fixed(32) }];
 static PREFLIGHT_FIXED_BLOCKS: &[BlockSchema] = &[BlockSchema { name: "Data", mode: BlockMode::Variable, fields: PREFLIGHT_FIXED_FIELDS }];
@@ -155,8 +161,6 @@ fn field_kinds_match_bytes() {
 
 #[test]
 fn variable_2_little_endian() {
-    use std::iter::repeat_n;
-
     let payload = vec![0x02, 0x01].into_iter().chain(repeat_n(0xaa, 258)).collect::<Vec<_>>();
     let schema = FieldSchema { name: "Data", kind: FieldKind::Variable(2) };
     let (decoded, complete) = decode_field(&mut Reader::new(&payload), &schema).expect("decode 258-byte Variable(2)");
@@ -330,7 +334,7 @@ fn schema_bounds_fit_packet_limit() {
                 .saturating_add(fixed_bytes);
             bytes = bytes.saturating_add(count.saturating_mul(instance_capacity));
         }
-        assert!(bytes <= crate::lludp::MAX_PACKET_RETAINED_CAPACITY_BYTES, "{} requires {bytes} bytes", schema.name);
+        assert!(bytes <= MAX_PACKET_RETAINED_CAPACITY_BYTES, "{} requires {bytes} bytes", schema.name);
     }
 }
 

@@ -1,3 +1,5 @@
+use std::str;
+
 use math::{Quat, Vec3};
 use uuid::Uuid;
 
@@ -5,7 +7,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     messages::object::{
@@ -79,7 +81,7 @@ impl TypedMessage for ObjectUpdateCompressed {
     const INBOUND_ONLY: bool = true;
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
-        self::decode(reader)
+        decode(reader)
     }
 
     fn encode(&self, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
@@ -94,13 +96,13 @@ impl TypedMessage for ObjectUpdateCompressed {
     }
 
     fn preflight_allocation_bound(payload: &[u8]) -> Result<usize, LLUdpError> {
-        crate::lludp::message::allocation::with_payload(payload, preflight_allocation_bytes(payload)?)
+        allocation::with_payload(payload, preflight_allocation_bytes(payload)?)
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        let mut bytes = crate::lludp::message::allocation::capacity_bytes(self.objects.capacity(), std::mem::size_of::<ObjectData>());
+        let mut bytes = allocation::capacity_bytes(self.objects.capacity(), size_of::<ObjectData>());
         for object in &self.objects {
-            crate::lludp::message::allocation::add_object_update_compressed_capacity(&mut bytes, object);
+            allocation::add_object_update_compressed_capacity(&mut bytes, object);
         }
         bytes
     }
@@ -452,7 +454,7 @@ fn write_binary_data(writer: &mut Writer<'_>, bytes: &[u8]) -> Result<(), LLUdpE
 fn read_c_string(reader: &mut Reader<'_>) -> Result<String, LLUdpError> {
     let len = reader.remaining().iter().position(|byte| *byte == 0).ok_or(LLUdpError::TruncatedPacket)?;
     let bytes = reader.take(len + 1)?;
-    std::str::from_utf8(&bytes[..len]).map(str::to_owned).map_err(|_| LLUdpError::InvalidUtf8)
+    str::from_utf8(&bytes[..len]).map(str::to_owned).map_err(|_| LLUdpError::InvalidUtf8)
 }
 
 fn write_c_string(writer: &mut Writer<'_>, value: &str) -> Result<(), LLUdpError> {

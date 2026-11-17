@@ -4,7 +4,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::REQUEST_MULTIPLE_OBJECTS,
@@ -59,7 +59,7 @@ impl TypedMessage for RequestMultipleObjects {
     const INBOUND_ONLY: bool = false;
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
-        self::decode(reader)
+        decode(reader)
     }
 
     fn encode(&self, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
@@ -74,7 +74,7 @@ impl TypedMessage for RequestMultipleObjects {
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        crate::lludp::message::allocation::capacity_bytes(self.objects.capacity(), std::mem::size_of::<ObjectRequest>())
+        allocation::capacity_bytes(self.objects.capacity(), size_of::<ObjectRequest>())
     }
 }
 

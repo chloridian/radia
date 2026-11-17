@@ -1,18 +1,17 @@
 use uuid::Uuid;
 
+use super::{
+    blocks::{MoveInventoryFolderBlock, read_move_folder, write_move_folder},
+    read_blocks, read_bool, validate_agent_id, write_bool, write_count,
+};
 use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::MOVE_INVENTORY_FOLDER,
-};
-
-use super::{
-    blocks::{MoveInventoryFolderBlock, read_move_folder, write_move_folder},
-    read_blocks, read_bool, validate_agent_id, write_bool, write_count,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,6 +50,6 @@ impl TypedMessage for MoveInventoryFolder {
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        crate::lludp::message::allocation::capacity_bytes(self.inventory_data.capacity(), std::mem::size_of::<MoveInventoryFolderBlock>())
+        allocation::capacity_bytes(self.inventory_data.capacity(), size_of::<MoveInventoryFolderBlock>())
     }
 }

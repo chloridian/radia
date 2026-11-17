@@ -1,9 +1,10 @@
 mod wire;
 
 use std::{collections::BTreeMap, error, fmt};
+
 use uuid::Uuid;
 
-pub use wire::{
+pub use self::wire::{
     decode_ais_children, decode_ais_edit_response, decode_ais_item, decode_created_category_response, decode_fetch_inventory_descendents2,
     decode_fetch_inventory2,
 };

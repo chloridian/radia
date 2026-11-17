@@ -2,7 +2,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::PARCEL_OVERLAY,
@@ -29,12 +29,14 @@ impl TypedMessage for ParcelOverlay {
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        crate::lludp::message::allocation::capacity_bytes(self.data.capacity(), std::mem::size_of::<u8>())
+        allocation::capacity_bytes(self.data.capacity(), size_of::<u8>())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
     use crate::lludp::{codec::Reader, error::LLUdpError};
 
@@ -55,6 +57,6 @@ mod tests {
         let payload = [0, 0, 0, 0, 4, 0, 1];
         let mut reader = Reader::new(&payload);
 
-        std::assert_matches!(ParcelOverlay::decode(&mut reader), Err(LLUdpError::TruncatedPacket));
+        assert_matches!(ParcelOverlay::decode(&mut reader), Err(LLUdpError::TruncatedPacket));
     }
 }

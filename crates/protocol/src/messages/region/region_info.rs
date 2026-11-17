@@ -4,7 +4,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::REGION_INFO,
@@ -210,12 +210,12 @@ impl TypedMessage for RegionInfo {
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        let mut bytes = crate::lludp::message::allocation::capacity_bytes(self.region_info.sim_name.capacity(), std::mem::size_of::<u8>());
-        crate::lludp::message::allocation::add_capacity(&mut bytes, self.region_info3.capacity(), std::mem::size_of::<RegionInfo3>());
-        crate::lludp::message::allocation::add_capacity(&mut bytes, self.region_info5.capacity(), std::mem::size_of::<RegionInfo5>());
-        crate::lludp::message::allocation::add_capacity(&mut bytes, self.combat_settings.capacity(), std::mem::size_of::<CombatSettings>());
-        crate::lludp::message::allocation::add_capacity(&mut bytes, self.region_info2.product_sku.capacity(), std::mem::size_of::<u8>());
-        crate::lludp::message::allocation::add_capacity(&mut bytes, self.region_info2.product_name.capacity(), std::mem::size_of::<u8>());
+        let mut bytes = allocation::capacity_bytes(self.region_info.sim_name.capacity(), size_of::<u8>());
+        allocation::add_capacity(&mut bytes, self.region_info3.capacity(), size_of::<RegionInfo3>());
+        allocation::add_capacity(&mut bytes, self.region_info5.capacity(), size_of::<RegionInfo5>());
+        allocation::add_capacity(&mut bytes, self.combat_settings.capacity(), size_of::<CombatSettings>());
+        allocation::add_capacity(&mut bytes, self.region_info2.product_sku.capacity(), size_of::<u8>());
+        allocation::add_capacity(&mut bytes, self.region_info2.product_name.capacity(), size_of::<u8>());
         bytes
     }
 }

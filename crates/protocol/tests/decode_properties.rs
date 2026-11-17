@@ -1,4 +1,5 @@
 use proptest::{
+    collection,
     prelude::*,
     test_runner::{Config, TestCaseResult},
 };
@@ -38,7 +39,7 @@ fn object_packet_prefixes() -> Vec<Vec<u8>> {
 
 fn object_payload() -> impl Strategy<Value = Vec<u8>> {
     let max_prefix_len = object_packet_prefixes().into_iter().map(|prefix| prefix.len()).max().unwrap_or(0);
-    prop::collection::vec(any::<u8>(), 0..=(MAX_DATAGRAM_BYTES - max_prefix_len))
+    collection::vec(any::<u8>(), 0..=(MAX_DATAGRAM_BYTES - max_prefix_len))
 }
 
 fn check_preflight(bytes: &[u8]) -> TestCaseResult {
@@ -57,7 +58,7 @@ proptest! {
     })]
 
     #[test]
-    fn packet_decode_arbitrary(bytes in prop::collection::vec(any::<u8>(), 0..=MAX_DATAGRAM_BYTES)) {
+    fn packet_decode_arbitrary(bytes in collection::vec(any::<u8>(), 0..=MAX_DATAGRAM_BYTES)) {
         check_preflight(&bytes)?;
     }
 
@@ -70,7 +71,7 @@ proptest! {
     }
 
     #[test]
-    fn padded_record_bound(count in any::<u8>(), suffix in prop::collection::vec(any::<u8>(), 0..1024), zero_code in any::<bool>()) {
+    fn padded_record_bound(count in any::<u8>(), suffix in collection::vec(any::<u8>(), 0..1024), zero_code in any::<bool>()) {
         let mut bytes = vec![0, 0, 0, 0, 1, 0, 0xff, 0xff, 0, 98];
         bytes.extend_from_slice(&[0; 32]);
         bytes.push(count);

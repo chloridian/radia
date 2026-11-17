@@ -481,6 +481,8 @@ pub(super) fn rust_constant_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     #[test]
@@ -492,7 +494,7 @@ mod tests {
         let packet_ack = template.messages.iter().find(|message| message.name == "PacketAck").expect("PacketAck is defined");
         assert_eq!(packet_ack.frequency, Frequency::Fixed);
         assert_eq!(packet_ack.id, 0xffff_fffb);
-        std::assert_matches!(packet_ack.blocks[0].fields[0].kind, FieldKind::U32);
+        assert_matches!(packet_ack.blocks[0].fields[0].kind, FieldKind::U32);
     }
 
     #[test]
@@ -500,7 +502,7 @@ mod tests {
         let source =
             "version 2.0\n{\n\tExample Low\n  3 NotTrusted Zerocoded // header\n  { Data Single\n    { Value Variable\n      2 }\n  }\n}\n";
         let template = parse("fixture.msg", source).expect("multiline declarations parse");
-        std::assert_matches!(template.messages[0].blocks[0].fields[0].kind, FieldKind::Variable(2));
+        assert_matches!(template.messages[0].blocks[0].fields[0].kind, FieldKind::Variable(2));
     }
 
     #[test]
@@ -508,8 +510,8 @@ mod tests {
         let source = "version 2.0\n{ Example Low 3 NotTrusted Unencoded { Data Single { Marker NULL } { Value S64 } } }";
         let template = parse("fixture.msg", source).expect("supported field kinds parse");
         let fields = &template.messages[0].blocks[0].fields;
-        std::assert_matches!(fields[0].kind, FieldKind::Null);
-        std::assert_matches!(fields[1].kind, FieldKind::S64);
+        assert_matches!(fields[0].kind, FieldKind::Null);
+        assert_matches!(fields[1].kind, FieldKind::S64);
     }
 
     #[test]

@@ -79,7 +79,7 @@ impl TypedMessage for AgentThrottle {
         let agent_data = AgentData { agent_id: reader.uuid()?, session_id: reader.uuid()?, circuit_code: reader.u32()? };
         let gen_counter = reader.u32()?;
         let byte_count = usize::from(reader.u8()?);
-        if byte_count != 7 * std::mem::size_of::<f32>() {
+        if byte_count != 7 * size_of::<f32>() {
             return Err(LLUdpError::InvalidMessage);
         }
         let mut rates = [0.0; 7];

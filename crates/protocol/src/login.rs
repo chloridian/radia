@@ -1,11 +1,10 @@
-pub use dxr::{Fault, Value};
-
 use std::{
     collections::BTreeMap,
     error, fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 
+pub use dxr::{Fault, Value};
 use dxr::{FaultResponse, MethodCall, MethodResponse};
 use md5::{Digest, Md5};
 use quick_xml::{Reader, events::Event};

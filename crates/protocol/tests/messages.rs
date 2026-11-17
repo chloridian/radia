@@ -1,4 +1,4 @@
-use std::assert_matches;
+use std::{assert_matches, net::Ipv4Addr};
 
 use math::{Quat, Vec3};
 use protocol::{
@@ -7,19 +7,17 @@ use protocol::{
     messages::{
         AgentMovementComplete, AgentUpdate, ChatFromSimulator, ChatFromViewer, ConfirmEnableSimulator, DisableSimulator, EnableSimulator,
         GenericStreamingMessage, LogoutReply, TeleportCancel,
-        agent::agent_movement_complete::{AgentData, Data, SimData},
-        agent::agent_update,
-        agent::logout_reply,
-        agent::logout_reply::InventoryData,
-        chat::chat_from_simulator::ChatData,
-        chat::chat_from_viewer,
+        agent::{
+            agent_movement_complete::{AgentData, Data, SimData},
+            agent_update, logout_reply,
+            logout_reply::InventoryData,
+        },
+        chat::{chat_from_simulator::ChatData, chat_from_viewer},
         generic_streaming_message::MAX_DATA_BYTES,
-        region::confirm_enable_simulator,
-        region::enable_simulator::SimulatorInfo,
+        region::{confirm_enable_simulator, enable_simulator::SimulatorInfo},
     },
     schema::{MessageEncoding, MessageTrust},
 };
-use std::net::Ipv4Addr;
 use test_support::{lludp::vectors, parse_hex_fixture};
 use uuid::Uuid;
 

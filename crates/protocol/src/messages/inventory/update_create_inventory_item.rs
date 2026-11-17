@@ -1,18 +1,17 @@
 use uuid::Uuid;
 
+use super::{
+    blocks::{InventoryItemBlock, ItemBlockOrder, add_item_capacity, read_item, write_item},
+    read_blocks, read_bool, validate_agent_id, write_bool, write_count,
+};
 use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::UPDATE_CREATE_INVENTORY_ITEM,
-};
-
-use super::{
-    blocks::{InventoryItemBlock, ItemBlockOrder, add_item_capacity, read_item, write_item},
-    read_blocks, read_bool, validate_agent_id, write_bool, write_count,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,11 +51,7 @@ impl TypedMessage for UpdateCreateInventoryItem {
 
     fn retained_capacity_bytes(&self) -> usize {
         let mut bytes = 0;
-        crate::lludp::message::allocation::add_capacity(
-            &mut bytes,
-            self.inventory_data.capacity(),
-            std::mem::size_of::<InventoryItemBlock>(),
-        );
+        allocation::add_capacity(&mut bytes, self.inventory_data.capacity(), size_of::<InventoryItemBlock>());
         self.inventory_data.iter().for_each(|block| add_item_capacity(&mut bytes, block));
         bytes
     }

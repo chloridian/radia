@@ -1,5 +1,5 @@
 use protocol::inventory::{
-    AisEditResponse, DecodeError, Item, Permissions, SaleInfo, decode_ais_edit_response, decode_ais_item,
+    AisEditResponse, DecodeError, Item, Permissions, RequestedFolder, SaleInfo, decode_ais_edit_response, decode_ais_item,
     decode_fetch_inventory_descendents2, decode_fetch_inventory2,
 };
 use uuid::Uuid;
@@ -130,10 +130,7 @@ fn malformed_flat_fields_are_rejected() {
             "<llsd><map><key>folders</key><array><map><key>folder_id</key><uuid>{folder_id}</uuid><key>owner_id</key><uuid>{owner_id}</uuid><key>version</key><integer>1</integer><key>descendents</key><integer>1</integer><key>categories</key><array/><key>items</key><array>{legacy}</array></map></array></map></llsd>"
         );
         assert_eq!(
-            decode_fetch_inventory_descendents2(
-                descendents.as_bytes(),
-                &[protocol::inventory::RequestedFolder { id: folder_id, owner_id }],
-            ),
+            decode_fetch_inventory_descendents2(descendents.as_bytes(), &[RequestedFolder { id: folder_id, owner_id }],),
             Err(DecodeError::InvalidResponse)
         );
     }
@@ -201,9 +198,8 @@ fn legacy_decoders_keep_flat_fields() {
     );
     let fetched = format!("<llsd><map><key>items</key><array>{item}</array></map></llsd>");
 
-    let decoded =
-        decode_fetch_inventory_descendents2(descendents.as_bytes(), &[protocol::inventory::RequestedFolder { id: folder_id, owner_id }])
-            .expect("legacy folder records accept flat item fields");
+    let decoded = decode_fetch_inventory_descendents2(descendents.as_bytes(), &[RequestedFolder { id: folder_id, owner_id }])
+        .expect("legacy folder records accept flat item fields");
     let direct_item = &decoded[0].direct_items[0];
     assert_flat_item(direct_item);
 

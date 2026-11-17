@@ -1,4 +1,7 @@
-use std::fmt::{Display, Formatter};
+use std::{
+    error, fmt,
+    fmt::{Display, Formatter},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LLUdpError {
@@ -20,7 +23,7 @@ pub enum LLUdpError {
 }
 
 impl Display for LLUdpError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::TruncatedPacket => "truncated LLUDP packet or message",
             Self::InvalidMessageId => "invalid LLUDP message ID",
@@ -41,4 +44,4 @@ impl Display for LLUdpError {
     }
 }
 
-impl std::error::Error for LLUdpError {}
+impl error::Error for LLUdpError {}

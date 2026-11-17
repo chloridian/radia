@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
     marker::PhantomData,
 };
@@ -1919,7 +1919,7 @@ pub fn decode_fetch_inventory_descendents2(bytes: &[u8], requested: &[RequestedF
     if folders.len() != requested.len() {
         return Err(DecodeError::InvalidResponse);
     }
-    let mut by_id = std::collections::HashMap::with_capacity(folders.len());
+    let mut by_id = HashMap::with_capacity(folders.len());
     for FolderValue(fields) in folders {
         let fields = fields?;
         let id = uuid_fields(&[fields.folder_id.as_ref()])?.ok_or(DecodeError::InvalidResponse)?;

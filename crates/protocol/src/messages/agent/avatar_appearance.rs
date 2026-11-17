@@ -5,7 +5,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::AVATAR_APPEARANCE,
@@ -120,17 +120,12 @@ impl TypedMessage for AvatarAppearance {
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        let mut bytes =
-            crate::lludp::message::allocation::capacity_bytes(self.object_data.texture_entry.capacity(), std::mem::size_of::<u8>());
-        crate::lludp::message::allocation::add_capacity(&mut bytes, self.visual_params.capacity(), std::mem::size_of::<VisualParam>());
-        crate::lludp::message::allocation::add_capacity(&mut bytes, self.appearance_data.capacity(), std::mem::size_of::<AppearanceData>());
-        crate::lludp::message::allocation::add_capacity(
-            &mut bytes,
-            self.appearance_hover.capacity(),
-            std::mem::size_of::<AppearanceHover>(),
-        );
+        let mut bytes = allocation::capacity_bytes(self.object_data.texture_entry.capacity(), size_of::<u8>());
+        allocation::add_capacity(&mut bytes, self.visual_params.capacity(), size_of::<VisualParam>());
+        allocation::add_capacity(&mut bytes, self.appearance_data.capacity(), size_of::<AppearanceData>());
+        allocation::add_capacity(&mut bytes, self.appearance_hover.capacity(), size_of::<AppearanceHover>());
         if let Some(blocks) = &self.attachment_blocks {
-            crate::lludp::message::allocation::add_capacity(&mut bytes, blocks.capacity(), std::mem::size_of::<AttachmentBlock>());
+            allocation::add_capacity(&mut bytes, blocks.capacity(), size_of::<AttachmentBlock>());
         }
         bytes
     }

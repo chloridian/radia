@@ -1,4 +1,5 @@
 use std::{
+    array,
     f32::consts::{FRAC_1_SQRT_2, PI},
     iter::FusedIterator,
     sync::OnceLock,
@@ -145,8 +146,7 @@ struct Tables {
 fn tables() -> &'static Tables {
     static TABLES: OnceLock<Tables> = OnceLock::new();
     TABLES.get_or_init(|| {
-        let cosines =
-            std::array::from_fn(|n| std::array::from_fn(|u| ((2 * n + 1) as f32 * u as f32 * PI / (2 * PATCH_SIZE) as f32).cos()));
+        let cosines = array::from_fn(|n| array::from_fn(|u| ((2 * n + 1) as f32 * u as f32 * PI / (2 * PATCH_SIZE) as f32).cos()));
         let mut zigzag = [0; PATCH_SAMPLES];
         let mut index = 0;
         for diagonal in 0..(2 * PATCH_SIZE - 1) {
@@ -164,6 +164,8 @@ fn tables() -> &'static Tables {
 
 #[cfg(test)]
 mod tests {
+    use proptest::{collection, num::u8::ANY};
+
     use super::*;
 
     fn payload(bits: &str) -> Vec<u8> {
@@ -253,7 +255,7 @@ mod tests {
 
     proptest::proptest! {
         #[test]
-        fn streams_remain_bounded_and_finite(body in proptest::collection::vec(proptest::num::u8::ANY, 0..2048)) {
+        fn streams_remain_bounded_and_finite(body in collection::vec(ANY, 0..2048)) {
             let mut data = vec![8, 1, 16, b'L'];
             data.extend(body);
             let mut layer = Decoder::new(b'L', &data).unwrap();

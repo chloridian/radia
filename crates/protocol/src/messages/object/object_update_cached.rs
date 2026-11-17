@@ -2,7 +2,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     messages::object::RegionData,
@@ -28,7 +28,7 @@ impl TypedMessage for ObjectUpdateCached {
     const INBOUND_ONLY: bool = true;
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
-        self::decode(reader)
+        decode(reader)
     }
 
     fn encode(&self, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
@@ -44,7 +44,7 @@ impl TypedMessage for ObjectUpdateCached {
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        crate::lludp::message::allocation::capacity_bytes(self.objects.capacity(), std::mem::size_of::<CachedObjectReference>())
+        allocation::capacity_bytes(self.objects.capacity(), size_of::<CachedObjectReference>())
     }
 }
 

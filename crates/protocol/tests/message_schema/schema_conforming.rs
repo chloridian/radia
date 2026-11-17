@@ -1,7 +1,7 @@
 use protocol::{
     BlockInstance, BlockValues, FieldValue,
     lludp::Message,
-    messages::{InventoryItemBlock, MoveInventoryFolderBlock, MoveInventoryItemBlock},
+    messages::{AgentUpdate, InventoryItemBlock, MoveInventoryFolderBlock, MoveInventoryItemBlock},
 };
 
 pub(crate) fn schema_conforming_fields(message: &Message) -> Option<Vec<BlockValues>> {
@@ -447,7 +447,7 @@ pub(crate) fn schema_conforming_fields(message: &Message) -> Option<Vec<BlockVal
     }
 }
 
-pub(crate) fn agent_update_fields(message: &protocol::messages::AgentUpdate) -> Vec<FieldValue> {
+pub(crate) fn agent_update_fields(message: &AgentUpdate) -> Vec<FieldValue> {
     let data = &message.agent_data;
     vec![
         FieldValue::Uuid(data.agent_id),
