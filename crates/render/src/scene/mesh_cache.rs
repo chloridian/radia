@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_admission_and_retry() {
+    fn shared_admission_releases_for_retry() {
         let budget = Budget::default();
         let mut a = MeshCache::new(budget.clone());
         let mut b = MeshCache::new(budget.clone());
@@ -551,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_jobs_and_retained_charge() {
+    fn stale_completion_keeps_retained_charge() {
         let budget = Budget::default();
         let mut meshes = MeshCache::new(budget.clone());
         let key = key(Detail::High);

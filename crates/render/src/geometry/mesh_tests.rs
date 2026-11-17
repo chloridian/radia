@@ -1284,7 +1284,7 @@ fn gpu_late_recovery_applies_changes() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored ignored-only gpu_mesh_pages"]
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only gpu_mesh_pages"]
 fn gpu_mesh_pages() {
     let (device, queue) = block_on(async {
         let instance =
@@ -2146,21 +2146,11 @@ fn gpu_overbudget_visible_subset() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(gpu_draws_during_scene_churn)'"]
-fn gpu_draws_during_scene_churn() {
-    draws_during_scene_churn(false, false);
-}
-
-#[test]
-#[ignore = "requires a Vulkan adapter"]
-fn gpu_draws_during_history_churn() {
-    draws_during_scene_churn(true, false);
-}
-
-#[test]
-#[ignore = "requires a Vulkan adapter"]
-fn gpu_draws_during_membership_churn() {
-    draws_during_scene_churn(false, true);
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --all-features --locked --run-ignored only -E 'test(gpu_draws_during_churn)'"]
+fn gpu_draws_during_churn() {
+    for (history_overflow, membership) in [(false, false), (true, false), (false, true)] {
+        draws_during_scene_churn(history_overflow, membership);
+    }
 }
 
 fn draws_during_scene_churn(overflow: bool, membership: bool) {

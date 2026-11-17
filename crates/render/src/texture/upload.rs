@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored ignored-only gpu_texture_lifetimes"]
+    #[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only gpu_texture_lifetimes"]
     fn gpu_texture_lifetimes() {
         let (device, queue) = vulkan_device();
         let mut textures = Textures::new(&device, &queue);

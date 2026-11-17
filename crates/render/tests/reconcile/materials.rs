@@ -1,4 +1,4 @@
-use std::assert_matches;
+use std::{assert_matches, cmp::Ordering};
 
 use assets::{TextureHandle, TextureSize};
 use math::UvTransform;
@@ -383,23 +383,18 @@ fn shared_textures_follow_camera() {
 }
 
 #[test]
-fn pbr_texture_demand_tracks_magnification() {
-    let size = pbr_texture_size(
-        UvTransform { offset: [0.25, -0.5], scale: [4.0, 3.0], rotation: 0.6 },
-        UvTransform { offset: [-0.2, 0.35], scale: [0.1, 0.15], rotation: -0.4 },
-    );
-
-    assert!(size.edge() > TextureSize::new(128).edge(), "composed magnification needs more detail than the camera baseline");
-}
-
-#[test]
-fn pbr_texture_demand_tracks_repeats() {
-    let size = pbr_texture_size(
-        UvTransform { offset: [0.25, -0.5], scale: [0.5, 0.4], rotation: 0.6 },
-        UvTransform { offset: [-0.2, 0.35], scale: [8.0, 6.0], rotation: -0.4 },
-    );
-
-    assert!(size.edge() < TextureSize::new(128).edge(), "composed repeats need less detail than the camera baseline");
+fn pbr_texture_demand_tracks_uv_scale() {
+    let cases = [
+        ("composed magnification needs more detail", [4.0, 3.0], [0.1, 0.15], Ordering::Greater),
+        ("composed repeats need less detail", [0.5, 0.4], [8.0, 6.0], Ordering::Less),
+    ];
+    for (case, material_scale, face_scale, expected) in cases {
+        let size = pbr_texture_size(
+            UvTransform { offset: [0.25, -0.5], scale: material_scale, rotation: 0.6 },
+            UvTransform { offset: [-0.2, 0.35], scale: face_scale, rotation: -0.4 },
+        );
+        assert_eq!(size.edge().cmp(&TextureSize::new(128).edge()), expected, "{case} than the camera baseline");
+    }
 }
 
 #[test]

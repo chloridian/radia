@@ -39,7 +39,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn star_field_is_deterministic() {
+    fn star_field_matches_legacy_ranges() {
         let first = stars();
         let second = stars();
         assert_eq!(first, second);
