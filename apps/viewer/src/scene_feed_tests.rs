@@ -156,44 +156,25 @@ fn motion_sample(received_at: Instant) -> (World, AgentMotionSample) {
 }
 
 #[test]
-fn dead_reckoning_uses_constant_velocity() {
-    let received_at = Instant::now();
-    let (_region_world, mut sample) = motion_sample(received_at);
-    sample.velocity = Vec3::new(2.0, -1.0, 0.5);
-    let mut dead_reckoning = DeadReckoning::default();
-    dead_reckoning.replace(Some(sample));
+fn dead_reckoning_extrapolates() {
+    for (velocity, acceleration, time_dilation, ping_delay, elapsed, expected) in [
+        (Vec3::new(2.0, -1.0, 0.5), Vec3::ZERO, 1.0, None, 2, DVec3::new(14.016, 17.992, 31.004)),
+        (Vec3::ZERO, Vec3::new(0.0, 9.0, 0.0), 1.0, None, 1, DVec3::new(10.0, 20.0 + 0.5 * 9.0 * (1.0 - 1.0 / 45.0), 30.0)),
+        (Vec3::X * 2.0, Vec3::ZERO, 0.5, Some(Duration::from_millis(100)), 1, DVec3::new(11.058, 20.0, 30.0)),
+    ] {
+        let received_at = Instant::now();
+        let (_region_world, mut sample) = motion_sample(received_at);
+        sample.velocity = velocity;
+        sample.acceleration = acceleration;
+        sample.time_dilation = time_dilation;
+        sample.ping_delay = ping_delay;
+        let mut dead_reckoning = DeadReckoning::default();
+        dead_reckoning.replace(Some(sample));
 
-    assert!(
-        dead_reckoning.pose(received_at + Duration::from_secs(2), &[]).unwrap().position.distance(DVec3::new(14.016, 17.992, 31.004))
-            < 1e-12
-    );
-}
+        let position = dead_reckoning.pose(received_at + Duration::from_secs(elapsed), &[]).unwrap().position;
 
-#[test]
-fn dead_reckoning_uses_timestep_acceleration() {
-    let received_at = Instant::now();
-    let (_region_world, mut sample) = motion_sample(received_at);
-    sample.acceleration = Vec3::new(0.0, 9.0, 0.0);
-    let mut dead_reckoning = DeadReckoning::default();
-    dead_reckoning.replace(Some(sample));
-
-    let expected = 20.0 + 0.5 * 9.0 * (1.0 - 1.0 / 45.0);
-    assert!((dead_reckoning.pose(received_at + Duration::from_secs(1), &[]).unwrap().position.y - expected).abs() < 1e-12);
-}
-
-#[test]
-fn dead_reckoning_leads_half_ping() {
-    let received_at = Instant::now();
-    let (_region_world, mut sample) = motion_sample(received_at);
-    sample.velocity = Vec3::X * 2.0;
-    sample.time_dilation = 0.5;
-    sample.ping_delay = Some(Duration::from_millis(100));
-    let mut dead_reckoning = DeadReckoning::default();
-    dead_reckoning.replace(Some(sample));
-
-    let position = dead_reckoning.pose(received_at + Duration::from_secs(1), &[]).unwrap().position;
-
-    assert!((position.x - 11.058).abs() < 1e-12);
+        assert!(position.distance(expected) < 1e-12, "velocity {velocity} acceleration {acceleration}: {position} != {expected}");
+    }
 }
 
 #[test]
@@ -409,6 +390,9 @@ async fn terrain_clamp_respects_parenting() {
     let (camera, _) = watch::channel(None);
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
     let assets = AssetCoordinator::new(Handle::current(), pending(), None);
+    let (environment_selection, selected_environment) =
+        watch::channel(EnvironmentSelection { choice: EnvironmentChoice::default(), agent_region: None, active_textures: BTreeSet::new() });
+    let choice = EnvironmentChoice::Local(render::scene::LocalChoice::Preset(render::scene::EnvironmentPreset::Midday));
     let mut feed = SceneFeed {
         runtime: Handle::current(),
         view,
@@ -427,16 +411,12 @@ async fn terrain_clamp_respects_parenting() {
         motion_active: HashMap::new(),
         dead_reckoning: DeadReckoning::default(),
         last_movement: None,
-        environment_selection: watch::channel(EnvironmentSelection {
-            choice: EnvironmentChoice::default(),
-            agent_region: None,
-            active_textures: BTreeSet::new(),
-        })
-        .0,
+        environment_selection,
         environment_items: watch::channel(EnvironmentItems::Loading).1,
         incoming,
         _cancel: cancel,
     };
+    let mut selected_local = false;
     let mut hydrate = |world: &World| {
         scene.notify_world_change();
         let now = Instant::now();
@@ -461,6 +441,10 @@ async fn terrain_clamp_respects_parenting() {
                 ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
                 ReconcileStep::Continue => {}
                 ReconcileStep::Idle => {
+                    if !selected_local && feed.agent().is_some() {
+                        feed.set_environment_choice(choice.clone());
+                        selected_local = true;
+                    }
                     return (
                         feed.water_height,
                         feed.agent.and_then(|entity| feed.view.object(entity)).map(|object| object.detail().summary.entity),
@@ -473,6 +457,8 @@ async fn terrain_clamp_respects_parenting() {
     };
     let (height, original) = hydrate(&world);
     assert_eq!(height, None, "another region's water must not supply the water height");
+    assert_eq!(selected_environment.borrow().agent_region, Some(first_region));
+    assert_eq!(selected_environment.borrow().choice, choice);
     let original = original.expect("the observed avatar is available before its water height");
     let _ = world.observe_water_height(UpdateSource::new(first_region, 2, Ordered(2), 0), 17.0).unwrap();
     assert_eq!(hydrate(&world), (Some(24.0), Some(original)));
@@ -490,6 +476,8 @@ async fn terrain_clamp_respects_parenting() {
     let (height, replacement) = hydrate(&world);
     assert_eq!(height, Some(38.0), "the new avatar region supplies its own observed height");
     assert_ne!(replacement.expect("the replacement avatar is available"), original, "a retired entity must not remain cached");
+    assert_eq!(selected_environment.borrow().choice, choice);
+    assert_eq!(selected_environment.borrow().agent_region, Some(second_region));
     drop(hydrate);
     let received_at = Instant::now();
     let (_motion_world, mut falling_agent) = motion_sample(received_at);

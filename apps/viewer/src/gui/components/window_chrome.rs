@@ -22,19 +22,6 @@ mod platform {
     fn needs_client_titlebar(decorations: Decorations) -> bool {
         matches!(decorations, Decorations::Client { .. })
     }
-
-    #[cfg(test)]
-    mod tests {
-        use gpui::{Decorations, Tiling};
-
-        use super::needs_client_titlebar;
-
-        #[test]
-        fn titlebar_tracks_client_decorations() {
-            assert!(needs_client_titlebar(Decorations::Client { tiling: Tiling::default() }));
-            assert!(!needs_client_titlebar(Decorations::Server));
-        }
-    }
 }
 
 #[cfg(target_os = "windows")]

@@ -278,21 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_menu_reuses_rows() {
-        let (mut inventory, personal) = model();
-        inventory.upsert_item(item(personal, 3, 1, "Sky", AssetType::Settings, InventoryType::Settings)).expect("settings item");
-        let first = environment_items(inventory.snapshot(), None);
-        inventory.upsert_item(item(personal, 4, 1, "Notecard", AssetType::Notecard, InventoryType::Notecard)).expect("notecard");
-        let second = environment_items(inventory.snapshot(), Some(Arc::clone(&first)));
-        assert!(Arc::ptr_eq(&first, &second));
-        inventory.upsert_item(item(personal, 5, 1, "Cycle", AssetType::Settings, InventoryType::Settings)).expect("new setting");
-        let third = environment_items(inventory.snapshot(), Some(second));
-        assert_eq!(third.items().len(), 2);
-        assert!(!Arc::ptr_eq(&first, &third));
-    }
-
-    #[test]
-    fn large_menu_reuses_unchanged_rows() {
+    fn menu_reuses_unchanged_rows() {
         let (mut inventory, personal) = model();
         for id in 10_u128..10_010 {
             inventory.upsert_item(item(personal, id, 1, "Setting", AssetType::Settings, InventoryType::Settings)).expect("settings item");
@@ -303,6 +289,10 @@ mod tests {
         assert_eq!(first.items().len(), 10_000);
         assert!(Arc::ptr_eq(&first, &second));
         assert!(Arc::ptr_eq(&first.items()[0].name, &inventory.snapshot().item(first.items()[0].key).unwrap().name));
+        inventory.upsert_item(item(personal, 20_001, 1, "Cycle", AssetType::Settings, InventoryType::Settings)).expect("new setting");
+        let third = environment_items(inventory.snapshot(), Some(second));
+        assert_eq!(third.items().len(), 10_001);
+        assert!(!Arc::ptr_eq(&first, &third));
     }
 
     fn model() -> (Inventory, InventoryOwner) {

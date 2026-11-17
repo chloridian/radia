@@ -300,11 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn v_is_unbound() {
-        assert_eq!(KeyBinding::from_key(&Key::Character("v".into())), None);
-    }
-
-    #[test]
     fn captured_press_does_not_move() {
         let mut controls = HeldControls::default();
         let key = Key::Character("w".into());

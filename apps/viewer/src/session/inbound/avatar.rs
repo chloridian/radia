@@ -194,11 +194,20 @@ mod tests {
 
     #[test]
     fn bad_texture_keeps_visual_params() {
-        let message = avatar_message(vec![0], &[12, 34], None);
-        let update = decode_avatar_appearance_update(&message).expect("valid visual params").expect("avatar update");
-        assert_eq!(update.update.texture_slots(), None);
-        assert_eq!(update.update.visual_params().count(), 2);
-        assert_eq!(update.invalid_fields, 1);
+        let mut oversized = texture_entry(Uuid::from_u128(88));
+        while oversized.len() <= super::MAX_AVATAR_TEXTURE_ENTRY_BYTES {
+            oversized.push(1);
+            oversized.extend_from_slice(&[0; 16]);
+        }
+        assert!(decode_texture_entry(&oversized).expect("valid TextureEntry").is_some());
+
+        for (case, bytes) in [("malformed", vec![0]), ("oversized", oversized)] {
+            let message = avatar_message(bytes, &[12, 34], None);
+            let update = decode_avatar_appearance_update(&message).expect("valid visual params").expect("avatar update");
+            assert_eq!(update.update.texture_slots(), None, "{case}");
+            assert_eq!(update.update.visual_params().count(), 2, "{case}");
+            assert_eq!(update.invalid_fields, 1, "{case}");
+        }
     }
 
     #[test]
@@ -218,31 +227,13 @@ mod tests {
     }
 
     #[test]
-    fn oversized_texture_is_omitted() {
-        let mut bytes = texture_entry(Uuid::from_u128(88));
-        while bytes.len() <= super::MAX_AVATAR_TEXTURE_ENTRY_BYTES {
-            bytes.push(1);
-            bytes.extend_from_slice(&[0; 16]);
+    fn invalid_appearance_is_rejected() {
+        for (case, params, version) in [("short param list", &[12][..], None), ("unsupported version", &[12, 34][..], Some((2, 50)))] {
+            assert_eq!(
+                decode_avatar_appearance_update(&avatar_message(Vec::new(), params, version)),
+                Err(super::DecodeError::InvalidMessage),
+                "{case}"
+            );
         }
-        assert!(decode_texture_entry(&bytes).expect("valid TextureEntry").is_some());
-
-        let message = avatar_message(bytes, &[12, 34], None);
-        let update = decode_avatar_appearance_update(&message).expect("valid visual params").expect("avatar update");
-        assert_eq!(update.update.texture_slots(), None);
-        assert_eq!(update.update.visual_params().count(), 2);
-        assert_eq!(update.invalid_fields, 1);
-    }
-
-    #[test]
-    fn short_param_list_is_ignored() {
-        assert_eq!(decode_avatar_appearance_update(&avatar_message(Vec::new(), &[12], None)), Err(super::DecodeError::InvalidMessage));
-    }
-
-    #[test]
-    fn unsupported_version_is_ignored() {
-        assert_eq!(
-            decode_avatar_appearance_update(&avatar_message(Vec::new(), &[12, 34], Some((2, 50)))),
-            Err(super::DecodeError::InvalidMessage)
-        );
     }
 }

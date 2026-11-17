@@ -361,39 +361,32 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bad_faces_and_alignment() {
-        assert!(decode_payload(&payload(7, vec![Value::Integer(45)], vec![material([])])).is_err());
-        assert!(decode_payload(&payload(7, vec![Value::Integer(4)], Vec::new())).is_err());
-    }
-
-    #[test]
-    fn rejects_bad_vectors_counts() {
+    fn rejects_invalid_payloads() {
+        let face = |material| payload(7, vec![Value::Integer(4)], vec![material]);
+        let mut cases = vec![
+            ("face out of range".to_owned(), payload(7, vec![Value::Integer(45)], vec![material([])])),
+            ("unaligned faces".to_owned(), payload(7, vec![Value::Integer(4)], Vec::new())),
+            ("non-finite value".to_owned(), face(material([("rf", Value::Real(f64::MAX))]))),
+            ("oversized".to_owned(), vec![b' '; MAX_DATA_BYTES + 1]),
+            ("zero local id".to_owned(), payload(0, Vec::new(), Vec::new())),
+        ];
         for values in [vec![Value::Real(1.0)], vec![Value::Real(1.0); 5], vec![Value::Boolean(true); 4]] {
-            let bad_vector = material([("bc", Value::Array(values))]);
-            assert!(decode_payload(&payload(7, vec![Value::Integer(4)], vec![bad_vector])).is_err());
+            cases.push((format!("bad bc vector {values:?}"), face(material([("bc", Value::Array(values))]))));
         }
-
         for (key, element) in [("tex", Value::Uuid(Uuid::nil())), ("ti", material([]))] {
-            let too_many = material([(key, Value::Array(vec![element; 5]))]);
-            assert!(decode_payload(&payload(7, vec![Value::Integer(4)], vec![too_many])).is_err(), "too many {key} entries");
+            cases.push((format!("too many {key} entries"), face(material([(key, Value::Array(vec![element; 5]))]))));
         }
-
         for (key, value) in [
             ("tex", Value::Array(vec![Value::Integer(1)])),
             ("ti", Value::Array(vec![Value::Integer(1)])),
             ("ti", Value::Array(vec![material([("s", Value::Integer(1))])])),
             ("bc", Value::Integer(1)),
         ] {
-            let wrong_type = material([(key, value)]);
-            assert!(decode_payload(&payload(7, vec![Value::Integer(4)], vec![wrong_type])).is_err(), "wrong {key} type");
+            cases.push((format!("wrong {key} type {value:?}"), face(material([(key, value)]))));
         }
-    }
-
-    #[test]
-    fn rejects_non_finite_oversized() {
-        let non_finite = material([("rf", Value::Real(f64::MAX))]);
-        assert!(decode_payload(&payload(7, vec![Value::Integer(4)], vec![non_finite])).is_err());
-        assert!(decode_payload(&vec![b' '; MAX_DATA_BYTES + 1]).is_err());
+        for (case, bytes) in cases {
+            assert!(decode_payload(&bytes).is_err(), "{case}");
+        }
     }
 
     #[test]
@@ -403,11 +396,6 @@ mod tests {
 
             assert_eq!(decoded.local_id.get(), expected);
         }
-    }
-
-    #[test]
-    fn rejects_zero_local_id() {
-        assert!(decode_payload(&payload(0, Vec::new(), Vec::new())).is_err());
     }
 
     #[test]

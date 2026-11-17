@@ -251,7 +251,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn updates_coalesce_and_bound_chat() {
+    fn updates_coalesce_within_bounds() {
         let (mailbox, mut receiver) = PresentationMailbox::new(7);
         for index in 0..1000 {
             mailbox.publish(ViewerUpdate::RegionName(format!("Region {index}")));
