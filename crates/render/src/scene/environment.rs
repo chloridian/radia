@@ -924,7 +924,7 @@ mod tests {
         manager.set_local(EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Midday)), region).unwrap();
         let first = requested(&mut manager, EnvironmentPreset::Midday);
         manager.set_local(EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Sunset)), region).unwrap();
-        assert!(matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == first.ticket));
+        std::assert_matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == first.ticket);
         let second = requested(&mut manager, EnvironmentPreset::Sunset);
         assert_ne!(first.ticket, second.ticket);
     }

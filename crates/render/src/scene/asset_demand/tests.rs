@@ -705,7 +705,7 @@ fn shared_texture_work(count: u32) -> [usize; 3] {
     assert!(initial_work <= 3 * identities.len(), "registration work stays bounded by user count");
     let initial_events: Vec<_> = std::iter::from_fn(|| demand.event()).collect();
     assert_eq!(initial_events.len(), 1, "all objects share one request");
-    assert!(matches!(&initial_events[0], AssetChange::Request(request) if request.ticket == ticket));
+    assert_matches!(&initial_events[0], AssetChange::Request(request) if request.ticket == ticket);
 
     demand.set_camera(next_camera);
     process_all(&mut demand, &mirror, &identities);
@@ -726,7 +726,7 @@ fn shared_texture_work(count: u32) -> [usize; 3] {
     demand.remove(entities.next().expect("one fixture user remains"));
     let releases: Vec<_> = std::iter::from_fn(|| demand.event()).collect();
     assert_eq!(releases.len(), 1, "the final user releases the shared ticket once");
-    assert!(matches!(&releases[0], AssetChange::Release(released) if *released == ticket));
+    assert_matches!(&releases[0], AssetChange::Release(released) if *released == ticket);
     assert!(!demand.entries.contains_key(&key));
     assert!(!demand.tickets.contains_key(&ticket));
     [initial_work, rescan_work, reverse_work]

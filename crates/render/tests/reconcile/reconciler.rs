@@ -67,7 +67,7 @@ fn mesh_reuse_and_replacement() {
     scene.set_camera(camera(-300.0));
     settle(&mut scene, &mut view, &world, &mut now);
     let meshes: Vec<_> = view.objects().map(|object| object.mesh().map(|(key, mesh)| (key, mesh.clone())).unwrap()).collect();
-    assert!(matches!(meshes[0].0, DrawnMeshKey::Prim(key) if key.detail == Detail::Lowest));
+    assert_matches!(meshes[0].0, DrawnMeshKey::Prim(key) if key.detail == Detail::Lowest);
     assert_eq!(meshes[0].1.id(), meshes[1].1.id());
 
     scene.set_camera(camera(99.0));
@@ -322,7 +322,7 @@ fn quality_updates() {
     scene.set_camera(camera(0.0));
     settle(&mut scene, &mut view, &world, &mut now);
     let revision = view.revision();
-    assert!(matches!(view.objects().next().unwrap().mesh().unwrap().0, DrawnMeshKey::Prim(key) if key.detail == Detail::Low));
+    assert_matches!(view.objects().next().unwrap().mesh().unwrap().0, DrawnMeshKey::Prim(key) if key.detail == Detail::Low);
 
     scene.set_camera(camera(0.0).with_quality(32.0, 1.0).unwrap());
     settle(&mut scene, &mut view, &world, &mut now);
@@ -330,10 +330,10 @@ fn quality_updates() {
 
     scene.set_camera(camera(0.0).with_quality(512.0, 4.0).unwrap());
     settle(&mut scene, &mut view, &world, &mut now);
-    assert!(matches!(view.objects().next().unwrap().mesh().unwrap().0, DrawnMeshKey::Prim(key) if key.detail == Detail::Medium));
+    assert_matches!(view.objects().next().unwrap().mesh().unwrap().0, DrawnMeshKey::Prim(key) if key.detail == Detail::Medium);
     scene.set_camera(camera(0.0).with_quality(512.0, 0.25).unwrap());
     settle(&mut scene, &mut view, &world, &mut now);
-    assert!(matches!(view.objects().next().unwrap().mesh().unwrap().0, DrawnMeshKey::Prim(key) if key.detail == Detail::Lowest));
+    assert_matches!(view.objects().next().unwrap().mesh().unwrap().0, DrawnMeshKey::Prim(key) if key.detail == Detail::Lowest);
     assert_eq!(view.revision(), revision);
 }
 

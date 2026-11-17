@@ -1648,10 +1648,10 @@ fn gpu_invisible_face_allows_mesh() {
     assert_eq!(opaque.alpha, crate::material::AlphaBehavior::Opaque);
     assert_eq!(invisible.alpha, crate::material::AlphaBehavior::Blend);
     assert_eq!(invisible.base_color_factor()[3], 0.0);
-    assert!(matches!(
+    std::assert_matches!(
         invisible.base_color_texture.as_ref().expect("invisible face texture").state().resolution,
         crate::material::Resolution::Pending
-    ));
+    );
     let (_, shared) = object.mesh().expect("uploaded mesh geometry");
     assert_eq!(shared.mesh().faces().len(), 2, "both authored face slots remain in the selected LOD");
 
