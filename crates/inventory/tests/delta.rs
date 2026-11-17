@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{assert_matches, sync::Arc};
 
 use inventory::{
     AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryDelta, InventoryError, InventoryLimits,
@@ -221,7 +221,7 @@ fn cycle_delta_preserves_snapshot() {
     let mut renamed_b = inventory.snapshot().category(b_key).expect("B exists").clone();
     renamed_b.name = Arc::from("would change if published");
 
-    std::assert_matches!(
+    assert_matches!(
         inventory.apply_delta(InventoryDelta { updated_categories: vec![moved_a, renamed_b], ..InventoryDelta::default() }),
         Err(InventoryError::Cycle)
     );
@@ -243,7 +243,7 @@ fn missing_parent_delta_is_atomic() {
     let orphan = category(owner, 11, Some(99), -1, None);
     let orphan_key = orphan.key;
 
-    std::assert_matches!(
+    assert_matches!(
         inventory.apply_delta(InventoryDelta { created_categories: vec![orphan], ..InventoryDelta::default() }),
         Err(InventoryError::MissingParent)
     );
@@ -408,7 +408,7 @@ fn invalid_delta_publishes_nothing() {
     let mut inventory = Inventory::new(root, None, InventoryLimits::default()).expect("root is valid");
     let before = inventory.revision();
 
-    std::assert_matches!(
+    assert_matches!(
         inventory.apply_delta(InventoryDelta {
             created_categories: vec![created],
             created_items: vec![invalid_item],

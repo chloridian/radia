@@ -7,17 +7,19 @@ mod types;
 
 use std::{error::Error, fmt};
 
-pub use cache::{
-    InventoryCache, InventoryCacheError, InventoryCacheLoad, InventoryCacheOpenStatus, InventoryCacheRestore,
-    InventoryCacheRestoreProgress, InventoryCacheWrite,
-};
-pub use mutation::{FolderFetchCommit, InventoryChild, InventoryPreparationCancellation, MAX_FOLDER_FETCH_CHILDREN, PreparedFolderFetch};
-pub use snapshot::InventorySnapshot;
-pub use state::{Inventory, InventoryLimits, InventoryRoots};
-pub use types::{
-    AssetType, Category, CategoryKey, ChangeSet, FolderType, InventoryChange, InventoryChangeEstimate, InventoryDelta, InventoryNodeId,
-    InventoryNodeKey, InventoryOwner, InventoryRevision, InventoryType, Item, ItemKey, LinkResolution, PermissionMask, Permissions,
-    SaleInfo, SaleType, ServerVersion,
+pub use self::{
+    cache::{
+        InventoryCache, InventoryCacheError, InventoryCacheLoad, InventoryCacheOpenStatus, InventoryCacheRestore,
+        InventoryCacheRestoreProgress, InventoryCacheWrite,
+    },
+    mutation::{FolderFetchCommit, InventoryChild, InventoryPreparationCancellation, MAX_FOLDER_FETCH_CHILDREN, PreparedFolderFetch},
+    snapshot::InventorySnapshot,
+    state::{Inventory, InventoryLimits, InventoryRoots},
+    types::{
+        AssetType, Category, CategoryKey, ChangeSet, FolderType, InventoryChange, InventoryChangeEstimate, InventoryDelta, InventoryNodeId,
+        InventoryNodeKey, InventoryOwner, InventoryRevision, InventoryType, Item, ItemKey, LinkResolution, PermissionMask, Permissions,
+        SaleInfo, SaleType, ServerVersion,
+    },
 };
 
 pub const MAX_INVENTORY_CATEGORIES: usize = 131_074;

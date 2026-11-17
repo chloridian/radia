@@ -3,12 +3,11 @@ use std::{
     sync::Arc,
 };
 
-use crate::state::{InventoryState, insert_child, remove_child, replace_category_record};
 use crate::{
     Category, CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryDelta, InventoryError, InventoryNodeId, InventoryNodeKey,
     ServerVersion,
     mutation::{remove_category_subtree, remove_item, upsert_item_state},
-    state::validate_category,
+    state::{InventoryState, insert_child, remove_child, replace_category_record, validate_category},
 };
 
 struct CategoryAncestry<'a> {

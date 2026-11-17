@@ -1,10 +1,10 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, mem};
 
-use crate::{Category, CategoryKey, ChangeSet, InventoryChange, InventoryNodeId, InventorySnapshot, Item, ItemKey};
 use rusqlite::{Transaction, params};
 use storage::sqlite::{MAX_BATCH_BYTES, MAX_BATCH_ROWS, SqliteBatch, SqliteError};
 
 use super::{CacheIdentity, InventoryCacheError};
+use crate::{Category, CategoryKey, ChangeSet, InventoryChange, InventoryNodeId, InventorySnapshot, Item, ItemKey};
 
 pub(super) fn bootstrap(snapshot: &InventorySnapshot, identity: &CacheIdentity) -> Result<Vec<SqliteBatch>, InventoryCacheError> {
     let categories = snapshot.categories().cloned().collect::<Vec<_>>();
@@ -156,7 +156,7 @@ fn category_batches(values: Vec<Category>, identity: &CacheIdentity) -> Result<V
     for category in values {
         let row_bytes = 128usize.saturating_add(category.name.len());
         if !chunk.is_empty() && (chunk.len() >= MAX_BATCH_ROWS || bytes.saturating_add(row_bytes) > MAX_BATCH_BYTES) {
-            batches.push(category_batch(std::mem::take(&mut chunk), bytes, identity)?);
+            batches.push(category_batch(mem::take(&mut chunk), bytes, identity)?);
             bytes = 0;
         }
         bytes = bytes.saturating_add(row_bytes);
@@ -219,7 +219,7 @@ fn item_batches(values: Vec<Item>, identity: &CacheIdentity) -> Result<Vec<Sqlit
     for item in values {
         let row_bytes = 288usize.saturating_add(item.name.len()).saturating_add(item.description.len());
         if !chunk.is_empty() && (chunk.len() >= MAX_BATCH_ROWS || bytes.saturating_add(row_bytes) > MAX_BATCH_BYTES) {
-            batches.push(item_batch(std::mem::take(&mut chunk), bytes, identity)?);
+            batches.push(item_batch(mem::take(&mut chunk), bytes, identity)?);
             bytes = 0;
         }
         bytes = bytes.saturating_add(row_bytes);
@@ -346,7 +346,7 @@ where
     let mut bytes = 0usize;
     for value in values {
         if !chunk.is_empty() && chunk.len() >= MAX_BATCH_ROWS {
-            batches.push(make(std::mem::take(&mut chunk), bytes)?);
+            batches.push(make(mem::take(&mut chunk), bytes)?);
             bytes = 0;
         }
         chunk.push(value);
