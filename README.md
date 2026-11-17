@@ -9,7 +9,7 @@ Radia is still in development, and prebuilt downloads aren't available yet. You 
 ```sh
 git clone https://github.com/hymenaei/Radia.git
 cd Radia
-cargo run
+cargo run --release
 ```
 
 When prebuilt downloads are available, they'll be listed on [GitHub Releases](https://github.com/hymenaei/Radia/releases). For platform setup, see the [development guide](docs/tooling.md). For more on how Radia is built, see [architecture](docs/architecture.md) and [compatibility references](docs/reference.md).
