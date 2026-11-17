@@ -88,12 +88,13 @@ impl LocalChoice {
 
 static SHARED_ENVIRONMENT: EnvironmentChoice = EnvironmentChoice::Shared;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EnvironmentProperty {
     pub name: String,
     pub source: Arc<[u8]>,
 }
 
+#[derive(Debug)]
 pub enum EnvironmentPush {
     Clear { experience: Option<ExperienceId>, transition: Duration },
     Full { experience: ExperienceId, asset: AssetId, transition: Duration },
