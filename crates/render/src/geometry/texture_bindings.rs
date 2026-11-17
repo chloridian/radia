@@ -49,7 +49,7 @@ pub(super) struct TerrainDemand {
 }
 
 impl GeometryRenderer {
-    pub(super) fn request_frame_textures(&mut self, view: &SceneView, background: &[Entity], gated: &[Entity]) {
+    pub(super) fn request_frame_textures(&mut self, view: &SceneView, background: &[Entity]) {
         self.requested_textures.clear();
         self.visible_textures.clear();
         self.visible_texture_requests.clear();
@@ -88,15 +88,6 @@ impl GeometryRenderer {
             for (handle, _) in hidden {
                 if requested.insert(handle.id()) {
                     textures.request(handle, epoch, Priority::Background);
-                }
-            }
-        }
-        for entity in gated {
-            if let Some(object) = view.object(*entity).filter(|_| view.object_is_live(*entity))
-                && let Some(faces) = object.materials()
-            {
-                for face in faces {
-                    self.request_material_texture(face, Priority::Visible);
                 }
             }
         }

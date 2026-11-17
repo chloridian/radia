@@ -1686,20 +1686,19 @@ fn gpu_invisible_face_allows_mesh() {
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
     let depth = geometry.depth(&device, [128, 128]).expect("depth target");
     let started = Instant::now();
-    prepare_frame_at(&device, &queue, &mut geometry, &view, camera, started);
-    assert!(geometry.meshes.contains_key(&shared.id()), "the two-face LOD has been uploaded to the GPU");
-    assert_eq!(geometry.stats.instances, 0, "the opaque texture must reach GPU residency before it can appear");
-    let job = geometry.next_texture_job().expect("opaque face texture upload job");
-    geometry.complete_texture(job.run(crate::texture::CompressionQuality::Fast));
-    let early = started + std::time::Duration::from_millis(10);
     for _ in 0..3 {
-        prepare_frame_at(&device, &queue, &mut geometry, &view, camera, early);
+        prepare_frame_at(&device, &queue, &mut geometry, &view, camera, started);
         if geometry.stats.instances == 1 {
             break;
         }
     }
-    assert_eq!(geometry.stats.instances, 1, "the opaque face appears once its own texture is resident, before 250 ms");
-    let opaque_image = opaque.base_color_texture.as_ref().and_then(|binding| binding.image()).expect("resident opaque texture");
+    assert!(geometry.meshes.contains_key(&shared.id()), "the two-face LOD has been uploaded to the GPU");
+    assert_eq!(geometry.stats.instances, 1, "the mesh object appears as soon as its geometry is resident");
+    let opaque_image = opaque.base_color_texture.as_ref().and_then(|binding| binding.image()).expect("decoded opaque texture");
+    assert!(!geometry.textures.is_resident(opaque_image.id()), "the mesh object did not wait for its texture");
+    let job = geometry.next_texture_job().expect("opaque face texture upload job");
+    geometry.complete_texture(job.run(crate::texture::CompressionQuality::Fast));
+    prepare_frame_at(&device, &queue, &mut geometry, &view, camera, started);
     assert!(geometry.textures.is_resident(opaque_image.id()));
     assert!(
         invisible.base_color_texture.as_ref().is_some_and(|binding| binding.image().is_none()),
@@ -1734,10 +1733,6 @@ fn gpu_invisible_face_allows_mesh() {
     let pixels = render_pixels(&device, &queue, [128, 128], &depth, |pass| geometry.draw(pass));
     let red_pixels = pixels.iter().filter(|pixel| pixel[0] > pixel[1].saturating_add(24)).count();
     assert!(red_pixels > 50, "the opaque face is rendered while the hidden texture is still pending: {red_pixels} pixels");
-
-    let late = started + crate::geometry::first_appearance::ASSET_WAIT + std::time::Duration::from_millis(1);
-    prepare_frame_at(&device, &queue, &mut geometry, &view, camera, late);
-    assert_eq!(geometry.stats.instances, 1, "the visible object remains available after the optional asset deadline");
 }
 
 #[test]
