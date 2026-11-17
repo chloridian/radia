@@ -34,14 +34,10 @@ pub(super) const MESH_DEMANDS_PER_FRAME: usize = 24;
 pub(super) struct MeshAdmission {
     pub(super) revision: u64,
     pub(super) active: bool,
-    visible_after: Option<MeshDemandOrder>,
-    visible_pass_revision: Option<u64>,
-    preparation_after: Option<MeshDemandOrder>,
-    preparation_pass_revision: Option<u64>,
-    visible_blocked: bool,
-    preparation_blocked: bool,
-    visible_retry: bool,
-    preparation_retry: bool,
+    after: Option<MeshDemandOrder>,
+    pass_revision: u64,
+    blocked: bool,
+    retry: bool,
     pub(super) restart_pending: bool,
     pub(super) retry_after_layout: bool,
     pub(super) capacity_blocked: bool,
@@ -51,20 +47,21 @@ pub(super) struct MeshAdmission {
 
 impl MeshAdmission {
     fn begin(&mut self, revision: u64) {
-        self.revision = revision;
-        self.active = true;
-        self.visible_after = None;
-        self.visible_pass_revision = Some(revision);
-        self.preparation_after = None;
-        self.preparation_pass_revision = Some(revision);
-        self.visible_blocked = false;
-        self.preparation_blocked = false;
-        self.visible_retry = false;
-        self.preparation_retry = false;
-        self.restart_pending = false;
-        self.retry_after_layout = false;
+        *self = Self { revision, active: true, ..Self::default() };
+        self.restart(revision);
+    }
+
+    fn restart(&mut self, revision: u64) {
+        self.after = None;
+        self.pass_revision = revision;
+        self.blocked = false;
+        self.retry = false;
         self.capacity_blocked = false;
         self.visible_ready = false;
+    }
+
+    fn pass_incomplete(&self, revision: u64, retired: bool) -> bool {
+        self.after.is_some() && (self.pass_revision != revision || self.blocked && (self.retry || retired))
     }
 }
 
@@ -315,7 +312,7 @@ impl GeometryRenderer {
         let mut uploaded = 0;
         let mesh_uploads_started = Instant::now();
         if mesh_admission_requested {
-            self.advance_mesh_admission(device, &mut uploaded);
+            self.advance_mesh_admission(device, &mut uploaded, camera, &frustum);
             self.cache.mesh_state = self.memory.mesh_state();
         }
         let residency_changed = uploaded > 0 || self.stats.gpu_mesh_retirements > 0;
@@ -411,7 +408,7 @@ impl GeometryRenderer {
         }
         if layout_requested {
             let visible = if visible_changed { &self.cache.next_visible } else { &self.cache.visible };
-            self.layout_required = !self.draw_list.request_layout(visible, camera, &self.cache.items);
+            self.layout_required = !self.draw_list.request_layout(visible, camera);
         }
 
         let draw_list_started = Instant::now();
@@ -606,126 +603,90 @@ impl GeometryRenderer {
         }
     }
 
-    fn advance_mesh_admission(&mut self, device: &Device, uploaded: &mut usize) {
+    fn advance_mesh_admission(&mut self, device: &Device, uploaded: &mut usize, camera: Camera, frustum: &Frustum) {
         let revision = self.cache.mesh_demand_revision;
+        self.pending_meshes.clear();
         if !self.mesh_admission.active || self.mesh_admission.restart_pending {
             self.mesh_admission.begin(revision);
-            self.pending_meshes.clear();
             self.mesh_budget_blocked.clear();
-        } else {
-            self.pending_meshes.clear();
-            if self.mesh_admission.revision != revision && self.mesh_admission.visible_ready {
-                self.mesh_admission.visible_ready = false;
-                self.mesh_admission.visible_after = None;
-                self.mesh_admission.visible_pass_revision = Some(revision);
-                self.mesh_admission.preparation_after = None;
-                self.mesh_admission.preparation_pass_revision = Some(revision);
-                self.mesh_admission.visible_blocked = false;
-                self.mesh_admission.preparation_blocked = false;
-                self.mesh_admission.visible_retry = false;
-                self.mesh_admission.preparation_retry = false;
-                self.mesh_admission.capacity_blocked = false;
-            }
+        } else if self.mesh_admission.revision != revision && self.mesh_admission.visible_ready {
+            self.mesh_admission.restart(revision);
         }
         self.mesh_admission.visits_this_frame = 0;
         let mut budget = MESH_DEMANDS_PER_FRAME;
         while budget > 0 {
-            if !self.mesh_admission.visible_ready {
-                let after = self.mesh_admission.visible_after;
-                let Some(demand) = next_mesh_demand(&self.cache.mesh_order, after) else {
-                    if after.is_some() {
-                        self.mesh_admission.visible_after = None;
-                        if self.mesh_admission.visible_pass_revision != Some(revision) {
-                            self.mesh_admission.visible_pass_revision = Some(revision);
-                            self.mesh_admission.visible_blocked = false;
-                            self.mesh_admission.visible_retry = false;
-                            continue;
-                        }
-                        if self.mesh_admission.visible_blocked && (self.mesh_admission.visible_retry || !self.retired.is_empty()) {
-                            self.mesh_admission.visible_blocked = false;
-                            self.mesh_admission.visible_retry = false;
-                            continue;
-                        }
-                    }
-                    self.mesh_admission.visible_ready = true;
-                    self.mesh_admission.preparation_after = None;
-                    self.mesh_admission.preparation_pass_revision = Some(revision);
-                    self.mesh_admission.preparation_blocked = false;
-                    self.mesh_admission.preparation_retry = false;
-                    continue;
-                };
-                self.mesh_admission.visible_after = Some(demand);
-                budget -= 1;
-                self.mesh_admission.visits_this_frame += 1;
-                self.stats.mesh_admission_items_visited += 1;
-                if self.cache.admission_protected.contains(&demand.mesh) {
+            let next = next_mesh_demand(&self.cache.mesh_order, self.mesh_admission.after);
+            let viewed_done = next.is_none_or(|demand| !demand.visible);
+            if viewed_done && !self.mesh_admission.visible_ready {
+                if self.mesh_admission.pass_incomplete(revision, !self.retired.is_empty()) {
+                    self.mesh_admission.restart(revision);
                     continue;
                 }
-                let outcome = self.admit_mesh_demand(device, demand, true, uploaded);
-                self.mesh_admission.visible_blocked |= !matches!(outcome, MeshUpload::Ready);
-                self.mesh_admission.visible_retry |= matches!(outcome, MeshUpload::Deferred);
-                self.mesh_admission.capacity_blocked |= matches!(outcome, MeshUpload::CapacityBlocked);
-                self.mesh_admission.retry_after_layout |= matches!(outcome, MeshUpload::CapacityBlocked) && self.draw_list.layout_pending();
-                continue;
+                self.mesh_admission.visible_ready = true;
+                self.mesh_admission.blocked = false;
+                self.mesh_admission.retry = false;
             }
-
-            let after = self.mesh_admission.preparation_after;
-            let Some(demand) = next_mesh_demand(&self.cache.preparation_mesh_order, after) else {
-                if after.is_some() {
-                    self.mesh_admission.preparation_after = None;
-                    if self.mesh_admission.preparation_pass_revision != Some(revision) {
-                        self.mesh_admission.preparation_pass_revision = Some(revision);
-                        self.mesh_admission.preparation_blocked = false;
-                        self.mesh_admission.preparation_retry = false;
-                        continue;
-                    }
-                    if self.mesh_admission.preparation_blocked && (self.mesh_admission.preparation_retry || !self.retired.is_empty()) {
-                        self.mesh_admission.preparation_blocked = false;
-                        self.mesh_admission.preparation_retry = false;
-                        continue;
-                    }
+            let Some(demand) = next else {
+                if self.mesh_admission.pass_incomplete(revision, !self.retired.is_empty()) {
+                    self.mesh_admission.restart(revision);
+                    continue;
                 }
                 self.mesh_admission.active = false;
                 break;
             };
-            self.mesh_admission.preparation_after = Some(demand);
+            self.mesh_admission.after = Some(demand);
             budget -= 1;
             self.mesh_admission.visits_this_frame += 1;
             self.stats.mesh_admission_items_visited += 1;
             if self.meshes.contains_key(&demand.mesh) {
+                if demand.visible {
+                    self.cache.admission_protected.insert(demand.mesh);
+                }
                 continue;
             }
-            let outcome = self.admit_mesh_demand(device, demand, false, uploaded);
-            self.mesh_admission.preparation_blocked |= !matches!(outcome, MeshUpload::Ready);
-            self.mesh_admission.preparation_retry |= matches!(outcome, MeshUpload::Deferred);
-            self.mesh_admission.capacity_blocked |= matches!(outcome, MeshUpload::CapacityBlocked);
-            self.mesh_admission.retry_after_layout |= matches!(outcome, MeshUpload::CapacityBlocked) && self.draw_list.layout_pending();
+            match self.admit_mesh_demand(device, demand, uploaded, camera, frustum) {
+                MeshUpload::Ready => {}
+                MeshUpload::Deferred => {
+                    self.mesh_admission.blocked = true;
+                    self.mesh_admission.retry = true;
+                }
+                MeshUpload::CapacityBlocked => {
+                    self.mesh_admission.blocked = true;
+                    self.mesh_admission.capacity_blocked = true;
+                    self.mesh_admission.retry_after_layout |= self.draw_list.layout_pending();
+                }
+            }
         }
         self.mesh_admission.revision = revision;
     }
 
-    fn admit_mesh_demand(&mut self, device: &Device, demand: MeshDemandOrder, allow_eviction: bool, uploaded: &mut usize) -> MeshUpload {
+    fn admit_mesh_demand(
+        &mut self,
+        device: &Device,
+        demand: MeshDemandOrder,
+        uploaded: &mut usize,
+        camera: Camera,
+        frustum: &Frustum,
+    ) -> MeshUpload {
         let mesh_id = demand.mesh;
         let Some(mesh) = self.cache.mesh_representatives.get(&mesh_id).cloned() else { return MeshUpload::Ready };
         let composition = self.cache.mesh_compositions.get(&mesh_id).cloned().flatten();
-        if self.meshes.contains_key(&mesh_id) {
-            if allow_eviction {
-                self.cache.admission_protected.insert(mesh_id);
-                return MeshUpload::Ready;
-            }
-            self.stats.mesh_upload_attempts += 1;
-            self.stats.mesh_upload_attempt_bytes += mesh.mesh().owned_bytes();
-            return self.upload_mesh(device, &mesh, composition.as_deref(), uploaded, false);
-        }
         self.stats.mesh_upload_attempts += 1;
         self.stats.mesh_upload_attempt_bytes += mesh.mesh().owned_bytes();
-        let outcome = self.upload_mesh(device, &mesh, composition.as_deref(), uploaded, allow_eviction);
-        if matches!(outcome, MeshUpload::Ready) && allow_eviction {
-            self.cache.admission_protected.insert(mesh_id);
-        } else if allow_eviction && !matches!(outcome, MeshUpload::Ready) {
-            self.pending_meshes.insert(mesh_id);
-            if matches!(outcome, MeshUpload::CapacityBlocked) {
-                self.mesh_budget_blocked.insert(mesh_id);
+        let eviction = demand.visible.then_some((camera, frustum));
+        let outcome = self.upload_mesh(device, &mesh, composition.as_deref(), uploaded, eviction);
+        if demand.visible {
+            match outcome {
+                MeshUpload::Ready => {
+                    self.cache.admission_protected.insert(mesh_id);
+                }
+                MeshUpload::Deferred => {
+                    self.pending_meshes.insert(mesh_id);
+                }
+                MeshUpload::CapacityBlocked => {
+                    self.pending_meshes.insert(mesh_id);
+                    self.mesh_budget_blocked.insert(mesh_id);
+                }
             }
         }
         outcome

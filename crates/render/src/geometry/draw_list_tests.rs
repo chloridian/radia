@@ -50,7 +50,7 @@ fn canceled_layout_retires_in_chunks() {
     assert!(list.pending.is_none());
     assert_eq!(staged_entry_count(list.retired.as_ref().expect("full staged build is retained")), initial_entries);
     for _ in 0..8 {
-        assert!(!list.request_layout(&[index], camera, &items.items));
+        assert!(!list.request_layout(&[index], camera));
         list.cancel_layout();
         assert!(list.pending.is_none());
         assert!(list.retired.is_some(), "repeated requests cannot add retired builds");
@@ -71,7 +71,7 @@ fn canceled_layout_retires_in_chunks() {
     assert!(steps > 1, "many staged group references require multiple retirement turns");
     assert!(list.retired.is_none(), "completed retirement releases the whole staged allocation");
     assert_eq!(group_refs(&list, group), active_refs, "retirement releases every staged group reference");
-    assert!(list.request_layout(&[index], camera, &items.items));
+    assert!(list.request_layout(&[index], camera));
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn canceled_build_keeps_committed_patches() {
 
     let entering = items.insert_item(new_item((2, 0, 0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("entering item");
     visible.insert(0, entering);
-    assert!(list.request_layout(&visible, camera, &items.items));
+    assert!(list.request_layout(&visible, camera));
     for _ in 0..10_000 {
         let _ = list.advance_layout(&mut items.items, Duration::ZERO);
         if list.staged_progress().is_some_and(|(phase, cursor, ..)| phase == "fill" && cursor > 501) {
@@ -170,7 +170,7 @@ fn canceled_build_keeps_committed_patches() {
     assert_eq!(list.instance_transform(next), Some(&transform[..]), "the next generation patches its own address");
 
     visible.remove(0);
-    assert!(list.request_layout(&visible, camera, &items.items));
+    assert!(list.request_layout(&visible, camera));
     for _ in 0..10_000 {
         let _ = list.advance_layout(&mut items.items, Duration::ZERO);
         if list.staged_progress().is_some_and(|(phase, cursor, ..)| phase == "fill" && cursor > 500) {
@@ -194,7 +194,7 @@ fn plain_staging_retires_at_once() {
 
     let _ = list.advance_layout(&mut items.items, Duration::ZERO);
     assert!(!list.layout_pending(), "staged data without resources does not hold the next layout back");
-    assert!(list.request_layout(&[index], camera, &items.items));
+    assert!(list.request_layout(&[index], camera));
 }
 
 #[test]
@@ -337,7 +337,7 @@ fn moved_faces_cull_by_their_pose() {
         face_command(list, &view, face).1
     };
 
-    assert!(list.request_layout(&visible, camera, &items.items));
+    assert!(list.request_layout(&visible, camera));
     for _ in 0..10_000 {
         let _ = list.advance_layout(&mut items.items, Duration::ZERO);
         if list.staged_progress().is_some_and(|(phase, cursor, ..)| phase == "fill" && cursor > 501) {
@@ -354,6 +354,57 @@ fn moved_faces_cull_by_their_pose() {
     assert!(list.cull_dirty(), "a committed pose patch requests a cull");
     let above = Camera::new(DVec3::new(0.0, 0.0, 100.0), Vec3::Z, 1.0, [128, 128]).expect("test camera");
     assert!(target_emitted(&items, &list, above), "a pose patched into the committed list moves its command bounds");
+}
+
+#[test]
+fn evicted_mesh_never_draws() {
+    let (_region_world, region) = crate::test_support::registered_region();
+    let meshes = crate::scene::distinct_meshes_for_test(2);
+    let (evicted, kept) = (meshes[0].id(), meshes[1].id());
+    let textures = [loaded_texture(9_200_001), loaded_texture(9_200_002)];
+    let camera = camera(0.0);
+    let origin = scene_origin(camera.position());
+    let frustum = Frustum::from_clip_matrix(crate::pipeline::projection(camera, [128, 128]));
+    let drawn = |list: &DrawList, items: &FrameCache| {
+        let mut view = ViewDraws::default();
+        list.select(&items.items, camera, &frustum, &mut view);
+        let state = &list.committed;
+        let opaque = view.opaque.iter().map(|index| state.draws[*index as usize].mesh);
+        let blended = view.blended.iter().map(|record| state.draws[state.opaque_draws + *record as usize].mesh);
+        opaque.chain(blended).collect::<HashSet<_>>()
+    };
+    for step in 0.. {
+        let mut items = FrameCache::default();
+        let mut list = DrawList::default();
+        let visible = (1..=36u8)
+            .map(|id| {
+                let item = new_item(item_id(id), id, 0.0, origin, &meshes[usize::from(id % 2)], region, &textures, &mut list);
+                items.insert_item(item).expect("test item index")
+            })
+            .collect::<Vec<_>>();
+        layout(&mut list, &visible, &mut items.items, camera);
+        assert_eq!(drawn(&list, &items), HashSet::from([evicted, kept]), "both meshes draw before eviction");
+
+        assert!(list.request_layout(&visible, camera));
+        let mut building = true;
+        for _ in 0..step {
+            let _ = list.advance_layout(&mut items.items, Duration::ZERO);
+            building = list.layout_building();
+            if !building {
+                break;
+            }
+        }
+        list.evict(evicted);
+        assert!(!list.shows_mesh(evicted, camera, &frustum));
+        assert!(!list.committed_pins_mesh(evicted));
+        assert_eq!(drawn(&list, &items), HashSet::from([kept]), "eviction disables committed commands at once (step {step})");
+        settle(&mut list, &mut items.items);
+        assert!(!list.committed_pins_mesh(evicted));
+        assert_eq!(drawn(&list, &items), HashSet::from([kept]), "a build that saw the eviction never draws the mesh (step {step})");
+        if !building {
+            break;
+        }
+    }
 }
 
 proptest! {
@@ -494,7 +545,7 @@ proptest! {
         let culled = view.opaque.iter().map(|index| ranks[*index as usize]).collect::<Vec<_>>();
         prop_assert!(!culled.is_empty() && culled.is_sorted(), "culled opaque classes out of order: {culled:?}");
 
-        prop_assert!(list.request_layout(&visible, camera, &items.items));
+        prop_assert!(list.request_layout(&visible, camera));
         let mut steps = 0;
         while !list.staged_progress().is_some_and(|(phase, ..)| matches!(phase, "allocate" | "fill")) {
             let _ = list.advance_layout(&mut items.items, Duration::ZERO);
@@ -622,7 +673,7 @@ const STAGED_REFS: usize = 2_047;
 
 fn staged_layout(list: &mut DrawList, index: ItemIndex, camera: Camera, items: &ItemSlab, refs: usize) -> super::LayoutBuild {
     let input = vec![index; 2_047];
-    let mut build = super::LayoutBuild::new(Default::default(), &input, camera, items);
+    let mut build = super::LayoutBuild::new(Default::default(), &input, camera);
     let group = items.get(index).expect("staged item").faces[0].group;
     for _ in 0..refs {
         assert!(list.groups.retain(group));
@@ -640,7 +691,7 @@ fn staged_entry_count(build: &super::LayoutBuild) -> usize {
     let state = &build.state;
     build.uploads.len()
         + build.visible.len()
-        + build.mesh_pins.len()
+        + build.evicted.len()
         + build.layout_items.len()
         + build.selected_items.len()
         + build.commands.len()
@@ -680,7 +731,7 @@ fn staged_allocation_bytes(build: &super::LayoutBuild) -> usize {
     [
         set_bytes(&build.uploads),
         vec_bytes(&build.visible),
-        set_bytes(&build.mesh_pins),
+        set_bytes(&build.evicted),
         vec_bytes(&build.layout_items),
         set_bytes(&build.selected_items),
         map_bytes(&build.commands),
@@ -691,7 +742,7 @@ fn staged_allocation_bytes(build: &super::LayoutBuild) -> usize {
         vec_bytes(&build.blended),
         vec_bytes(&state.draws),
         vec_bytes(&state.cells),
-        set_bytes(&state.mesh_references),
+        map_bytes(&state.mesh_references) + state.mesh_references.values().map(vec_bytes).sum::<usize>(),
         vec_bytes(&state.instance_bytes),
         vec_bytes(&state.active_textures),
         vec_bytes(&state.active_terrain),
@@ -897,7 +948,7 @@ fn instance_count(list: &DrawList) -> usize {
 
 fn layout(list: &mut DrawList, visible: &[ItemIndex], items: &mut ItemSlab, camera: Camera) -> LayoutStats {
     settle(list, items);
-    assert!(list.request_layout(visible, camera, items), "an idle list accepts a layout");
+    assert!(list.request_layout(visible, camera), "an idle list accepts a layout");
     let mut stats = None;
     for _ in 0..100_000 {
         if let Some(progress) = list.advance_layout(items, Duration::ZERO) {

@@ -42,7 +42,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
     let mut geometry = GeometryRenderer::new(device, queue, TextureFormat::Rgba8UnormSrgb);
     let filler = separate_pages.then(|| {
         let (_, shared) = view.objects().next().unwrap().mesh().unwrap();
-        assert_matches!(geometry.upload_mesh(device, shared, None, &mut 0, true), MeshUpload::Ready);
+        assert_matches!(geometry.upload_mesh(device, shared, None, &mut 0, None), MeshUpload::Ready);
         let allocation = &geometry.meshes[&shared.id()].allocation;
         let vertices = allocation.buffers().vertices.size() as usize / VERTEX_BYTES - allocation.vertices().end as usize;
         let indices = allocation.buffers().indices.size() as usize / size_of::<u32>() - allocation.indices().end as usize;
@@ -429,9 +429,8 @@ fn prepare_frame(device: &wgpu::Device, queue: &wgpu::Queue, geometry: &mut Geom
 }
 
 fn assert_draws_resident(geometry: &GeometryRenderer) {
-    for draw in geometry.draw_list.draws() {
-        assert!(geometry.meshes.contains_key(&draw.mesh), "committed draw command lost GPU mesh residency");
-        assert!(geometry.draw_list.committed_pins_mesh(draw.mesh), "committed draw command lost its mesh pin");
+    for draw in geometry.draw_list.draws().iter().filter(|draw| geometry.draw_list.committed_pins_mesh(draw.mesh)) {
+        assert!(geometry.meshes.contains_key(&draw.mesh), "a live committed draw command lost GPU mesh residency");
     }
 }
 
@@ -1467,7 +1466,7 @@ fn gpu_lod_keeps_fallback() {
     assert_eq!(geometry.stats.pending_meshes, 0);
     assert!(
         geometry.stats.mesh_bytes > 48 * 1024 * 1024,
-        "resident bytes {} across {} meshes; version {:?}, expected {:?}, rebuilding {}, rebuild objects {}, mesh info entries {}, mesh info bytes {}, demands {} visible/{} preparation, ready {}, active {}, visits {}, uploaded {}",
+        "resident bytes {} across {} meshes; version {:?}, expected {:?}, rebuilding {}, rebuild objects {}, mesh info entries {}, mesh info bytes {}, demands {}, protected {}, active {}, visits {}, uploaded {}",
         geometry.stats.mesh_bytes,
         geometry.meshes.len(),
         geometry.cache.version,
@@ -1477,7 +1476,6 @@ fn gpu_lod_keeps_fallback() {
         geometry.stats.rebuild_mesh_info_entries,
         geometry.stats.rebuild_mesh_info_bytes,
         geometry.cache.mesh_order.len(),
-        geometry.cache.preparation_mesh_order.len(),
         geometry.cache.admission_protected.len(),
         geometry.mesh_admission.active,
         geometry.mesh_admission.visits_this_frame,
@@ -1882,6 +1880,71 @@ fn gpu_admission_work_bounded_ordered() {
 }
 
 #[test]
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_eviction_spares_shown_meshes)'"]
+fn gpu_eviction_spares_shown_meshes() {
+    let assets = [AssetId::new(Uuid::from_u128(9_921)), AssetId::new(Uuid::from_u128(9_922)), AssetId::new(Uuid::from_u128(9_923))];
+    let bytes = test_support::mesh::asset_with_lod_geometry(&[(3, 8, 65_535, 196_605)]);
+    let asset_bytes = std::collections::HashMap::from([(assets[0], bytes.clone()), (assets[1], bytes.clone()), (assets[2], bytes)]);
+    let objects =
+        [(1, assets[0], Vec3::new(-3.0, 0.0, 0.0)), (2, assets[1], Vec3::new(4.0, 0.0, 0.0)), (3, assets[2], Vec3::new(6.0, 0.0, 0.0))];
+    let (world, mut scene, mut view, ahead, requests) = mesh_scene(&objects, None);
+    complete_mesh_requests(&world, &mut scene, &mut view, &asset_bytes, requests);
+    let behind = Camera::new(DVec3::ZERO, Vec3::NEG_X, std::f64::consts::FRAC_PI_3, [128, 128]).expect("test camera");
+    scene.set_camera(behind);
+    let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    complete_mesh_requests(&world, &mut scene, &mut view, &asset_bytes, requests);
+    let mesh = |x: f64| {
+        view.objects()
+            .find(|object| matches!(object.placement(), Placement::Ready(transform) if transform.pose.position.x == x))
+            .and_then(|object| object.mesh())
+            .map(|(_, mesh)| mesh.id())
+            .expect("loaded fixture mesh")
+    };
+    let [near, shown, far] = [mesh(-3.0), mesh(4.0), mesh(6.0)];
+
+    let (device, queue) = vulkan_device();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    let settle = |geometry: &mut GeometryRenderer, camera: Camera, keep: Option<crate::scene::MeshId>| {
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let resident = geometry.meshes.keys().copied().collect::<std::collections::HashSet<_>>();
+            prepare_frame(&device, &queue, geometry, &view, camera);
+            assert_draws_resident(geometry);
+            for evicted in resident.iter().filter(|mesh| !geometry.meshes.contains_key(*mesh)) {
+                assert!(!geometry.draw_list.committed_pins_mesh(*evicted), "an evicted mesh keeps live committed commands");
+                assert_ne!(Some(*evicted), keep, "a mesh drawn on screen was evicted");
+            }
+            if geometry.cache.rebuild.is_none()
+                && geometry.cache.version.as_ref() == Some(&view.version())
+                && geometry.draw_list.valid()
+                && !geometry.draw_list.layout_pending()
+                && !geometry.mesh_admission.active
+                && !geometry.needs_frame(Instant::now())
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "geometry did not settle");
+        }
+    };
+
+    settle(&mut geometry, behind, None);
+    assert!(geometry.meshes.contains_key(&near), "the viewed mesh is admitted");
+    settle(&mut geometry, ahead, Some(shown));
+    assert!(geometry.meshes.contains_key(&shown) && geometry.meshes.contains_key(&far), "both viewed meshes are admitted");
+    assert!(!geometry.meshes.contains_key(&near), "the mesh behind the camera made room");
+
+    settle(&mut geometry, behind, None);
+    assert!(geometry.meshes.contains_key(&near), "turning back re-admits the evicted mesh");
+    assert!(geometry.draw_list.committed_pins_mesh(near), "the re-admitted mesh draws again");
+    assert!(geometry.meshes.contains_key(&shown) && !geometry.meshes.contains_key(&far), "the lowest-priority mesh made room");
+
+    settle(&mut geometry, ahead, Some(shown));
+    assert!(geometry.meshes.contains_key(&shown) && geometry.meshes.contains_key(&far));
+    assert!(!geometry.meshes.contains_key(&near), "the off-screen mesh made room although it outranks the shown one");
+}
+
+#[test]
 #[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_overbudget_visible_subset)'"]
 fn gpu_overbudget_visible_subset() {
     let assets = [AssetId::new(Uuid::from_u128(9_911)), AssetId::new(Uuid::from_u128(9_912)), AssetId::new(Uuid::from_u128(9_913))];
@@ -1968,7 +2031,7 @@ fn gpu_overbudget_visible_subset() {
             geometry.mesh_admission.capacity_blocked,
             geometry.cache.admission_protected.len(),
             geometry.stats.pending_meshes,
-            geometry.draw_list.pins_mesh(ordered[0]),
+            geometry.draw_list.committed_pins_mesh(ordered[0]),
             geometry.meshes.contains_key(&ordered[0]),
         ));
         if geometry.cache.rebuild.is_none()
@@ -1988,7 +2051,7 @@ fn gpu_overbudget_visible_subset() {
             geometry.meshes.contains_key(&ordered[0]),
             geometry.cache.admission_protected.contains(&ordered[0]),
             geometry.cache.mesh_order_by_id.contains_key(&ordered[0]),
-            geometry.draw_list.pins_mesh(ordered[0]),
+            geometry.draw_list.committed_pins_mesh(ordered[0]),
             geometry.meshes.contains_key(&ordered[2]),
             geometry.cache.mesh_order_by_id.contains_key(&ordered[2]),
             geometry.cache.mesh_order.len(),
