@@ -1,6 +1,8 @@
 use std::{
+    assert_matches,
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, mpsc},
+    thread,
 };
 
 use inventory::{
@@ -8,7 +10,7 @@ use inventory::{
     InventoryNodeId, InventoryNodeKey, InventoryOwner, InventoryType, Item, ItemKey, LinkResolution, PermissionMask, Permissions, SaleInfo,
     SaleType, ServerVersion,
 };
-use proptest::prelude::*;
+use proptest::{collection, prelude::*};
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
@@ -129,7 +131,7 @@ fn owner_refresh_invalidates_nested_completeness() {
     assert_eq!(invalidated.incomplete_category_count(personal), 4);
     assert_eq!(invalidated.incomplete_category_count(library), 0);
     assert!(invariant(&invalidated).is_none());
-    std::assert_matches!(inventory.commit_folder_fetch(stale), Ok(inventory::FolderFetchCommit::StaleBase(_)));
+    assert_matches!(inventory.commit_folder_fetch(stale), Ok(inventory::FolderFetchCommit::StaleBase(_)));
 
     let mut newer_metadata = invalidated.category(deepest_key).expect("deep folder remains present").clone();
     newer_metadata.server_version = ServerVersion::from_raw(2);
@@ -432,9 +434,9 @@ fn prepared_delete_rejects_live_revision() {
     }
     let mut inventory = Inventory::from_categories(root, None, descendants, InventoryLimits::default()).expect("large subtree is valid");
     let snapshot = inventory.snapshot();
-    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
-    let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
-    let worker = std::thread::spawn(move || {
+    let (started_tx, started_rx) = mpsc::sync_channel(0);
+    let (continue_tx, continue_rx) = mpsc::sync_channel(0);
+    let worker = thread::spawn(move || {
         started_tx.send(()).expect("test is waiting for the worker");
         continue_rx.recv().expect("test releases the worker");
         snapshot.prepare_folder_fetch(folder, ServerVersion::from_raw(8), Some(0), Vec::new())
@@ -447,7 +449,7 @@ fn prepared_delete_rejects_live_revision() {
     continue_tx.send(()).expect("worker is waiting to prepare");
     let prepared = worker.join().expect("worker completes preparation").expect("fetch transaction prepares");
 
-    std::assert_matches!(inventory.commit_folder_fetch(prepared), Ok(inventory::FolderFetchCommit::StaleBase(_)));
+    assert_matches!(inventory.commit_folder_fetch(prepared), Ok(inventory::FolderFetchCommit::StaleBase(_)));
     let snapshot = inventory.snapshot();
     assert_eq!(snapshot.category(folder).map(|category| category.server_version), Some(ServerVersion::from_raw(9)));
     assert_eq!(snapshot.categories().count(), 4_098);
@@ -713,7 +715,7 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: 72, ..ProptestConfig::default() })]
 
     #[test]
-    fn sequences_preserve_invariants(operations in prop::collection::vec((0_u8..9, 0_u8..8, 0_u8..8, 0_u8..8), 0..72)) {
+    fn sequences_preserve_invariants(operations in collection::vec((0_u8..9, 0_u8..8, 0_u8..8, 0_u8..8), 0..72)) {
         let owner = owner(14);
         let limits = InventoryLimits { max_categories: 4, max_items: 3, max_folder_fetch_children: 4 };
         let mut inventory = inventory_with_limits(owner, limits);

@@ -607,24 +607,23 @@ impl InventoryDelta {
             .created_categories
             .capacity()
             .saturating_add(self.updated_categories.capacity())
-            .saturating_mul(std::mem::size_of::<Category>())
-            .saturating_add(
-                self.created_items.capacity().saturating_add(self.updated_items.capacity()).saturating_mul(std::mem::size_of::<Item>()),
+            .saturating_mul(size_of::<Category>())
+            .saturating_add(self.created_items.capacity().saturating_add(self.updated_items.capacity()).saturating_mul(size_of::<Item>()))
+            .saturating_add(self.removed_categories.capacity().saturating_mul(size_of::<CategoryKey>()))
+            .saturating_add(self.removed_items.capacity().saturating_mul(size_of::<ItemKey>()))
+            .saturating_add(self.updated_category_versions.capacity().saturating_mul(size_of::<(CategoryKey, ServerVersion)>()));
+        let text_bytes = self
+            .created_categories
+            .iter()
+            .chain(&self.updated_categories)
+            .map(|category| category.name.len().saturating_add(2 * size_of::<usize>()))
+            .chain(
+                self.created_items
+                    .iter()
+                    .chain(&self.updated_items)
+                    .map(|item| item.name.len().saturating_add(item.description.len()).saturating_add(4 * size_of::<usize>())),
             )
-            .saturating_add(self.removed_categories.capacity().saturating_mul(std::mem::size_of::<CategoryKey>()))
-            .saturating_add(self.removed_items.capacity().saturating_mul(std::mem::size_of::<ItemKey>()))
-            .saturating_add(self.updated_category_versions.capacity().saturating_mul(std::mem::size_of::<(CategoryKey, ServerVersion)>()));
-        let text_bytes =
-            self.created_categories
-                .iter()
-                .chain(&self.updated_categories)
-                .map(|category| category.name.len().saturating_add(2 * std::mem::size_of::<usize>()))
-                .chain(
-                    self.created_items.iter().chain(&self.updated_items).map(|item| {
-                        item.name.len().saturating_add(item.description.len()).saturating_add(4 * std::mem::size_of::<usize>())
-                    }),
-                )
-                .fold(0usize, usize::saturating_add);
-        std::mem::size_of::<Self>().saturating_add(vector_bytes).saturating_add(text_bytes)
+            .fold(0usize, usize::saturating_add);
+        size_of::<Self>().saturating_add(vector_bytes).saturating_add(text_bytes)
     }
 }

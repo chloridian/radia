@@ -8,12 +8,11 @@ use rusqlite::{Row, Transaction, types::Type};
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
+use super::{CacheIdentity, CachedFolder, InventoryCacheLoad, InventoryLimits, MAX_READ_BYTES};
 use crate::{
     AssetType, Category, CategoryKey, FolderType, InventoryChild, InventoryNodeId, InventoryNodeKey, InventoryOwner, InventoryRoots,
-    InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
+    InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion, state,
 };
-
-use super::{CacheIdentity, CachedFolder, InventoryCacheLoad, InventoryLimits, MAX_READ_BYTES};
 
 const CATEGORY_ESTIMATED_BYTES: usize = 256;
 const ITEM_ESTIMATED_BYTES: usize = 1_024;
@@ -223,7 +222,7 @@ fn tree_is_valid(categories: &[CategoryRow], items: &[Item], scopes: &[Scope]) -
     for row in categories {
         let category = &row.category;
         if !scopes.iter().any(|scope| scope.id == row.scope_id && scope.owner == category.key.owner().id())
-            || crate::state::validate_category(category).is_err()
+            || state::validate_category(category).is_err()
         {
             return false;
         }
@@ -276,7 +275,7 @@ fn tree_is_valid(categories: &[CategoryRow], items: &[Item], scopes: &[Scope]) -
         if !scopes.iter().any(|scope| scope.owner == item.key.owner().id()) {
             return false;
         }
-        if crate::state::validate_item(item).is_err() || !category_map.contains_key(&item.parent) {
+        if state::validate_item(item).is_err() || !category_map.contains_key(&item.parent) {
             return false;
         }
         *child_counts.entry(item.parent).or_default() += 1;
