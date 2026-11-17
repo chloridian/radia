@@ -589,9 +589,7 @@ impl Client {
         let task = runtime.spawn(
             async move {
                 let exit = event_queue::run_event_queue(context, stop, primary).await;
-                if let Err(exit) = completed.send(exit) {
-                    tracing::debug!(?exit, "EventQueueGet completion receiver was dropped");
-                }
+                completed.send(exit).ok();
             }
             .in_current_span(),
         );

@@ -12,7 +12,6 @@ use reqwest::{
     redirect::Policy,
 };
 use tokio::time::{self, Instant};
-use tracing::{Instrument, Span};
 
 #[derive(Clone)]
 pub(crate) struct Client {
@@ -50,25 +49,18 @@ impl Client {
         self
     }
 
-    pub(crate) async fn get(&self, operation: &str, url: &Url, max_response_bytes: usize) -> Result<Response, Error> {
+    pub(crate) async fn get(&self, url: &Url, max_response_bytes: usize) -> Result<Response, Error> {
         validate_http_url(url)?;
-        self.send_headers(operation, self.client.get(url.clone()), max_response_bytes).await?.read().await
+        self.send_headers(self.client.get(url.clone()), max_response_bytes).await?.read().await
     }
 
-    pub(crate) async fn get_with_accept(
-        &self,
-        operation: &str,
-        url: &Url,
-        accept: &str,
-        max_response_bytes: usize,
-    ) -> Result<Response, Error> {
+    pub(crate) async fn get_with_accept(&self, url: &Url, accept: &str, max_response_bytes: usize) -> Result<Response, Error> {
         validate_http_url(url)?;
-        self.send_headers(operation, self.client.get(url.clone()).header(ACCEPT, accept), max_response_bytes).await?.read().await
+        self.send_headers(self.client.get(url.clone()).header(ACCEPT, accept), max_response_bytes).await?.read().await
     }
 
     pub(crate) async fn get_with_accept_and_redirect_policy(
         &self,
-        operation: &str,
         url: &Url,
         accept: &str,
         max_response_bytes: usize,
@@ -79,12 +71,11 @@ impl Client {
             RedirectPolicy::None => &self.client,
             RedirectPolicy::ViewerAsset => &self.viewer_asset_client,
         };
-        self.send_headers(operation, client.get(url.clone()).header(ACCEPT, accept), max_response_bytes).await?.read().await
+        self.send_headers(client.get(url.clone()).header(ACCEPT, accept), max_response_bytes).await?.read().await
     }
 
     pub(crate) async fn get_with_redirect_policy(
         &self,
-        operation: &str,
         url: &Url,
         max_response_bytes: usize,
         redirect_policy: RedirectPolicy,
@@ -94,12 +85,11 @@ impl Client {
             RedirectPolicy::None => &self.client,
             RedirectPolicy::ViewerAsset => &self.viewer_asset_client,
         };
-        self.send_headers(operation, client.get(url.clone()), max_response_bytes).await?.read().await
+        self.send_headers(client.get(url.clone()), max_response_bytes).await?.read().await
     }
 
     pub(crate) async fn get_range_with_redirect_policy(
         &self,
-        operation: &str,
         url: &Url,
         range: &str,
         max_response_bytes: usize,
@@ -110,7 +100,7 @@ impl Client {
             RedirectPolicy::None => &self.client,
             RedirectPolicy::ViewerAsset => &self.viewer_asset_client,
         };
-        self.send_headers(operation, client.get(url.clone()).header(RANGE, range).header(ACCEPT_ENCODING, "identity"), max_response_bytes)
+        self.send_headers(client.get(url.clone()).header(RANGE, range).header(ACCEPT_ENCODING, "identity"), max_response_bytes)
             .await?
             .read()
             .await
@@ -118,19 +108,17 @@ impl Client {
 
     pub(crate) async fn post(
         &self,
-        operation: &str,
         url: &Url,
         content_type: &str,
         accept: Option<&str>,
         body: Vec<u8>,
         max_response_bytes: usize,
     ) -> Result<Response, Error> {
-        self.post_headers(operation, url, content_type, accept, body, max_response_bytes).await?.read().await
+        self.post_headers(url, content_type, accept, body, max_response_bytes).await?.read().await
     }
 
     pub(crate) async fn post_headers(
         &self,
-        operation: &str,
         url: &Url,
         content_type: &str,
         accept: Option<&str>,
@@ -142,12 +130,11 @@ impl Client {
         if let Some(accept) = accept {
             request = request.header(ACCEPT, accept);
         }
-        self.send_headers(operation, request, max_response_bytes).await
+        self.send_headers(request, max_response_bytes).await
     }
 
     pub(crate) async fn patch(
         &self,
-        operation: &str,
         url: &Url,
         content_type: &str,
         accept: Option<&str>,
@@ -159,40 +146,24 @@ impl Client {
         if let Some(accept) = accept {
             request = request.header(ACCEPT, accept);
         }
-        self.send_headers(operation, request, max_response_bytes).await?.read().await
+        self.send_headers(request, max_response_bytes).await?.read().await
     }
 
-    pub(crate) async fn delete(
-        &self,
-        operation: &str,
-        url: &Url,
-        accept: Option<&str>,
-        max_response_bytes: usize,
-    ) -> Result<Response, Error> {
+    pub(crate) async fn delete(&self, url: &Url, accept: Option<&str>, max_response_bytes: usize) -> Result<Response, Error> {
         validate_http_url(url)?;
         let mut request = self.client.delete(url.clone());
         if let Some(accept) = accept {
             request = request.header(ACCEPT, accept);
         }
-        self.send_headers(operation, request, max_response_bytes).await?.read().await
+        self.send_headers(request, max_response_bytes).await?.read().await
     }
 
-    #[tracing::instrument(
-        name = "http.execute", level = "debug", skip_all,
-        fields(operation = %operation, response_limit = max_response_bytes)
-    )]
-    async fn send_headers(&self, operation: &str, request: RequestBuilder, max_response_bytes: usize) -> Result<IncomingResponse, Error> {
+    async fn send_headers(&self, request: RequestBuilder, max_response_bytes: usize) -> Result<IncomingResponse, Error> {
         let started = Instant::now();
         let deadline = self.timeout.map(|timeout| started + timeout);
-        let response = match send_with_deadline(request.send(), deadline, started).await {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::debug!(error = %error, elapsed_ms = started.elapsed().as_millis(), "HTTP request failed");
-                return Err(error);
-            }
-        };
+        let response = send_with_deadline(request.send(), deadline, started).await?;
         let retry_after = response_retry_after(response.headers());
-        let incoming = IncomingResponse { response, started, deadline, max_response_bytes, retry_after, span: Span::current() };
+        let incoming = IncomingResponse { response, started, deadline, max_response_bytes, retry_after };
         incoming.check_deadline()?;
         Ok(incoming)
     }
@@ -204,7 +175,6 @@ pub(crate) struct IncomingResponse {
     deadline: Option<Instant>,
     max_response_bytes: usize,
     retry_after: Option<Duration>,
-    span: Span,
 }
 
 impl IncomingResponse {
@@ -225,34 +195,12 @@ impl IncomingResponse {
         if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) { Err(self.timeout_error()) } else { Ok(()) }
     }
 
-    pub(crate) async fn read(self) -> Result<Response, Error> {
-        let span = self.span.clone();
-        async move {
-            let mut incoming = self;
-            let status = incoming.response.status();
-            let headers = incoming.response.headers().clone();
-            let body = match read_bounded_body(&mut incoming).await {
-                Ok(body) => body,
-                Err(error) => {
-                    tracing::debug!(
-                        http_status = status.as_u16(),
-                        elapsed_ms = incoming.started.elapsed().as_millis(),
-                        "HTTP response body rejected"
-                    );
-                    return Err(error);
-                }
-            };
-            let elapsed = incoming.started.elapsed();
-            tracing::debug!(
-                http_status = status.as_u16(),
-                response_bytes = body.len(),
-                elapsed_ms = elapsed.as_millis(),
-                "HTTP response received"
-            );
-            Ok(Response { status, headers, body, elapsed })
-        }
-        .instrument(span)
-        .await
+    pub(crate) async fn read(mut self) -> Result<Response, Error> {
+        let status = self.response.status();
+        let headers = self.response.headers().clone();
+        let body = read_bounded_body(&mut self).await?;
+        let elapsed = self.started.elapsed();
+        Ok(Response { status, headers, body, elapsed })
     }
 }
 

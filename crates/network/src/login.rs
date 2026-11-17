@@ -255,14 +255,9 @@ pub(crate) async fn login_at_url(
     login_url: &str,
 ) -> Result<LoginResponse, LoginError> {
     let login_url = Url::parse(login_url).map_err(|error| LoginError::request(error.to_string(), error))?;
-    let result = login_request(credentials, mfa_token, mfa_hash, &login_url).await;
-    if matches!(&result, Ok(LoginResponse::MfaChallenge)) {
-        tracing::info!("Login response requires MFA");
-    }
-    result
+    login_request(credentials, mfa_token, mfa_hash, &login_url).await
 }
 
-#[tracing::instrument(name = "network.login.request", level = "debug", skip_all, fields(grid = ?credentials.grid))]
 async fn login_request(
     credentials: &LoginCredentials,
     mfa_token: &str,
@@ -299,12 +294,10 @@ async fn login_request(
     .map_err(|error| LoginError::unavailable(LOGIN_ADMISSION_UNAVAILABLE_MESSAGE, error))?;
     let client = Client::new(Some(LOGIN_REQUEST_TIMEOUT), true, Some(concat!("Radia/", env!("CARGO_PKG_VERSION"))))
         .map_err(|error| LoginError::request(format!("Could not prepare the login request: {error}"), error))?;
-    tracing::debug!("Login request started");
-    let response =
-        time::timeout_at(deadline, client.post("login", login_url, "text/xml", None, body.into_bytes(), MAX_LOGIN_RESPONSE_BYTES))
-            .await
-            .map_err(|error| LoginError::request("Could not contact Second Life: the login operation exceeded its deadline.", error))?
-            .map_err(|error| LoginError::request(format!("Could not contact Second Life: {error}"), error))?;
+    let response = time::timeout_at(deadline, client.post(login_url, "text/xml", None, body.into_bytes(), MAX_LOGIN_RESPONSE_BYTES))
+        .await
+        .map_err(|error| LoginError::request("Could not contact Second Life: the login operation exceeded its deadline.", error))?
+        .map_err(|error| LoginError::request(format!("Could not contact Second Life: {error}"), error))?;
     let status = response.status;
     let content_type = response.headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default().to_owned();
     let crate::http::Response { body, .. } = response;
