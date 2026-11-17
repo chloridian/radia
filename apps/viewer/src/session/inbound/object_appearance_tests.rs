@@ -176,22 +176,37 @@ fn clear_textures_are_absent() {
 }
 
 #[test]
-fn malformed_texture_is_field_local() {
+fn malformed_field_stays_local() {
     let (_region_world, region) = crate::test_helpers::registered_region();
-    let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
-    let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
-    update.objects[0].texture_entry = vec![0];
-    update.objects[0].texture_anim.clear();
+    let pbr = |data: Vec<u8>| vec![ExtraParameter { parameter_type: 0x0080, data }];
+    for (case, texture_entry, extra_parameters) in
+        [("texture entry", Some(vec![0]), None), ("short pbr", None, Some(pbr(vec![1]))), ("zero pbr", None, Some(pbr(vec![0, 0])))]
+    {
+        let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
+        let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
+        if let Some(texture_entry) = texture_entry {
+            update.objects[0].texture_entry = texture_entry;
+            update.objects[0].texture_anim.clear();
+        }
+        let malformed_pbr = extra_parameters.is_some();
+        if let Some(extra_parameters) = extra_parameters {
+            update.objects[0].extra_parameters = extra_parameters;
+        }
 
-    let batch = decode_object_message(region, 34, OrderEvidence::Ordered(34), &full).expect("full object batch");
-    let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
+        let batch = decode_object_message(region, 34, OrderEvidence::Ordered(34), &full).expect("full object batch");
+        let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
 
-    assert_eq!(batch.invalid_blocks, 0);
-    assert_eq!(batch.invalid_fields, 1);
-    assert_eq!(observation.surface_appearance, None);
-    assert!(observation.pose.is_some());
-    assert!(observation.scale.is_some());
-    assert_eq!(observation.shape, FieldUpdate::Set(Shape::Prim(full_prim_shape())));
+        assert_eq!(batch.invalid_blocks, 0, "{case}");
+        if malformed_pbr {
+            assert_eq!(observation.pbr_materials, None, "{case}");
+        } else {
+            assert_eq!(batch.invalid_fields, 1, "{case}");
+            assert_eq!(observation.surface_appearance, None, "{case}");
+        }
+        assert!(observation.pose.is_some(), "{case}");
+        assert!(observation.scale.is_some(), "{case}");
+        assert_eq!(observation.shape, FieldUpdate::Set(Shape::Prim(full_prim_shape())), "{case}");
+    }
 }
 
 #[test]
@@ -297,25 +312,6 @@ fn non_volume_clears_pbr() {
     assert_eq!(observation.pbr_materials, Some(PbrMaterialAssignments::default()));
     assert_eq!(state.observe_object(observation.clone()).expect("compressed update applies").outcome, Updated(entity));
     assert_eq!(state.object(entity).expect("object remains").pbr_materials(), None);
-}
-
-#[test]
-fn malformed_pbr_is_field_local() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
-    for parameters in
-        [vec![ExtraParameter { parameter_type: 0x0080, data: vec![1] }], vec![ExtraParameter { parameter_type: 0x0080, data: vec![0, 0] }]]
-    {
-        let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
-        let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
-        update.objects[0].extra_parameters = parameters;
-
-        let batch = decode_object_message(region, 44, OrderEvidence::Ordered(44), &full).expect("full object batch");
-        let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
-        assert_eq!(observation.pbr_materials, None);
-        assert!(observation.pose.is_some());
-        assert!(observation.scale.is_some());
-        assert_eq!(observation.shape, FieldUpdate::Set(Shape::Prim(full_prim_shape())));
-    }
 }
 
 #[test]

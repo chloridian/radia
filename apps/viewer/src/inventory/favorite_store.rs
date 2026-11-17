@@ -409,20 +409,31 @@ mod tests {
     }
 
     #[test]
-    fn too_many_favorites_keep_snapshot() {
-        let agent_id = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
-        let saved = vec![FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }];
-        let mut store = FavoriteStore::default();
-        store.replace_favorites(Grid::Agni, agent_id, "Example Resident", saved.clone()).expect("replace saved favorites");
-        let mut current_favorites = saved.clone();
-        let oversized =
-            vec![FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }; MAX_FAVORITES_PER_AGENT + 1];
+    fn invalid_refresh_keeps_snapshot() {
+        let home = FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 };
+        let long_name = FavoriteLocation { name: "x".repeat(513), ..home.clone() };
+        for (refreshed, reason) in [
+            (vec![home.clone(); MAX_FAVORITES_PER_AGENT + 1], "an account has too many saved favorites"),
+            (vec![long_name], "a saved favorite name is too long"),
+        ] {
+            let test_directory = tempdir().expect("create temporary login locations directory");
+            let path = login_locations_path_under(test_directory.path());
+            let agent_id = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+            let saved = vec![home.clone()];
+            let mut store = FavoriteStore::default();
+            store.replace_favorites(Grid::Agni, agent_id, "Example Resident", saved.clone()).expect("replace saved favorites");
+            save_to(&path, &store).expect("save known-good favorite snapshot");
+            let mut current_favorites = saved.clone();
 
-        let result = apply_favorites_refresh(&mut current_favorites, &mut store, Grid::Agni, agent_id, "Example Resident", Ok(oversized));
+            let result =
+                apply_favorites_refresh(&mut current_favorites, &mut store, Grid::Agni, agent_id, "Example Resident", Ok(refreshed));
 
-        assert_matches!(result, Err(FavoriteStoreError::InvalidRefreshedValues("an account has too many saved favorites")));
-        assert_eq!(current_favorites, saved);
-        assert_eq!(store.favorites_for(Grid::Agni, agent_id), saved);
+            assert_matches!(result, Err(FavoriteStoreError::InvalidRefreshedValues(actual)) if actual == reason, "{reason}");
+            assert_eq!(current_favorites, saved, "{reason}");
+            assert_eq!(store.favorites_for(Grid::Agni, agent_id), saved, "{reason}");
+            save_to(&path, &store).expect("rejected refresh must leave a savable snapshot");
+            assert_eq!(load_from(&path).expect("reload known-good snapshot").favorites_for(Grid::Agni, agent_id), saved, "{reason}");
+        }
     }
 
     #[test]
@@ -456,27 +467,6 @@ mod tests {
         let reloaded_favorites = reloaded.favorites_for(Grid::Agni, agent_id);
         assert_eq!(reloaded_favorites.len(), saved.len());
         assert_eq!(reloaded_favorites.first(), saved.first());
-    }
-
-    #[test]
-    fn oversized_favorite_name_keeps_snapshot() {
-        let test_directory = tempdir().expect("create temporary login locations directory");
-        let path = login_locations_path_under(test_directory.path());
-        let agent_id = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
-        let saved = vec![FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }];
-        let mut store = FavoriteStore::default();
-        store.replace_favorites(Grid::Agni, agent_id, "Example Resident", saved.clone()).expect("replace saved favorites");
-        save_to(&path, &store).expect("save known-good favorite snapshot");
-        let mut current_favorites = saved.clone();
-        let oversized = vec![FavoriteLocation { name: "x".repeat(513), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }];
-
-        let result = apply_favorites_refresh(&mut current_favorites, &mut store, Grid::Agni, agent_id, "Example Resident", Ok(oversized));
-
-        assert_matches!(result, Err(FavoriteStoreError::InvalidRefreshedValues("a saved favorite name is too long")));
-        assert_eq!(current_favorites, saved);
-        assert_eq!(store.favorites_for(Grid::Agni, agent_id), saved);
-        save_to(&path, &store).expect("rejected refresh must leave a savable snapshot");
-        assert_eq!(load_from(&path).expect("reload known-good snapshot").favorites_for(Grid::Agni, agent_id), saved);
     }
 
     #[test]

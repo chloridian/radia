@@ -530,7 +530,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coalesces_and_checks_replies() {
+    async fn cell_lookups_share_checked_reply() {
         let (lookup, mut sent) = lookup();
         let first = lookup.lookup_region_at(RegionGridCell::new(12, 34));
         let second = lookup.lookup_region_at(RegionGridCell::new(12, 34));
@@ -822,7 +822,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn times_out_and_clears_pending() {
+    async fn timeout_clears_pending() {
         let (lookup, mut sent) = lookup();
         let request_lookup = lookup.clone();
         let task = spawn(async move { request_lookup.lookup_region_at(RegionGridCell::new(1, 2)).await });

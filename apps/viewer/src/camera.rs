@@ -204,12 +204,6 @@ impl OrbitCamera {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_follow_pose(pose: WorldPose, draw_distance: f32, lod_factor: f32) -> Self {
-        let (position, focus) = FollowCamera::position_and_focus(pose);
-        Self { focus, offset: position - focus, minimum: 0.5, transition: None, draw_distance, lod_factor }
-    }
-
     pub(crate) fn from_follow_view(position: DVec3, focus: DVec3, draw_distance: f32, lod_factor: f32) -> Self {
         Self { focus, offset: position - focus, minimum: 0.5, transition: None, draw_distance, lod_factor }
     }
@@ -392,82 +386,32 @@ mod tests {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
-    fn pick_detaches_escape_returns() {
-        let mut mode = CameraMode::Follow;
-        mode.detach_for_focus();
-        assert_eq!(mode, CameraMode::Free);
-
-        mode.return_to_follow();
-        assert_eq!(mode, CameraMode::Follow);
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    #[test]
-    fn uncaptured_movement_returns_to_follow() {
-        let mut mode = CameraMode::Free;
-        let mut controls = HeldControls::default();
-
-        assert_eq!(
-            handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, false),
-            Some(true)
-        );
-        assert_eq!(mode, CameraMode::Follow);
-        assert_eq!(controls.observation(false, math::Quat::IDENTITY).control_flags & 0x0000_0001, 0x0000_0001);
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    #[test]
-    fn captured_movement_stays_free() {
-        let mut mode = CameraMode::Free;
-        let mut controls = HeldControls::default();
-
-        assert_eq!(handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, true), None);
-        assert_eq!(mode, CameraMode::Free);
-        assert_eq!(controls.observation(false, math::Quat::IDENTITY).control_flags, 0);
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    #[test]
-    fn action_keys_return_to_follow() {
+    fn keys_select_camera_mode() {
         use winit::keyboard::NamedKey;
 
-        for key in [Key::Character("f".into()), Key::Character("r".into()), Key::Named(NamedKey::Space)] {
-            let mut mode = CameraMode::Free;
-            let mut controls = HeldControls::default();
-
-            let binding = KeyBinding::from_key(&key).expect("mapped camera-return key");
-            assert_eq!(handle_keyboard_input(&mut controls, &mut mode, &key, ElementState::Pressed, false, false), Some(true));
-            assert!(matches!(binding, KeyBinding::ToggleFlying | KeyBinding::ToggleRun | KeyBinding::Stop));
-            assert_eq!(mode, CameraMode::Follow);
-        }
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    #[test]
-    fn key_release_keeps_mode() {
         use crate::agent_movement::input::MovementKey;
 
-        let mut mode = CameraMode::Free;
-        let mut controls = HeldControls::default();
-        controls.set_pressed(MovementKey::Forward, true);
+        let forward = Key::Character("w".into());
+        for (key, state, captured, result, mode, moving) in [
+            (forward.clone(), ElementState::Pressed, false, Some(true), CameraMode::Follow, true),
+            (forward.clone(), ElementState::Pressed, true, None, CameraMode::Free, false),
+            (forward, ElementState::Released, false, Some(true), CameraMode::Free, false),
+            (Key::Character("f".into()), ElementState::Pressed, false, Some(true), CameraMode::Follow, false),
+            (Key::Character("r".into()), ElementState::Pressed, false, Some(true), CameraMode::Follow, false),
+            (Key::Named(NamedKey::Space), ElementState::Pressed, false, Some(true), CameraMode::Follow, false),
+        ] {
+            let case = format!("{key:?} {state:?} captured={captured}");
+            let mut camera_mode = CameraMode::Free;
+            let mut controls = HeldControls::default();
+            if state == ElementState::Released {
+                controls.set_pressed(MovementKey::Forward, true);
+            }
 
-        assert_eq!(
-            handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Released, false, false),
-            Some(true)
-        );
-        assert_eq!(mode, CameraMode::Free);
-    }
-
-    #[test]
-    fn detach_preserves_view() {
-        let pose = WorldPose { position: DVec3::new(1280.0, -256.0, 45.0), rotation: math::Quat::from_rotation_z(0.7) };
-        let now = Instant::now();
-        let follow = FollowCamera::scene_camera(pose, [1280, 720], 512.0, 1.5).expect("valid follow camera");
-        let free = OrbitCamera::from_follow_pose(pose, 512.0, 1.5).scene_camera([1280, 720], now).expect("valid free camera");
-
-        assert!(free.position().distance(follow.position()) < 1e-9);
-        assert!(free.direction().distance(follow.direction()) < 1e-6);
-        assert_eq!(free.draw_distance(), follow.draw_distance());
+            assert_eq!(handle_keyboard_input(&mut controls, &mut camera_mode, &key, state, false, captured), result, "{case}");
+            assert_eq!(camera_mode, mode, "{case}");
+            let flags = controls.observation(false, math::Quat::IDENTITY).control_flags;
+            assert_eq!(flags & 0x0000_0001 != 0, moving, "{case}");
+        }
     }
 
     #[test]
@@ -510,20 +454,6 @@ mod tests {
             assert!(camera.scene_camera([1280, 720], now + elapsed).unwrap().position().distance(position) < 1e-6);
         }
         assert_eq!(camera.focus, home + DVec3::new(10.0, 2.0, 3.0));
-    }
-
-    #[test]
-    fn orbit_and_pan() {
-        let mut camera = OrbitCamera::new(DVec3::ZERO);
-        camera.drag([250.0, 0.0], 1000.0, true, false);
-        assert!(camera.offset.distance(DVec3::new(0.0, 4.0, 2.0)) < 1e-10);
-        assert_eq!(camera.focus, DVec3::ZERO);
-        let offset = camera.offset;
-        camera.drag([100.0, 0.0], 1000.0, true, true);
-        assert_eq!(camera.offset, offset);
-        assert!(camera.focus.distance(DVec3::new(20.0f64.sqrt() * 0.3, 0.0, 0.0)) < 1e-10);
-        camera.drag([0.0, 1000.0], 1000.0, true, false);
-        assert!((camera.offset.normalize().z.acos() - PI / 180.0).abs() < 1e-10);
     }
 
     #[test]

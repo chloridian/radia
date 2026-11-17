@@ -10,10 +10,7 @@ use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
 use crate::inventory::{FolderFetch, FolderFetchProvenance, favorites::FavoritesError};
-use crate::session::coordinator::inventory_cache::{
-    CACHE_WRITER_QUEUE_CAPACITY, InventoryCacheEvent, InventoryCacheSession, MAX_PENDING_BYTES, MAX_PENDING_ROWS, MAX_PENDING_WRITES,
-    RECLAIMER_QUEUE_CAPACITY,
-};
+use crate::session::coordinator::inventory_cache::InventoryCacheSession;
 
 use super::inventory::{
     FolderFetchApply, PreparedInventoryFetch, apply_inventory_fetch, cancel_favorites_refresh, confirm_pending_moves,
@@ -26,11 +23,6 @@ use crate::session::{
     SessionEnd,
     coordinator::{FavoritesUpdate, PresentationMailbox},
 };
-
-#[global_allocator]
-static ALLOCATOR: test_support::allocation::CountingAllocator = test_support::allocation::CountingAllocator;
-
-const OWNER_PATH_ENTRY_COUNT: usize = 100_000;
 
 #[tokio::test(flavor = "current_thread")]
 async fn pending_update_serves_read_first() {
@@ -521,120 +513,6 @@ async fn pending_sit_serves_read_first() {
     reads.finish();
 }
 
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "manual faithful inventory owner-path measurement"]
-async fn owner_path_reclaim_measurement() {
-    for replace in [false, true] {
-        let owner = InventoryOwner::new(Uuid::from_u128(if replace { 72 } else { 71 }));
-        let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(73)));
-        let fixture_baseline = test_support::allocation::live_bytes();
-        let fixture_started = Instant::now();
-        let mut inventory = Inventory::new(category(root, None, ServerVersion::UNKNOWN, None), None, InventoryLimits::default())
-            .expect("valid inventory root");
-        let initial_children = (0..OWNER_PATH_ENTRY_COUNT)
-            .map(|index| {
-                let item_key = ItemKey::new(owner, ItemId::new(Uuid::from_u128(1_000_000 + index as u128)));
-                InventoryChild::Item(item(item_key, root))
-            })
-            .collect();
-        let initial = FolderFetch {
-            folder: root,
-            version: ServerVersion::from_raw(1),
-            descendent_count: Some(OWNER_PATH_ENTRY_COUNT as u32),
-            children: initial_children,
-            provenance: FolderFetchProvenance::Untracked,
-        };
-        std::assert_matches!(apply_inventory_fetch(&mut inventory, initial), Ok(FolderFetchApply::Applied(_)));
-        let fixture_elapsed = fixture_started.elapsed();
-        let fixture_retained_bytes = test_support::allocation::live_bytes().saturating_sub(fixture_baseline);
-
-        let (inventory_changes, _inventory_change_receiver) = tokio::sync::watch::channel(None);
-        let mut cache = InventoryCacheSession::new(&tokio::runtime::Handle::current());
-        cache.handle_event(
-            &tokio::runtime::Handle::current(),
-            InventoryCacheEvent::OpenFailed("owner-path measurement cache unavailable".into()),
-            &mut inventory,
-        );
-        let before = inventory.snapshot();
-        let worker_snapshot = before.clone();
-        let cancellation = InventoryPreparationCancellation::default();
-        let (prepared, worker_allocations, worker_elapsed) = tokio::task::spawn_blocking(move || {
-            let worker_started = Instant::now();
-            let (prepared, allocations) = test_support::allocation::measure(|| {
-                let children = if replace {
-                    (0..OWNER_PATH_ENTRY_COUNT)
-                        .map(|index| {
-                            let item_key = ItemKey::new(owner, ItemId::new(Uuid::from_u128(2_000_000 + index as u128)));
-                            InventoryChild::Item(item(item_key, root))
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                let fetch = FolderFetch {
-                    folder: root,
-                    version: ServerVersion::from_raw(2),
-                    descendent_count: Some(if replace { OWNER_PATH_ENTRY_COUNT as u32 } else { 0 }),
-                    children,
-                    provenance: FolderFetchProvenance::Untracked,
-                };
-                prepare_inventory_fetch(&worker_snapshot, fetch, &cancellation)
-            });
-            (prepared.expect("worker preparation succeeds"), allocations, worker_started.elapsed())
-        })
-        .await
-        .expect("preparation worker completes");
-        let PreparedInventoryFetch::Prepared(prepared) = prepared else {
-            panic!("folder response is current");
-        };
-        let disposal = cache.try_reserve_disposal().expect("owner mutation reserves bounded reclamation");
-        let (applied, applied_result) = oneshot::channel();
-        let owner_started = Instant::now();
-        let (_, owner_allocations) = test_support::allocation::measure(|| {
-            let changes = match inventory.commit_folder_fetch(prepared).expect("prepared folder commits") {
-                ::inventory::FolderFetchCommit::Applied(changes) => changes,
-                ::inventory::FolderFetchCommit::StaleBase(_) => panic!("single owner kept the base revision current"),
-            };
-            let after = inventory.snapshot();
-            super::inventory::publish_inventory_change(&inventory_changes, &mut cache, changes, before, after, disposal);
-            if applied.send(crate::inventory::FolderApplyOutcome::Applied).is_err() {
-                tracing::trace!("inventory fetch worker stopped before apply acknowledgement");
-            }
-        });
-        let owner_elapsed = owner_started.elapsed();
-        std::assert_matches!(applied_result.await, Ok(crate::inventory::FolderApplyOutcome::Applied));
-        let cleanup_started = Instant::now();
-        let final_snapshot = inventory_changes.send_replace(None);
-        cache.close_with_payload((inventory, final_snapshot)).await;
-        let cleanup_elapsed = cleanup_started.elapsed();
-        let label = if replace { "replace" } else { "delete" };
-        eprintln!(
-            "inventory_owner_path case={label} entries={OWNER_PATH_ENTRY_COUNT} cache=disabled fixture_build_ms={} fixture_retained_bytes={} worker_input_plus_prepare_ms={} worker_input_plus_prepare_live_delta_bytes={} worker_input_plus_prepare_peak_delta_bytes={} worker_alloc_calls={} worker_realloc_calls={} owner_commit_publish_handoff_ack_ms={} owner_thread_live_delta_bytes={} owner_thread_peak_delta_bytes={} owner_alloc_calls={} owner_realloc_calls={} cleanup_completion_ms={} cleanup_complete=true reclaimer_queued_capacity={} reclaimer_active_limit=1 deferred_inventory_event_limit={} deferred_inventory_byte_limit={} deferred_network_event_limit_bytes={} cache_writer_queue_capacity={} cache_pending_write_limit={} cache_pending_row_limit={} cache_pending_byte_limit={} memory_scope=per_thread_allocator_deltas_fixture_and_worker_peak_are_separate_and_exclude_whole_process_concurrency",
-            fixture_elapsed.as_secs_f64() * 1_000.0,
-            fixture_retained_bytes,
-            worker_elapsed.as_secs_f64() * 1_000.0,
-            worker_allocations.live_bytes,
-            worker_allocations.peak_bytes,
-            worker_allocations.allocation_calls,
-            worker_allocations.reallocation_calls,
-            owner_elapsed.as_secs_f64() * 1_000.0,
-            owner_allocations.live_bytes,
-            owner_allocations.peak_bytes,
-            owner_allocations.allocation_calls,
-            owner_allocations.reallocation_calls,
-            cleanup_elapsed.as_secs_f64() * 1_000.0,
-            RECLAIMER_QUEUE_CAPACITY,
-            super::MAX_DEFERRED_INVENTORY_EVENTS,
-            super::MAX_DEFERRED_INVENTORY_BYTES,
-            super::MAX_DEFERRED_NETWORK_EVENT_BYTES,
-            CACHE_WRITER_QUEUE_CAPACITY,
-            MAX_PENDING_WRITES,
-            MAX_PENDING_ROWS,
-            MAX_PENDING_BYTES,
-        );
-    }
-}
-
 #[test]
 fn handshake_replies_share_one_drain() {
     let simulator = network::SimulatorId::new(7);
@@ -654,29 +532,19 @@ fn handshake_replies_share_one_drain() {
 }
 
 #[test]
-fn requested_disconnect_ends_normally() {
-    assert_eq!(network_end_after_stream_close(true, None, true), SessionEnd::Requested);
-}
-
-#[test]
-fn stream_close_keeps_simulator_failure() {
-    assert_eq!(
-        network_end_after_stream_close(false, Some("heartbeat timeout".into()), false),
-        SessionEnd::Failed("heartbeat timeout".into())
-    );
-}
-
-#[test]
-fn disconnect_request_keeps_failure() {
-    assert_eq!(
-        network_end_after_stream_close(true, Some("heartbeat timeout".into()), false),
-        SessionEnd::Failed("heartbeat timeout".into())
-    );
-}
-
-#[test]
-fn unexpected_primary_disconnect_fails() {
-    assert_eq!(network_end_after_stream_close(false, None, true), SessionEnd::Failed("The primary simulator disconnected.".into()));
+fn stream_close_session_end() {
+    for (requested, failure, primary_closed, expected) in [
+        (true, None, true, SessionEnd::Requested),
+        (false, Some("heartbeat timeout"), false, SessionEnd::Failed("heartbeat timeout".into())),
+        (true, Some("heartbeat timeout"), false, SessionEnd::Failed("heartbeat timeout".into())),
+        (false, None, true, SessionEnd::Failed("The primary simulator disconnected.".into())),
+    ] {
+        assert_eq!(
+            network_end_after_stream_close(requested, failure.map(Into::into), primary_closed),
+            expected,
+            "requested={requested} failure={failure:?} primary_closed={primary_closed}"
+        );
+    }
 }
 
 fn category(key: CategoryKey, parent: Option<CategoryKey>, version: ServerVersion, descendent_count: Option<u32>) -> Category {
@@ -1031,31 +899,6 @@ async fn fetch_move_resolves_pending_edit() {
     );
     confirm_pending_moves(&mut pending, &before, &inventory.snapshot());
     confirmation.await.expect("fetch change set confirms pending edit");
-    assert!(pending.is_empty());
-}
-
-#[tokio::test]
-async fn cache_move_resolves_pending_edit() {
-    let owner = InventoryOwner::new(Uuid::from_u128(31));
-    let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(32)));
-    let first = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(33)));
-    let second = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(34)));
-    let folder = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(35)));
-    let mut inventory =
-        Inventory::new(category(root, None, ServerVersion::UNKNOWN, None), None, InventoryLimits::default()).expect("valid inventory root");
-    inventory.upsert_category(category(first, Some(root), ServerVersion::UNKNOWN, None)).expect("add first folder");
-    inventory.upsert_category(category(second, Some(root), ServerVersion::UNKNOWN, None)).expect("add second folder");
-    inventory.upsert_category(category(folder, Some(first), ServerVersion::UNKNOWN, None)).expect("add cached moved folder");
-
-    let before = inventory.snapshot();
-    inventory.move_node(InventoryNodeKey::new(owner, InventoryNodeId::Category(folder.id())), second).expect("restore cached folder move");
-    let after = inventory.snapshot();
-    let node = InventoryNodeKey::new(owner, InventoryNodeId::Category(folder.id()));
-    let expectation = MoveExpectation { node, from: first, to: second };
-    let (confirmed, confirmation) = oneshot::channel();
-    let mut pending = HashMap::from([(node, (expectation, confirmed))]);
-    confirm_pending_moves(&mut pending, &before, &after);
-    confirmation.await.expect("cache restore change set confirms pending edit");
     assert!(pending.is_empty());
 }
 

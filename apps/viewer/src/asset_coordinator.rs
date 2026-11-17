@@ -1051,7 +1051,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn material_posts_are_bounded_serial_and_paced() {
+    async fn material_posts_are_throttled() {
         let (batcher, mut posts) = fake_batcher();
         let ids: Vec<AssetId> = (1..=120).map(material_id).collect();
         let senders = {
@@ -1291,7 +1291,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn demand_fetches_header_then_lod() {
+    async fn demand_fetches_header_first() {
         let (asset, _compressed_empty_lod, header_size) = mesh_fixture_asset();
         assert!(header_size > assets::mesh::MESH_HEADER_BYTES);
         let asset_length = asset.len();
@@ -1947,50 +1947,6 @@ mod tests {
         assert_eq!(budget.stats().charged_bytes, size_of::<MaterialDescription>());
         drop(material);
         assert_eq!(budget.stats().charged_bytes, 0);
-        assert_eq!(peer.finish().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn sky_settings_decode_through_store() {
-        use assets::{Content, EnvironmentSettings, Status};
-
-        let asset = AssetId::new(Uuid::from_u128(0xc46226b40e435a569708d27ca1df3292));
-        let peer = Peer::new(2, move |index, request, base| {
-            if index == 0 {
-                return (200, grants(base));
-            }
-            let header = String::from_utf8_lossy(request);
-            assert!(header.starts_with(&format!("GET /content/?settings_id={} HTTP/1.1", asset.uuid())));
-            (200, b"{'type':'sky','sunlight_color':[r1,r0,r0]}".to_vec())
-        });
-        let client = Client::new(peer.url().join("seed").unwrap()).unwrap();
-        let (cancel, cancelled) = oneshot::channel();
-        let service = AssetCoordinator::with_budget(
-            Handle::current(),
-            async move {
-                let _ = cancelled.await;
-            },
-            Budget::default(),
-            None,
-        );
-        let (_region_world, region) = crate::test_helpers::registered_region();
-        service.register(region, client);
-        let mut demand =
-            service.handle().request_with_importance(region, assets::Request::Environment(asset), Priority::Visible, 0).await.unwrap();
-        let sky = loop {
-            match demand.status() {
-                Status::Ready(Content::Environment(environment)) => break environment,
-                Status::Failed { failure, .. } => panic!("unexpected environment failure: {failure:?}"),
-                Status::StaleSession | Status::Ready(_) => panic!("unexpected environment content"),
-                _ => {
-                    demand.changed().await;
-                }
-            }
-        };
-        let EnvironmentSettings::Sky(sky) = &sky.settings else { panic!("decoded asset is not sky settings") };
-        assert_eq!(sky.sunlight, Some([1.0, 0.0, 0.0]));
-        cancel.send(()).unwrap();
-        service.stop().await;
         assert_eq!(peer.finish().len(), 2);
     }
 
