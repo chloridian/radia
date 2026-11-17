@@ -1,5 +1,4 @@
 use std::{
-    mem::size_of,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
@@ -326,11 +325,12 @@ fn subtract_bytes(counter: &mut usize, bytes: usize) {
 
 #[cfg(test)]
 pub(crate) mod test_values {
-    use super::{ConnectionRole, MemoryLimits, PacketMemoryError, PacketMemoryReservation, SimulatorMemoryBudget, lock_unpoisoned};
     use std::sync::Arc;
 
     use protocol::lludp::{Packet, PacketPreflight};
     use tokio::sync::OwnedSemaphorePermit;
+
+    use super::{ConnectionRole, MemoryLimits, PacketMemoryError, PacketMemoryReservation, SimulatorMemoryBudget, lock_unpoisoned};
 
     pub(crate) fn with_test_limits(global: usize, neighbors: usize, neighbor_connection: usize) -> SimulatorMemoryBudget {
         SimulatorMemoryBudget::with_limits(MemoryLimits { global, neighbors, primary_connection: global, neighbor_connection })

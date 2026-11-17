@@ -1,11 +1,17 @@
-use std::sync;
+use std::{assert_matches, sync::mpsc as std_mpsc};
+
+use llsd::{Map, xml};
+use protocol::lludp::Message::RegionHandshake;
+use tokio::sync::oneshot::error::TryRecvError;
 
 use super::*;
+use crate::{
+    event::Event::SimulatorMessage,
+    fixtures::http::{EventQueueTestServer, EventServerResponse, response},
+};
 
 async fn run_event_batch_order_survives_forwarding() {
-    use crate::fixtures::http::{EventQueueTestServer, EventServerResponse, response};
-
-    let (release, poll_response) = sync::mpsc::channel();
+    let (release, poll_response) = std_mpsc::channel();
     let batch = r#"<llsd><map><key>id</key><integer>1</integer><key>events</key><array>
         <map><key>message</key><string>FirstEvent</string><key>body</key><map/></map>
         <map><key>message</key><string>SecondEvent</string><key>body</key><map/></map>
@@ -135,11 +141,7 @@ async fn run_return_handoff_reuses_root_connection() {
 }
 
 async fn run_stale_cancel() {
-    use llsd::{Map, xml};
-
-    use crate::fixtures::http::{EventQueueTestServer, EventServerResponse, response};
-
-    let (release, poll_response) = sync::mpsc::channel();
+    let (release, poll_response) = std_mpsc::channel();
     let server = EventQueueTestServer::start(|base| {
         let seed = format!("<llsd><map><key>EventQueueGet</key><uri>{base}events</uri></map></llsd>");
         vec![
@@ -158,7 +160,7 @@ async fn run_stale_cancel() {
         .expect("handoff packet");
     harness.primary.send_to(&finish, harness.primary_peer).await.expect("announce handoff");
     loop {
-        if matches!(next_raw_event(&mut harness.events).await, Event::SimulatorMessage { message: Message::TeleportFinish(_), .. }) {
+        if matches!(next_raw_event(&mut harness.events).await, SimulatorMessage { message: Message::TeleportFinish(_), .. }) {
             break;
         }
     }
@@ -217,13 +219,13 @@ async fn run_stale_cancel() {
         if let Event::CapabilityEventBatch { events, .. } = next_raw_event(&mut harness.events).await
             && let Some(event) = events.iter().find(|event| event.message == "CrossedRegion")
         {
-            let fields = crate::session::teleport::event_fields(&event.body).expect("published CrossedRegion body");
-            let region = crate::session::teleport::event_block(fields, "RegionData").expect("published RegionData block");
+            let fields = teleport::event_fields(&event.body).expect("published CrossedRegion body");
+            let region = teleport::event_block(fields, "RegionData").expect("published RegionData block");
             assert_eq!(region.get("SeedCapability"), Some(&Value::String("[redacted]".into())));
             break;
         }
     }
-    std::assert_matches!(canceled.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    assert_matches!(canceled.try_recv(), Err(TryRecvError::Empty));
     harness.pause_sends.send_replace(false);
     let sent = receive_message(&harness.primary, |message| matches!(message, Message::TeleportCancel(_))).await;
     assert!(timeout(WAIT, canceled).await.expect("cancel completes").expect("cancel reply").is_ok());
@@ -257,9 +259,6 @@ async fn run_stale_cancel() {
 }
 
 async fn run_disconnect_logs_out_promoted_primary() {
-    use crate::event::Event::SimulatorMessage;
-    use protocol::lludp::Message::RegionHandshake;
-
     let mut harness = Box::pin(connected_neighbor()).await;
     let target_region = 0x1000_0000_0000_1000;
     let target_endpoint = harness.neighbor.local_addr().expect("destination simulator address");
@@ -329,7 +328,7 @@ async fn run_disconnect_logs_out_promoted_primary() {
         .await
         .expect("shutdown should send LogoutRequest to the promoted primary");
     assert!(logout.is_reliable());
-    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+    assert_matches!(logout.message(), Message::LogoutRequest(_));
     send_logout_reply(&harness.neighbor, harness.neighbor_peer, &logout, 45).await;
     timeout(WAIT, async {
         loop {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, net::SocketAddr};
 
 use protocol::{lludp::Message, login::ResponseData};
 use tokio::{
@@ -8,12 +8,11 @@ use tokio::{
 use tracing::Instrument;
 use uuid::Uuid;
 
-use super::routing::PrimaryEventBacklog;
 use super::{
     ConnectionError, ConnectionTaskResult, EventQueueLifecycle, NEIGHBOR_COMMAND_CAPACITY, PrimaryState, RuntimeAction, RuntimeInputs,
     SessionDispatcher, SessionError, SessionRuntime, SessionRuntimeOptions, SessionState, SimulatorCapabilitySession, SimulatorCommand,
     SimulatorConnection, SimulatorConnectionLifecycle, SimulatorConnectionOptions, SimulatorEvent, SimulatorMemoryBudget, SimulatorRecord,
-    SimulatorRequest, SimulatorTaskOutcome, track_capability_requests,
+    SimulatorRequest, SimulatorTaskOutcome, logout::SessionLogout, routing::PrimaryEventBacklog, track_capability_requests,
 };
 use crate::{
     AgentSession,
@@ -75,7 +74,7 @@ impl SessionStartup {
 
 struct RootConnectionStart {
     simulator_id: SimulatorId,
-    endpoint: std::net::SocketAddr,
+    endpoint: SocketAddr,
     session: AgentSession,
     options: SimulatorConnectionOptions,
     events: mpsc::Sender<SimulatorEvent>,
@@ -210,7 +209,7 @@ impl SessionRuntime {
                 neighbor_events,
                 neighbor_requests,
                 neighbor_cancellation,
-                logout: super::logout::SessionLogout::Active,
+                logout: SessionLogout::Active,
                 session,
                 capability_budget,
                 capability_request_waiters,

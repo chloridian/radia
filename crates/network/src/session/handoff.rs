@@ -1,18 +1,20 @@
-use std::{cmp::Ordering, collections::HashMap, mem::replace};
+use std::{cmp::Ordering, collections::HashMap, mem, mem::replace};
+
+use protocol::{lludp::Message, messages::AgentMovementComplete};
+use tokio::sync::{mpsc, watch};
 
 use super::{
     ConnectionError, EventQueueLifecycle, HandoffCommand, RunState, RuntimeAction, SessionDispatcher, SessionError, SessionState,
-    SimulatorEvent, SimulatorRecord, SimulatorRequest, record_event_envelope_loss, remove_simulator_capability,
+    SimulatorEvent, SimulatorRecord, SimulatorRequest, record_event_envelope_loss, remove_simulator_capability, simulators,
+    simulators::SimulatorCapabilitySession, teleport,
 };
 use crate::{
     capabilities::Client,
+    circuit,
     circuit::{HandoffCancellation, HandoffGeneration, HandoffTarget},
-    coverage::{CoverageLossLedger, CoverageLossReason},
-    event::EventRetention,
-    event::{Event, EventEnvelope, PacketOrder, SimulatorId},
+    coverage::{CoverageLossLedger, CoverageLossReason, CoverageWatermark},
+    event::{Event, EventEnvelope, EventRetention, PacketOrder, SimulatorId},
 };
-use protocol::{lludp::Message, messages::AgentMovementComplete};
-use tokio::sync::{mpsc, watch};
 
 #[derive(Clone)]
 pub(crate) struct PendingPromotion {
@@ -200,7 +202,7 @@ impl SessionState {
             (simulator_id, endpoint, exit)
         });
         if let Some(simulator) = self.simulators.get_mut(&simulator_id) {
-            simulator.capabilities = Some(super::simulators::SimulatorCapabilitySession {
+            simulator.capabilities = Some(SimulatorCapabilitySession {
                 seed_capability: handoff.seed_capability.clone(),
                 client: client.clone(),
                 event_queue: EventQueueLifecycle::Running { role: event_queue_role, task },
@@ -344,24 +346,22 @@ impl SessionState {
             return Ok(());
         }
         match message {
-            Message::TeleportFinish(_) => {
-                match super::teleport::decode_teleport_finish(message, self.session.agent_id, self.session.session_id) {
-                    Ok(handoff) => {
-                        self.request_handoff(
-                            source,
-                            handoff,
-                            HandoffAnnouncement::TeleportFinish(HandoffOrder::Packet(packet_order)),
-                            setup,
-                            state,
-                        )
-                        .await
-                    }
-                    Err(reason) => {
-                        tracing::debug!(simulator = source.get(), announcement = "TeleportFinish", reason, "handoff announcement rejected");
-                        Ok(())
-                    }
+            Message::TeleportFinish(_) => match teleport::decode_teleport_finish(message, self.session.agent_id, self.session.session_id) {
+                Ok(handoff) => {
+                    self.request_handoff(
+                        source,
+                        handoff,
+                        HandoffAnnouncement::TeleportFinish(HandoffOrder::Packet(packet_order)),
+                        setup,
+                        state,
+                    )
+                    .await
                 }
-            }
+                Err(reason) => {
+                    tracing::debug!(simulator = source.get(), announcement = "TeleportFinish", reason, "handoff announcement rejected");
+                    Ok(())
+                }
+            },
             Message::TeleportFailed(failed) if failed.agent_id == self.session.agent_id => {
                 if teleport_failure_matches(state.pending(), HandoffOrder::Packet(packet_order))
                     && let Some(pending) = state.take_pending()
@@ -402,11 +402,7 @@ impl SessionDispatcher<'_> {
         if let Some(error) = error {
             if report_failure {
                 self.state
-                    .publish_event(
-                        &self.events,
-                        &mut self.run_state,
-                        Event::SendFailed(crate::circuit::bound_send_error(error.to_string())),
-                    )
+                    .publish_event(&self.events, &mut self.run_state, Event::SendFailed(circuit::bound_send_error(error.to_string())))
                     .await?;
             }
         } else if simulator_id == self.state.primary_id
@@ -436,7 +432,7 @@ impl SessionDispatcher<'_> {
         simulator_id: SimulatorId,
         event: Event,
         retained_bytes: Option<EventRetention>,
-        coverage_watermark: Option<crate::coverage::CoverageWatermark>,
+        coverage_watermark: Option<CoverageWatermark>,
     ) -> Result<(), SessionError> {
         let promotion = self.handoff_state.take_pending().expect("matching promotion is pending");
         let Some(_connection) = self.state.simulators.get(&promotion.target).filter(|connection| {
@@ -591,15 +587,15 @@ pub(super) fn cancel_pending_handoff(
         connection.queue_handoff_command(HandoffCommand::Cancel);
         return;
     }
-    if connection.connection == super::simulators::SimulatorConnectionLifecycle::Connected
+    if connection.connection == simulators::SimulatorConnectionLifecycle::Connected
         && connection.connection_task.as_ref().is_some_and(|task| !task.is_finished())
     {
         connection.log_disconnected(current.target, current.handoff.region_handle);
     }
-    connection.connection = super::simulators::SimulatorConnectionLifecycle::Retiring;
+    connection.connection = simulators::SimulatorConnectionLifecycle::Retiring;
     connection.abort_connection();
     let event_queue_task = connection.capabilities.as_ref().and_then(|capabilities| capabilities.event_queue.task());
-    let queued = std::mem::take(&mut connection.preconnect_events);
+    let queued = mem::take(&mut connection.preconnect_events);
     connection.capabilities.take();
     run_state.preconnect_events_len = run_state.preconnect_events_len.saturating_sub(queued.len());
     if let Some(task) = event_queue_task {
@@ -627,7 +623,7 @@ pub(crate) fn matches_pending_promotion(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{assert_matches, time::Duration};
 
     use protocol::login::ResponseData;
     use tokio::{net::UdpSocket, time::timeout};
@@ -635,7 +631,11 @@ mod tests {
     use super::*;
     use crate::{
         Error,
-        session::{SessionRuntime, tests::login_session},
+        session::{
+            SessionRuntime,
+            simulators::SimulatorConnectionLifecycle,
+            tests::{login_session, test_options},
+        },
     };
 
     #[test]
@@ -682,7 +682,7 @@ mod tests {
             endpoint: destination.local_addr().expect("destination endpoint"),
             seed_capability: session.seed_capability.clone(),
         };
-        let mut connection = SessionRuntime::connect(session, ResponseData::default(), crate::session::tests::test_options())
+        let mut connection = SessionRuntime::connect(session, ResponseData::default(), test_options())
             .await
             .expect("session startup")
             .expect("primary connection starts");
@@ -708,7 +708,7 @@ mod tests {
             .expect("start first destination attempt")
             .expect("first attempt is admitted");
         let old = connection.state.simulators.get_mut(&old_id).expect("first attempt record");
-        old.connection = crate::session::simulators::SimulatorConnectionLifecycle::Retiring;
+        old.connection = SimulatorConnectionLifecycle::Retiring;
         old.abort_connection();
 
         let replacement_id = connection
@@ -758,7 +758,7 @@ mod tests {
             endpoint: destination.local_addr().expect("destination endpoint"),
             seed_capability: session.seed_capability.clone(),
         };
-        let mut connection = SessionRuntime::connect(session, ResponseData::default(), crate::session::tests::test_options())
+        let mut connection = SessionRuntime::connect(session, ResponseData::default(), test_options())
             .await
             .expect("session startup")
             .expect("primary connection starts");
@@ -801,6 +801,6 @@ mod tests {
         drop(setup);
         while timeout(Duration::from_secs(2), run_state.event_queues.join_next()).await.expect("join retired EventQueue").is_some() {}
         run_state.connections.shutdown().await;
-        std::assert_matches!(client.request_capabilities(&["TestCapability"]).await, Err(Error::CapabilitySessionClosed));
+        assert_matches!(client.request_capabilities(&["TestCapability"]).await, Err(Error::CapabilitySessionClosed));
     }
 }

@@ -1,13 +1,9 @@
-use std::{future::poll_fn, task::Poll};
+use std::{assert_matches, future::poll_fn, net::TcpStream, task::Poll};
 
 use super::*;
-use crate::fixtures::event_queue::EventQueueBudgetHarness;
+use crate::{capabilities::budget::EVENT_QUEUE_REQUEST_TIMEOUT, coverage::CoverageLoss, fixtures::event_queue::EventQueueBudgetHarness};
 
-async fn held_body(
-    server: &EventQueueBudgetTestServer,
-    client: &http::Client,
-    body_bytes: usize,
-) -> (http::IncomingResponse, std::net::TcpStream) {
+async fn held_body(server: &EventQueueBudgetTestServer, client: &http::Client, body_bytes: usize) -> (http::IncomingResponse, TcpStream) {
     let request = {
         let client = client.clone();
         let url = server.url("/event-queue");
@@ -23,7 +19,7 @@ async fn held_body(
 #[tokio::test(flavor = "multi_thread")]
 async fn body_lanes_preserve_primary() {
     let server = EventQueueBudgetTestServer::start();
-    let client = http::Client::new(Some(crate::capabilities::budget::EVENT_QUEUE_REQUEST_TIMEOUT), false, None).expect("HTTP client");
+    let client = http::Client::new(Some(EVENT_QUEUE_REQUEST_TIMEOUT), false, None).expect("HTTP client");
     let budget = CapabilityBudget::new();
     let body = b"<llsd><map><key>id</key><integer>5</integer><key>events</key><array/></map></llsd>";
     let (first, mut first_stream) = held_body(&server, &client, body.len()).await;
@@ -35,7 +31,7 @@ async fn body_lanes_preserve_primary() {
     let mut second = Box::pin(read_admitted_body(second, Arc::clone(&budget.neighbor_event_bodies)));
     let mut waiting = Box::pin(read_admitted_body(waiting, Arc::clone(&budget.neighbor_event_bodies)));
     let mut primary = Box::pin(read_admitted_body(primary, Arc::clone(&budget.primary_event_bodies)));
-    std::assert_matches!(
+    assert_matches!(
         poll_fn(|cx| Poll::Ready((
             first.as_mut().poll(cx),
             second.as_mut().poll(cx),
@@ -50,14 +46,14 @@ async fn body_lanes_preserve_primary() {
 
     first_stream.write_all(body).expect("release first neighbor body");
     let (response, body_permit) = first.await.expect("first neighbor body completes");
-    std::assert_matches!(poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await, Poll::Pending);
+    assert_matches!(poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await, Poll::Pending);
     let role_permit = Arc::clone(&budget.neighbor_event_queues).acquire_owned().await.expect("neighbor poll admission");
     let (id, events, role_permit) =
         decode_admitted_event_batch(response.body, role_permit, body_permit).await.expect("decode admitted body");
     assert_eq!(id, 5);
     assert!(events.is_empty());
     drop(role_permit);
-    std::assert_matches!(poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await, Poll::Pending);
+    assert_matches!(poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await, Poll::Pending);
     assert_eq!(budget.neighbor_event_bodies.available_permits(), 0, "the waiting body takes released decoder admission");
     waiting_stream.write_all(body).expect("release waiting body");
     let (response, permit) = waiting.await.expect("waiting body completes");
@@ -79,7 +75,7 @@ async fn body_lanes_preserve_primary() {
 #[tokio::test]
 async fn body_admission_keeps_deadline() {
     let server = LocalServer::start(vec![b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nRetry-After: 7\r\nConnection: close\r\n\r\n".to_vec()]);
-    let client = http::Client::new(Some(crate::capabilities::budget::EVENT_QUEUE_REQUEST_TIMEOUT), false, None).expect("HTTP client");
+    let client = http::Client::new(Some(EVENT_QUEUE_REQUEST_TIMEOUT), false, None).expect("HTTP client");
     let incoming = client
         .post_headers(&server.url("/event-queue"), "application/llsd+xml", None, Vec::new(), 1024)
         .await
@@ -87,9 +83,9 @@ async fn body_admission_keeps_deadline() {
     let budget = Arc::new(Semaphore::new(1));
     let held = Arc::clone(&budget).acquire_owned().await.expect("occupy body admission");
     let mut response = Box::pin(read_admitted_body(incoming, Arc::clone(&budget)));
-    std::assert_matches!(poll_fn(|cx| Poll::Ready(response.as_mut().poll(cx))).await, Poll::Pending);
+    assert_matches!(poll_fn(|cx| Poll::Ready(response.as_mut().poll(cx))).await, Poll::Pending);
     time::pause();
-    time::advance(crate::capabilities::budget::EVENT_QUEUE_REQUEST_TIMEOUT).await;
+    time::advance(EVENT_QUEUE_REQUEST_TIMEOUT).await;
     let error = response.await.expect_err("admission remains within the original request deadline");
     assert_eq!(error.kind, http::ErrorKind::Timeout);
     assert_eq!(error.status, Some(StatusCode::OK));
@@ -106,7 +102,7 @@ async fn broken_body_releases_admission() {
         b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nshort".to_vec(),
         b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec(),
     ]);
-    let client = http::Client::new(Some(crate::capabilities::budget::EVENT_QUEUE_REQUEST_TIMEOUT), false, None).expect("HTTP client");
+    let client = http::Client::new(Some(EVENT_QUEUE_REQUEST_TIMEOUT), false, None).expect("HTTP client");
     let budget = Arc::new(Semaphore::new(1));
     let error = post_event_queue(&client, &server.url("/event-queue"), &Value::Undefined, 1024, Arc::clone(&budget))
         .await
@@ -166,7 +162,7 @@ async fn shared_budget_bounds_event_polls() {
 
     let mut primary_waiter = Box::pin(Arc::clone(&harness.budget.primary_event_queues).acquire_owned());
     let mut neighbor_waiter = Box::pin(Arc::clone(&harness.budget.neighbor_event_queues).acquire_owned());
-    std::assert_matches!(
+    assert_matches!(
         poll_fn(|context| Poll::Ready((primary_waiter.as_mut().poll(context), neighbor_waiter.as_mut().poll(context)))).await,
         (Poll::Pending, Poll::Pending)
     );
@@ -177,13 +173,13 @@ async fn shared_budget_bounds_event_polls() {
         .await
         .expect("decoded batch releases unused byte admission")
         .expect("batch budget remains open");
-    std::assert_matches!(
+    assert_matches!(
         poll_fn(|context| Poll::Ready((primary_waiter.as_mut().poll(context), neighbor_waiter.as_mut().poll(context)))).await,
         (Poll::Pending, Poll::Pending),
         "a decoded batch holds its poll slot while forwarding is blocked"
     );
     drop(decoded_batch);
-    std::assert_matches!(
+    assert_matches!(
         timeout(CLIENT_TEST_TIMEOUT, received_events.recv()).await.expect("held event channel item").expect("event channel remains open"),
         Event::SendFailed(message) if message == "hold event forwarding"
     );
@@ -258,7 +254,7 @@ async fn ordinary_requests_run_during_polls() {
         .await
         .expect("EventQueue response should be decoded")
         .expect("event channel remains open");
-    std::assert_matches!(&batch.event, Event::CapabilityEventBatch { events, .. } if events.len() == 2);
+    assert_matches!(&batch.event, Event::CapabilityEventBatch { events, .. } if events.len() == 2);
     assert!(budget.queued_event_bytes.available_permits() < queued_event_capacity, "decoded batch must retain its queue reservation");
     let second_poll = event_server.next_request();
     assert_eq!(map_field(&decode_request_body(&second_poll), "ack"), Some(&Value::Integer(5)));
@@ -351,7 +347,7 @@ async fn waiting_queue_gets_freed_slot() {
     primary_server.next_seed();
     let primary_poll = primary_server.next_poll();
     let mut next_primary_slot = Box::pin(Arc::clone(&budget.primary_event_queues).acquire_owned());
-    std::assert_matches!(
+    assert_matches!(
         poll_fn(|context| Poll::Ready((next_primary_slot.as_mut().poll(context), next_neighbor_slot.as_mut().poll(context)))).await,
         (Poll::Pending, Poll::Pending),
         "active polls retain both role budgets"
@@ -437,9 +433,9 @@ async fn primary_slot_follows_role() {
         .expect("canceling a live EventQueue poll must record uncertain coverage")
         .expect("coverage ledger remains available");
     assert!(old_coverage_losses.snapshot().losses.iter().any(|loss| {
-        matches!(loss, crate::coverage::CoverageLoss::Source(record)
+        matches!(loss, CoverageLoss::Source(record)
                     if record.watermark.simulator_id == test_simulator_id(MAX_CONCURRENT_EVENT_QUEUES as u64)
-                        && record.reason == crate::coverage::CoverageLossReason::EventQueueAdmission)
+                        && record.reason == CoverageLossReason::EventQueueAdmission)
     }));
     let new_primary = new_primary_client
         .start_event_queue(

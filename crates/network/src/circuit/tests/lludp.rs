@@ -1,4 +1,4 @@
-use std::{io::ErrorKind, time::Duration};
+use std::{assert_matches, io::ErrorKind, time::Duration};
 
 use protocol::{
     ChatType,
@@ -14,6 +14,7 @@ use test_support::{lludp::vectors, parse_hex_fixture};
 use tokio::{net::UdpSocket, time::Instant};
 use uuid::Uuid;
 
+use super::Circuit;
 use crate::{
     circuit::{
         UdpTransport,
@@ -24,17 +25,18 @@ use crate::{
         },
     },
     event::PacketOrder::{Ambiguous, Degraded, Ordered},
-    fixtures::circuit::{
-        complete_ping, connected_simulator, receive_at, receive_packet, receive_packet_at, reliable_packet, resent_reliable_packet,
-        send_ping_at, start_ping, with_sequence,
+    fixtures::{
+        circuit,
+        circuit::{
+            complete_ping, connected_simulator, receive_at, receive_packet, receive_packet_at, reliable_packet, resent_reliable_packet,
+            send_ping_at, start_ping, with_sequence,
+        },
     },
 };
 
-use super::Circuit;
-
 fn assert_no_datagram(socket: &UdpSocket) {
     let mut buffer = [0; 65_535];
-    std::assert_matches!(socket.try_recv_from(&mut buffer), Err(error) if error.kind() == ErrorKind::WouldBlock);
+    assert_matches!(socket.try_recv_from(&mut buffer), Err(error) if error.kind() == ErrorKind::WouldBlock);
 }
 
 async fn receive_ping_id(simulator: &UdpSocket, buffer: &mut [u8]) -> u8 {
@@ -72,7 +74,7 @@ async fn local_send_commits_sequence() {
     assert_eq!(circuit.next_sequence, 1);
     assert!(circuit.pending.is_empty());
 
-    crate::fixtures::circuit::send_prepared_at(&mut circuit, &transport, prepared, sent_at).await.expect("commit successful local send");
+    circuit::send_prepared_at(&mut circuit, &transport, prepared, sent_at).await.expect("commit successful local send");
     let mut bytes = [0; 1024];
     let (_, packet) = receive_packet(&simulator, &mut bytes).await;
     assert_eq!(packet.sequence(), 1);
@@ -94,7 +96,7 @@ async fn send_removes_only_carried_acks() {
     assert_eq!(packet.appended_acks(), &[41]);
 
     receive_at(&mut circuit, &reliable_packet(42), now + Duration::from_millis(1));
-    crate::fixtures::circuit::send_prepared_at(&mut circuit, &transport, prepared, now + Duration::from_millis(2))
+    circuit::send_prepared_at(&mut circuit, &transport, prepared, now + Duration::from_millis(2))
         .await
         .expect("commit successful local send");
     let mut bytes = [0; 1024];
@@ -124,7 +126,7 @@ async fn appended_acks_respect_datagram_limit() {
     assert!(!packet.appended_acks().is_empty());
     assert!(packet.appended_acks().len() < usize::from(u8::MAX));
     let acknowledged = packet.appended_acks().len();
-    crate::fixtures::circuit::send_prepared_at(&mut circuit, &transport, prepared, now).await.expect("commit limited ACK batch");
+    circuit::send_prepared_at(&mut circuit, &transport, prepared, now).await.expect("commit limited ACK batch");
     let mut bytes = [0; 2048];
     let (_, sent) = receive_packet(&simulator, &mut bytes).await;
     assert!(sent.appended_acks().len() == acknowledged);
@@ -134,9 +136,7 @@ async fn appended_acks_respect_datagram_limit() {
     assert!(next.bytes().len() <= MAX_NORMAL_DATAGRAM_BYTES);
     let expected = usize::from(u8::MAX) - acknowledged;
     assert_eq!(Packet::decode(next.bytes()).expect("decode remaining batch").appended_acks().len(), expected);
-    crate::fixtures::circuit::send_prepared_at(&mut circuit, &transport, next, now + Duration::from_millis(1))
-        .await
-        .expect("send remaining ACK batch");
+    circuit::send_prepared_at(&mut circuit, &transport, next, now + Duration::from_millis(1)).await.expect("send remaining ACK batch");
     let (_, sent) = receive_packet(&simulator, &mut bytes).await;
     assert_eq!(sent.appended_acks().len(), expected);
     assert!(circuit.pending_acks.is_empty());
@@ -158,7 +158,7 @@ async fn oversized_message_leaves_standalone_acks() {
     let prepared = circuit.prepare_message(message, Delivery::Unreliable).expect("prepare compatibility-sized request");
     assert!(prepared.bytes().len() > MAX_NORMAL_DATAGRAM_BYTES);
     assert!(Packet::decode(prepared.bytes()).expect("decode oversized base message").appended_acks().is_empty());
-    crate::fixtures::circuit::send_prepared_at(&mut circuit, &transport, prepared, now).await.expect("commit base message without ACKs");
+    circuit::send_prepared_at(&mut circuit, &transport, prepared, now).await.expect("commit base message without ACKs");
     let mut bytes = [0; 65_535];
     let (size, _) = simulator.recv_from(&mut bytes).await.expect("receive oversized base message");
     assert!(bytes[..size].len() > MAX_NORMAL_DATAGRAM_BYTES);
@@ -167,7 +167,7 @@ async fn oversized_message_leaves_standalone_acks() {
     let acknowledgements = circuit.prepare_acknowledgements().expect("prepare standalone ACKs").expect("ACKs remain pending");
     assert!(acknowledgements.bytes().len() <= MAX_NORMAL_DATAGRAM_BYTES);
     assert_eq!(Packet::decode(acknowledgements.bytes()).expect("decode standalone ACKs").message().name(), "PacketAck");
-    crate::fixtures::circuit::send_prepared_at(&mut circuit, &transport, acknowledgements, now + Duration::from_millis(1))
+    circuit::send_prepared_at(&mut circuit, &transport, acknowledgements, now + Duration::from_millis(1))
         .await
         .expect("send standalone acknowledgement batch");
     let (size, _) = simulator.recv_from(&mut bytes).await.expect("receive standalone acknowledgement batch");
@@ -195,7 +195,7 @@ async fn late_retry_skips_acked_packet() {
     let mut circuit = Circuit::new();
     let sent_at = Instant::now() - Duration::from_secs(6);
     let prepared = circuit.prepare_message(complete_ping(8), Delivery::Reliable).expect("prepare reliable packet");
-    crate::fixtures::circuit::send_prepared_at(&mut circuit, &transport, prepared, sent_at).await.expect("send original reliable packet");
+    circuit::send_prepared_at(&mut circuit, &transport, prepared, sent_at).await.expect("send original reliable packet");
     let mut bytes = [0; 1024];
     simulator.recv_from(&mut bytes).await.expect("receive original packet");
 
@@ -249,14 +249,13 @@ async fn refuses_unknown_direction() {
     let datagram = parse_hex_fixture(vectors::COARSE_LOCATION_UPDATE).expect("valid independent fixture");
     let packet = Packet::decode(&datagram).expect("decode schema fallback fixture");
 
-    std::assert_matches!(packet.message(), Message::Schema(_));
+    assert_matches!(packet.message(), Message::Schema(_));
     let unknown = Message::Unknown { id: MessageId::high(0xfe), payload: Vec::new() };
     let mut circuit = Circuit::new();
     for message in [packet.message().clone(), unknown] {
-        let error = crate::fixtures::circuit::send_message(&mut circuit, &transport, message, Delivery::Unreliable)
-            .await
-            .expect_err("message direction is unknown");
-        std::assert_matches!(error, CircuitError::UnknownDirection);
+        let error =
+            circuit::send_message(&mut circuit, &transport, message, Delivery::Unreliable).await.expect_err("message direction is unknown");
+        assert_matches!(error, CircuitError::UnknownDirection);
     }
     assert_no_datagram(&server);
 }
@@ -269,14 +268,12 @@ async fn logout_bypasses_window() {
     let mut buffer = [0; 1024];
 
     for sequence in 1..=MAX_PENDING_PACKETS {
-        crate::fixtures::circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Reliable)
-            .await
-            .expect("fill reliable window");
+        circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Reliable).await.expect("fill reliable window");
         let (_, packet) = receive_packet(&server, &mut buffer).await;
         assert_eq!(packet.sequence(), sequence as u32);
     }
 
-    let logout_sequence = crate::fixtures::circuit::send_message(
+    let logout_sequence = circuit::send_message(
         &mut circuit,
         &transport,
         Message::LogoutRequest(LogoutRequest { agent_data: logout_request::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() } }),
@@ -288,7 +285,7 @@ async fn logout_bypasses_window() {
 
     assert_eq!(logout.sequence(), logout_sequence);
     assert!(logout.is_reliable());
-    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+    assert_matches!(logout.message(), Message::LogoutRequest(_));
     assert!(!circuit.has_pending(logout_sequence));
 }
 
@@ -444,7 +441,7 @@ async fn bounds_duplicate_history() {
     for sequence in 1..=MAX_RECEIVED_RELIABLE_PACKETS as u32 {
         assert!(receive_at(&mut circuit, &reliable_packet(sequence), received_at));
         if sequence % 200 == 0 {
-            crate::fixtures::circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush fake simulator acknowledgements");
+            circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush fake simulator acknowledgements");
             let (_, ack) = receive_packet(&server, &mut buffer).await;
             let Message::PacketAck(message) = ack.message() else {
                 panic!("expected a packet acknowledgement");
@@ -454,24 +451,22 @@ async fn bounds_duplicate_history() {
     }
     let remaining_acks = MAX_RECEIVED_RELIABLE_PACKETS % 200;
     if remaining_acks != 0 {
-        crate::fixtures::circuit::send_acknowledgements(&mut circuit, &transport)
-            .await
-            .expect("flush remaining fake simulator acknowledgements");
+        circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush remaining fake simulator acknowledgements");
         let (_, ack) = receive_packet(&server, &mut buffer).await;
-        std::assert_matches!(ack.message(), Message::PacketAck(message) if message.packets.len() == remaining_acks);
+        assert_matches!(ack.message(), Message::PacketAck(message) if message.packets.len() == remaining_acks);
     }
 
     assert_eq!(
         receive_packet_at(&mut circuit, &reliable_packet(MAX_RECEIVED_RELIABLE_PACKETS as u32 + 1), received_at),
         Err(ReceiveError::DuplicateHistoryFull)
     );
-    crate::fixtures::circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush no ack for untracked packet");
+    circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush no ack for untracked packet");
     assert_no_datagram(&server);
 
     assert!(!receive_at(&mut circuit, &resent_reliable_packet(1), received_at + Duration::from_secs(1)));
-    crate::fixtures::circuit::send_acknowledgements(&mut circuit, &transport).await.expect("re-ack known duplicate");
+    circuit::send_acknowledgements(&mut circuit, &transport).await.expect("re-ack known duplicate");
     let (_, ack) = receive_packet(&server, &mut buffer).await;
-    std::assert_matches!(ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == 1);
+    assert_matches!(ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == 1);
 
     let resumed_at = received_at + Duration::from_secs(61);
     let ping_sequence = MAX_RECEIVED_RELIABLE_PACKETS as u32 + 1;
@@ -489,19 +484,19 @@ async fn reacks_duplicates() {
     let first_time = Instant::now();
 
     assert!(receive_at(&mut circuit, &reliable_packet(72), first_time));
-    crate::fixtures::circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush first acknowledgement");
+    circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush first acknowledgement");
     let (_, first_ack) = receive_packet(&server, &mut buffer).await;
-    std::assert_matches!(first_ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == 72);
+    assert_matches!(first_ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == 72);
 
     assert!(!receive_at(&mut circuit, &reliable_packet(72), first_time + Duration::from_secs(1)));
-    crate::fixtures::circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush duplicate acknowledgement");
+    circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush duplicate acknowledgement");
     let (_, duplicate_ack) = receive_packet(&server, &mut buffer).await;
-    std::assert_matches!(duplicate_ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == 72);
+    assert_matches!(duplicate_ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == 72);
 
     assert!(!receive_at(&mut circuit, &resent_reliable_packet(72), first_time + Duration::from_secs(2)));
-    crate::fixtures::circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush resent duplicate acknowledgement");
+    circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush resent duplicate acknowledgement");
     let (_, resent_ack) = receive_packet(&server, &mut buffer).await;
-    std::assert_matches!(resent_ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == 72);
+    assert_matches!(resent_ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == 72);
 }
 
 #[test]
@@ -610,9 +605,8 @@ async fn undeliverable_packets_still_process_acks() {
     let mut buffer = [0; 1024];
 
     let mut circuit = Circuit::new();
-    let outgoing = crate::fixtures::circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Reliable)
-        .await
-        .expect("send reliable packet");
+    let outgoing =
+        circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Reliable).await.expect("send reliable packet");
     simulator.recv_from(&mut buffer).await.expect("receive packet");
 
     let now = Instant::now();
@@ -625,14 +619,13 @@ async fn undeliverable_packets_still_process_acks() {
     assert_eq!(ambiguous.packet_order, Ambiguous);
     assert!(!circuit.has_pending(outgoing), "an ambiguous packet still clears its valid outgoing ACK");
     assert_eq!(circuit.observe_sequence(21), Ordered(21), "isolated ambiguity leaves the anchor usable");
-    crate::fixtures::circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush ACKs for ambiguous packet");
+    circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush ACKs for ambiguous packet");
     let (_, ack) = receive_packet(&simulator, &mut buffer).await;
-    std::assert_matches!(ack.message(), Message::PacketAck(message) if message.packets.iter().map(|packet| packet.id).collect::<Vec<_>>() == [20, ambiguous_sequence]);
+    assert_matches!(ack.message(), Message::PacketAck(message) if message.packets.iter().map(|packet| packet.id).collect::<Vec<_>>() == [20, ambiguous_sequence]);
 
     let mut circuit = Circuit::new();
-    let outgoing = crate::fixtures::circuit::send_message(&mut circuit, &transport, complete_ping(2), Delivery::Reliable)
-        .await
-        .expect("send another reliable packet");
+    let outgoing =
+        circuit::send_message(&mut circuit, &transport, complete_ping(2), Delivery::Reliable).await.expect("send another reliable packet");
     simulator.recv_from(&mut buffer).await.expect("receive packet");
     let anchor = receive_packet_at(&mut circuit, &reliable_packet(30), now).expect("receive second anchor");
     assert_eq!(anchor.packet_order, Ordered(30));
@@ -645,9 +638,9 @@ async fn undeliverable_packets_still_process_acks() {
     let later = receive_packet_at(&mut circuit, &reliable_packet(jump_sequence + 1), now).expect("receive later degraded packet");
     assert!(later.is_new_packet);
     assert_eq!(later.packet_order, Degraded);
-    crate::fixtures::circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush ACKs for degraded packet");
+    circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush ACKs for degraded packet");
     let (_, ack) = receive_packet(&simulator, &mut buffer).await;
-    std::assert_matches!(ack.message(), Message::PacketAck(message) if message.packets.iter().map(|packet| packet.id).collect::<Vec<_>>() == [30, jump_sequence, jump_sequence + 1]);
+    assert_matches!(ack.message(), Message::PacketAck(message) if message.packets.iter().map(|packet| packet.id).collect::<Vec<_>>() == [30, jump_sequence, jump_sequence + 1]);
 }
 
 #[tokio::test]
@@ -657,9 +650,7 @@ async fn sends_wrapped_sequence() {
     let mut buffer = [0; 1024];
 
     for expected in [0x00ff_fffe_u32, 0x00ff_ffff, 0x0100_0000, 0x0100_0001] {
-        crate::fixtures::circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Unreliable)
-            .await
-            .expect("send packet");
+        circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Unreliable).await.expect("send packet");
         let (size, _) = simulator.recv_from(&mut buffer).await.expect("read datagram");
         assert_eq!(&buffer[1..5], &expected.to_be_bytes());
         assert_eq!(Packet::decode(&buffer[..size]).expect("decode packet").sequence(), expected);
@@ -667,9 +658,7 @@ async fn sends_wrapped_sequence() {
 
     let mut circuit = with_sequence(u32::MAX - 1);
     for expected in [u32::MAX - 1, u32::MAX, 0, 1] {
-        crate::fixtures::circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Unreliable)
-            .await
-            .expect("send wrapped packet");
+        circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Unreliable).await.expect("send wrapped packet");
         let (size, _) = simulator.recv_from(&mut buffer).await.expect("read datagram");
         assert_eq!(&buffer[1..5], &expected.to_be_bytes());
         assert_eq!(Packet::decode(&buffer[..size]).expect("decode wrapped packet").sequence(), expected);
@@ -685,9 +674,9 @@ async fn acks_keep_wide_sequence() {
     let mut buffer = [0; 1024];
 
     assert!(receive_at(&mut circuit, &reliable_packet(sequence), now));
-    crate::fixtures::circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush acknowledgement");
+    circuit::send_acknowledgements(&mut circuit, &transport).await.expect("flush acknowledgement");
     let (_, ack) = receive_packet(&simulator, &mut buffer).await;
-    std::assert_matches!(ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == sequence);
+    assert_matches!(ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == sequence);
 
     circuit.clear_duplicate_list(sequence + 1, now + Duration::from_secs(1));
     assert!(!receive_at(&mut circuit, &resent_reliable_packet(sequence), now + Duration::from_secs(2)));
@@ -699,9 +688,7 @@ async fn ping_keeps_wide_watermark() {
     let mut circuit = with_sequence(0x0100_0000);
     let mut buffer = [0; 1024];
 
-    crate::fixtures::circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Reliable)
-        .await
-        .expect("send wide reliable packet");
+    circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Reliable).await.expect("send wide reliable packet");
     let (size, _) = simulator.recv_from(&mut buffer).await.expect("read datagram");
     assert_eq!(Packet::decode(&buffer[..size]).expect("decode reliable packet").sequence(), 0x0100_0000);
 
@@ -861,12 +848,8 @@ async fn ping_uses_oldest_unacked() {
     let mut circuit = Circuit::new();
     let mut buffer = [0; 1024];
 
-    crate::fixtures::circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Reliable)
-        .await
-        .expect("send reliable packet");
-    crate::fixtures::circuit::send_message(&mut circuit, &transport, complete_ping(2), Delivery::Reliable)
-        .await
-        .expect("send second reliable packet");
+    circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Reliable).await.expect("send reliable packet");
+    circuit::send_message(&mut circuit, &transport, complete_ping(2), Delivery::Reliable).await.expect("send second reliable packet");
     for _ in 0..2 {
         let (size, _) = simulator.recv_from(&mut buffer).await.expect("read datagram");
         Packet::decode(&buffer[..size]).expect("decode reliable packet");

@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, fmt};
+use std::{error, fmt, mem};
 
 use tokio::{
     sync::oneshot,
@@ -128,8 +128,8 @@ impl fmt::Display for LogoutAttemptError {
     }
 }
 
-impl StdError for LogoutAttemptError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+impl error::Error for LogoutAttemptError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Unexpected(error) => Some(error),
             Self::Unavailable(_) => None,
@@ -214,7 +214,7 @@ impl SessionState {
     }
 
     pub(super) async fn finish_pending_logout(&mut self) -> Result<(), SessionError> {
-        let state = std::mem::replace(&mut self.logout, SessionLogout::Active);
+        let state = mem::replace(&mut self.logout, SessionLogout::Active);
         match state {
             SessionLogout::Sending { mut pending } => {
                 let result = pending.wait().await;

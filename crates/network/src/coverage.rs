@@ -263,6 +263,8 @@ fn advance_overflow(state: &mut LedgerState) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::{CoverageLoss, CoverageLossLedger, CoverageLossReason, CoverageRecord, CoverageSource};
     use crate::fixtures::test_simulator_id;
 
@@ -280,7 +282,7 @@ mod tests {
         assert_eq!(*changed.borrow_and_update(), 2, "watch wake coalesces both updates without losing the latest ledger state");
         ledger.acknowledge(first);
 
-        std::assert_matches!(
+        assert_matches!(
             ledger.snapshot().losses.as_slice(),
             [CoverageLoss::Source(loss)] if loss.watermark.generation == second.generation && loss.reason == CoverageLossReason::DecodeAdmission
         );
@@ -296,7 +298,7 @@ mod tests {
         };
 
         ledger.retire(simulator_id, source);
-        std::assert_matches!(ledger.snapshot().losses.as_slice(), [CoverageLoss::Source(loss)] if loss.retired);
+        assert_matches!(ledger.snapshot().losses.as_slice(), [CoverageLoss::Source(loss)] if loss.retired);
         ledger.acknowledge(loss);
         assert!(ledger.snapshot().losses.is_empty());
         assert_eq!(ledger.watermark(simulator_id, source).generation, 0);
@@ -306,19 +308,19 @@ mod tests {
     fn scope_exhaustion_records_overflow() {
         let ledger = CoverageLossLedger::new();
         for id in 1..=256 {
-            std::assert_matches!(
+            assert_matches!(
                 ledger.record(test_simulator_id(id), CoverageSource::Lludp, CoverageLossReason::EventAdmission),
                 CoverageRecord::Recorded(_)
             );
         }
-        std::assert_matches!(
+        assert_matches!(
             ledger.record(test_simulator_id(257), CoverageSource::Lludp, CoverageLossReason::EventAdmission),
             CoverageRecord::Overflowed { generation: 1 }
         );
         assert_eq!(ledger.snapshot().overflow_generation, Some(1));
         ledger.acknowledge_overflow(1);
         assert_eq!(ledger.snapshot().overflow_generation, None);
-        std::assert_matches!(
+        assert_matches!(
             ledger.record(test_simulator_id(258), CoverageSource::Lludp, CoverageLossReason::EventAdmission),
             CoverageRecord::Overflowed { generation: 2 }
         );

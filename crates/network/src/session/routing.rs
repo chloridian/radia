@@ -1,16 +1,28 @@
 use std::{
     collections::{HashSet, VecDeque},
+    mem,
     time::Duration,
 };
 
-use protocol::lludp::Message;
-use tokio::{sync::mpsc, time::Instant};
+use protocol::{
+    lludp::Message,
+    messages::{
+        RegionHandshakeReply,
+        region::region_handshake_reply::{AgentData, RegionInfo},
+    },
+};
+use tokio::{
+    sync::{
+        mpsc,
+        mpsc::error::{SendError, TrySendError},
+    },
+    time::Instant,
+};
 use utils::Summary;
 
-use super::teleport::is_teleport_cancel;
 use super::{
     ConnectionQueueFailure, RuntimeAction, SessionDispatcher, SessionError, SimulatorCommand, queue_connection_message,
-    queue_primary_message,
+    queue_primary_message, teleport::is_teleport_cancel,
 };
 use crate::{
     circuit::{MAX_PENDING_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS, admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY},
@@ -72,7 +84,7 @@ impl SessionDispatcher<'_> {
         if self.run_state.pending_region_handshake_replies.is_empty() {
             return;
         }
-        let mut pending = std::mem::take(&mut self.run_state.pending_region_handshake_replies);
+        let mut pending = mem::take(&mut self.run_state.pending_region_handshake_replies);
         flush_handshake_reply_queue(&mut pending, |simulator_id| self.simulator_commands(simulator_id));
         self.run_state.pending_region_handshake_replies = pending;
     }
@@ -100,7 +112,7 @@ impl SessionDispatcher<'_> {
 
     pub(super) async fn handle_pending_application_event(
         &mut self,
-        permit: Result<mpsc::OwnedPermit<EventEnvelope>, mpsc::error::SendError<()>>,
+        permit: Result<mpsc::OwnedPermit<EventEnvelope>, SendError<()>>,
     ) -> Result<RuntimeAction, SessionError> {
         match permit {
             Ok(permit) => {
@@ -188,12 +200,9 @@ impl SessionDispatcher<'_> {
                 }
             }
             Some(Command::ReplyRegionHandshake { simulator_id, flags, completed }) => {
-                let message = Message::RegionHandshakeReply(protocol::messages::RegionHandshakeReply {
-                    agent_data: protocol::messages::region::region_handshake_reply::AgentData {
-                        agent_id: self.state.session.agent_id,
-                        session_id: self.state.session.session_id,
-                    },
-                    region_info: protocol::messages::region::region_handshake_reply::RegionInfo { flags },
+                let message = Message::RegionHandshakeReply(RegionHandshakeReply {
+                    agent_data: AgentData { agent_id: self.state.session.agent_id, session_id: self.state.session.session_id },
+                    region_info: RegionInfo { flags },
                 });
                 let command = SimulatorCommand::ReplyRegionHandshake { message, completed };
                 self.queue_handshake_reply(simulator_id, command);
@@ -230,8 +239,8 @@ fn queue_handshake_reply(
     };
     match commands.try_send(command) {
         Ok(()) => false,
-        Err(mpsc::error::TrySendError::Full(command)) => defer_handshake_reply(pending, simulator_id, command),
-        Err(mpsc::error::TrySendError::Closed(command)) => {
+        Err(TrySendError::Full(command)) => defer_handshake_reply(pending, simulator_id, command),
+        Err(TrySendError::Closed(command)) => {
             complete_handshake_reply(command, Error::SimulatorConnectionClosed);
             false
         }
@@ -270,11 +279,11 @@ fn flush_handshake_reply_queue(
         };
         match commands.try_send(command) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(command)) => {
+            Err(TrySendError::Full(command)) => {
                 blocked.insert(simulator_id);
                 pending.push_back((simulator_id, command));
             }
-            Err(mpsc::error::TrySendError::Closed(command)) => {
+            Err(TrySendError::Closed(command)) => {
                 complete_handshake_reply(command, Error::SimulatorConnectionClosed);
             }
         }
@@ -314,8 +323,8 @@ pub(super) fn queue_simulator_event(
             permit.send(event);
             EventQueueOutcome::Queued
         }
-        Err(mpsc::error::TrySendError::Closed(_)) => EventQueueOutcome::ReceiverClosed,
-        Err(mpsc::error::TrySendError::Full(_)) => {
+        Err(TrySendError::Closed(_)) => EventQueueOutcome::ReceiverClosed,
+        Err(TrySendError::Full(_)) => {
             pending_events.push_back(event);
             if !is_application {
                 *pending_lifecycle_events += 1;
@@ -333,12 +342,16 @@ pub(super) fn primary_event_queue_size(events: &mpsc::Sender<EventEnvelope>, pen
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, net::SocketAddr, sync::Arc, time::Duration};
+    use std::{assert_matches, collections::VecDeque, net::SocketAddr, sync::Arc, time::Duration};
 
     use llsd::Value;
-
-    use crate::circuit::SimulatorCommand;
-    use crate::event::{Event, EventEnvelope, SimulatorId};
+    use protocol::{
+        lludp::Message,
+        messages::{
+            RegionHandshakeReply,
+            region::region_handshake_reply::{AgentData, RegionInfo},
+        },
+    };
     use tokio::{
         sync::{Semaphore, mpsc, oneshot},
         time::Instant,
@@ -347,6 +360,11 @@ mod tests {
     use super::{
         EVENT_BACKLOG_WARNING_THRESHOLD, MAX_PENDING_LIFECYCLE_EVENTS, MAX_PENDING_REGION_HANDSHAKE_REPLIES, MAX_PENDING_SESSION_EVENTS,
         PrimaryEventBacklog, flush_handshake_reply_queue, primary_event_queue_size, queue_handshake_reply, queue_simulator_event,
+    };
+    use crate::{
+        circuit::{SimulatorCommand, admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY},
+        error,
+        event::{Event, EventEnvelope, SimulatorId},
     };
 
     #[test]
@@ -392,19 +410,19 @@ mod tests {
         events.try_send(EventEnvelope::new(lifecycle_event(0))).expect("fill the channel");
         let mut pending = VecDeque::with_capacity(MAX_PENDING_SESSION_EVENTS);
         let mut pending_lifecycle_events = 0;
-        for index in 0..crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY {
-            std::assert_matches!(
+        for index in 0..SESSION_APPLICATION_EVENT_CREDIT_CAPACITY {
+            assert_matches!(
                 queue_simulator_event(&events, &mut pending, &mut pending_lifecycle_events, EventEnvelope::new(application_event(index)),),
                 super::EventQueueOutcome::Queued
             );
         }
         for index in 1..=MAX_PENDING_LIFECYCLE_EVENTS {
-            std::assert_matches!(
+            assert_matches!(
                 queue_simulator_event(&events, &mut pending, &mut pending_lifecycle_events, EventEnvelope::new(lifecycle_event(index)),),
                 super::EventQueueOutcome::Queued
             );
         }
-        std::assert_matches!(
+        assert_matches!(
             queue_simulator_event(
                 &events,
                 &mut pending,
@@ -415,12 +433,12 @@ mod tests {
         );
         assert_eq!(pending.len(), MAX_PENDING_SESSION_EVENTS);
         assert_eq!(pending_lifecycle_events, MAX_PENDING_LIFECYCLE_EVENTS);
-        for (index, event) in pending.iter().take(crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY).enumerate() {
+        for (index, event) in pending.iter().take(SESSION_APPLICATION_EVENT_CREDIT_CAPACITY).enumerate() {
             assert_application_event(&event.event, index);
         }
-        std::assert_matches!(pending.back().map(|event| &event.event), Some(Event::SimulatorConnected { simulator_id, .. }) if *simulator_id == SimulatorId::new(33));
+        assert_matches!(pending.back().map(|event| &event.event), Some(Event::SimulatorConnected { simulator_id, .. }) if *simulator_id == SimulatorId::new(33));
         let first = received.try_recv().expect("the channel event remains in front of the pending queue");
-        std::assert_matches!(first.event, Event::SimulatorConnected { simulator_id, .. } if simulator_id == SimulatorId::new(1));
+        assert_matches!(first.event, Event::SimulatorConnected { simulator_id, .. } if simulator_id == SimulatorId::new(1));
     }
 
     #[test]
@@ -433,7 +451,7 @@ mod tests {
         let mut pending = VecDeque::new();
         let mut pending_lifecycle_events = 0;
 
-        std::assert_matches!(
+        assert_matches!(
             queue_simulator_event(&events, &mut pending, &mut pending_lifecycle_events, event),
             super::EventQueueOutcome::Queued
         );
@@ -493,17 +511,14 @@ mod tests {
         }
 
         assert_eq!(pending.len(), MAX_PENDING_REGION_HANDSHAKE_REPLIES);
-        std::assert_matches!(overflow.expect("the extra reply is rejected").await, Ok(Err(crate::error::Error::SimulatorCommandQueueFull)));
+        assert_matches!(overflow.expect("the extra reply is rejected").await, Ok(Err(error::Error::SimulatorCommandQueueFull)));
     }
 
-    fn handshake_reply(completed: oneshot::Sender<Result<(), crate::error::Error>>) -> SimulatorCommand {
+    fn handshake_reply(completed: oneshot::Sender<Result<(), error::Error>>) -> SimulatorCommand {
         SimulatorCommand::ReplyRegionHandshake {
-            message: protocol::lludp::Message::RegionHandshakeReply(protocol::messages::RegionHandshakeReply {
-                agent_data: protocol::messages::region::region_handshake_reply::AgentData {
-                    agent_id: uuid::Uuid::nil(),
-                    session_id: uuid::Uuid::nil(),
-                },
-                region_info: protocol::messages::region::region_handshake_reply::RegionInfo { flags: 0 },
+            message: Message::RegionHandshakeReply(RegionHandshakeReply {
+                agent_data: AgentData { agent_id: uuid::Uuid::nil(), session_id: uuid::Uuid::nil() },
+                region_info: RegionInfo { flags: 0 },
             }),
             completed,
         }

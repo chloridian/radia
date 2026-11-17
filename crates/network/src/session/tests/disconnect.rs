@@ -1,4 +1,4 @@
-use std::{io::ErrorKind, net::SocketAddr, time::Duration};
+use std::{assert_matches, io::ErrorKind, net::SocketAddr, time::Duration};
 
 use protocol::{
     lludp::{Message, Packet},
@@ -19,15 +19,15 @@ use tokio::{
 use uuid::Uuid;
 
 use super::{
-    AGENT_ID, LOGOUT_TIMEOUT, LogoutOutcome, PendingLogout, SESSION_ID, SimulatorConnectionLifecycle, connect_runtime,
-    connect_with_send_gate, login_session, new_send_gate, set_sequence,
+    AGENT_ID, LOGOUT_TIMEOUT, LogoutOutcome, PendingLogout, SESSION_ID, SimulatorConnectionLifecycle, ack, connect_runtime,
+    connect_with_send_gate, login_session, new_send_gate, send_logout_reply, set_sequence, test_fixture,
 };
-use super::{ack, send_logout_reply, test_fixture};
-use crate::session::{SessionError, logout::LogoutUnavailable};
 use crate::{
     Error,
     circuit::{LOGOUT_REPLY_TIMEOUT, lludp::Circuit},
     event::{Event, EventEnvelope},
+    fixtures::circuit,
+    session::{SessionError, logout::LogoutUnavailable},
 };
 
 const CIRCUIT_CODE: u32 = 0x1122_3344;
@@ -36,7 +36,7 @@ pub(super) const RETRANSMISSION_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub(super) fn assert_no_datagram(socket: &UdpSocket) {
     let mut buffer = [0; 65_535];
-    std::assert_matches!(socket.try_recv_from(&mut buffer), Err(error) if error.kind() == ErrorKind::WouldBlock);
+    assert_matches!(socket.try_recv_from(&mut buffer), Err(error) if error.kind() == ErrorKind::WouldBlock);
 }
 
 pub(super) fn complete_ping(ping_id: u8) -> Message {
@@ -52,7 +52,7 @@ pub(super) fn packet_ack_contains(message: &Message, packet_id: u32) -> bool {
 }
 
 pub(super) fn receive_packet(circuit: &mut Circuit, packet: &Packet) -> bool {
-    crate::fixtures::circuit::receive_packet_at(circuit, packet, Instant::now()).expect("valid circuit packet").is_new_packet
+    circuit::receive_packet_at(circuit, packet, Instant::now()).expect("valid circuit packet").is_new_packet
 }
 
 pub(super) fn is_complete_ping(message: &Message, ping_id: u8) -> bool {
@@ -176,7 +176,7 @@ async fn root_disconnect_awaits_logout_reply() {
     let (movement_bytes, movement_peer) = receive(&simulator).await;
     assert_eq!(movement_peer, peer);
     let movement = Packet::decode(&movement_bytes).expect("decode initial movement");
-    std::assert_matches!(movement.message(), Message::CompleteAgentMovement(_));
+    assert_matches!(movement.message(), Message::CompleteAgentMovement(_));
     simulator.send_to(&ack(21, movement.sequence()), peer).await.expect("ack initial movement");
     let mut disconnect = Box::pin(connection.state.disconnect_once());
 
@@ -188,7 +188,7 @@ async fn root_disconnect_awaits_logout_reply() {
     assert_eq!(logout_peer, peer);
     let logout = Packet::decode(&logout_bytes).expect("decode LogoutRequest");
     assert_eq!(logout.sequence(), 3);
-    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+    assert_matches!(logout.message(), Message::LogoutRequest(_));
 
     let agent_id = Uuid::parse_str(AGENT_ID).expect("agent UUID");
     let session_id = Uuid::parse_str(SESSION_ID).expect("session UUID");
@@ -237,7 +237,7 @@ async fn disconnect_reply_deadline_is_bounded() {
     simulator.send_to(&ack(20, 1), peer).await.expect("ack circuit establishment");
     let (movement_bytes, _) = receive(&simulator).await;
     let movement = Packet::decode(&movement_bytes).expect("decode initial movement");
-    std::assert_matches!(movement.message(), Message::CompleteAgentMovement(_));
+    assert_matches!(movement.message(), Message::CompleteAgentMovement(_));
     simulator.send_to(&ack(21, movement.sequence()), peer).await.expect("ack initial movement");
     let mut disconnect = Box::pin(connection.state.disconnect_once());
     let (logout_bytes, _) = tokio::select! {
@@ -246,7 +246,7 @@ async fn disconnect_reply_deadline_is_bounded() {
         packet = timeout(SIMULATOR_TIMEOUT, receive(&simulator)) => packet.expect("send LogoutRequest"),
     };
     let logout = Packet::decode(&logout_bytes).expect("decode LogoutRequest");
-    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+    assert_matches!(logout.message(), Message::LogoutRequest(_));
 
     time::advance(LOGOUT_REPLY_TIMEOUT).await;
     yield_now().await;
@@ -269,7 +269,7 @@ async fn disconnect_send_failure_is_unexpected() {
     simulator.send_to(&ack(20, 1), peer).await.expect("ack circuit establishment");
     let (movement_bytes, _) = receive(&simulator).await;
     let movement = Packet::decode(&movement_bytes).expect("decode initial movement");
-    std::assert_matches!(movement.message(), Message::CompleteAgentMovement(_));
+    assert_matches!(movement.message(), Message::CompleteAgentMovement(_));
     simulator.send_to(&ack(21, movement.sequence()), peer).await.expect("ack initial movement");
     pause_sends.send_replace(true);
     let mut disconnect = Box::pin(connection.state.disconnect_once());
@@ -280,7 +280,7 @@ async fn disconnect_send_failure_is_unexpected() {
     }
     drop(pause_sends);
 
-    std::assert_matches!(
+    assert_matches!(
         timeout(SIMULATOR_TIMEOUT, &mut disconnect).await.expect("send failure completes disconnect"),
         Err(SessionError::Network(Error::SimulatorSend(_)))
     );

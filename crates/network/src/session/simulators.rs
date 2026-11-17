@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    mem,
     net::SocketAddr,
     num::NonZeroU64,
 };
@@ -9,23 +10,29 @@ use protocol::{lludp::Message, login::ResponseData};
 #[cfg(test)]
 use tokio::time;
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{mpsc, mpsc::error::TrySendError, oneshot, watch},
     task::{AbortHandle, Id, JoinError, JoinSet},
     time::Instant,
 };
 use url::Url;
 use uuid::Uuid;
 
-use super::capability_events::{decode_agent_communication, decode_enable_simulators};
-use super::handoff::{HandoffAnnouncement, HandoffOrder, HandoffState, PromotionSetup, cancel_pending_handoff, teleport_failure_matches};
-use super::logout::{LogoutUnavailable, PendingLogout, SessionLogout};
-use super::routing::{
-    EventQueueOutcome, MAX_PENDING_REGION_HANDSHAKE_REPLIES, MAX_PENDING_SESSION_EVENTS, PrimaryEventBacklog, primary_event_queue_size,
-    queue_simulator_event,
+#[cfg(test)]
+pub(in crate::session) use self::tests::publish_primary_terminal_event;
+use super::{
+    Command, SessionError, SessionOptions,
+    capability_events::{decode_agent_communication, decode_enable_simulators},
+    handoff::{HandoffAnnouncement, HandoffOrder, HandoffState, PromotionSetup, cancel_pending_handoff, teleport_failure_matches},
+    logout::{LogoutUnavailable, PendingLogout, SessionLogout},
+    routing::{
+        EventQueueOutcome, MAX_PENDING_REGION_HANDSHAKE_REPLIES, MAX_PENDING_SESSION_EVENTS, PrimaryEventBacklog, primary_event_queue_size,
+        queue_simulator_event,
+    },
+    runtime::SessionDispatcher,
+    teleport::{decode_crossed_region, decode_event_teleport_failed, decode_event_teleport_finish, is_teleport_cancel},
 };
-use super::runtime::SessionDispatcher;
-use super::teleport::{decode_crossed_region, decode_event_teleport_failed, decode_event_teleport_finish, is_teleport_cancel};
-use super::{Command, SessionError, SessionOptions};
+#[cfg(not(test))]
+use crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY;
 use crate::{
     AgentSession,
     capabilities::{CapabilityBudget, Client, EventQueueExit, EventQueueRoleHandle},
@@ -40,9 +47,6 @@ use crate::{
     error::Error,
     event::{Event, EventEnvelope, SimulatorId},
 };
-
-#[cfg(test)]
-pub(in crate::session) use tests::publish_primary_terminal_event;
 
 pub(super) const MAX_TRACKED_CAPABILITY_CLIENTS: usize = MAX_SIMULATOR_CONNECTIONS;
 pub(super) const NEIGHBOR_COMMAND_CAPACITY: usize = 8;
@@ -130,7 +134,7 @@ impl SimulatorRecord {
         };
         match self.commands.try_send(command) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(command)) => {
+            Err(TrySendError::Full(command)) => {
                 self.pending_handoff_command = Some(match command {
                     SimulatorCommand::PrepareHandoff(target) => HandoffCommand::Prepare(target),
                     SimulatorCommand::CancelHandoff => HandoffCommand::Cancel,
@@ -138,7 +142,7 @@ impl SimulatorRecord {
                     SimulatorCommand::Send { .. } => unreachable!("only handoff control commands are deferred"),
                 });
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(TrySendError::Closed(_)) => {}
         }
     }
 }
@@ -165,7 +169,7 @@ impl SessionRuntimeOptions {
         }
         #[cfg(not(test))]
         {
-            crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY
+            SESSION_APPLICATION_EVENT_CREDIT_CAPACITY
         }
     }
 }
@@ -453,10 +457,10 @@ impl SessionState {
                 Ok(()) => {
                     self.logout = SessionLogout::Sending { pending };
                 }
-                Err(mpsc::error::TrySendError::Full(_command)) => {
+                Err(TrySendError::Full(_command)) => {
                     self.record_logout_unavailable(LogoutUnavailable::QueueFull, deadline);
                 }
-                Err(mpsc::error::TrySendError::Closed(_command)) => {
+                Err(TrySendError::Closed(_command)) => {
                     self.record_logout_unavailable(LogoutUnavailable::ConnectionClosed, deadline);
                 }
             }
@@ -501,7 +505,7 @@ impl SessionState {
         }
         self.publish_event(events, state, event).await?;
         let queued = if let Some(simulator) = self.simulators.get_mut(&simulator_id) {
-            std::mem::take(&mut simulator.preconnect_events)
+            mem::take(&mut simulator.preconnect_events)
         } else {
             VecDeque::new()
         };
@@ -790,13 +794,13 @@ pub(super) fn queue_connection_message(
     let command = SimulatorCommand::Send { message, delivery, completed, cancel_target, report_failure };
     match commands.try_send(command) {
         Ok(()) => Ok(()),
-        Err(mpsc::error::TrySendError::Full(SimulatorCommand::Send { completed, .. })) => {
+        Err(TrySendError::Full(SimulatorCommand::Send { completed, .. })) => {
             Err(ConnectionQueueFailure { error: Error::SimulatorCommandQueueFull, completion: completed })
         }
-        Err(mpsc::error::TrySendError::Closed(SimulatorCommand::Send { completed, .. })) => {
+        Err(TrySendError::Closed(SimulatorCommand::Send { completed, .. })) => {
             Err(ConnectionQueueFailure { error: Error::SimulatorConnectionClosed, completion: completed })
         }
-        Err(mpsc::error::TrySendError::Full(_)) | Err(mpsc::error::TrySendError::Closed(_)) => {
+        Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => {
             unreachable!("only send commands are queued through this helper")
         }
     }
@@ -836,9 +840,11 @@ mod tests {
 
     use tokio::sync::mpsc;
 
-    use crate::{event::EventEnvelope, event::SimulatorId, session::error::SessionError};
-
     use super::SessionState;
+    use crate::{
+        event::{EventEnvelope, SimulatorId},
+        session::error::SessionError,
+    };
 
     pub(in crate::session) fn publish_primary_terminal_event(
         permit: mpsc::OwnedPermit<EventEnvelope>,

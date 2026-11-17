@@ -17,13 +17,14 @@ mod send;
 mod startup;
 
 use std::{
+    assert_matches,
     collections::VecDeque,
     future::{Future, pending},
     io::ErrorKind,
     net::SocketAddr,
     sync::Arc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use llsd::{Map, Value};
@@ -35,15 +36,15 @@ use protocol::{
         AgentMovementComplete, CacheMissType, ChatFromViewer, CompletePingCheck, ObjectRequest, PacketAck, PingId, RequestAgentData,
         RequestMultipleObjects, StartPingCheck, TeleportCancel, TeleportFinish,
         agent::agent_movement_complete::{AgentData, Data, SimData},
-        chat::chat_from_viewer,
-        chat::chat_from_viewer::ChatData,
+        chat::{chat_from_viewer, chat_from_viewer::ChatData},
         circuit::packet_ack::Packets,
     },
 };
 use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, UdpSocket},
-    runtime as tokio_runtime, spawn,
+    runtime::Builder,
+    spawn,
     sync::{Notify, Semaphore, mpsc, oneshot, watch},
     task,
     task::JoinHandle,
@@ -52,22 +53,22 @@ use tokio::{
 use url::Url;
 use uuid::Uuid;
 
-use crate::event::send_failure_event;
-use crate::fixtures::{
-    circuit::{SendGate, SimulatorMemoryBudgetTestExt, new_send_gate, set_send_gate},
-    event_with_coverage_watermark, event_with_retained_bytes, event_with_retention,
-    session::{receive_client_message, receive_udp, server_ack, set_sequence, test_fixture},
-    simulator::clone_udp_socket,
-    test_simulator_id,
+use super::{
+    EventQueueLifecycle, HandoffState, NEIGHBOR_COMMAND_CAPACITY, SimulatorCapabilitySession, SimulatorConnection,
+    SimulatorConnectionLifecycle, SimulatorRecord,
+    logout::{LogoutOutcome, PendingLogout, SessionLogout},
+    *,
 };
-use crate::session::simulators::publish_primary_terminal_event;
 use crate::{
     AgentSession, Error, Grid, StartLocation,
     capabilities::{CapabilityBudget, Client, EventQueueExit},
     circuit::{
         HandoffTarget, LOGOUT_TIMEOUT, LogoutCommand, LogoutReceipt, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS,
         MAX_PRECONNECT_EVENTS, NeighborEventQueueOutcome, SimulatorCommand, SimulatorEvent, UdpTransport,
-        admission::{MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES},
+        admission::{
+            MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES,
+            SESSION_APPLICATION_EVENT_CREDIT_CAPACITY,
+        },
         lludp::{
             Circuit, CircuitError, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, MAX_RETRIES, PING_INTERVAL, RESENT_FLAG, ReceiveError,
         },
@@ -77,22 +78,25 @@ use crate::{
     coverage::{CoverageLoss, CoverageLossLedger, CoverageLossReason, CoverageRecord, CoverageSource},
     event::{
         CLIENT_EVENT_CAPACITY, Event, EventEnvelope, EventRetention, EventSendOutcome, PRIMARY_TERMINAL_EVENT_CAPACITY,
-        PacketOrder::Ordered, SimulatorId,
+        PacketOrder::Ordered, SimulatorId, send_failure_event,
     },
-    session::{COMMAND_CAPACITY, Command, DEFAULT_UPSTREAM_BYTES_PER_SECOND, NETWORK_THREAD_STACK_SIZE},
+    fixtures::{
+        circuit::{SendGate, SimulatorMemoryBudgetTestExt, new_send_gate, set_send_gate},
+        event_with_coverage_watermark, event_with_retained_bytes, event_with_retention,
+        session::{receive_client_message, receive_udp, server_ack, set_sequence, test_fixture},
+        simulator::clone_udp_socket,
+        test_simulator_id,
+    },
+    session::{
+        COMMAND_CAPACITY, Command, DEFAULT_UPSTREAM_BYTES_PER_SECOND, NETWORK_THREAD_STACK_SIZE,
+        handoff::{
+            FinishOrder, HandoffAnnouncement, HandoffDecision, HandoffOrder, PromotionSetup, arbitrate_handoff, handoff_cancellation,
+            same_handoff_destination, teleport_failure_matches,
+        },
+        simulators::publish_primary_terminal_event,
+        teleport::{decode_crossed_region, decode_event_teleport_finish, decode_teleport_finish},
+    },
 };
-
-use super::logout::{LogoutOutcome, PendingLogout, SessionLogout};
-use super::*;
-use super::{
-    EventQueueLifecycle, HandoffState, NEIGHBOR_COMMAND_CAPACITY, SimulatorCapabilitySession, SimulatorConnection,
-    SimulatorConnectionLifecycle, SimulatorRecord,
-};
-use crate::session::handoff::{
-    FinishOrder, HandoffAnnouncement, HandoffDecision, HandoffOrder, PromotionSetup, arbitrate_handoff, handoff_cancellation,
-    same_handoff_destination, teleport_failure_matches,
-};
-use crate::session::teleport::{decode_crossed_region, decode_event_teleport_finish, decode_teleport_finish};
 
 const AGENT_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
 const SESSION_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
@@ -102,10 +106,10 @@ const SESSION_EVENT_CAPACITY: usize = 2;
 const TEST_EVENT_CAPACITY: usize = CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY;
 
 pub(super) fn relay_handshake_events(
-    events: mpsc::Sender<EventEnvelope>,
-    commands: mpsc::Sender<Command>,
+    events: Sender<EventEnvelope>,
+    commands: Sender<Command>,
     capacity: usize,
-) -> (mpsc::Sender<EventEnvelope>, JoinHandle<()>, watch::Receiver<Option<u32>>) {
+) -> (Sender<EventEnvelope>, JoinHandle<()>, watch::Receiver<Option<u32>>) {
     let commands = commands.downgrade();
     let (runtime_events, mut incoming) = mpsc::channel::<EventEnvelope>(capacity);
     let (observed, observation) = watch::channel(None);
@@ -138,12 +142,12 @@ struct NeighborHarness {
     primary_id: SimulatorId,
     primary_region_handle: u64,
     neighbor_id: SimulatorId,
-    commands: mpsc::Sender<Command>,
-    events: mpsc::Receiver<EventEnvelope>,
+    commands: Sender<Command>,
+    events: Receiver<EventEnvelope>,
     disconnect: watch::Sender<bool>,
     packet_memory: SimulatorMemoryBudget,
     coverage: CoverageLossLedger,
-    client: JoinHandle<Result<(), crate::session::SessionError>>,
+    client: JoinHandle<Result<(), SessionError>>,
     pause_sends: watch::Sender<bool>,
     send_entered: Arc<Notify>,
 }
@@ -159,22 +163,22 @@ impl NeighborHarness {
 
 pub(crate) async fn run_session(
     session: AgentSession,
-    command_sender: mpsc::Sender<Command>,
-    commands: mpsc::Receiver<Command>,
-    events: mpsc::Sender<EventEnvelope>,
+    command_sender: Sender<Command>,
+    commands: Receiver<Command>,
+    events: Sender<EventEnvelope>,
     disconnect_requested: watch::Receiver<bool>,
-) -> Result<(), crate::session::SessionError> {
+) -> Result<(), SessionError> {
     run_session_with_options(session, command_sender, commands, events, disconnect_requested, test_options()).await
 }
 
 pub(crate) async fn run_session_with_options(
     session: AgentSession,
-    command_sender: mpsc::Sender<Command>,
-    commands: mpsc::Receiver<Command>,
-    events: mpsc::Sender<EventEnvelope>,
+    command_sender: Sender<Command>,
+    commands: Receiver<Command>,
+    events: Sender<EventEnvelope>,
     disconnect_requested: watch::Receiver<bool>,
     options: SessionRuntimeOptions,
-) -> Result<(), crate::session::SessionError> {
+) -> Result<(), SessionError> {
     let failure_events = events.clone();
     let mut failure_shutdown = disconnect_requested.clone();
     let (session_events, relay, _) = relay_handshake_events(events, command_sender, SESSION_EVENT_CAPACITY);
@@ -182,7 +186,7 @@ pub(crate) async fn run_session_with_options(
     let result = async {
         let connection = SessionRuntime::connect(session, ResponseData::default(), options)
             .await?
-            .ok_or(crate::session::SessionError::PrimaryConnectionStoppedDuringStartup)?;
+            .ok_or(SessionError::PrimaryConnectionStoppedDuringStartup)?;
         connection.run(commands, session_events, disconnect_requested, terminal_event_permit).await
     }
     .await;
@@ -199,15 +203,15 @@ pub(super) fn test_options() -> SessionRuntimeOptions {
         session: SessionOptions::default(),
         startup_disconnect: None,
         root_transport: None,
-        application_event_capacity: crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY,
+        application_event_capacity: SESSION_APPLICATION_EVENT_CREDIT_CAPACITY,
     }
 }
 
 fn test_simulator_record(
     endpoint: SocketAddr,
     region_handle: Option<u64>,
-    abort: tokio::task::AbortHandle,
-    commands: mpsc::Sender<SimulatorCommand>,
+    abort: task::AbortHandle,
+    commands: Sender<SimulatorCommand>,
 ) -> SimulatorRecord {
     let (primary_state, _) = watch::channel(PrimaryState::Neighbor { generation: 0 });
     SimulatorRecord {
@@ -247,36 +251,34 @@ fn runtime_options() -> SessionRuntimeOptions {
     test_options()
 }
 
-async fn gated_transport(session: &AgentSession, send_gate: SendGate) -> Result<UdpTransport, crate::circuit::ConnectionError> {
+async fn gated_transport(session: &AgentSession, send_gate: SendGate) -> Result<UdpTransport, ConnectionError> {
     let mut transport = UdpTransport::connect(session.simulator_address).await?;
     set_send_gate(&mut transport, send_gate);
     Ok(transport)
 }
 
-async fn connect_runtime(session: AgentSession, login_data: ResponseData) -> Result<SessionRuntime, crate::session::SessionError> {
-    SessionRuntime::connect(session, login_data, runtime_options())
-        .await?
-        .ok_or(crate::session::SessionError::PrimaryConnectionStoppedDuringStartup)
+async fn connect_runtime(session: AgentSession, login_data: ResponseData) -> Result<SessionRuntime, SessionError> {
+    SessionRuntime::connect(session, login_data, runtime_options()).await?.ok_or(SessionError::PrimaryConnectionStoppedDuringStartup)
 }
 
 async fn connect_with_coverage(
     session: AgentSession,
     login_data: ResponseData,
     coverage_losses: CoverageLossLedger,
-) -> Result<SessionRuntime, crate::session::SessionError> {
+) -> Result<SessionRuntime, SessionError> {
     let mut options = runtime_options();
     options.coverage_losses = coverage_losses;
-    SessionRuntime::connect(session, login_data, options).await?.ok_or(crate::session::SessionError::PrimaryConnectionStoppedDuringStartup)
+    SessionRuntime::connect(session, login_data, options).await?.ok_or(SessionError::PrimaryConnectionStoppedDuringStartup)
 }
 
 async fn connect_with_send_gate(
     session: AgentSession,
     login_data: ResponseData,
     send_gate: SendGate,
-) -> Result<SessionRuntime, crate::session::SessionError> {
+) -> Result<SessionRuntime, SessionError> {
     let mut options = runtime_options();
     options.root_transport = Some(gated_transport(&session, send_gate).await?);
-    SessionRuntime::connect(session, login_data, options).await?.ok_or(crate::session::SessionError::PrimaryConnectionStoppedDuringStartup)
+    SessionRuntime::connect(session, login_data, options).await?.ok_or(SessionError::PrimaryConnectionStoppedDuringStartup)
 }
 
 async fn connect_with_gate_and_disconnect(
@@ -284,7 +286,7 @@ async fn connect_with_gate_and_disconnect(
     login_data: ResponseData,
     send_gate: SendGate,
     disconnect_requested: watch::Receiver<bool>,
-) -> Result<Option<SessionRuntime>, crate::session::SessionError> {
+) -> Result<Option<SessionRuntime>, SessionError> {
     let mut options = runtime_options();
     options.root_transport = Some(gated_transport(&session, send_gate).await?);
     options.startup_disconnect = Some(disconnect_requested);
@@ -300,7 +302,7 @@ pub(crate) async fn connect_test_connection(
     budget: Option<OutboundBudgetHandle>,
     owned_budget: Option<OutboundBudget>,
     send_gate: Option<SendGate>,
-) -> Result<SimulatorConnection, crate::circuit::ConnectionError> {
+) -> Result<SimulatorConnection, ConnectionError> {
     let transport = match send_gate {
         Some(send_gate) => Some(gated_transport(&session, send_gate).await?),
         None => None,
@@ -324,7 +326,7 @@ async fn connect_test_neighbor(
     simulator_id: SimulatorId,
     session: AgentSession,
     region_handle: u64,
-) -> Result<SimulatorConnection, crate::circuit::ConnectionError> {
+) -> Result<SimulatorConnection, ConnectionError> {
     connect_test_connection(simulator_id, session, Some(region_handle), CoverageLossLedger::new(), None, None, None, None).await
 }
 
@@ -335,7 +337,7 @@ pub(crate) async fn connect_test_primary_with_state(
     primary_state: watch::Receiver<PrimaryState>,
     budget: OutboundBudgetHandle,
     send_gate: Option<SendGate>,
-) -> Result<SimulatorConnection, crate::circuit::ConnectionError> {
+) -> Result<SimulatorConnection, ConnectionError> {
     connect_test_connection(simulator_id, session, None, coverage_losses, Some(primary_state), Some(budget), None, send_gate).await
 }
 
@@ -365,7 +367,7 @@ fn retained_packet_event(budget: &SimulatorMemoryBudget, simulator_id: Simulator
             source,
             sequence,
             packet_order: Ordered(u64::from(sequence)),
-            received_at: std::time::Instant::now(),
+            received_at: Instant::now(),
             ping_delay: None,
             message: packet.into_message(),
         },
@@ -391,7 +393,7 @@ fn run_large_stack_test<F: Future<Output = ()> + 'static>(test: fn() -> F) {
         .name("network-handoff-test".into())
         .stack_size(NETWORK_THREAD_STACK_SIZE)
         .spawn(move || {
-            let runtime = tokio_runtime::Builder::new_current_thread().enable_all().build().expect("handoff runtime");
+            let runtime = Builder::new_current_thread().enable_all().build().expect("handoff runtime");
             runtime.block_on(test());
         })
         .expect("handoff test thread")
@@ -404,7 +406,7 @@ fn run_large_paused_stack_test<F: Future<Output = ()> + 'static>(test: fn() -> F
         .name("network-runtime-test".into())
         .stack_size(NETWORK_THREAD_STACK_SIZE)
         .spawn(move || {
-            let mut builder = tokio_runtime::Builder::new_current_thread();
+            let mut builder = Builder::new_current_thread();
             builder.enable_all();
             builder.start_paused(true);
             builder.build().expect("runtime runtime").block_on(test());
@@ -483,7 +485,7 @@ async fn connected_neighbor_with_options(seed: Url) -> NeighborHarness {
     let use_circuit = Packet::decode(&bytes).expect("decode neighbor UseCircuitCode");
     assert_eq!(use_circuit.sequence(), 1);
     assert!(use_circuit.is_reliable());
-    std::assert_matches!(use_circuit.message(), Message::UseCircuitCode(_));
+    assert_matches!(use_circuit.message(), Message::UseCircuitCode(_));
     assert_ne!(neighbor_peer, primary_peer, "each simulator must have a separate LLUDP circuit");
     neighbor.send_to(&ack(40, 1), neighbor_peer).await.expect("ack neighbor circuit");
     let neighbor_id = loop {
@@ -618,7 +620,7 @@ async fn announce_neighbor(primary: &UdpSocket, peer: SocketAddr, endpoint: Sock
     primary.send_to(&enable, peer).await.expect("announce neighbor simulator");
 }
 
-async fn send_targeted(commands: &mpsc::Sender<Command>, simulator_id: SimulatorId, message: Message) -> Result<(), Error> {
+async fn send_targeted(commands: &Sender<Command>, simulator_id: SimulatorId, message: Message) -> Result<(), Error> {
     let (completed, response) = oneshot::channel();
     commands
         .send(Command::SendTo { simulator_id, message, delivery: Delivery::Reliable, completed })
@@ -647,7 +649,7 @@ fn chat_message(message: impl Into<String>) -> Message {
     })
 }
 
-async fn next_event(events: &mut mpsc::Receiver<EventEnvelope>) -> Event {
+async fn next_event(events: &mut Receiver<EventEnvelope>) -> Event {
     loop {
         let event = next_raw_event(events).await;
         if matches!(&event, Event::SimulatorConnected { region_handle: None, .. }) {
@@ -657,7 +659,7 @@ async fn next_event(events: &mut mpsc::Receiver<EventEnvelope>) -> Event {
     }
 }
 
-async fn next_neighbor_event(events: &mut mpsc::Receiver<SimulatorEvent>) -> Event {
+async fn next_neighbor_event(events: &mut Receiver<SimulatorEvent>) -> Event {
     match events.recv().await.expect("neighbor event channel remains open") {
         SimulatorEvent::Simulator(event) => event.into_event(),
         SimulatorEvent::SendCompleted { .. } | SimulatorEvent::Finished { .. } => {
@@ -666,7 +668,7 @@ async fn next_neighbor_event(events: &mut mpsc::Receiver<SimulatorEvent>) -> Eve
     }
 }
 
-async fn next_raw_event(events: &mut mpsc::Receiver<EventEnvelope>) -> Event {
+async fn next_raw_event(events: &mut Receiver<EventEnvelope>) -> Event {
     loop {
         let event = events.recv().await.expect("event channel remains open").into_event();
         if matches!(&event, Event::CapabilityError { capability, .. } if capability == "EventQueueGet") {

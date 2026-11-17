@@ -1,4 +1,5 @@
 use std::{
+    assert_matches,
     collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::Arc,
@@ -14,6 +15,7 @@ use tokio::{
 };
 
 use super::*;
+use crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY;
 
 const HANG_GUARD: Duration = Duration::from_secs(60);
 const BURST_COUNT: usize = 12;
@@ -31,10 +33,10 @@ struct SimulatorEndpoint {
 
 struct SessionHarness {
     simulators: Vec<SimulatorEndpoint>,
-    events: mpsc::Receiver<EventEnvelope>,
-    commands: mpsc::Sender<Command>,
+    events: Receiver<EventEnvelope>,
+    commands: Sender<Command>,
     disconnect: watch::Sender<bool>,
-    client: JoinHandle<Result<(), crate::session::SessionError>>,
+    client: JoinHandle<Result<(), SessionError>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -50,7 +52,7 @@ struct AckObservation {
 
 struct AckMonitor {
     shutdown: watch::Sender<bool>,
-    observations: mpsc::Receiver<AckObservation>,
+    observations: Receiver<AckObservation>,
     tasks: JoinSet<()>,
 }
 
@@ -145,7 +147,7 @@ impl SessionHarness {
         let (use_circuit_bytes, primary_peer) = receive(&primary_socket).await;
         let use_circuit = Packet::decode(&use_circuit_bytes).expect("decode primary UseCircuitCode");
         assert!(use_circuit.is_reliable());
-        std::assert_matches!(use_circuit.message(), Message::UseCircuitCode(_));
+        assert_matches!(use_circuit.message(), Message::UseCircuitCode(_));
         primary_socket.send_to(&ack(20, use_circuit.sequence()), primary_peer).await.expect("ack primary circuit");
 
         let movement = receive_message(&primary_socket, |message| matches!(message, Message::CompleteAgentMovement(_))).await;
@@ -190,7 +192,7 @@ impl SessionHarness {
             let (use_circuit_bytes, peer) = receive(&socket).await;
             let use_circuit = Packet::decode(&use_circuit_bytes).expect("decode neighbor UseCircuitCode");
             assert!(use_circuit.is_reliable());
-            std::assert_matches!(use_circuit.message(), Message::UseCircuitCode(_));
+            assert_matches!(use_circuit.message(), Message::UseCircuitCode(_));
             socket.send_to(&ack(40, use_circuit.sequence()), peer).await.expect("ack neighbor circuit");
 
             let id = loop {
@@ -306,7 +308,7 @@ async fn measure_bursts(harness: &mut SessionHarness, monitor: &mut AckMonitor, 
                 event = next_raw_event(&mut harness.events), if delivered.len() < expected.len() => {
                     match event {
                         Event::SimulatorMessage { simulator_id, sequence, message, .. } => {
-                            std::assert_matches!(message, Message::ObjectUpdate(_));
+                            assert_matches!(message, Message::ObjectUpdate(_));
                             let circuit = *circuit_indices.get(&simulator_id).expect("event belongs to an active circuit");
                             let key = PacketKey { circuit, sequence };
                             assert!(expected.contains(&key), "session delivered an unexpected burst packet");
@@ -364,7 +366,7 @@ async fn udp_burst_measurement() {
         let mut harness =
             timeout(HANG_GUARD, Box::pin(SessionHarness::connect(neighbor_count))).await.expect("session setup should complete");
         let circuits = harness.simulators.len();
-        assert!(circuits * PACKETS_PER_CIRCUIT < crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY);
+        assert!(circuits * PACKETS_PER_CIRCUIT < SESSION_APPLICATION_EVENT_CREDIT_CAPACITY);
         let mut monitor = harness.start_ack_monitor();
         let measurements = timeout(HANG_GUARD, measure_bursts(&mut harness, &mut monitor, &ordinary, &larger))
             .await

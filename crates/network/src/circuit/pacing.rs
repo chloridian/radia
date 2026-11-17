@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
-    error::Error as StdError,
-    fmt,
+    error, fmt,
     io::{self, ErrorKind},
     sync::{
         Arc, Mutex,
@@ -11,7 +10,7 @@ use std::{
 };
 
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{mpsc, mpsc::error::TrySendError, oneshot},
     task::{self, JoinHandle, spawn},
     time::{self, Instant},
 };
@@ -45,8 +44,8 @@ impl fmt::Display for PacerError {
     }
 }
 
-impl StdError for PacerError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+impl error::Error for PacerError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Writable(error) | Self::Send(error) => Some(error.as_ref()),
             Self::Stopped | Self::GrantCanceled => None,
@@ -349,7 +348,7 @@ impl Drop for ConnectionPacer {
     fn drop(&mut self) {
         self.active.store(false, Ordering::Release);
         match self.commands.try_send(Command::Unregister { id: self.id }) {
-            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) | Err(mpsc::error::TrySendError::Full(_)) => {}
+            Ok(()) | Err(TrySendError::Closed(_)) | Err(TrySendError::Full(_)) => {}
         }
     }
 }

@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, fmt, sync::Arc};
+use std::{error, fmt, sync::Arc};
 
 use crate::http;
 
@@ -21,8 +21,8 @@ impl fmt::Display for SetupError {
     }
 }
 
-impl StdError for SetupError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+impl error::Error for SetupError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::InvalidSeed(error) => Some(error.as_ref()),
             Self::HttpClient(error) => Some(error.as_ref()),

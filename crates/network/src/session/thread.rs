@@ -17,10 +17,13 @@ use super::{
     COMMAND_CAPACITY, Command, MfaChallenge, NETWORK_THREAD_STACK_SIZE, Session, SessionError, SessionHandle, SessionOptions,
     SessionRuntime, SessionRuntimeOptions,
 };
+#[cfg(test)]
+use crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY;
 use crate::{
     LoginCredentials,
     coverage::CoverageLossLedger,
     error::Error,
+    event,
     event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, EventSendOutcome, PRIMARY_TERMINAL_EVENT_CAPACITY, send_client_event},
     login::{LoginError, LoginResponse, login_at_url},
 };
@@ -79,7 +82,7 @@ pub(super) fn start_at(credentials: LoginCredentials, options: SessionOptions, l
                     }
                     error => tracing::warn!(%error, "network session failed"),
                 }
-                runtime.block_on(crate::event::send_failure_event(&failure_sender, error.to_string(), &mut failure_shutdown));
+                runtime.block_on(event::send_failure_event(&failure_sender, error.to_string(), &mut failure_shutdown));
             } else {
                 tracing::debug!("network worker finished");
             }
@@ -195,7 +198,7 @@ pub(super) async fn run_client(
             startup_disconnect: Some(disconnect_requested.clone()),
             root_transport: None,
             #[cfg(test)]
-            application_event_capacity: crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY,
+            application_event_capacity: SESSION_APPLICATION_EVENT_CREDIT_CAPACITY,
         },
     )
     .await?

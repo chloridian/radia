@@ -1,32 +1,37 @@
 use std::{
     collections::{HashMap, VecDeque},
+    mem,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
 };
 
 use protocol::lludp::Message;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{
+        mpsc,
+        mpsc::error::{SendError, TrySendError},
+        watch,
+    },
     task::{Id, JoinError},
 };
-use tracing::Instrument;
+use tracing::{Instrument, field};
 use url::Url;
 
-use super::handoff::PromotionSetup;
 use super::{
     ConnectionError, ConnectionTaskResult, HandoffCommand, HandoffTarget, NEIGHBOR_COMMAND_CAPACITY, PrimaryState, RunState, RuntimeAction,
     SessionDispatcher, SessionError, SessionState, SimulatorCapabilitySession, SimulatorCommand, SimulatorConnection,
     SimulatorConnectionLifecycle, SimulatorConnectionOptions, SimulatorEvent, SimulatorRecord, SimulatorRequest, SimulatorTaskOutcome,
+    handoff::{PromotionSetup, matches_pending_promotion},
     is_current_simulator, record_event_envelope_loss, remove_simulator_capability,
+    simulators::EventQueueLifecycle,
+    teleport::is_handoff_message,
 };
 use crate::{
     capabilities::{EVENT_QUEUE_NAME, EventQueueExit},
     circuit::{MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS},
-    coverage::CoverageLossReason,
-    event::{Event, EventEnvelope, SimulatorId},
+    coverage::{CoverageLossReason, CoverageWatermark},
+    event::{Event, EventEnvelope, EventRetention, SimulatorId},
 };
-
-use super::{handoff::matches_pending_promotion, teleport::is_handoff_message};
 
 impl SessionState {
     pub(super) async fn start_neighbor(
@@ -156,7 +161,7 @@ impl SessionState {
             current.connection = SimulatorConnectionLifecycle::Retiring;
             current.abort_connection();
             let event_queue_task = current.capabilities.as_ref().and_then(|capability| capability.event_queue.task());
-            (std::mem::take(&mut current.preconnect_events), event_queue_task)
+            (mem::take(&mut current.preconnect_events), event_queue_task)
         } else {
             return;
         };
@@ -285,7 +290,7 @@ impl SessionState {
             simulator.capabilities = Some(SimulatorCapabilitySession {
                 seed_capability: seed,
                 client: client.clone(),
-                event_queue: super::simulators::EventQueueLifecycle::Running { role: event_queue_role, task },
+                event_queue: EventQueueLifecycle::Running { role: event_queue_role, task },
             });
         }
         self.publish_simulator_event(
@@ -339,8 +344,8 @@ impl SessionDispatcher<'_> {
     async fn handle_current_simulator_event(
         &mut self,
         event: Event,
-        retained_bytes: Option<crate::event::EventRetention>,
-        coverage_watermark: Option<crate::coverage::CoverageWatermark>,
+        retained_bytes: Option<EventRetention>,
+        coverage_watermark: Option<CoverageWatermark>,
     ) -> Result<RuntimeAction, SessionError> {
         if let Event::SimulatorMessage { simulator_id, message, .. } = &event
             && *simulator_id == self.state.simulator_id
@@ -412,7 +417,7 @@ impl SessionDispatcher<'_> {
 
     pub(super) fn handle_pending_neighbor_finish(
         &mut self,
-        permit: Result<mpsc::OwnedPermit<SimulatorEvent>, mpsc::error::SendError<()>>,
+        permit: Result<mpsc::OwnedPermit<SimulatorEvent>, SendError<()>>,
     ) -> RuntimeAction {
         match permit {
             Ok(permit) => {
@@ -466,8 +471,8 @@ impl SessionDispatcher<'_> {
                     let finish = SimulatorEvent::Finished { simulator_id, region_handle, endpoint, outcome };
                     match self.neighbor_events.try_send(finish) {
                         Ok(()) => {}
-                        Err(mpsc::error::TrySendError::Full(finish)) => self.pending_neighbor_finishes.push_back(finish),
-                        Err(mpsc::error::TrySendError::Closed(_)) => {}
+                        Err(TrySendError::Full(finish)) => self.pending_neighbor_finishes.push_back(finish),
+                        Err(TrySendError::Closed(_)) => {}
                     }
                 }
             }
@@ -502,7 +507,7 @@ impl SessionDispatcher<'_> {
                 region = pending.handoff.region_handle,
                 %endpoint,
                 reason,
-                error = error.map(tracing::field::display),
+                error = error.map(field::display),
                 "simulator handoff failed"
             );
             self.handoff_state.take_pending();
@@ -540,7 +545,7 @@ impl SessionDispatcher<'_> {
             if let Some(task) = event_queue_task {
                 task.abort();
             }
-            let queued = std::mem::take(&mut connection.preconnect_events);
+            let queued = mem::take(&mut connection.preconnect_events);
             self.run_state.preconnect_events_len = self.run_state.preconnect_events_len.saturating_sub(queued.len());
             connection.capabilities.take();
             for event in queued {
