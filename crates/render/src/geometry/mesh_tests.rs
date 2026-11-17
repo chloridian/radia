@@ -19,7 +19,7 @@ use wgpu::{
 use super::*;
 use crate::geometry::{
     fixtures::{scene, scene_with_agent, scene_with_world, vulkan_device},
-    instance::{instance_base, packed_instance},
+    instance::{InstanceBuffers, instance_base, packed_instance},
 };
 use crate::material::FaceParams;
 use crate::pipeline::{INSTANCE_BYTES, Pipeline, VERTEX_BYTES};
@@ -134,7 +134,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
         } else {
             geometry.pipelines.bind_pipeline(&mut pass, if alpha == 255 { Pipeline::Surface } else { Pipeline::Blend });
             pass.set_bind_group(1, geometry.textures.material_binding(MaterialTextures::default()), &[]);
-            pass.set_vertex_buffer(1, geometry.face_indices.slice(..));
+            pass.set_vertex_buffer(1, geometry.instances.face_indices.slice(..));
             for (face, (vertices, indices, _, count)) in (first_reference..).zip(&reference) {
                 pass.set_vertex_buffer(0, vertices.slice(..));
                 pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -570,8 +570,8 @@ fn reference_faces<'a>(
 ) -> u32 {
     let bytes: Vec<u8> = records.into_iter().flatten().copied().collect();
     let count = bytes.len() / INSTANCE_BYTES;
-    let first = crate::geometry::draw_list::MAX_FACE_INSTANCES - count;
-    queue.write_buffer(&geometry.instances, (first * INSTANCE_BYTES) as u64, &bytes);
+    let first = geometry.instances.bytes() / INSTANCE_BYTES - count;
+    queue.write_buffer(&geometry.instances.instances, (first * INSTANCE_BYTES) as u64, &bytes);
     u32::try_from(first).expect("face slots fit u32")
 }
 
@@ -1710,13 +1710,56 @@ fn gpu_invisible_face_allows_mesh() {
 
 #[test]
 #[ignore = "requires a Vulkan adapter"]
+fn gpu_instance_buffer_grows_at_layout_commit() {
+    let (device, queue) = vulkan_device();
+    let camera = |draw_distance: f64, direction: Vec3| {
+        Camera::new(DVec3::ZERO, direction, 1.0, [128, 128]).unwrap().with_quality(draw_distance, 1.0).unwrap()
+    };
+    let near = camera(32.0, Vec3::X);
+    let (_world, _scene, view) = crate::geometry::fixtures::object_scene_with(16, camera(256.0, Vec3::X), |id| {
+        let x = if id <= 12 { 8.0 + id as f32 } else { -38.0 - id as f32 };
+        (Vec3::new(x, 0.0, 0.0), world::PrimShape::default())
+    });
+    let mut reference = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    reference.memory = Arc::new(crate::geometry::Accounting::default());
+    prepare_until_current(&device, &queue, &mut reference, &view, near);
+    let near_slots = reference.draw_list.slot_count();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    geometry.instances = InstanceBuffers::new(&device, near_slots);
+    geometry.pipelines.set_faces(&device, &geometry.textures, &geometry.instances.instances);
+    prepare_until_current(&device, &queue, &mut geometry, &view, near);
+    assert_eq!(geometry.stats.instance_buffer_growths, 0, "the near layout fits the initial buffer");
+
+    let size = [128, 128];
+    let compare = |geometry: &mut GeometryRenderer, reference: &mut GeometryRenderer, camera: Camera, reason: &str| {
+        prepare_until_current(&device, &queue, reference, &view, camera);
+        prepare_until_current(&device, &queue, geometry, &view, camera);
+        let grown_depth = geometry.depth(&device, size).expect("grown depth target");
+        let reference_depth = reference.depth(&device, size).expect("reference depth target");
+        let grown = render_pixels(&device, &queue, size, &grown_depth, |pass| geometry.draw(pass));
+        let expected = render_pixels(&device, &queue, size, &reference_depth, |pass| reference.draw(pass));
+        assert!(expected.iter().any(|pixel| *pixel != expected[0]), "the reference draws objects: {reason}");
+        assert_eq!(grown, expected, "{reason}");
+    };
+    compare(&mut geometry, &mut reference, camera(256.0, Vec3::X), "objects placed before growth still draw");
+    assert_eq!(geometry.stats.instance_buffer_growths, 1);
+    assert_eq!(geometry.stats.omitted_faces, 0);
+    assert!(geometry.draw_list.slot_count() > near_slots, "the far objects enlarge the layout");
+    assert!(geometry.stats.instance_buffer_bytes >= geometry.draw_list.slot_count() * INSTANCE_BYTES);
+    assert!(geometry.cache.items.iter().all(|(_, item)| item.faces.iter().all(|face| face.slot.is_some())), "every face is placed");
+    compare(&mut geometry, &mut reference, camera(256.0, Vec3::NEG_X), "objects placed by the growing layout draw");
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter"]
 fn gpu_blended_rotation_uploads_instances() {
     let (device, queue) = vulkan_device();
     let (_scene, view, _) = scene(128);
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
-    geometry.instances = device.create_buffer(&BufferDescriptor {
+    geometry.instances.instances = device.create_buffer(&BufferDescriptor {
         label: None,
-        size: crate::geometry::INSTANCE_BUFFER_BYTES as u64,
+        size: geometry.instances.bytes() as u64,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
@@ -1756,7 +1799,7 @@ fn gpu_blended_rotation_uploads_instances() {
         readback.unmap();
         result
     };
-    let before = read_instances(&geometry.instances);
+    let before = read_instances(&geometry.instances.instances);
     assert_eq!(before, expected_instances(&geometry), "the initial upload matches active transforms and materials");
     let order_before = geometry.main_view.blended_order();
     prepare_frame(&device, &queue, &mut geometry, &view, camera(26.0));
@@ -1764,7 +1807,7 @@ fn gpu_blended_rotation_uploads_instances() {
     assert_eq!(geometry.stats.layouts, 0);
     assert_eq!(geometry.stats.blended_sorts, 1);
     let expected = expected_instances(&geometry);
-    let actual = read_instances(&geometry.instances);
+    let actual = read_instances(&geometry.instances.instances);
     assert_ne!(geometry.main_view.blended_order(), order_before, "the camera change reorders the blended draw commands");
     assert_eq!(expected, before, "camera sorting leaves blended instance slots unchanged");
     assert_eq!(actual, expected, "the GPU instance buffer keeps its transforms and materials");

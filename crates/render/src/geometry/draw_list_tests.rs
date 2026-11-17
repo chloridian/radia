@@ -12,7 +12,7 @@ use utils::AssetId;
 use uuid::Uuid;
 use world::Region;
 
-use super::{DrawKey, DrawList, LayoutStats, MAX_FACE_INSTANCES, ViewDraws};
+use super::{DrawKey, DrawList, LayoutStats, ViewDraws};
 use crate::{
     geometry::{
         ShadingMode,
@@ -115,7 +115,7 @@ fn canceled_build_keeps_committed_patches() {
     let camera = camera(0.0);
     let origin = super::super::instance::scene_origin(camera.position());
     let mut items = FrameCache::default();
-    let mut list = DrawList::default();
+    let mut list = DrawList::new(usize::MAX);
     let mut visible = (1..=4_096)
         .map(|id| items.insert_item(new_item((2, id, 0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index"))
         .collect::<Vec<_>>();
@@ -225,7 +225,7 @@ fn hiding_slot_preserves_others() {
     let camera = camera(0.0);
     let origin = super::super::instance::scene_origin(camera.position());
     let mut items = FrameCache::default();
-    let mut list = DrawList::default();
+    let mut list = DrawList::new(usize::MAX);
     let first = items.insert_item(new_item(item_id(0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("first item index");
     let second = items.insert_item(new_item(item_id(1), 1, 0.0, origin, &mesh, region, &textures, &mut list)).expect("second item index");
     layout(&mut list, &[first, second], &mut items.items, camera);
@@ -253,9 +253,10 @@ fn overflow_omits_until_in_budget() {
     let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
     let camera = camera(0.0);
     let origin = super::super::instance::scene_origin(camera.position());
-    let faces_per_item = MAX_FACE_INSTANCES / 2 + 1;
+    let capacity = 64;
+    let faces_per_item = capacity / 2 + 1;
     let mut items = FrameCache::default();
-    let mut list = DrawList::default();
+    let mut list = DrawList::new(capacity);
     let mut indices = Vec::new();
 
     for (slot, style, x) in [(0, 0, 1.0), (1, 3, 100.0)] {
@@ -282,14 +283,14 @@ fn overflow_omits_until_in_budget() {
         items.items.get(indices[0]).expect("retained item").faces.iter().filter_map(|face| face.slot).collect();
 
     assert_eq!(stats.omitted_faces, faces_per_item);
-    assert!(instance_count(&list) <= MAX_FACE_INSTANCES);
-    assert_eq!(emitted, instance_count(&list));
+    assert!(list.slot_count() <= capacity);
+    assert_eq!(emitted, list.slot_count());
     assert_eq!(retained_slots.len(), faces_per_item);
-    assert!(retained_slots.iter().all(|slot| usize::try_from(*slot).is_ok_and(|slot| slot < MAX_FACE_INSTANCES)));
+    assert!(retained_slots.iter().all(|slot| usize::try_from(*slot).is_ok_and(|slot| slot < capacity)));
     assert!(omitted.faces.iter().all(|face| face.slot.is_none()), "omitted items cannot own instance slots");
     assert!(list.draws().iter().all(|draw| draw.pipeline != Pipeline::Blend), "omitted items cannot appear in draw commands");
 
-    let retained_faces = MAX_FACE_INSTANCES - faces_per_item - 1;
+    let retained_faces = capacity - faces_per_item - 1;
     let removed = items.items.get_mut(indices[1]).expect("second item").faces.split_off(retained_faces);
     list.release_faces(&removed);
     let stats = layout(&mut list, &visible, &mut items.items, camera);
@@ -301,11 +302,11 @@ fn overflow_omits_until_in_budget() {
         .collect();
 
     assert_eq!(stats.omitted_faces, 0);
-    assert_eq!(instance_count(&list), faces_per_item + retained_faces);
-    assert_eq!(emitted, instance_count(&list));
-    assert_eq!(slots.len(), instance_count(&list));
-    assert!(slots.iter().all(|slot| usize::try_from(*slot).is_ok_and(|slot| slot < MAX_FACE_INSTANCES)));
-    assert!(instance_count(&list) < MAX_FACE_INSTANCES);
+    assert_eq!(list.slot_count(), faces_per_item + retained_faces);
+    assert_eq!(emitted, list.slot_count());
+    assert_eq!(slots.len(), list.slot_count());
+    assert!(slots.iter().all(|slot| usize::try_from(*slot).is_ok_and(|slot| slot < capacity)));
+    assert!(list.slot_count() < capacity);
     assert!(indices.iter().all(|index| items.items.get(*index).is_some_and(|item| item.faces.iter().all(|face| face.slot.is_some()))));
     assert!(list.draws().iter().any(|draw| draw.pipeline == Pipeline::Blend), "restored items return to draw commands");
 }
@@ -319,7 +320,7 @@ fn moved_faces_cull_by_their_pose() {
     let camera = camera(0.0);
     let origin = super::super::instance::scene_origin(camera.position());
     let mut items = FrameCache::default();
-    let mut list = DrawList::default();
+    let mut list = DrawList::new(usize::MAX);
     let visible = (1..=4_096)
         .map(|id| items.insert_item(new_item((2, id, 0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index"))
         .collect::<Vec<_>>();
@@ -375,7 +376,7 @@ fn evicted_mesh_never_draws() {
     };
     for step in 0.. {
         let mut items = FrameCache::default();
-        let mut list = DrawList::default();
+        let mut list = DrawList::new(usize::MAX);
         let visible = (1..=36u8)
             .map(|id| {
                 let item = new_item(item_id(id), id, 0.0, origin, &meshes[usize::from(id % 2)], region, &textures, &mut list);
@@ -437,7 +438,7 @@ fn assert_cull_matches_faces(placements: &[(f64, f64, f64, f32, u8)], eye: DVec3
         Camera::new(eye, direction, 1.0, viewport).and_then(|camera| camera.with_quality(draw_distance, 1.0)).expect("test camera");
     let origin = super::super::instance::scene_origin(camera.position());
     let mut items = FrameCache::default();
-    let mut list = DrawList::default();
+    let mut list = DrawList::new(usize::MAX);
     let mut visible = Vec::new();
     for (id, (x, y, z, scale, style)) in placements.iter().enumerate() {
         let mut item = new_item((2, id as u128, 0), *style, 0.0, origin, &mesh, region, &textures, &mut list);
@@ -518,7 +519,7 @@ proptest! {
         let camera = camera(0.0);
         let origin = scene_origin(camera.position());
         let mut items = FrameCache::default();
-        let mut list = DrawList::default();
+        let mut list = DrawList::new(usize::MAX);
         let visible = styles
             .iter()
             .copied()
@@ -571,7 +572,7 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
     let current_camera = camera(camera_x);
     let origin = super::super::instance::scene_origin(current_camera.position());
     let mut items = FrameCache::default();
-    let mut list = DrawList::default();
+    let mut list = DrawList::new(usize::MAX);
     let mut visible = visible_items(&items.items, camera_x);
     layout(&mut list, &visible, &mut items.items, current_camera);
     assert_matches_fresh(&list, &items.items, &visible, current_camera);
@@ -663,7 +664,7 @@ fn active_layout() -> (world::World, crate::scene::SceneView, Camera, FrameCache
     let camera = camera(0.0);
     let origin = super::super::instance::scene_origin(camera.position());
     let mut items = FrameCache::default();
-    let mut list = DrawList::default();
+    let mut list = DrawList::new(usize::MAX);
     let index = items.insert_item(new_item(item_id(0), 0, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index");
     layout(&mut list, &[index], &mut items.items, camera);
     (_region_world, view, camera, items, list, index)
@@ -673,7 +674,7 @@ const STAGED_REFS: usize = 2_047;
 
 fn staged_layout(list: &mut DrawList, index: ItemIndex, camera: Camera, items: &ItemSlab, refs: usize) -> super::LayoutBuild {
     let input = vec![index; 2_047];
-    let mut build = super::LayoutBuild::new(Default::default(), &input, camera);
+    let mut build = super::LayoutBuild::new(Default::default(), &input, camera, usize::MAX);
     let group = items.get(index).expect("staged item").faces[0].group;
     for _ in 0..refs {
         assert!(list.groups.retain(group));
@@ -879,7 +880,7 @@ fn assert_matches_fresh(list: &DrawList, items: &ItemSlab, visible: &[ItemIndex]
     let expected_slots =
         items.iter().filter(|(index, _)| contains_item(visible, items, *index)).map(|(_, item)| item.faces.len()).sum::<usize>();
     assert_eq!(slots.len(), expected_slots, "every visible face has one draw slot");
-    assert_eq!(instance_count(list), expected_slots, "instance output contains only visible face bytes");
+    assert_eq!(list.slot_count(), expected_slots, "instance output contains only visible face bytes");
     assert!(opaque == expected.0, "opaque draw key and packed byte multiset differs from a fresh layout");
     let mut expected_blended = HashMap::<(DrawKey, Vec<u8>), usize>::new();
     for entry in &expected.1 {
@@ -940,10 +941,6 @@ fn fresh_output(list: &DrawList, items: &ItemSlab, visible: &[ItemIndex], camera
 fn instance_bytes(list: &DrawList, slot: u32) -> Vec<u8> {
     let start = slot as usize * INSTANCE_BYTES;
     list.committed.instance_bytes.get(start..start + INSTANCE_BYTES).expect("draw slot has packed instance bytes").to_vec()
-}
-
-fn instance_count(list: &DrawList) -> usize {
-    list.committed.instance_bytes.len() / INSTANCE_BYTES
 }
 
 fn layout(list: &mut DrawList, visible: &[ItemIndex], items: &mut ItemSlab, camera: Camera) -> LayoutStats {

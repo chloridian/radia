@@ -19,7 +19,7 @@ use crate::support;
 const OBJECTS: usize = 3_000;
 const TEXTURES: usize = 512;
 const ANIMATED_OBJECTS: usize = 500;
-const CAP_OBJECTS: usize = 14_500;
+const OBJECTS_87K_FACES: usize = 14_500;
 const SETTLE_FRAMES: usize = 256;
 const SIZE: [u32; 2] = [1024, 1024];
 const DURATION_BUCKETS: usize = 10_001;
@@ -335,12 +335,12 @@ pub(crate) fn bench(c: &mut Criterion) {
         let cameras = [camera_yaw_at(128.0, -0.001, 128.0), camera_yaw_at(128.0, 0.001, 128.0)];
         bench_camera_culling_rotation(&mut group, &device, &queue, fixture, cameras, name);
     }
-    let (mut world, rows) = support::live_prepare_world_with_regions(CAP_OBJECTS, 50, TEXTURES, 1);
+    let (mut world, rows) = support::live_prepare_world_with_regions(OBJECTS_87K_FACES, 50, TEXTURES, 1);
     support::blend_alternate_objects(&mut world, &rows);
     let overhead = DVec3::new(128.0, 72.0, 160.0);
     let fixture = Fixture::settle(&device, &queue, world, rows, 1, camera_yaw_from(overhead, 0.0, 512.0));
     let cameras = [camera_yaw_from(overhead, -0.001, 512.0), camera_yaw_from(overhead, 0.001, 512.0)];
-    bench_camera_culling_rotation(&mut group, &device, &queue, fixture, cameras, "camera_culling_rotation_cap_half_blended");
+    bench_camera_culling_rotation(&mut group, &device, &queue, fixture, cameras, "camera_culling_rotation_87k_faces_half_blended");
     bench_camera_culling_edge_sweep(&mut group, &device, &queue, OBJECTS, "camera_culling_edge_sweep_3000");
     bench_camera_culling_edge_sweep(&mut group, &device, &queue, 10_000, "camera_culling_edge_sweep_10000");
     bench_pose(&mut group, &device, &queue);

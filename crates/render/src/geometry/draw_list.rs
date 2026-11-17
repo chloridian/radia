@@ -13,7 +13,7 @@ use wgpu::{Buffer, Queue};
 use world::Region;
 
 use super::{
-    INSTANCE_BUFFER_BYTES, ShadingMode, TRANSFORM_BYTES,
+    ShadingMode, TRANSFORM_BYTES,
     instance::{PARAMETER_BYTES, instance_base},
     items::{CachedFace, CachedItem, ItemId, ItemIndex, ItemSlab, draw_priority, surface_pipeline},
     mesh::GpuMesh,
@@ -27,7 +27,6 @@ use crate::{
     texture::MaterialTextures,
 };
 
-pub(super) const MAX_FACE_INSTANCES: usize = INSTANCE_BUFFER_BYTES / INSTANCE_BYTES;
 pub(super) const INDIRECT_DRAW_BYTES: usize = 20;
 pub(super) type FaceOrder = (u8, u128, u16, u8);
 const CELL_SIZE: f64 = 16.0;
@@ -477,6 +476,7 @@ struct LayoutBuild {
     command_keys: Vec<(u32, u32)>,
     cells: HashMap<[i64; 3], u32>,
     item_cells: Vec<u32>,
+    capacity: usize,
     required: usize,
     remaining: usize,
     omitted: usize,
@@ -509,7 +509,7 @@ enum LayoutPhase {
 }
 
 impl LayoutBuild {
-    fn new(layout: LayoutId, visible: &[ItemIndex], camera: Camera) -> Self {
+    fn new(layout: LayoutId, visible: &[ItemIndex], camera: Camera, capacity: usize) -> Self {
         Self {
             layout,
             state: LayoutState::default(),
@@ -529,8 +529,9 @@ impl LayoutBuild {
             command_keys: Vec::new(),
             cells: HashMap::new(),
             item_cells: Vec::new(),
+            capacity,
             required: 0,
-            remaining: MAX_FACE_INSTANCES,
+            remaining: capacity,
             omitted: 0,
             opaque_count: 0,
             instance_bytes: 0,
@@ -552,7 +553,11 @@ impl LayoutBuild {
     }
 
     fn input_items(&self) -> &[ItemIndex] {
-        if self.required > MAX_FACE_INSTANCES { &self.layout_items } else { &self.visible }
+        if self.over_capacity() { &self.layout_items } else { &self.visible }
+    }
+
+    fn over_capacity(&self) -> bool {
+        self.required > self.capacity
     }
 
     fn cell(&mut self, position: DVec3) -> u32 {
@@ -639,8 +644,8 @@ impl LayoutState {
     }
 }
 
-#[derive(Default)]
 pub(super) struct DrawList {
+    capacity: usize,
     groups: DrawInterner,
     committed: LayoutState,
     cull_dirty: bool,
@@ -651,6 +656,19 @@ pub(super) struct DrawList {
 }
 
 impl DrawList {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            groups: DrawInterner::default(),
+            committed: LayoutState::default(),
+            cull_dirty: false,
+            pending: None,
+            retired: None,
+            layout: LayoutId::default(),
+            last_layout: LayoutId::default(),
+        }
+    }
+
     pub(super) fn request_layout(&mut self, visible: &[ItemIndex], camera: Camera) -> bool {
         if self.pending.is_some() {
             return false;
@@ -659,7 +677,7 @@ impl DrawList {
             return false;
         }
         let layout = self.next_layout();
-        self.pending = Some(LayoutBuild::new(layout, visible, camera));
+        self.pending = Some(LayoutBuild::new(layout, visible, camera, self.capacity));
         true
     }
 
@@ -797,7 +815,7 @@ impl DrawList {
                     if build.item_cursor >= input_len {
                         build.item_cursor = 0;
                         build.face_cursor = 0;
-                        if count_visible && build.required > MAX_FACE_INSTANCES {
+                        if count_visible && build.over_capacity() {
                             build.phase = LayoutPhase::ClearInitialCounts;
                             build.state.visible_items = 0;
                         } else if count_visible {
@@ -881,7 +899,7 @@ impl DrawList {
                     }
                 }
                 LayoutPhase::HideOmitted => {
-                    if build.required <= MAX_FACE_INSTANCES || build.item_cursor >= build.visible.len() {
+                    if !build.over_capacity() || build.item_cursor >= build.visible.len() {
                         build.phase = LayoutPhase::Commands;
                         build.item_cursor = 0;
                         build.face_cursor = 0;
@@ -1119,11 +1137,8 @@ impl DrawList {
         let complete = matches!(build.phase, LayoutPhase::Commit);
         if complete {
             let commit_started = Instant::now();
-            build.state.layout_items = if build.required > MAX_FACE_INSTANCES {
-                std::mem::take(&mut build.layout_items)
-            } else {
-                std::mem::take(&mut build.visible)
-            };
+            build.state.layout_items =
+                if build.over_capacity() { std::mem::take(&mut build.layout_items) } else { std::mem::take(&mut build.visible) };
             build.state.visible_items = build.visible_items;
             build.state.omitted = build.omitted;
             build.state.valid = true;
@@ -1297,6 +1312,10 @@ impl DrawList {
         !view.blended.is_empty()
     }
 
+    pub(super) fn slot_count(&self) -> usize {
+        self.committed.instance_bytes.len() / INSTANCE_BYTES
+    }
+
     pub(super) fn cull_dirty(&self) -> bool {
         self.cull_dirty
     }
@@ -1357,7 +1376,7 @@ impl DrawList {
         }
     }
 
-    pub(super) fn upload_layout(&mut self, queue: &Queue, buffer: &Buffer) -> UploadStats {
+    pub(super) fn upload_layout(&mut self, queue: &Queue, buffer: &Buffer, full: bool) -> UploadStats {
         let mut stats = UploadStats::default();
         self.committed.dirty_slots.sort_unstable();
         self.committed.dirty_slots.dedup();
@@ -1378,7 +1397,7 @@ impl DrawList {
         if let Some(start) = first {
             uploaded_bytes = uploaded_bytes.saturating_add((last as usize + 1 - start as usize) * INSTANCE_BYTES);
         }
-        if range_count > MAX_LAYOUT_UPLOAD_RANGES || uploaded_bytes > self.committed.instance_bytes.len() / 2 {
+        if full || range_count > MAX_LAYOUT_UPLOAD_RANGES || uploaded_bytes > self.committed.instance_bytes.len() / 2 {
             if !self.committed.instance_bytes.is_empty() {
                 queue.write_buffer(buffer, 0, &self.committed.instance_bytes);
                 stats.bytes = self.committed.instance_bytes.len();

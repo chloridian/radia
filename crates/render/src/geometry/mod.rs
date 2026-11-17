@@ -24,13 +24,13 @@ use uuid::Uuid;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
-    util::{BufferInitDescriptor, DeviceExt},
 };
 
 use world::{Entity, WorldTransform};
 
 use self::cache::FrameCache;
-use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES, ViewDraws};
+use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, ViewDraws};
+use self::instance::{INITIAL_FACE_INSTANCES, InstanceBuffers};
 use self::items::ItemIndex;
 use self::mesh::GpuMesh;
 use self::storage::Storage;
@@ -44,7 +44,6 @@ pub use pick::PickError;
 
 const MESH_BYTES: usize = 64 * 1024 * 1024;
 const DEPTH_BYTES: usize = 128 * 1024 * 1024;
-pub(super) const INSTANCE_BUFFER_BYTES: usize = 20 * 1024 * 1024;
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MESH_UPLOADS: usize = 16;
 const TRANSFORM_BYTES: usize = 112;
@@ -52,6 +51,8 @@ const TRANSFORM_BYTES: usize = 112;
 #[derive(Clone, Copy, Default)]
 pub struct Stats {
     pub instances: usize,
+    pub instance_buffer_bytes: usize,
+    pub instance_buffer_growths: usize,
     pub draw_calls: usize,
     pub draw_commands: usize,
     pub pending_meshes: usize,
@@ -279,9 +280,7 @@ pub(crate) struct GeometryRenderer {
     region_water_bounds: [Vec4; MAX_REGIONS],
     region_water_count: usize,
     region_water_origin: Option<DVec3>,
-    instances: Buffer,
-    face_indices: Buffer,
-    indirect: Buffer,
+    instances: InstanceBuffers,
     indirect_first_instance: bool,
     depth: Option<Depth>,
     meshes: HashMap<MeshId, GpuMesh>,
@@ -337,17 +336,10 @@ impl GeometryRenderer {
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
-        let instances = buffer(device, "Face instances", INSTANCE_BUFFER_BYTES, BufferUsages::STORAGE);
-        let face_indices: Vec<u8> = (0..MAX_FACE_INSTANCES as u32).flat_map(u32::to_le_bytes).collect();
-        let face_indices = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("Face indices"),
-            contents: &face_indices,
-            usage: BufferUsages::VERTEX,
-        });
-        let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout, &textures, &instances);
+        let instances = InstanceBuffers::new(device, INITIAL_FACE_INSTANCES);
+        let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout, &textures, &instances.instances);
         let void_water = VoidWater::new(device, format, &textures);
         let sky = Sky::new(device, format, &textures);
-        let indirect_bytes = MAX_FACE_INSTANCES * INDIRECT_DRAW_BYTES;
         Self {
             queue: queue.clone(),
             memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
@@ -361,9 +353,8 @@ impl GeometryRenderer {
             region_water_origin: None,
             void_water,
             sky,
+            draw_list: DrawList::new(instances.cap()),
             instances,
-            face_indices,
-            indirect: buffer(device, "Scene indexed draws", indirect_bytes, BufferUsages::INDIRECT),
             indirect_first_instance: device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
             depth: None,
             meshes: HashMap::new(),
@@ -371,7 +362,6 @@ impl GeometryRenderer {
             retired: Vec::new(),
             cache: FrameCache::default(),
             active_origin: DVec3::ZERO,
-            draw_list: DrawList::default(),
             main_view: ViewDraws::default(),
             layout_pose_items: HashSet::new(),
             recovery_publication_pending: false,
@@ -479,6 +469,8 @@ impl GeometryRenderer {
         self.stats.depth_bytes = self.memory.depth.load(Ordering::Acquire);
         self.stats.mesh_bytes = self.memory.bytes.load(Ordering::Acquire);
         self.stats.mesh_peak = self.memory.peak.load(Ordering::Acquire);
+        self.stats.instance_buffer_bytes = self.instances.bytes();
+        self.stats.instance_buffer_growths = self.instances.growths();
         self.stats.texture_bytes = self.textures.bytes();
         self.stats.texture_count = self.textures.count();
         self.stats.texture_failure = self.textures.failure();
@@ -533,14 +525,14 @@ impl GeometryRenderer {
                 pass.set_vertex_buffer(1, composition.slice(..));
             }
             if self.indirect_first_instance {
-                pass.set_vertex_buffer(face_slot, self.face_indices.slice(..));
-                pass.multi_draw_indexed_indirect(&self.indirect, draw.offset, draw.count);
+                pass.set_vertex_buffer(face_slot, self.instances.face_indices.slice(..));
+                pass.multi_draw_indexed_indirect(&self.instances.indirect, draw.offset, draw.count);
             } else {
                 for command in 0..draw.count {
                     let Some(first_instance) = self.main_view.first_instance(draw.offset, command) else { continue };
                     let start = u64::from(first_instance) * FACE_INDEX_BYTES as u64;
-                    pass.set_vertex_buffer(face_slot, self.face_indices.slice(start..));
-                    pass.draw_indexed_indirect(&self.indirect, draw.offset + u64::from(command) * INDIRECT_DRAW_BYTES as u64);
+                    pass.set_vertex_buffer(face_slot, self.instances.face_indices.slice(start..));
+                    pass.draw_indexed_indirect(&self.instances.indirect, draw.offset + u64::from(command) * INDIRECT_DRAW_BYTES as u64);
                 }
             }
         }

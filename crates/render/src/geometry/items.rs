@@ -292,7 +292,7 @@ mod tests {
             (true, true, Pipeline::Surface, 1.0),
         ] {
             let scale = draw_scale(Vec3::ONE, mirror);
-            let mut draw_list = DrawList::default();
+            let mut draw_list = DrawList::new(usize::MAX);
             let faces = cached_faces(
                 CachedFaceContext {
                     id: (2, object.detail().summary.id.as_u128(), 0),
