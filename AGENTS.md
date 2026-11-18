@@ -21,6 +21,7 @@ The legacy viewer is a reference for protocol behavior, content compatibility, a
 ## Structure
 
 - Before writing code, determine which concept owns it. Restructure first when the existing organization would obstruct the feature.
+- GPUI changes belong in Prism (`hymenaei/Prism`, checked out beside Radia as `../Prism`), Radia's fork of gpui-ce. Fix GPUI there instead of working around it in Radia.
 - Put reusable geometry and numeric primitives in math, and shared utility functions, types, helpers, and traits in utils. Keep subsystem policy with its owning crate.
 - Keep each file focused on one cohesive responsibility. Split distinct responsibilities when justified, but keep small, closely related functionality together. Avoid unnecessary fragmentation.
 - Group related functionality by concept. Keep shared types and coordination with the concept they serve. Give a substantial, distinct responsibility its own focused module when that clarifies ownership.
