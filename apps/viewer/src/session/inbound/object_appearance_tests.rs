@@ -1,9 +1,13 @@
-use super::*;
+use std::assert_matches;
+
 use world::TextureAnimation;
+
+use super::*;
+use crate::test_helpers;
 
 #[test]
 fn textures_apply_to_volumes() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let texture_entry = valid_texture_entry();
 
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
@@ -43,7 +47,7 @@ fn textures_apply_to_volumes() {
 
 #[test]
 fn texture_animation_updates_by_path() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let mut wire = vec![0x01, 0xff, 2, 2];
     wire.extend_from_slice(&0.0_f32.to_le_bytes());
     wire.extend_from_slice(&0.0_f32.to_le_bytes());
@@ -107,12 +111,12 @@ fn texture_animation_updates_by_path() {
 
     let cached = packet(vectors::OBJECT_UPDATE_CACHED).message().clone();
     let batch = decode_object_message(region, 41, OrderEvidence::Ordered(41), &cached).expect("cached object batch");
-    std::assert_matches!(batch.blocks[0], Some(ObjectOperation::Cached { .. }));
+    assert_matches!(batch.blocks[0], Some(ObjectOperation::Cached { .. }));
 }
 
 #[test]
 fn texture_flags_are_normalized() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     for (flags, bump, shiny, fullbright, media_flags, mapping, media) in [
         (0x00, 0, 0, false, 0x00, TextureMapping::Default, false),
         (0x1f, 31, 0, false, 0x01, TextureMapping::Default, true),
@@ -157,7 +161,7 @@ fn texture_flags_are_normalized() {
 
 #[test]
 fn clear_textures_are_absent() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     for (texture, material, expected_material) in
         [(Uuid::nil(), Uuid::nil(), None), (Uuid::max(), Uuid::max(), Some(AssetId::new(Uuid::max())))]
     {
@@ -177,7 +181,7 @@ fn clear_textures_are_absent() {
 
 #[test]
 fn malformed_field_stays_local() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let pbr = |data: Vec<u8>| vec![ExtraParameter { parameter_type: 0x0080, data }];
     for (case, texture_entry, extra_parameters) in
         [("texture entry", Some(vec![0]), None), ("short pbr", None, Some(pbr(vec![1]))), ("zero pbr", None, Some(pbr(vec![0, 0])))]
@@ -316,7 +320,7 @@ fn non_volume_clears_pbr() {
 
 #[test]
 fn material_count_skips_extra_faces() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let bindings: Vec<_> = (0..usize::from(u8::MAX))
         .map(|index| {
             let face = if index < world::MAX_SURFACE_FACES { index as u8 } else { u8::MAX };
@@ -339,7 +343,7 @@ fn material_count_skips_extra_faces() {
 
 #[test]
 fn full_materials_follow_variable1_limit() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     for count in [14_usize, 15] {
         let bindings = (0..count).map(|face| (face as u8, Uuid::from_u128(0x500 + face as u128))).collect::<Vec<_>>();
         let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
@@ -354,7 +358,7 @@ fn full_materials_follow_variable1_limit() {
             let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected full volume observation") };
             assert_eq!(observation.pbr_materials.as_ref().unwrap().bindings().count(), 14);
         } else {
-            std::assert_matches!(encoded, Err(protocol::LLUdpError::VariableFieldTooLong));
+            assert_matches!(encoded, Err(protocol::LLUdpError::VariableFieldTooLong));
         }
     }
 }
@@ -414,7 +418,7 @@ fn incremental_materials_replace_and_clear() {
 
 #[test]
 fn repeated_params_replace_in_order() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects[0].texture_entry = valid_texture_entry();
@@ -444,7 +448,7 @@ fn repeated_params_replace_in_order() {
 
 #[test]
 fn terse_preserves_shape_and_appearance() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let packet = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let batch = decode_object_message(region, packet.sequence(), OrderEvidence::Ordered(21), packet.message()).expect("terse batch");
     let Some(ObjectOperation::Patch(patch)) = batch.blocks[0].as_ref() else { panic!("expected terse patch") };

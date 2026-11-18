@@ -1,4 +1,4 @@
-use std::{hint::black_box, num::NonZeroU32};
+use std::{assert_matches, hint::black_box, num::NonZeroU32};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput};
 use world::{
@@ -84,7 +84,7 @@ fn linked_scene(count: usize) -> LinkedScene {
             object.parent = Local(NonZeroU32::new(1).expect("root local ID"));
             children.push(*row);
         }
-        std::assert_matches!(scene.world.observe_object(object).expect("insert linked object").outcome, Introduced(_));
+        assert_matches!(scene.world.observe_object(object).expect("insert linked object").outcome, Introduced(_));
     }
     for root in &roots {
         let root_entity = scene.world.entity(root.id).expect("linkset root");

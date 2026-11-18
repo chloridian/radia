@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, btree_set::Range},
+    collections::{BTreeSet, HashMap, TryReserveError, btree_set::Range},
     ops::Bound::{Excluded, Unbounded},
 };
 
@@ -88,7 +88,7 @@ impl Lru {
         self.order.len()
     }
 
-    pub fn try_reserve(&mut self, additional: usize) -> Result<(), std::collections::TryReserveError> {
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
         self.stamps.try_reserve(additional)
     }
 

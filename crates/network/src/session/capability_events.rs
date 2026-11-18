@@ -10,6 +10,8 @@ use super::{
     handoff::{HandoffOrder, PromotionSetup},
     is_current_simulator,
     neighbors::neighbor_event_queue_failure,
+    simulators::EventQueueTaskJoin,
+    teleport,
 };
 use crate::{
     capabilities::EventQueueExit,
@@ -119,10 +121,7 @@ impl SessionDispatcher<'_> {
         Ok(RuntimeAction::Continue)
     }
 
-    pub(super) async fn handle_event_queue_join(
-        &mut self,
-        joined: super::simulators::EventQueueTaskJoin,
-    ) -> Result<RuntimeAction, SessionError> {
+    pub(super) async fn handle_event_queue_join(&mut self, joined: EventQueueTaskJoin) -> Result<RuntimeAction, SessionError> {
         match joined {
             Some(Ok((task_id, (simulator_id, source, exit)))) => {
                 let Some((owner_id, owner_source, exit)) = self.state.finish_event_queue_task(task_id, exit) else {
@@ -186,7 +185,7 @@ impl SessionDispatcher<'_> {
 }
 
 pub(super) fn decode_enable_simulators(body: &Value) -> Result<Vec<(u64, SocketAddr)>, &'static str> {
-    let body = super::teleport::event_fields(body)?;
+    let body = teleport::event_fields(body)?;
     let Some(Value::Array(simulators)) = body.get("SimulatorInfo") else {
         return Err("SimulatorInfo is not an LLSD array");
     };
@@ -219,7 +218,7 @@ pub(super) fn decode_enable_simulators(body: &Value) -> Result<Vec<(u64, SocketA
 }
 
 pub(super) fn decode_agent_communication(body: &Value, agent_id: Uuid) -> Result<(SocketAddr, Url), &'static str> {
-    let body = super::teleport::event_fields(body)?;
+    let body = teleport::event_fields(body)?;
     match body.get("agent-id") {
         Some(Value::Uuid(value)) if *value == agent_id => {}
         Some(Value::Uuid(_)) => return Err("agent-id does not match the logged-in agent"),
@@ -264,8 +263,7 @@ mod tests {
     use url::Url;
     use uuid::Uuid;
 
-    use super::MAX_SIMULATORS_PER_ENABLE_EVENT;
-    use super::{decode_agent_communication, decode_enable_simulators, redact_seed_capability};
+    use super::{MAX_SIMULATORS_PER_ENABLE_EVENT, decode_agent_communication, decode_enable_simulators, redact_seed_capability};
 
     fn simulator(handle: Vec<u8>, ip: Vec<u8>, port: i32) -> Value {
         Value::Map(Map::from([

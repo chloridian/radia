@@ -1,3 +1,4 @@
+use std::array;
 pub(crate) const STAR_COUNT: usize = 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -8,7 +9,7 @@ pub(crate) struct Star {
 
 pub(crate) fn stars() -> [Star; STAR_COUNT] {
     let mut seed = 0x5eed_51a7_d15c_a11eu64;
-    std::array::from_fn(|_| {
+    array::from_fn(|_| {
         let x = random(&mut seed) - 0.5;
         let y = random(&mut seed) - 0.5;
         let z = random(&mut seed) * 0.5;

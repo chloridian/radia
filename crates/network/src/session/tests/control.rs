@@ -1,6 +1,9 @@
-use std::sync::mpsc as std_mpsc;
+use std::{assert_matches, sync::mpsc as std_mpsc};
+
+use tokio::{sync::oneshot::error::TryRecvError, time};
 
 use super::*;
+use crate::circuit::test_values;
 
 async fn run_enable_overflow_keeps_primary_responsive() {
     let mut harness = Box::pin(connected_neighbor()).await;
@@ -19,7 +22,7 @@ async fn run_enable_overflow_keeps_primary_responsive() {
     let send_announcements = async {
         for index in 0..addresses.len() {
             announce_neighbor(primary, primary_peer, addresses[index], regions[index], first_sequence + index as u32).await;
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
     };
     let observe_announcements = async {
@@ -67,14 +70,14 @@ async fn run_enable_overflow_keeps_primary_responsive() {
 
     for socket in &sockets[..MAX_NEIGHBOR_SIMULATORS - 1] {
         let (bytes, _) = receive(socket).await;
-        std::assert_matches!(Packet::decode(&bytes).expect("decode admitted neighbor bootstrap").message(), Message::UseCircuitCode(_));
+        assert_matches!(Packet::decode(&bytes).expect("decode admitted neighbor bootstrap").message(), Message::UseCircuitCode(_));
     }
     let rejected = sockets.last().expect("the 33rd neighbor announcement");
     let mut buffer = [0; 65_535];
-    std::assert_matches!(clone_udp_socket(rejected).expect("inspect rejected endpoint").recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
+    assert_matches!(clone_udp_socket(rejected).expect("inspect rejected endpoint").recv_from(&mut buffer), Err(error) if error.kind() == ErrorKind::WouldBlock);
 
     harness.primary.send_to(&start_ping_packet(150, 7, 0), harness.primary_peer).await.expect("ping primary after announcement burst");
-    std::assert_matches!(
+    assert_matches!(
         receive_message(&harness.primary, |message| matches!(message, Message::CompletePingCheck(_))).await.message(),
         Message::CompletePingCheck(message) if message.ping_id.ping_id == 7
     );
@@ -104,7 +107,7 @@ async fn neighbor_shutdown_preempts_start() {
         neighbor_connection.run(event_sender, shutdown, neighbor_requests, commands, mpsc::channel(1).1, SimulatorMemoryBudget::new()),
     )
     .await;
-    std::assert_matches!(result, Ok(Ok(())), "a pre-signaled shutdown should stop the neighbor immediately");
+    assert_matches!(result, Ok(Ok(())), "a pre-signaled shutdown should stop the neighbor immediately");
 }
 
 #[tokio::test]
@@ -115,7 +118,7 @@ async fn neighbor_logout_bypasses_full_queues() {
     let mut connection =
         connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000).await.expect("connect neighbor circuit");
     let (send_gate, pause_sends, send_entered) = new_send_gate();
-    crate::circuit::test_values::set_send_gate(&mut connection, send_gate);
+    test_values::set_send_gate(&mut connection, send_gate);
     let (event_sender, mut event_receiver) = mpsc::channel(4);
     let (shutdown_signal, shutdown) = watch::channel(false);
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(4);
@@ -126,7 +129,7 @@ async fn neighbor_logout_bypasses_full_queues() {
 
     let (_, peer) = receive(&neighbor).await;
     neighbor.send_to(&ack(40, 1), peer).await.expect("ack neighbor circuit");
-    std::assert_matches!(next_neighbor_event(&mut event_receiver).await, Event::SimulatorConnected { .. });
+    assert_matches!(next_neighbor_event(&mut event_receiver).await, Event::SimulatorConnected { .. });
 
     for _ in 0..MAX_PENDING_PACKETS {
         let (completed, response) = oneshot::channel();
@@ -143,7 +146,7 @@ async fn neighbor_logout_bypasses_full_queues() {
         assert!(timeout(WAIT, response).await.expect("reliable message should be sent").expect("send reply").is_ok());
         let (bytes, sender) = receive(&neighbor).await;
         assert_eq!(sender, peer);
-        std::assert_matches!(Packet::decode(&bytes).expect("decode reliable message").message(), Message::RequestMultipleObjects(_));
+        assert_matches!(Packet::decode(&bytes).expect("decode reliable message").message(), Message::RequestMultipleObjects(_));
     }
 
     pause_sends.send_replace(true);
@@ -181,8 +184,8 @@ async fn neighbor_logout_bypasses_full_queues() {
     let (logout_receipt, mut logout_receipt_response) = oneshot::channel();
     logout_sender.send(LogoutCommand { sent: logout_completed, receipt: logout_receipt }).await.expect("queue priority logout control");
 
-    std::assert_matches!(queued_response.await, Ok(Err(Error::SimulatorConnectionClosed)));
-    std::assert_matches!(queued_tail_response.await, Ok(Err(Error::SimulatorConnectionClosed)));
+    assert_matches!(queued_response.await, Ok(Err(Error::SimulatorConnectionClosed)));
+    assert_matches!(queued_tail_response.await, Ok(Err(Error::SimulatorConnectionClosed)));
     pause_sends.send_replace(false);
 
     let (logout, logout_peer) = timeout(WAIT, receive_message_with_peer(&neighbor, |message| matches!(message, Message::LogoutRequest(_))))
@@ -190,9 +193,9 @@ async fn neighbor_logout_bypasses_full_queues() {
         .expect("logout should bypass the full reliable window and application queue");
     assert_eq!(logout_peer, peer);
     assert!(logout.is_reliable());
-    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+    assert_matches!(logout.message(), Message::LogoutRequest(_));
     assert!(timeout(WAIT, logout_response).await.expect("logout send should complete").expect("logout reply").is_ok());
-    std::assert_matches!(logout_receipt_response.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    assert_matches!(logout_receipt_response.try_recv(), Err(TryRecvError::Empty));
 
     shutdown_signal.send_replace(true);
     assert!(timeout(WAIT, worker).await.expect("neighbor should stop after shutdown").expect("neighbor task").is_ok());
@@ -220,9 +223,9 @@ async fn neighbor_receiver_close_preempts() {
     ));
 
     let (use_circuit, peer) = receive(&neighbor).await;
-    std::assert_matches!(Packet::decode(&use_circuit).expect("decode neighbor circuit packet").message(), Message::UseCircuitCode(_));
+    assert_matches!(Packet::decode(&use_circuit).expect("decode neighbor circuit packet").message(), Message::UseCircuitCode(_));
     neighbor.send_to(&ack(40, 1), peer).await.expect("ack neighbor circuit");
-    std::assert_matches!(next_neighbor_event(&mut event_receiver).await, Event::SimulatorConnected { .. });
+    assert_matches!(next_neighbor_event(&mut event_receiver).await, Event::SimulatorConnected { .. });
 
     drop(event_receiver);
     assert!(timeout(WAIT, task).await.expect("neighbor should stop after event receiver closes").expect("neighbor task").is_ok());
@@ -230,7 +233,7 @@ async fn neighbor_receiver_close_preempts() {
 
 #[tokio::test(start_paused = true)]
 async fn neighbor_ping_is_delayed() {
-    tokio::time::resume();
+    time::resume();
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
     let endpoint = neighbor.local_addr().expect("neighbor simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate neighbor ID");
@@ -240,7 +243,7 @@ async fn neighbor_ping_is_delayed() {
     let (_command_sender, commands) = mpsc::channel(1);
     let neighbor_connection =
         connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000).await.expect("connect neighbor circuit");
-    tokio::time::pause();
+    time::pause();
     let (release_clock, clock_task) = hold_clock().await;
     let task = spawn(neighbor_connection.run(
         event_sender,
@@ -252,18 +255,18 @@ async fn neighbor_ping_is_delayed() {
     ));
 
     let (use_circuit, peer) = receive(&neighbor).await;
-    std::assert_matches!(Packet::decode(&use_circuit).expect("decode neighbor circuit packet").message(), Message::UseCircuitCode(_));
+    assert_matches!(Packet::decode(&use_circuit).expect("decode neighbor circuit packet").message(), Message::UseCircuitCode(_));
     neighbor.send_to(&ack(40, 1), peer).await.expect("ack neighbor circuit");
-    std::assert_matches!(next_neighbor_event(&mut event_receiver).await, Event::SimulatorConnected { .. });
+    assert_matches!(next_neighbor_event(&mut event_receiver).await, Event::SimulatorConnected { .. });
 
     advance(PING_INTERVAL - Duration::from_millis(1)).await;
     let mut buffer = [0; 65_535];
-    std::assert_matches!(clone_udp_socket(&neighbor).expect("inspect neighbor endpoint").recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
+    assert_matches!(clone_udp_socket(&neighbor).expect("inspect neighbor endpoint").recv_from(&mut buffer), Err(error) if error.kind() == ErrorKind::WouldBlock);
     advance(Duration::from_millis(2)).await;
     release_clock.send(()).expect("release paused clock");
     clock_task.await.expect("clock guard finishes");
     let (ping, _) = timeout(WAIT, receive_udp(&neighbor)).await.expect("first neighbor ping follows PING_INTERVAL");
-    std::assert_matches!(Packet::decode(&ping).expect("decode neighbor ping").message(), Message::StartPingCheck(_));
+    assert_matches!(Packet::decode(&ping).expect("decode neighbor ping").message(), Message::StartPingCheck(_));
 
     shutdown_signal.send_replace(true);
     assert!(timeout(WAIT, task).await.expect("neighbor should stop on shutdown").expect("neighbor task").is_ok());

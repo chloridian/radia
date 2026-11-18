@@ -5,10 +5,9 @@ use protocol::{
     lludp::Message,
     login::ResponseData,
     messages::{
-        AgentMovementComplete,
+        AgentMovementComplete, TeleportCancel, TeleportFinish,
         agent::agent_movement_complete::{AgentData, Data, SimData},
     },
-    messages::{TeleportCancel, TeleportFinish},
 };
 use tokio::{
     net::UdpSocket,
@@ -19,26 +18,27 @@ use tokio::{
 use url::Url;
 use uuid::Uuid;
 
-use crate::fixtures::test_simulator_id;
-
 use super::{
     EventQueueLifecycle, FinishOrder, HANDOFF_COMMAND_RETRY_INTERVAL, HandoffAnnouncement, HandoffDecision, HandoffOrder, HandoffTarget,
     NEIGHBOR_COMMAND_CAPACITY, PromotionSetup, RunState, SimulatorCommand, SimulatorTaskOutcome, arbitrate_handoff, connect_runtime,
     decode_crossed_region, decode_event_teleport_finish, decode_teleport_finish, handoff_cancellation, login_session,
     retry_pending_handoff_commands, same_handoff_destination, teleport_failure_matches, test_simulator_record,
 };
-use crate::capabilities::{EventQueueExit, EventQueueRoleHandle};
-use crate::session::handoff::{HandoffEvidence, HandoffState, PendingPromotion, matches_handoff_cancellation, matches_pending_promotion};
 use crate::{
     AgentSession, Grid,
+    capabilities::{EventQueueExit, EventQueueRoleHandle},
+    circuit::HandoffGeneration,
     event::{
         PacketOrder::{Ambiguous, Degraded, Ordered},
         SimulatorId,
     },
-};
-use crate::{
-    circuit::HandoffGeneration,
-    session::{capability_events::redact_seed_capability, teleport::is_teleport_cancel},
+    fixtures::test_simulator_id,
+    session::{
+        capability_events::redact_seed_capability,
+        handoff::{HandoffEvidence, HandoffState, PendingPromotion, matches_handoff_cancellation, matches_pending_promotion},
+        teleport,
+        teleport::is_teleport_cancel,
+    },
 };
 
 fn crossed_region(agent_id: Uuid, session_id: Uuid) -> Value {
@@ -418,14 +418,14 @@ fn crossing_seed_is_redacted() {
 
     let mut redacted = crossed_region(Uuid::from_u128(1), Uuid::from_u128(2));
     redact_seed_capability(&mut redacted);
-    let fields = crate::session::teleport::event_fields(&redacted).expect("crossed region event");
-    let region = crate::session::teleport::event_block(fields, "RegionData").expect("region data block");
+    let fields = teleport::event_fields(&redacted).expect("crossed region event");
+    let region = teleport::event_block(fields, "RegionData").expect("region data block");
     assert_eq!(region.get("SeedCapability"), Some(&Value::String("[redacted]".into())));
 
     let mut finish = teleport_finish_event(Uuid::from_u128(1), "https://sim.invalid/private");
     redact_seed_capability(&mut finish);
-    let fields = crate::session::teleport::event_fields(&finish).expect("teleport finish event");
-    let info = crate::session::teleport::event_block(fields, "Info").expect("teleport finish info");
+    let fields = teleport::event_fields(&finish).expect("teleport finish event");
+    let info = teleport::event_block(fields, "Info").expect("teleport finish info");
     assert_eq!(info.get("SeedCapability"), Some(&Value::String("[redacted]".into())));
 }
 

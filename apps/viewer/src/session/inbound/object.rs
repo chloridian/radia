@@ -13,8 +13,8 @@ use protocol::{
         },
     },
     messages::{
-        CacheMissType, CachedObjectReference, ExtraParamUpdate, ExtraParameter, ObjectData, object::decode_texture_entry,
-        object::improved_terse_object_update, object::object_update_compressed,
+        CacheMissType, CachedObjectReference, ExtraParamUpdate, ExtraParameter, ObjectData,
+        object::{decode_texture_entry, improved_terse_object_update, object_update_compressed},
     },
     types::{ObjectShape, TextureEntry, TextureFace, decode_render_material_bindings},
 };
@@ -26,6 +26,7 @@ use world::{
     Shape, SurfaceAppearance, TextureAnimation, TextureMapping, UpdateSource,
 };
 
+use super::pbr;
 use crate::session::object_media::media_version;
 
 const VOLUME_PCODE: u8 = 9;
@@ -196,7 +197,7 @@ pub(crate) fn decode_object_message(region: Region, sequence: u32, order: OrderE
             &mut invalid_blocks,
             &mut invalid_fields,
         ),
-        GenericStreamingMessage(message) => match super::pbr::decode_message(message) {
+        GenericStreamingMessage(message) => match pbr::decode_message(message) {
             Some(Ok(decoded)) => {
                 let source = UpdateSource::new(region, sequence, order, 0);
                 let mut patch = ObjectPatch::new(source, decoded.local_id);

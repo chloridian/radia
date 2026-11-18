@@ -12,21 +12,23 @@ mod region_lookup;
 mod terrain;
 mod world;
 
-pub(crate) use agent_motion::AgentMotionPublisher;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-pub(crate) use agent_motion::AgentMotionSample;
-pub(crate) use coordinator::{
-    AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionEnd,
-    SessionReadyUpdate, ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,
-};
-#[cfg(test)]
-pub(crate) use coordinator::{FolderFetchApply, apply_inventory_fetch, apply_inventory_udp, confirm_pending_moves};
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-pub(crate) use experience_environment::EnvironmentInbox;
-pub(crate) use inbound::{ChatMessage, display_message, format_avatar_name};
 pub(crate) use network::{Session, SessionHandle};
-pub(crate) use outbound::CameraUplink;
-pub(crate) use region_lookup::{RegionGridCell, RegionLookup, RegionLookupError, map_request_coordinates};
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub(crate) use self::agent_motion::AgentMotionSample;
+#[cfg(test)]
+pub(crate) use self::coordinator::{FolderFetchApply, apply_inventory_fetch, apply_udp, confirm_pending_moves};
 #[cfg(all(test, any(target_os = "windows", target_os = "linux")))]
-pub(crate) use experience_environment::EnvironmentCommand;
+pub(crate) use self::experience_environment::EnvironmentCommand;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub(crate) use self::experience_environment::EnvironmentInbox;
+pub(crate) use self::{
+    agent_motion::AgentMotionPublisher,
+    coordinator::{
+        AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionEnd,
+        SessionReadyUpdate, ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,
+    },
+    inbound::{ChatMessage, display_message, format_avatar_name},
+    outbound::CameraUplink,
+    region_lookup::{RegionGridCell, RegionLookup, RegionLookupError, map_request_coordinates},
+};

@@ -9,74 +9,84 @@ mod region;
 mod removal;
 mod update;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use uuid::Uuid;
 
-use crate::history::Journal;
-use crate::history::address::Tombstones;
-use crate::history::retained::RetainedOverrides;
-use crate::identity::WorldId;
-use crate::object::components::{
-    Binding, Fences, ObjectOrdering, ObjectRecord, ObjectState, ParentRejectionBarrier, RegionalStamp, newer_field, newer_region_field,
+pub use self::{
+    history::{WorldChange, WorldChangeClasses, WorldEntityRemovalReason},
+    identity::{Entity, LocalAddress, ObjectBindingTarget, Region, RegionHandle, RegionInfo},
+    object::{
+        Kind, Parent, ParentUpdate,
+        appearance::{
+            Appearance, FaceAppearance, MAX_PBR_MATERIAL_BINDINGS, MAX_SURFACE_FACES, PbrAlphaMode, PbrMaterialAssignments,
+            PbrMaterialAssignmentsError, PbrMaterialOverride, PbrMaterialOverrides, PbrMaterialOverridesError, PbrTextureOverride,
+            PbrTextureTransformOverride, SurfaceAppearance, SurfaceAppearanceError, TextureAnimation, TextureAnimationError,
+            TextureMapping,
+        },
+        avatar::{
+            AvatarAppearance, AvatarAppearanceError, AvatarAppearanceUpdate, AvatarBakeSlot, AvatarTextureSlot, AvatarTextureSlots,
+            AvatarVisualParamIndex, MAX_AVATAR_TEXTURE_SLOTS, MAX_AVATAR_VISUAL_PARAMS,
+        },
+        media::{
+            MAX_MEDIA_DIMENSION, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MAX_MEDIA_WHITELIST_ENTRIES, MediaControls, MediaEntry,
+            ObjectMedia, ObjectMediaError, ObjectMediaUpdate,
+        },
+        relationships::{ParentResolutionCursor, ParentResolutionPlan, ParentResolutionProgress, RelationshipResolution},
+        shape::{PrimShape, SculptFlags, SculptType, Shape},
+        transform::{
+            AttachmentPoint, CoordinateFrame, LinearMotion, LocalTransform, Pose, PoseError, PoseState, SitTarget, Transform,
+            UnresolvedReason, WorldPose, WorldTransform, WorldTransformState,
+        },
+        view::{Object, Objects},
+    },
+    read::{
+        MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_DETAIL_WORK_ITEMS,
+        MAX_OBJECT_LOOKUP_WORK_ITEMS, MAX_OBJECT_MEDIA_READ_BYTES, MAX_OBJECT_PAGE_ITEMS, MAX_OBJECT_PAGE_WORK_ITEMS,
+        MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectBindingFence, ObjectDetail, ObjectDetailBatch,
+        ObjectDetailBatchPage, ObjectDetailCursor, ObjectDetailResult, ObjectListItem, ObjectListPage, ObjectLookupCursor,
+        ObjectLookupProgress, ObjectMediaRead, ObjectPageCursor, ObjectSummary, RegionPage, RegionPageCursor, RegionSummary,
+        WorldChangeCursor, WorldChangePage, WorldChangeRecord, WorldReadBarrier, WorldReadError,
+    },
+    region::{
+        environment::{
+            EnvironmentAssignment, EnvironmentRead, EnvironmentScope, EnvironmentSource, EnvironmentTarget, MAX_ENVIRONMENT_BYTES,
+            MAX_ENVIRONMENT_READ_BYTES, MAX_ENVIRONMENT_SOURCE_BYTES, ParcelEnvironment, ParcelLocalId,
+        },
+        parcel::{
+            CurrentParcel, EffectiveRestrictions, MAX_PARCEL_BYTES, MAX_PARCEL_DESCRIPTION_BYTES, MAX_PARCEL_NAME_BYTES,
+            MAX_PARCEL_READ_BYTES, MAX_PARCEL_REGION_BYTES, MAX_PARCEL_URL_BYTES, PARCEL_BITMAP_BYTES, PARCEL_GRID_EDGE,
+            PARCEL_OVERLAY_CELLS, PARCEL_OVERLAY_PART_BYTES, PARCEL_OVERLAY_PARTS, ParcelAccessSettings, ParcelBitmap, ParcelFlags,
+            ParcelOverlayCell, ParcelOverlayGrid, ParcelOverlayObservation, ParcelOwnership, ParcelPropertiesData,
+            ParcelPropertiesObservation, ParcelRead, RegionFlags,
+        },
+        terrain::{
+            MAX_TERRAIN_PAGE_PATCHES, MAX_TERRAIN_PATCHES, TERRAIN_PATCH_SAMPLES, TERRAIN_PATCH_SIZE, TERRAIN_REGION_SIZE, TerrainPage,
+            TerrainPageCursor, TerrainPatch, TerrainPatchError, TerrainPatchId, TerrainSettings, TerrainSettingsError,
+        },
+    },
+    removal::{MAX_REMOVAL_WORK_PER_TURN, RemovalFence, RemovalProgress},
+    update::{
+        Applied, ApplyError, ApplyOutcome, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, MotionUpdateKind,
+        ObjectObservation, ObjectPatch, OrderEvidence, Recovery, RecoveryCancellation, RegionApplied, RegionOutcome, Rejections,
+        UpdateAuthority, UpdateSource, WorldLimits, WorldRevision,
+    },
 };
-use crate::object::relationships::{PendingChildKey, PendingResolution};
-use crate::object::storage::ObjectStore;
-use crate::object::view::IndexedObjects;
-use crate::region::RegionState;
-use crate::removal::{ReclamationFrame, ReclamationTask, RemovalCause, TransferProgress, VisibilityLookupCache};
-use crate::update::Stamp;
-
-pub use history::{WorldChange, WorldChangeClasses, WorldEntityRemovalReason};
-pub use identity::{Entity, LocalAddress, ObjectBindingTarget, Region, RegionHandle, RegionInfo};
-pub use object::appearance::{
-    Appearance, FaceAppearance, MAX_PBR_MATERIAL_BINDINGS, MAX_SURFACE_FACES, PbrAlphaMode, PbrMaterialAssignments,
-    PbrMaterialAssignmentsError, PbrMaterialOverride, PbrMaterialOverrides, PbrMaterialOverridesError, PbrTextureOverride,
-    PbrTextureTransformOverride, SurfaceAppearance, SurfaceAppearanceError, TextureAnimation, TextureAnimationError, TextureMapping,
-};
-pub use object::avatar::{
-    AvatarAppearance, AvatarAppearanceError, AvatarAppearanceUpdate, AvatarBakeSlot, AvatarTextureSlot, AvatarTextureSlots,
-    AvatarVisualParamIndex, MAX_AVATAR_TEXTURE_SLOTS, MAX_AVATAR_VISUAL_PARAMS,
-};
-pub use object::media::{
-    MAX_MEDIA_DIMENSION, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MAX_MEDIA_WHITELIST_ENTRIES, MediaControls, MediaEntry,
-    ObjectMedia, ObjectMediaError, ObjectMediaUpdate,
-};
-pub use object::relationships::{ParentResolutionCursor, ParentResolutionPlan, ParentResolutionProgress, RelationshipResolution};
-pub use object::shape::{PrimShape, SculptFlags, SculptType, Shape};
-pub use object::transform::{
-    AttachmentPoint, CoordinateFrame, LinearMotion, LocalTransform, Pose, PoseError, PoseState, SitTarget, Transform, UnresolvedReason,
-    WorldPose, WorldTransform, WorldTransformState,
-};
-pub use object::view::{Object, Objects};
-pub use object::{Kind, Parent, ParentUpdate};
-pub use read::{
-    MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_DETAIL_WORK_ITEMS,
-    MAX_OBJECT_LOOKUP_WORK_ITEMS, MAX_OBJECT_MEDIA_READ_BYTES, MAX_OBJECT_PAGE_ITEMS, MAX_OBJECT_PAGE_WORK_ITEMS, MAX_REGION_PAGE_BYTES,
-    MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectBindingFence, ObjectDetail, ObjectDetailBatch, ObjectDetailBatchPage,
-    ObjectDetailCursor, ObjectDetailResult, ObjectListItem, ObjectListPage, ObjectLookupCursor, ObjectLookupProgress, ObjectMediaRead,
-    ObjectPageCursor, ObjectSummary, RegionPage, RegionPageCursor, RegionSummary, WorldChangeCursor, WorldChangePage, WorldChangeRecord,
-    WorldReadBarrier, WorldReadError,
-};
-pub use region::environment::{
-    EnvironmentAssignment, EnvironmentRead, EnvironmentScope, EnvironmentSource, EnvironmentTarget, MAX_ENVIRONMENT_BYTES,
-    MAX_ENVIRONMENT_READ_BYTES, MAX_ENVIRONMENT_SOURCE_BYTES, ParcelEnvironment, ParcelLocalId,
-};
-pub use region::parcel::{
-    CurrentParcel, EffectiveRestrictions, MAX_PARCEL_BYTES, MAX_PARCEL_DESCRIPTION_BYTES, MAX_PARCEL_NAME_BYTES, MAX_PARCEL_READ_BYTES,
-    MAX_PARCEL_REGION_BYTES, MAX_PARCEL_URL_BYTES, PARCEL_BITMAP_BYTES, PARCEL_GRID_EDGE, PARCEL_OVERLAY_CELLS, PARCEL_OVERLAY_PART_BYTES,
-    PARCEL_OVERLAY_PARTS, ParcelAccessSettings, ParcelBitmap, ParcelFlags, ParcelOverlayCell, ParcelOverlayGrid, ParcelOverlayObservation,
-    ParcelOwnership, ParcelPropertiesData, ParcelPropertiesObservation, ParcelRead, RegionFlags,
-};
-pub use region::terrain::{
-    MAX_TERRAIN_PAGE_PATCHES, MAX_TERRAIN_PATCHES, TERRAIN_PATCH_SAMPLES, TERRAIN_PATCH_SIZE, TERRAIN_REGION_SIZE, TerrainPage,
-    TerrainPageCursor, TerrainPatch, TerrainPatchError, TerrainPatchId, TerrainSettings, TerrainSettingsError,
-};
-pub use removal::{MAX_REMOVAL_WORK_PER_TURN, RemovalFence, RemovalProgress};
-pub use update::{
-    Applied, ApplyError, ApplyOutcome, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, MotionUpdateKind,
-    ObjectObservation, ObjectPatch, OrderEvidence, Recovery, RecoveryCancellation, RegionApplied, RegionOutcome, Rejections,
-    UpdateAuthority, UpdateSource, WorldLimits, WorldRevision,
+use crate::{
+    history::{Journal, address::Tombstones, retained::RetainedOverrides},
+    identity::WorldId,
+    object::{
+        components::{
+            Binding, Fences, ObjectOrdering, ObjectRecord, ObjectState, ParentRejectionBarrier, RegionalStamp, newer_field,
+            newer_region_field,
+        },
+        relationships::{PendingChildKey, PendingResolution},
+        storage::ObjectStore,
+        view::IndexedObjects,
+    },
+    region::RegionState,
+    removal::{ReclamationFrame, ReclamationTask, RemovalCause, TransferProgress, VisibilityLookupCache},
+    update::Stamp,
 };
 
 const MAX_OBJECT_MEDIA_BYTES: usize = 64 * 1024 * 1024;
@@ -86,7 +96,7 @@ pub struct World {
     store: ObjectStore,
     regions: BTreeMap<Region, RegionState>,
     retiring_regions: HashMap<Region, RegionState>,
-    removal_tasks: std::collections::VecDeque<ReclamationTask>,
+    removal_tasks: VecDeque<ReclamationTask>,
     reclamation: Vec<ReclamationFrame>,
     transfer_cursors: HashMap<Entity, TransferProgress>,
     transfer_address_count: usize,
@@ -121,7 +131,7 @@ impl World {
             store: ObjectStore::new(id),
             regions: BTreeMap::new(),
             retiring_regions: HashMap::new(),
-            removal_tasks: std::collections::VecDeque::new(),
+            removal_tasks: VecDeque::new(),
             reclamation: Vec::new(),
             transfer_cursors: HashMap::new(),
             transfer_address_count: 0,

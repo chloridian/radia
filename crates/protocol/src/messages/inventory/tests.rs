@@ -8,6 +8,7 @@ use crate::{
         MoveInventoryItemBlock, RemoveInventoryFolder, RemoveInventoryItem, RemoveInventoryObjects, SaveAssetIntoInventory,
         UpdateCreateInventoryItem,
     },
+    schema::ids::REMOVE_INVENTORY_ITEM,
 };
 
 const TRUNCATION_CASES: [&str; 7] = [
@@ -164,5 +165,5 @@ fn malformed_count_fails() {
     writer.uuid(uuid(1));
     writer.uuid(uuid(2));
     writer.u8(1);
-    assert_eq!(Message::decode(crate::schema::ids::REMOVE_INVENTORY_ITEM, &output), Err(LLUdpError::TruncatedPacket));
+    assert_eq!(Message::decode(REMOVE_INVENTORY_ITEM, &output), Err(LLUdpError::TruncatedPacket));
 }

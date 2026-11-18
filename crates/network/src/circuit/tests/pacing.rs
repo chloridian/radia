@@ -2,17 +2,21 @@
 mod weights;
 
 use std::{
+    assert_matches,
     collections::{HashMap, HashSet},
+    future::Future,
+    pin::pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    task::{Context, Waker},
     time::Duration,
 };
 
 use tokio::{
     net::UdpSocket,
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, oneshot::error::TryRecvError},
     task::{self, spawn},
     time::{Instant, advance, timeout},
 };
@@ -21,13 +25,14 @@ use super::{
     Bucket, BudgetLease, Command, ConnectionRole, ConnectionState, MAX_BURST_BYTES, NANOS_PER_SECOND, OutboundBudget, PendingRequest,
     TrafficClass, dispatch_next, next_dispatch_delay, queue_request,
 };
-use crate::circuit::MAX_NEIGHBOR_SIMULATORS;
-use crate::circuit::UdpTransport;
-use crate::fixtures::circuit::{new_send_gate, set_send_gate};
+use crate::{
+    circuit::{MAX_NEIGHBOR_SIMULATORS, UdpTransport},
+    fixtures::circuit::{new_send_gate, set_send_gate},
+};
 
 fn dispatch(
-    bucket: &Arc<Mutex<super::Bucket>>,
-    connections: &mut HashMap<u64, super::ConnectionState>,
+    bucket: &Arc<Mutex<Bucket>>,
+    connections: &mut HashMap<u64, ConnectionState>,
     order: &[u64],
     pending: &mut HashMap<u64, PendingRequest>,
     class_cursor: &mut usize,
@@ -37,17 +42,17 @@ fn dispatch(
     while dispatch_next(bucket, connections, order, pending, class_cursor, connection_cursor, virtual_time) {}
 }
 
-async fn queue_worker_request(pacer: &super::PacerHandle, bytes: usize) -> oneshot::Receiver<super::BudgetLease> {
+async fn queue_worker_request(pacer: &super::PacerHandle, bytes: usize) -> oneshot::Receiver<BudgetLease> {
     let (completed, receiver) = oneshot::channel();
     pacer
         .commands
-        .send(super::Command::Request { id: pacer.id, bytes, class: TrafficClass::Fair, completed })
+        .send(Command::Request { id: pacer.id, bytes, class: TrafficClass::Fair, completed })
         .await
         .expect("pacing worker command channel");
     receiver
 }
 
-fn consume_ready(receiver: &mut oneshot::Receiver<super::BudgetLease>) -> bool {
+fn consume_ready(receiver: &mut oneshot::Receiver<BudgetLease>) -> bool {
     match receiver.try_recv() {
         Ok(lease) => {
             lease.consume();
@@ -57,8 +62,8 @@ fn consume_ready(receiver: &mut oneshot::Receiver<super::BudgetLease>) -> bool {
     }
 }
 
-fn connection(role: ConnectionRole) -> super::ConnectionState {
-    super::ConnectionState { role, finish: [0; 3], active: Arc::new(AtomicBool::new(true)) }
+fn connection(role: ConnectionRole) -> ConnectionState {
+    ConnectionState { role, finish: [0; 3], active: Arc::new(AtomicBool::new(true)) }
 }
 
 async fn sustained_priority_service(primary_class: TrafficClass) {
@@ -123,12 +128,6 @@ async fn sustained_priority_service(primary_class: TrafficClass) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_stops_saturated_worker() {
-    use std::{
-        future::Future,
-        pin::pin,
-        task::{Context, Waker},
-    };
-
     for cancel_shutdown in [false, true] {
         let budget = OutboundBudget::new(1);
         let handle = budget.handle();
@@ -151,7 +150,7 @@ async fn shutdown_stops_saturated_worker() {
 fn full_queue_retires_dropped_pacer() {
     let (commands, mut receiver) = mpsc::channel(1);
     let (completed, _) = oneshot::channel();
-    assert!(commands.try_send(super::Command::Shutdown(completed)).is_ok());
+    assert!(commands.try_send(Command::Shutdown(completed)).is_ok());
 
     let active = Arc::new(AtomicBool::new(true));
     let pacer = super::ConnectionPacer {
@@ -162,7 +161,7 @@ fn full_queue_retires_dropped_pacer() {
         active: Arc::clone(&active),
     };
     let mut connections =
-        HashMap::from([(7, super::ConnectionState { role: ConnectionRole::Neighbor, finish: [0; 3], active: Arc::clone(&active) })]);
+        HashMap::from([(7, ConnectionState { role: ConnectionRole::Neighbor, finish: [0; 3], active: Arc::clone(&active) })]);
     let mut order = vec![7];
     let (completed, mut response) = oneshot::channel();
     let mut pending = HashMap::from([(7, PendingRequest::new(1_000, TrafficClass::Fair, 0, completed))]);
@@ -177,8 +176,8 @@ fn full_queue_retires_dropped_pacer() {
     assert!(connections.is_empty());
     assert!(order.is_empty());
     assert!(pending.is_empty());
-    std::assert_matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Closed));
-    std::assert_matches!(receiver.try_recv(), Ok(super::Command::Shutdown(_)));
+    assert_matches!(response.try_recv(), Err(TryRecvError::Closed));
+    assert_matches!(receiver.try_recv(), Ok(Command::Shutdown(_)));
 }
 
 #[test]
@@ -445,7 +444,7 @@ fn cancelled_send_refunds_lease() {
     let bucket = Arc::new(Mutex::new(Bucket::new(8_000, now)));
     assert!(bucket.lock().unwrap().reserve(4_000, now));
 
-    drop(super::BudgetLease::new(Arc::clone(&bucket), 4_000));
+    drop(BudgetLease::new(Arc::clone(&bucket), 4_000));
 
     assert_eq!(bucket.lock().unwrap().credit_byte_nanos, u128::from(MAX_BURST_BYTES) * 1_000_000_000);
 }
@@ -511,11 +510,7 @@ async fn leases_reserve_burst_capacity() {
     for _ in 0..8 {
         task::yield_now().await;
     }
-    std::assert_matches!(
-        next_request.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty),
-        "refill must count the delayed lease against the burst ceiling"
-    );
+    assert_matches!(next_request.try_recv(), Err(TryRecvError::Empty), "refill must count the delayed lease against the burst ceiling");
 
     delayed_lease.consume();
     advance(Duration::from_millis(1)).await;

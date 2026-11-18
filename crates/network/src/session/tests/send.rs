@@ -1,5 +1,14 @@
-use super::login::*;
-use super::*;
+use std::{
+    assert_matches,
+    future::Future,
+    pin::pin,
+    task::{Context, Waker},
+};
+
+use tokio::time::Instant;
+
+use self::{mpsc::error, oneshot::error::TryRecvError};
+use super::{login::*, *};
 
 fn object_request() -> RequestMultipleObjects {
     RequestMultipleObjects {
@@ -11,7 +20,7 @@ fn object_request() -> RequestMultipleObjects {
     }
 }
 
-pub(super) fn targeted_send_handle(commands: mpsc::Sender<Command>, disconnect_requested: watch::Sender<bool>) -> SessionHandle {
+pub(super) fn targeted_send_handle(commands: Sender<Command>, disconnect_requested: watch::Sender<bool>) -> SessionHandle {
     let (_, worker_finished) = watch::channel(false);
     SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(Mutex::new(false)), worker_finished }
 }
@@ -23,7 +32,7 @@ fn chat_message_with_size(size: usize) -> ChatFromViewer {
 pub(super) fn chat_message_with_text(message: String) -> ChatFromViewer {
     ChatFromViewer {
         agent_data: chat_from_viewer::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
-        chat_data: chat_from_viewer::ChatData { message, chat_type: ChatType::Normal, channel: 0 },
+        chat_data: ChatData { message, chat_type: ChatType::Normal, channel: 0 },
     }
 }
 
@@ -42,9 +51,9 @@ async fn run_stalled_send_is_isolated() {
         .await
         .expect("dispatch primary send");
     timeout(WAIT, harness.send_entered.notified()).await.expect("primary enters local send");
-    std::assert_matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    assert_matches!(response.try_recv(), Err(TryRecvError::Empty));
     advance(Duration::from_secs(5)).await;
-    std::assert_matches!(response.await.expect("stalled primary send should report its age limit"), Err(Error::SimulatorSend(_)));
+    assert_matches!(response.await.expect("stalled primary send should report its age limit"), Err(Error::SimulatorSend(_)));
 
     let neighbor_send = spawn({
         let commands = harness.commands.clone();
@@ -83,7 +92,7 @@ async fn run_stalled_send_is_isolated() {
     harness.neighbor.send_to(&start_ping_packet(44, 10, 0), harness.neighbor_peer).await.expect("ping after abandoned send");
     receive_message(&harness.neighbor, |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 10)).await;
 
-    let started = tokio::time::Instant::now();
+    let started = Instant::now();
     harness.disconnect.send_replace(true);
     assert!(harness.client.await.expect("runtime task").is_ok());
     assert!(started.elapsed() <= LOGOUT_TIMEOUT + WAIT, "bounded shutdown despite stalled send");
@@ -142,12 +151,6 @@ async fn disconnect_waits() {
 
 #[tokio::test]
 async fn dropped_send_keeps_command() {
-    use std::{
-        future::Future,
-        pin::pin,
-        task::{Context, Waker},
-    };
-
     let (commands, mut command_receiver) = mpsc::channel(1);
     let (disconnect_requested, _) = watch::channel(false);
     let handle = targeted_send_handle(commands, disconnect_requested);
@@ -177,7 +180,7 @@ async fn targeted_send_keeps_id() {
     };
     assert_eq!(routed_id, simulator_id);
     assert_eq!(delivery, Delivery::Reliable);
-    std::assert_matches!(message, Message::RequestMultipleObjects(_));
+    assert_matches!(message, Message::RequestMultipleObjects(_));
     completed.send(Ok(())).expect("return queue admission result");
     assert!(send.await.expect("send task").is_ok());
 }
@@ -196,7 +199,7 @@ async fn targeted_send_full() {
         objects: Vec::new(),
     };
 
-    std::assert_matches!(handle.send_to(test_simulator_id(42), request, Delivery::Reliable).await, Err(Error::SimulatorCommandQueueFull));
+    assert_matches!(handle.send_to(test_simulator_id(42), request, Delivery::Reliable).await, Err(Error::SimulatorCommandQueueFull));
 }
 
 #[tokio::test]
@@ -206,11 +209,11 @@ async fn disconnect_rejects_sends() {
     let handle = targeted_send_handle(commands, disconnect_requested);
     handle.request_disconnect();
 
-    std::assert_matches!(handle.send(chat_message_with_text("after disconnect".into()), Delivery::Unreliable), Err(Error::SessionClosed));
+    assert_matches!(handle.send(chat_message_with_text("after disconnect".into()), Delivery::Unreliable), Err(Error::SessionClosed));
     let request =
         RequestMultipleObjects { agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() }, objects: Vec::new() };
-    std::assert_matches!(handle.send_to(test_simulator_id(42), request, Delivery::Reliable).await, Err(Error::SessionClosed));
-    assert!(matches!(command_receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    assert_matches!(handle.send_to(test_simulator_id(42), request, Delivery::Reliable).await, Err(Error::SessionClosed));
+    assert!(matches!(command_receiver.try_recv(), Err(error::TryRecvError::Empty)));
 }
 
 #[tokio::test]
@@ -226,7 +229,7 @@ async fn targeted_send_target_closed() {
 
     drop(completed);
 
-    std::assert_matches!(send.await.expect("send task"), Err(Error::SimulatorConnectionClosed));
+    assert_matches!(send.await.expect("send task"), Err(Error::SimulatorConnectionClosed));
 }
 
 #[tokio::test]
@@ -242,7 +245,7 @@ async fn targeted_send_resolves_on_close() {
     };
 
     handle.request_disconnect();
-    std::assert_matches!(
+    assert_matches!(
         timeout(Duration::from_secs(1), send).await.expect("disconnect should release the targeted send waiter").expect("send task"),
         Err(Error::SessionClosed)
     );
@@ -267,7 +270,7 @@ async fn targeted_send_reports_finished_worker() {
     worker_finished_sender.send_replace(true);
     drop(completed);
 
-    std::assert_matches!(send.await.expect("send task"), Err(Error::SessionClosed));
+    assert_matches!(send.await.expect("send task"), Err(Error::SessionClosed));
 }
 
 #[test]
@@ -276,21 +279,18 @@ fn chat_limit_precedes_admission() {
     let (disconnect_requested, _) = watch::channel(false);
     let handle = targeted_send_handle(commands.clone(), disconnect_requested);
 
-    std::assert_matches!(
+    assert_matches!(
         handle.send(chat_message_with_size(MAX_OUTBOUND_CHAT_MESSAGE_BYTES + 1), Delivery::Unreliable),
         Err(Error::OutboundMessageTooLarge)
     );
     assert_eq!(commands.capacity(), 1);
-    assert!(matches!(command_receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    assert!(matches!(command_receiver.try_recv(), Err(error::TryRecvError::Empty)));
 
     let mut oversized_capacity = String::with_capacity(MAX_OUTBOUND_CHAT_MESSAGE_BYTES + 1);
     oversized_capacity.push('x');
-    std::assert_matches!(
-        handle.send(chat_message_with_text(oversized_capacity), Delivery::Unreliable),
-        Err(Error::OutboundMessageTooLarge)
-    );
+    assert_matches!(handle.send(chat_message_with_text(oversized_capacity), Delivery::Unreliable), Err(Error::OutboundMessageTooLarge));
     assert_eq!(commands.capacity(), 1);
-    assert!(matches!(command_receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    assert!(matches!(command_receiver.try_recv(), Err(error::TryRecvError::Empty)));
 
     handle.send(chat_message_with_size(MAX_OUTBOUND_CHAT_MESSAGE_BYTES), Delivery::Unreliable).expect("exact limit fits");
     assert_eq!(commands.capacity(), 0);
@@ -312,13 +312,13 @@ async fn object_limit_precedes_admission() {
     over_capacity.push(entry);
     for (case, objects) in [("over length", vec![entry; MAX_OUTBOUND_OBJECT_REQUESTS + 1]), ("over capacity", over_capacity)] {
         let request = RequestMultipleObjects { agent_data, objects };
-        std::assert_matches!(
+        assert_matches!(
             handle.send_to(test_simulator_id(42), request, Delivery::Reliable).await,
             Err(Error::OutboundMessageTooLarge),
             "{case}"
         );
         assert_eq!(commands.capacity(), 1, "{case}");
-        assert!(matches!(command_receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)), "{case}");
+        assert!(matches!(command_receiver.try_recv(), Err(error::TryRecvError::Empty)), "{case}");
     }
 
     let mut objects = Vec::with_capacity(MAX_OUTBOUND_OBJECT_REQUESTS);
@@ -374,22 +374,22 @@ async fn shutdown_cancels_error() {
     let outcome =
         timeout(Duration::from_secs(1), send_failure).await.expect("shutdown should release the blocked send").expect("send task");
 
-    std::assert_matches!(outcome, EventSendOutcome::Shutdown);
+    assert_matches!(outcome, EventSendOutcome::Shutdown);
 }
 
 #[test]
 fn full_command_queue_errors() {
     let (commands, mut receiver) = mpsc::channel(COMMAND_CAPACITY);
     let challenge = MfaChallenge::new(commands);
-    std::assert_matches!(challenge.complete(" \t "), Err(Error::EmptyMfaCode));
+    assert_matches!(challenge.complete(" \t "), Err(Error::EmptyMfaCode));
     for _ in 0..COMMAND_CAPACITY {
         MfaChallenge::new(challenge.commands.clone()).complete("123456").expect("queue has room");
     }
 
-    std::assert_matches!(challenge.complete("123456"), Err(Error::CommandQueueFull));
+    assert_matches!(challenge.complete("123456"), Err(Error::CommandQueueFull));
     assert!(receiver.try_recv().is_ok());
     challenge.complete("123456").expect("challenge can be retried after queue pressure");
-    std::assert_matches!(challenge.complete("123456"), Err(Error::MfaChallengeCompleted));
+    assert_matches!(challenge.complete("123456"), Err(Error::MfaChallengeCompleted));
 }
 
 #[test]

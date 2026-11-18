@@ -6,8 +6,7 @@ use std::{
 
 use math::{DVec3, Quat, Vec3, ray_intersects_bounds, ray_triangle_intersection};
 
-use super::items::ItemId;
-use super::{GeometryRenderer, ShadingMode};
+use super::{GeometryRenderer, ShadingMode, items::ItemId};
 use crate::scene::{Camera, Object, SharedMesh};
 
 const MAX_PICK_TRIANGLES: usize = 250_000;
@@ -210,7 +209,7 @@ impl PickQuery {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Range;
+    use std::{iter, ops::Range};
 
     use math::{DVec3, Quat, Vec3};
 
@@ -277,7 +276,7 @@ mod tests {
                 Vec3::ONE,
                 false,
                 ShadingMode::Surface,
-                std::iter::once((&indices, false, 3)),
+                iter::once((&indices, false, 3)),
             )
             .unwrap();
         query
@@ -289,7 +288,7 @@ mod tests {
                 Vec3::ONE,
                 false,
                 ShadingMode::Surface,
-                std::iter::once((&indices, false, 7)),
+                iter::once((&indices, false, 7)),
             )
             .unwrap();
 

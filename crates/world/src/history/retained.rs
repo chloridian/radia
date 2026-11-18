@@ -7,8 +7,7 @@ use uuid::Uuid;
 
 #[cfg(test)]
 use crate::World;
-use crate::update::Stamp;
-use crate::{LocalAddress, PbrMaterialOverrides, Region};
+use crate::{LocalAddress, PbrMaterialOverrides, Region, update::Stamp};
 
 const MAX_RETAINED_PER_REGION: usize = 1024;
 const MAX_RETAINED: usize = 4096;

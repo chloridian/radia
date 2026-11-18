@@ -1,12 +1,12 @@
 use std::{
-    error::Error as StdError,
-    fmt,
+    error, fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    str::from_utf8,
+    str::{Utf8Error, from_utf8},
     sync::{Arc, OnceLock},
     time::Duration,
 };
 
+pub use protocol::login::StartLocation;
 use protocol::login::{self, ResponseData};
 use reqwest::{StatusCode, header::CONTENT_TYPE};
 use tokio::{sync::Semaphore, time};
@@ -15,10 +15,8 @@ use uuid::Uuid;
 
 use crate::{
     capabilities::spawn_blocking_with_permit,
-    http::{Client, validate_http_url},
+    http::{Client, Response, validate_http_url},
 };
-
-pub use protocol::login::StartLocation;
 
 const LOGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_LOGIN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -42,7 +40,7 @@ pub(crate) enum LoginError {
 pub(crate) enum InvalidResponseReason {
     GatewayHtml,
     HtmlInsteadOfXmlRpc,
-    InvalidUtf8(std::str::Utf8Error),
+    InvalidUtf8(Utf8Error),
     Protocol(login::Error),
     ExcessiveNesting,
     TooManyElements,
@@ -52,15 +50,15 @@ pub(crate) enum InvalidResponseReason {
 
 pub(crate) struct LoginFailure {
     message: String,
-    source: Box<dyn StdError + Send + Sync + 'static>,
+    source: Box<dyn error::Error + Send + Sync + 'static>,
 }
 
 impl LoginError {
-    fn request(message: impl Into<String>, source: impl StdError + Send + Sync + 'static) -> Self {
+    fn request(message: impl Into<String>, source: impl error::Error + Send + Sync + 'static) -> Self {
         Self::Request(LoginFailure { message: message.into(), source: Box::new(source) })
     }
 
-    fn unavailable(message: impl Into<String>, source: impl StdError + Send + Sync + 'static) -> Self {
+    fn unavailable(message: impl Into<String>, source: impl error::Error + Send + Sync + 'static) -> Self {
         Self::Unavailable(LoginFailure { message: message.into(), source: Box::new(source) })
     }
 
@@ -123,8 +121,8 @@ impl fmt::Display for LoginError {
     }
 }
 
-impl StdError for LoginError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+impl error::Error for LoginError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Request(error) | Self::Unavailable(error) => Some(&*error.source),
             Self::InvalidResponse { reason: InvalidResponseReason::InvalidUtf8(error), .. } => Some(error),
@@ -300,7 +298,7 @@ async fn login_request(
         .map_err(|error| LoginError::request(format!("Could not contact Second Life: {error}"), error))?;
     let status = response.status;
     let content_type = response.headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default().to_owned();
-    let crate::http::Response { body, .. } = response;
+    let Response { body, .. } = response;
     let parse = spawn_blocking_with_permit(operation_permit, move || {
         from_utf8(&body)
             .map_err(|error| LoginError::invalid_response(status, InvalidResponseReason::InvalidUtf8(error), None))

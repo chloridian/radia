@@ -1,33 +1,37 @@
 #![allow(unexpected_cfgs)]
 
+#[cfg(world_bench_detailed)]
+use std::time::{Duration, Instant};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     num::NonZeroU32,
     ops::Bound::{Excluded, Unbounded},
 };
 
+use math::Vec3;
 use uuid::Uuid;
 
-use crate::history::WorldChange::{EntityRemoved, SubtreeRemovalPending};
-use crate::update::{FieldStamp, Stamp};
 use crate::{
     Binding, Entity, Kind, LocalAddress, Parent, Recovery, RecoveryCancellation, Region, World, WorldChange, WorldEntityRemovalReason,
     WorldRevision,
+    history::WorldChange::{EntityRemoved, SubtreeRemovalPending},
+    mutation::Effects,
+    object::relationships::PendingChildKey,
+    update::{FieldStamp, Stamp},
 };
-use math::Vec3;
 
 pub const MAX_REMOVAL_WORK_PER_TURN: usize = 16;
 
 #[cfg(world_bench_detailed)]
 struct PhaseTimer<'a> {
-    elapsed: &'a mut std::time::Duration,
-    started: std::time::Instant,
+    elapsed: &'a mut Duration,
+    started: Instant,
 }
 
 #[cfg(world_bench_detailed)]
 impl<'a> PhaseTimer<'a> {
-    fn new(elapsed: &'a mut std::time::Duration) -> Self {
-        Self { elapsed, started: std::time::Instant::now() }
+    fn new(elapsed: &'a mut Duration) -> Self {
+        Self { elapsed, started: Instant::now() }
     }
 }
 
@@ -73,33 +77,33 @@ pub struct RemovalProgress {
     pub recovery: Recovery,
     pub recovery_cancellations: Vec<RecoveryCancellation>,
     #[cfg(world_bench_detailed)]
-    pub reclamation_work_time: std::time::Duration,
+    pub reclamation_work_time: Duration,
     #[cfg(world_bench_detailed)]
-    pub finalization_time: std::time::Duration,
+    pub finalization_time: Duration,
     #[cfg(world_bench_detailed)]
-    pub entity_children_time: std::time::Duration,
+    pub entity_children_time: Duration,
     #[cfg(world_bench_detailed)]
-    pub entity_relationship_time: std::time::Duration,
+    pub entity_relationship_time: Duration,
     #[cfg(world_bench_detailed)]
-    pub region_objects_time: std::time::Duration,
+    pub region_objects_time: Duration,
     #[cfg(world_bench_detailed)]
-    pub region_state_time: std::time::Duration,
+    pub region_state_time: Duration,
     #[cfg(world_bench_detailed)]
-    pub region_tombstones_time: std::time::Duration,
+    pub region_tombstones_time: Duration,
     #[cfg(world_bench_detailed)]
-    pub transfer_time: std::time::Duration,
+    pub transfer_time: Duration,
     #[cfg(world_bench_detailed)]
-    pub index_removal_time: std::time::Duration,
+    pub index_removal_time: Duration,
     #[cfg(world_bench_detailed)]
-    pub component_destruction_time: std::time::Duration,
+    pub component_destruction_time: Duration,
     #[cfg(world_bench_detailed)]
-    pub tombstone_insertion_time: std::time::Duration,
+    pub tombstone_insertion_time: Duration,
     #[cfg(world_bench_detailed)]
-    pub journal_publication_time: std::time::Duration,
+    pub journal_publication_time: Duration,
     #[cfg(world_bench_detailed)]
-    pub recovery_compaction_time: std::time::Duration,
+    pub recovery_compaction_time: Duration,
     #[cfg(world_bench_detailed)]
-    pub final_buffer_release_time: std::time::Duration,
+    pub final_buffer_release_time: Duration,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -251,7 +255,7 @@ pub(crate) struct TransferProgress {
     phase: TransferPhase,
     after_work: Option<LocalAddress>,
     active_work: Option<LocalAddress>,
-    after_pending_child: Option<crate::object::relationships::PendingChildKey>,
+    after_pending_child: Option<PendingChildKey>,
     old_addresses: HashMap<LocalAddress, Binding>,
     release_addresses: VecDeque<LocalAddress>,
     latest_addresses: HashMap<Region, LocalAddress>,
@@ -346,7 +350,7 @@ struct PendingVisibility {
     address: LocalAddress,
     expected_uuid: Option<Uuid>,
     current_address_entity: Option<Entity>,
-    parent_field: Option<crate::update::FieldStamp>,
+    parent_field: Option<FieldStamp>,
     after_parent: Option<Uuid>,
     fallback_parent_seen: bool,
 }
@@ -430,7 +434,7 @@ impl World {
         let mut recovery_targets = Vec::with_capacity(limit);
         let mut recovery_cancellations = Vec::with_capacity(limit);
         #[cfg(world_bench_detailed)]
-        let work_started = std::time::Instant::now();
+        let work_started = Instant::now();
 
         while progress.work_units < limit {
             if self.reclamation.is_empty() {
@@ -545,7 +549,7 @@ impl World {
                     }
                     RemovalPhase::Finalize => {
                         #[cfg(world_bench_detailed)]
-                        let started = std::time::Instant::now();
+                        let started = Instant::now();
                         self.finalize_removal(frame, &mut changes, &mut recovery_cancellations, &mut progress);
                         #[cfg(world_bench_detailed)]
                         {
@@ -668,7 +672,7 @@ impl World {
                                         state.after_child = Some(id);
                                     }
                                     self.set_parent(child, Parent::Pending { address: pending_address, expected_uuid: Some(parent_id) });
-                                    let mut effects = crate::mutation::Effects::default();
+                                    let mut effects = Effects::default();
                                     self.relink_changed(child, child_id, &mut effects);
                                     if let Some(replacement) = self.entity_at(pending_address)
                                         && self.store.object_record(replacement).is_some_and(|record| record.id == parent_id)
@@ -744,7 +748,7 @@ impl World {
                                             }
                                             self.set_parent(child, Parent::Pending { address, expected_uuid: Some(parent_id) });
                                             recovery_targets.push(child_address);
-                                            let mut effects = crate::mutation::Effects::default();
+                                            let mut effects = Effects::default();
                                             self.relink_changed(child, child_id, &mut effects);
                                             changes.extend(effects.changes);
                                         }
@@ -820,7 +824,7 @@ impl World {
             progress.reclamation_work_time = work_started.elapsed();
         }
         #[cfg(world_bench_detailed)]
-        let journal_started = std::time::Instant::now();
+        let journal_started = Instant::now();
         progress.revision = self.publish_changes(changes);
         #[cfg(world_bench_detailed)]
         {
@@ -835,7 +839,7 @@ impl World {
             && self.transfer_address_count == 0
         {
             #[cfg(world_bench_detailed)]
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             self.release_empty_removal_capacity();
             #[cfg(world_bench_detailed)]
             {
@@ -843,7 +847,7 @@ impl World {
             }
         }
         #[cfg(world_bench_detailed)]
-        let recovery_started = std::time::Instant::now();
+        let recovery_started = Instant::now();
         progress.recovery = Recovery::from_targets(recovery_targets, self.limits.max_recovery_targets);
         #[cfg(world_bench_detailed)]
         {
@@ -1180,7 +1184,7 @@ impl World {
             let pending_address = LocalAddress::new(child_address.region(), parent_address.local_id());
             self.set_parent(child, Parent::Pending { address: pending_address, expected_uuid: Some(parent_id) });
             self.advance_parent_fence(child, cause.stamp(), parent_address.region());
-            let mut effects = crate::mutation::Effects::default();
+            let mut effects = Effects::default();
             self.relink_changed(child, child_id, &mut effects);
             if let Some(replacement) = self.entity_at(pending_address)
                 && self.store.object_record(replacement).is_some_and(|record| record.id == parent_id)
@@ -1232,7 +1236,7 @@ impl World {
         if crate::newer_field(field_stamp, ordering.fences.frame) {
             ordering.fences.frame = Some(field_stamp);
         }
-        let mut effects = crate::mutation::Effects::default();
+        let mut effects = Effects::default();
         self.relink_changed(child, id, &mut effects);
         changes.extend(effects.changes);
         true
@@ -1354,7 +1358,7 @@ impl World {
         if candidate.link_admitted && expected_uuid != Some(id) {
             self.set_parent(candidate.entity, Parent::Pending { address: pending_address, expected_uuid: Some(id) });
             self.advance_parent_fence(candidate.entity, stamp, parent_region);
-            let mut effects = crate::mutation::Effects::default();
+            let mut effects = Effects::default();
             self.relink_changed(candidate.entity, id, &mut effects);
             changes.extend(effects.changes);
         }
@@ -1413,7 +1417,7 @@ impl World {
             self.removal_fences.remove(&address);
         }
         #[cfg(world_bench_detailed)]
-        let tombstone_started = std::time::Instant::now();
+        let tombstone_started = Instant::now();
         if !address_is_replaced && let Some(stamp) = frame.cause.tombstone_stamp() {
             self.insert_tombstone(address, stamp);
         }
@@ -1763,7 +1767,7 @@ impl World {
         address: LocalAddress,
         expected_uuid: Option<Uuid>,
         current_address_entity: Option<Entity>,
-        parent_field: Option<crate::update::FieldStamp>,
+        parent_field: Option<FieldStamp>,
         cache: &mut VisibilityCache,
     ) -> Option<(RemovalCause, Region, Entity, Uuid)> {
         let key = (address, expected_uuid);

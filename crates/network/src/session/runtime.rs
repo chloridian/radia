@@ -1,11 +1,14 @@
 use std::{collections::VecDeque, future::pending, pin::Pin, time::Duration};
+
 use tokio::{
     sync::{mpsc, watch},
     time::{self, Instant, Interval, Sleep},
 };
 
-use super::handoff::HandoffState;
-use super::{CLIENT_EVENT_CAPACITY, RunState, RuntimeInputs, SessionError, SessionStartup, SessionState, SimulatorEvent, SimulatorRequest};
+use super::{
+    CLIENT_EVENT_CAPACITY, RunState, RuntimeInputs, SessionError, SessionStartup, SessionState, SimulatorEvent, SimulatorRequest,
+    handoff::HandoffState, simulators::EventQueueLifecycle,
+};
 use crate::{capabilities::EventQueueTask, event::EventEnvelope, session::Command};
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(40);
@@ -79,7 +82,7 @@ impl<'a> SessionDispatcher<'a> {
             (initial_simulator_id, event_queue_endpoint, exit)
         });
         if let Some(capability) = state.simulators.get_mut(&state.simulator_id).and_then(|simulator| simulator.capabilities.as_mut()) {
-            capability.event_queue = super::simulators::EventQueueLifecycle::Running { role: event_queue_role, task };
+            capability.event_queue = EventQueueLifecycle::Running { role: event_queue_role, task };
         }
         let mut handoff_command_retry = time::interval(HANDOFF_COMMAND_RETRY_INTERVAL);
         handoff_command_retry.set_missed_tick_behavior(time::MissedTickBehavior::Delay);

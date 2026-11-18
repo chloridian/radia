@@ -1,9 +1,14 @@
 #![allow(unexpected_cfgs)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
+};
 #[cfg(world_bench_detailed)]
-use std::time::Duration;
+use std::{
+    mem,
+    time::{Duration, Instant},
+};
 
 use hecs::{Component, EntityBuilder, QueryBorrow, QueryOne, Ref, ViewBorrow};
 use math::{Quat, Vec3};
@@ -11,11 +16,14 @@ use uuid::Uuid;
 
 #[cfg(world_bench_detailed)]
 use crate::World;
-use crate::identity::WorldId;
-use crate::mutation::facet::{FacetChanges, FacetSet, FacetUpdates};
-use crate::object::components::Fenced;
-use crate::{Entity, Kind, LocalAddress, ObjectMedia, Parent, Region, WorldRevision};
-use crate::{ObjectOrdering, ObjectRecord, ObjectState};
+#[cfg(test)]
+use crate::mutation::facet;
+use crate::{
+    Entity, Kind, LocalAddress, ObjectMedia, ObjectOrdering, ObjectRecord, ObjectState, Parent, Region, WorldRevision,
+    identity::WorldId,
+    mutation::facet::{FacetChanges, FacetSet, FacetUpdates},
+    object::components::Fenced,
+};
 
 pub(crate) struct ObjectStore {
     world: WorldId,
@@ -140,12 +148,12 @@ impl ObjectStore {
         };
         let current_identity = self.entities.get(&id) == Some(&entity);
         #[cfg(world_bench_detailed)]
-        let component_started = std::time::Instant::now();
+        let component_started = Instant::now();
         self.ecs.despawn(entity.0).expect("removal target is live");
         #[cfg(world_bench_detailed)]
         let component_destruction = component_started.elapsed();
         #[cfg(world_bench_detailed)]
-        let indexes_started = std::time::Instant::now();
+        let indexes_started = Instant::now();
         if current_identity {
             self.entities.remove(&id);
             self.ids.remove(&id);
@@ -296,7 +304,7 @@ impl ObjectStore {
 #[cfg(world_bench_detailed)]
 impl World {
     pub fn take_bench_layout_stats(&mut self) -> (usize, usize) {
-        (self.store.ecs.archetypes().len(), std::mem::take(&mut self.store.facet_structural_moves))
+        (self.store.ecs.archetypes().len(), mem::take(&mut self.store.facet_structural_moves))
     }
 }
 
@@ -351,7 +359,7 @@ pub(crate) fn object_store_invariants_hold(store: &ObjectStore) -> Result<(), &'
         .ecs
         .query::<(hecs::Entity, &ObjectRecord)>()
         .iter()
-        .any(|(entity, _)| store.ecs.entity(entity).is_ok_and(|entry| !crate::mutation::facet::components_valid(entry)))
+        .any(|(entity, _)| store.ecs.entity(entity).is_ok_and(|entry| !facet::components_valid(entry)))
     {
         return Err("empty facet components are stored");
     }

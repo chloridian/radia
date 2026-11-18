@@ -1,3 +1,5 @@
+use std::mem;
+
 use uuid::Uuid;
 
 use crate::{lludp::codec::Reader, types::texture_entry::MAX_TEXTURE_FACES};
@@ -29,7 +31,7 @@ pub fn decode_render_material_bindings(bytes: &[u8]) -> Result<Vec<RenderMateria
         let face_index = reader.u8().map_err(|_| RenderMaterialError::Malformed)?;
         let index = usize::from(face_index);
         let material_id = reader.uuid().map_err(|_| RenderMaterialError::Malformed)?;
-        if index < MAX_TEXTURE_FACES && !std::mem::replace(&mut seen[index], true) {
+        if index < MAX_TEXTURE_FACES && !mem::replace(&mut seen[index], true) {
             bindings.push(RenderMaterialBinding { face_index, material_id });
         }
     }

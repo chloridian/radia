@@ -1,3 +1,5 @@
+use std::f32::consts::TAU;
+
 use uuid::Uuid;
 
 use crate::lludp::codec::Reader;
@@ -116,7 +118,7 @@ fn convert_wire_values(face: &mut TextureFace) {
     face.color = face.color.map(|byte| u8::MAX - byte);
     face.offset_s /= 32767.0;
     face.offset_t /= 32767.0;
-    face.rotation = (face.rotation / 32768.0) * std::f32::consts::TAU;
+    face.rotation = (face.rotation / 32768.0) * TAU;
     face.glow /= 255.0;
 }
 
@@ -227,6 +229,8 @@ fn read_u8(reader: &mut Reader<'_>) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::FRAC_PI_2;
+
     use super::*;
 
     fn default_wire_entry() -> Vec<u8> {
@@ -269,7 +273,7 @@ mod tests {
         assert_eq!((face.scale_s, face.scale_t), (2.0, 0.5));
         assert_eq!(face.offset_s, 1.0);
         assert!(face.offset_t < -1.0);
-        assert!((face.rotation - std::f32::consts::FRAC_PI_2).abs() < 0.0001);
+        assert!((face.rotation - FRAC_PI_2).abs() < 0.0001);
         assert_eq!(face.bump_shiny_fullbright, 0b1010_0101);
         assert_eq!(face.media_texgen, 0b0000_0101);
         assert_eq!(face.glow, 128.0 / 255.0);

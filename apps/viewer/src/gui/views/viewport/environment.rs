@@ -3,12 +3,15 @@ use std::{
     time::Instant,
 };
 
-use ::inventory::{InventoryOwner, ItemKey};
+use inventory::{InventoryOwner, ItemKey};
 use render::scene;
 use utils::ItemId;
 
 use super::FRAME_INTERVAL;
-use crate::{inventory::environments::EnvironmentMenu, scene_feed::SceneFeed};
+use crate::{
+    inventory::environments::{EnvironmentItems, EnvironmentMenu},
+    scene_feed::SceneFeed,
+};
 
 #[derive(Default)]
 pub(super) struct EnvironmentControls {
@@ -24,7 +27,7 @@ impl EnvironmentControls {
             scene::EnvironmentChoice::Local(scene::LocalChoice::Preset(preset)) => preset.label().to_owned(),
             scene::EnvironmentChoice::Local(scene::LocalChoice::Inventory { owner_id, item_id, .. }) => feed
                 .and_then(|feed| {
-                    let crate::inventory::environments::EnvironmentItems::Ready(items) = feed.environment_items() else {
+                    let EnvironmentItems::Ready(items) = feed.environment_items() else {
                         return None;
                     };
                     if let Some((choice, previous, label)) = &self.label
@@ -54,7 +57,7 @@ impl EnvironmentControls {
                 }
                 ui.separator();
                 match environment_items {
-                    Some(crate::inventory::environments::EnvironmentItems::Ready(items)) => {
+                    Some(EnvironmentItems::Ready(items)) => {
                         if items.items().is_empty() {
                             ui.label("No saved environments");
                         } else {
@@ -76,10 +79,10 @@ impl EnvironmentControls {
                             });
                         }
                     }
-                    Some(crate::inventory::environments::EnvironmentItems::Failed) => {
+                    Some(EnvironmentItems::Failed) => {
                         ui.label("Saved environments unavailable");
                     }
-                    Some(crate::inventory::environments::EnvironmentItems::Loading) | None => {
+                    Some(EnvironmentItems::Loading) | None => {
                         ui.label("Loading saved environments…");
                     }
                 }

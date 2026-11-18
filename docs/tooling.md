@@ -23,8 +23,8 @@ cargo run -p <package-with-binary> -- <args>
 cargo build --workspace --timings
 
 # Format
-cargo fmt --all
-cargo fmt --all -- --check
+cargo xfmt
+cargo xfmt --check
 
 # Lint
 cargo lint
@@ -54,6 +54,7 @@ cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target
 ```
 
 - `cargo lint` checks all targets and features with warnings denied.
+- `cargo xfmt` runs rustfmt with the import grouping and merging options, which stable rustfmt accepts only on the command line. Plain `cargo fmt` leaves imports ungrouped, and the hook and CI reject the result.
 - `cargo xtest` runs Nextest with all features, but does not explicitly select the workspace. Add `--workspace` when needed.
 - Replace `<crate>`, `<name>`, and `<args>` with the relevant values.
 - Optional features may require platform-specific dependencies.

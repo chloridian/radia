@@ -1,11 +1,13 @@
 use std::{
+    assert_matches,
     collections::HashSet,
     env,
     error::Error,
+    fs, io,
     io::Write,
+    path::Path,
     process::{Command, Stdio},
-    sync::Arc,
-    sync::mpsc,
+    sync::{Arc, mpsc},
 };
 
 use futures::executor::block_on;
@@ -17,7 +19,6 @@ use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
 use super::{MAX_RESTORE_ROWS_PER_TURN, MAX_RESTORE_UNITS_PER_TURN};
-
 use crate::{
     AssetType, Category, CategoryKey, FolderType, Inventory, InventoryCache, InventoryCacheError, InventoryCacheLoad, InventoryCacheWrite,
     InventoryChild, InventoryLimits, InventoryOwner, InventorySnapshot, InventoryType, Item, ItemKey, PermissionMask, Permissions,
@@ -247,7 +248,7 @@ fn item(owner: InventoryOwner, agent: Uuid, parent: CategoryKey, item_id: u128, 
     }
 }
 
-fn seed_cache(root: &std::path::Path, folder_version: i32) -> Result<(), Box<dyn Error>> {
+fn seed_cache(root: &Path, folder_version: i32) -> Result<(), Box<dyn Error>> {
     let mut fixture = fixture(folder_version)?;
     let (cache, _) = InventoryCache::open_at_root(root, "agni", fixture.agent, None)?;
     block_on(cache.submit_bootstrap(&fixture.inventory.snapshot())?.wait())?;
@@ -265,7 +266,7 @@ fn seed_cache(root: &std::path::Path, folder_version: i32) -> Result<(), Box<dyn
     Ok(())
 }
 
-fn seed_two_folder_cache(root: &std::path::Path) -> Result<(), Box<dyn Error>> {
+fn seed_two_folder_cache(root: &Path) -> Result<(), Box<dyn Error>> {
     let mut fixture = two_folder_fixture()?;
     let (cache, _) = InventoryCache::open_at_root(root, "agni", fixture.agent, None)?;
     block_on(cache.submit_bootstrap(&fixture.inventory.snapshot())?.wait())?;
@@ -304,7 +305,7 @@ fn persist_fetch(
     Ok(())
 }
 
-fn seed_nested_cache(root: &std::path::Path, parent_version: i32, child_version: i32) -> Result<(), Box<dyn Error>> {
+fn seed_nested_cache(root: &Path, parent_version: i32, child_version: i32) -> Result<(), Box<dyn Error>> {
     let mut fixture = nested_fixture(parent_version, child_version)?;
     let (cache, _) = InventoryCache::open_at_root(root, "agni", fixture.agent, None)?;
     block_on(cache.submit_bootstrap(&fixture.inventory.snapshot())?.wait())?;
@@ -648,7 +649,7 @@ fn incomplete_partial_write_stays_incomplete() -> Result<(), Box<dyn Error>> {
     })?;
     let receipt = cache.db.submit_batches(vec![invalidate, partial])?;
     block_on(receipt.wait())?;
-    let crate::cache::InventoryCache { db, .. } = cache;
+    let InventoryCache { db, .. } = cache;
     db.shutdown()?;
 
     let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", fixture.agent, None)?;
@@ -695,7 +696,7 @@ fn full_queue_invalidates_cached_completeness() -> Result<(), Box<dyn Error>> {
     for receipt in queued {
         block_on(receipt.wait())?;
     }
-    std::assert_matches!(block_on(failed_write.wait()), Err(InventoryCacheError::Sqlite(SqliteError::QueueFull)));
+    assert_matches!(block_on(failed_write.wait()), Err(InventoryCacheError::Sqlite(SqliteError::QueueFull)));
     block_on(cache.close())?;
 
     let mut baseline = fixture(7)?;
@@ -801,7 +802,7 @@ fn damaged_cache_is_recreated() -> Result<(), Box<dyn Error>> {
     let (cache, status) = InventoryCache::open_at_root(directory.path(), "agni", agent, None)?;
     assert_eq!(status, OpenStatus::Recreated(RecoveryReason::SchemaMismatch));
     block_on(cache.close())?;
-    std::fs::write(&path, b"not a SQLite database")?;
+    fs::write(&path, b"not a SQLite database")?;
 
     let (cache, status) = InventoryCache::open_at_root(directory.path(), "agni", agent, None)?;
     assert_eq!(status, OpenStatus::Recreated(RecoveryReason::Corrupt));
@@ -813,9 +814,9 @@ fn damaged_cache_is_recreated() -> Result<(), Box<dyn Error>> {
 fn old_grid_caches_are_removed() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let old_grid = directory.path().join("inventory").join("a".repeat(64));
-    std::fs::create_dir_all(&old_grid)?;
+    fs::create_dir_all(&old_grid)?;
     let old_file = old_grid.join(format!("{}.sqlite", Uuid::from_u128(704)));
-    std::fs::write(&old_file, b"old inventory cache")?;
+    fs::write(&old_file, b"old inventory cache")?;
 
     let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", Uuid::from_u128(704), None)?;
 
@@ -829,7 +830,7 @@ fn old_grid_caches_are_removed() -> Result<(), Box<dyn Error>> {
 fn interrupted_batch_keeps_incomplete() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     seed_cache(directory.path(), 7)?;
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(env::current_exe()?);
     command
         .arg("--exact")
         .arg("cache::tests::inventory_cache_process_helper")
@@ -877,7 +878,7 @@ fn two_processes_share_library_scope() -> Result<(), Box<dyn Error>> {
     )?;
     let after = parent.inventory.snapshot();
 
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(env::current_exe()?);
     command
         .arg("--exact")
         .arg("cache::tests::inventory_cache_process_helper")
@@ -894,12 +895,12 @@ fn two_processes_share_library_scope() -> Result<(), Box<dyn Error>> {
         Ok(receipt) => block_on(receipt.wait()),
         Err(error) => Err(error),
     };
-    std::assert_matches!(busy, Err(SqliteError::Busy));
+    assert_matches!(busy, Err(SqliteError::Busy));
     child.write_stdin(b"go\n")?;
     assert!(child.wait()?.success(), "child process failed; stdout: {}", child.stdout());
 
     let failed_write = InventoryCacheWrite { result: Err(SqliteError::Busy), control, identity, owners, affected_categories };
-    std::assert_matches!(block_on(failed_write.wait()), Err(InventoryCacheError::Sqlite(SqliteError::Busy)));
+    assert_matches!(block_on(failed_write.wait()), Err(InventoryCacheError::Sqlite(SqliteError::Busy)));
     block_on(cache.close())?;
 
     let mut next_login = library_fixture(Uuid::from_u128(707), owner, 5, "Shared library item")?;
@@ -958,11 +959,11 @@ fn inventory_cache_process_helper() -> Result<(), Box<dyn Error>> {
                  WHERE scope_id=(SELECT scope_id FROM scopes WHERE grid_id='agni' AND owner_id=?1) AND id=?2",
                 (&owner_id, &item_id),
             )?;
-            let mut output = std::io::stdout();
+            let mut output = io::stdout();
             writeln!(output, "transaction-open").map_err(|_| rusqlite::Error::InvalidQuery)?;
             output.flush().map_err(|_| rusqlite::Error::InvalidQuery)?;
             let mut input = String::new();
-            std::io::stdin().read_line(&mut input).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            io::stdin().read_line(&mut input).map_err(|_| rusqlite::Error::InvalidQuery)?;
             Ok(())
         })?;
         let receipt = cache.db.submit_batches(vec![invalidate, partial])?;
@@ -980,11 +981,11 @@ fn inventory_cache_process_helper() -> Result<(), Box<dyn Error>> {
              WHERE scope_id=(SELECT scope_id FROM scopes WHERE grid_id='agni' AND owner_id=?1) AND id=?2",
             (&owner_id, &item_id),
         )?;
-        let mut output = std::io::stdout();
+        let mut output = io::stdout();
         writeln!(output, "write-lock-held").map_err(|_| rusqlite::Error::InvalidQuery)?;
         output.flush().map_err(|_| rusqlite::Error::InvalidQuery)?;
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        io::stdin().read_line(&mut input).map_err(|_| rusqlite::Error::InvalidQuery)?;
         Ok(())
     })?;
     let receipt = cache.db.submit_batches(vec![batch])?;

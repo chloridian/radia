@@ -2,11 +2,10 @@ use math::{Quat, Vec3};
 use protocol::{
     ChatType, LLUdpError,
     lludp::{Message, MessageId, Packet},
-    messages::{AgentUpdate, agent::agent_update::AgentData},
     messages::{
-        ChatFromViewer, RegionHandshake,
-        chat::chat_from_viewer,
-        chat::chat_from_viewer::ChatData,
+        AgentUpdate, ChatFromViewer, RegionHandshake,
+        agent::agent_update::AgentData,
+        chat::{chat_from_viewer, chat_from_viewer::ChatData},
         region::region_handshake::{RegionInfo1, RegionInfo2, RegionInfo3, RegionInfo4},
     },
 };

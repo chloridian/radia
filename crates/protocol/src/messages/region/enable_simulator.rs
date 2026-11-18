@@ -29,7 +29,7 @@ impl TypedMessage for EnableSimulator {
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
         let handle = reader.u64()?;
-        let ip = std::net::Ipv4Addr::from([reader.u8()?, reader.u8()?, reader.u8()?, reader.u8()?]);
+        let ip = Ipv4Addr::from([reader.u8()?, reader.u8()?, reader.u8()?, reader.u8()?]);
         let port = u16::from_be_bytes(reader.take(2)?.try_into().map_err(|_| LLUdpError::TruncatedPacket)?);
         Ok(Self { simulator_info: SimulatorInfo { handle, ip, port } })
     }

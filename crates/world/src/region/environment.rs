@@ -2,8 +2,9 @@ use std::{fmt, sync::Arc};
 
 use utils::AssetId;
 
-use crate::{ApplyError, Region, RegionApplied, UpdateSource, WorldRevision, identity::WorldId, update::FieldStamp};
-use crate::{World, WorldChange, newer_field};
+use crate::{
+    ApplyError, Region, RegionApplied, UpdateSource, World, WorldChange, WorldRevision, identity::WorldId, newer_field, update::FieldStamp,
+};
 
 pub const MAX_ENVIRONMENT_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_ENVIRONMENT_BYTES: usize = 16 * 1024 * 1024;

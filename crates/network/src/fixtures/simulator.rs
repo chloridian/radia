@@ -1,4 +1,8 @@
-use std::{collections::HashSet, io, net::SocketAddr, time::Duration};
+#[cfg(unix)]
+use std::os::fd::AsFd;
+#[cfg(windows)]
+use std::os::windows::io::AsSocket;
+use std::{collections::HashSet, io, net, net::SocketAddr, time::Duration};
 
 use protocol::{
     lludp::{Message, Packet},
@@ -18,18 +22,12 @@ pub(crate) fn test_source() -> SocketAddr {
     "127.0.0.1:13000".parse().expect("fixture simulator endpoint")
 }
 
-pub(crate) fn clone_udp_socket(socket: &UdpSocket) -> io::Result<std::net::UdpSocket> {
+pub(crate) fn clone_udp_socket(socket: &UdpSocket) -> io::Result<net::UdpSocket> {
     #[cfg(unix)]
-    let owned = {
-        use std::os::fd::AsFd;
-        socket.as_fd().try_clone_to_owned()?
-    };
+    let owned = { socket.as_fd().try_clone_to_owned()? };
     #[cfg(windows)]
-    let owned = {
-        use std::os::windows::io::AsSocket;
-        socket.as_socket().try_clone_to_owned()?
-    };
-    let socket = std::net::UdpSocket::from(owned);
+    let owned = { socket.as_socket().try_clone_to_owned()? };
+    let socket = net::UdpSocket::from(owned);
     socket.set_nonblocking(true)?;
     Ok(socket)
 }

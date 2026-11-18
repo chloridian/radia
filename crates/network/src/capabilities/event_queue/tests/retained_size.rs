@@ -1,9 +1,12 @@
-use std::fmt::Write as _;
+use std::{assert_matches, fmt::Write as _};
 
 use llsd::{Binary, Uri};
 
 use super::*;
-use crate::capabilities::budget::{MAX_CONCURRENT_NEIGHBOR_EVENT_BODIES, MAX_CONCURRENT_PRIMARY_EVENT_BODIES};
+use crate::{
+    capabilities::budget::{MAX_CONCURRENT_NEIGHBOR_EVENT_BODIES, MAX_CONCURRENT_PRIMARY_EVENT_BODIES},
+    fixtures::{allocation, http},
+};
 
 #[test]
 fn counts_owned_buffer_capacity() {
@@ -12,14 +15,14 @@ fn counts_owned_buffer_capacity() {
     let uri_capacity = uri_text.capacity();
     let uri = Value::Uri(Uri::from(uri_text));
     assert_eq!(uri.estimated_heap_bytes(), uri_capacity);
-    std::assert_matches!(&uri, Value::Uri(value) if value.as_str() == "uri");
+    assert_matches!(&uri, Value::Uri(value) if value.as_str() == "uri");
 
     let mut bytes = Vec::with_capacity(4096);
     bytes.extend_from_slice(b"bin");
     let binary_capacity = bytes.capacity();
     let binary = Value::Binary(Binary::from(bytes));
     assert_eq!(binary.estimated_heap_bytes(), binary_capacity);
-    std::assert_matches!(&binary, Value::Binary(value) if value.as_slice() == b"bin");
+    assert_matches!(&binary, Value::Binary(value) if value.as_slice() == b"bin");
 }
 
 const EVENT_BATCH_PREFIX: &str = "<llsd><map><key>id</key><integer>5</integer><key>events</key><array>";
@@ -66,7 +69,7 @@ fn decode_working_sets() {
     drop(empty_body);
     let body = event_batch_with_strings(1, value_bytes);
     assert_eq!(body.len(), MAX_EVENT_QUEUE_RESPONSE_BYTES);
-    let (result, live, peak, elapsed_ns) = crate::fixtures::allocation::measure(|| decode_event_batch(&body));
+    let (result, live, peak, elapsed_ns) = allocation::measure(|| decode_event_batch(&body));
     let total = report_decode("near_32mib_string", body.len(), body.capacity(), live, peak, elapsed_ns, 0, "reject_scalar_limit");
     if total > largest.1 {
         largest = ("near_32mib_string", total);
@@ -77,7 +80,7 @@ fn decode_working_sets() {
     assert!(error.contains("string bytes limit exceeded"), "{error}");
     assert!(peak <= (2 * MAX_QUEUED_CAPABILITY_EVENT_BYTES) as i128, "oversized string was copied before rejection: peak={peak}");
     assert!((0..=4096).contains(&live), "rejected decode retained unexpected allocations: {live} bytes");
-    let ((), released, _, _) = crate::fixtures::allocation::measure(|| drop(error));
+    let ((), released, _, _) = allocation::measure(|| drop(error));
     assert_eq!(released, -live, "rejected decode output should release its allocations");
     drop(body);
 
@@ -92,7 +95,7 @@ fn decode_working_sets() {
     xml.push_str(map_suffix);
     let body = xml.into_bytes();
     assert!(body.len() <= MAX_EVENT_QUEUE_RESPONSE_BYTES);
-    let (result, live, peak, elapsed_ns) = crate::fixtures::allocation::measure(|| decode_event_batch(&body));
+    let (result, live, peak, elapsed_ns) = allocation::measure(|| decode_event_batch(&body));
     let total = report_decode("large_key_map", body.len(), body.capacity(), live, peak, elapsed_ns, 0, "reject_event_heap_limit");
     if total > largest.1 {
         largest = ("large_key_map", total);
@@ -103,7 +106,7 @@ fn decode_working_sets() {
     assert!(error.contains("heap limit"), "{error}");
     assert!(peak <= (2 * MAX_QUEUED_CAPABILITY_EVENT_BYTES) as i128, "large map was built before rejection: peak={peak}");
     assert!((0..=4096).contains(&live), "rejected decode retained unexpected allocations: {live} bytes");
-    let ((), released, _, _) = crate::fixtures::allocation::measure(|| drop(error));
+    let ((), released, _, _) = allocation::measure(|| drop(error));
     assert_eq!(released, -live, "rejected decode output should release its allocations");
     drop(body);
 
@@ -111,7 +114,7 @@ fn decode_working_sets() {
     let regular_map_entries = 31;
     let surrounding_values = 3 + 3;
     let extra_last_map_entries = MAX_LLSD_XML_ELEMENTS - surrounding_values - nested_map_count * (regular_map_entries + 1);
-    let container_item_limit = MAX_QUEUED_CAPABILITY_EVENT_BYTES / std::mem::size_of::<Value>();
+    let container_item_limit = MAX_QUEUED_CAPABILITY_EVENT_BYTES / size_of::<Value>();
     assert!(nested_map_count < container_item_limit);
     assert!(regular_map_entries + extra_last_map_entries < container_item_limit);
     assert_eq!(surrounding_values + nested_map_count * (regular_map_entries + 1) + extra_last_map_entries, MAX_LLSD_XML_ELEMENTS);
@@ -136,7 +139,7 @@ fn decode_working_sets() {
     xml.push_str(dense_suffix);
     let body = xml.into_bytes();
     assert!(body.len() <= MAX_EVENT_QUEUE_RESPONSE_BYTES);
-    let (result, live, peak, elapsed_ns) = crate::fixtures::allocation::measure(|| decode_event_batch(&body));
+    let (result, live, peak, elapsed_ns) = allocation::measure(|| decode_event_batch(&body));
     let total =
         report_decode("near_global_values_small_maps", body.len(), body.capacity(), live, peak, elapsed_ns, 0, "reject_event_heap_limit");
     if total > largest.1 {
@@ -148,14 +151,14 @@ fn decode_working_sets() {
     assert!(error.contains("heap limit"), "{error}");
     assert!(peak <= (2 * MAX_QUEUED_CAPABILITY_EVENT_BYTES) as i128, "nested maps were built before rejection: peak={peak}");
     assert!((0..=4096).contains(&live), "rejected decode retained unexpected allocations: {live} bytes");
-    let ((), released, _, _) = crate::fixtures::allocation::measure(|| drop(error));
+    let ((), released, _, _) = allocation::measure(|| drop(error));
     assert_eq!(released, -live, "rejected decode output should release its allocations");
     drop(body);
 
     let oversized_event_count = 1025;
     let messages = vec!["x"; oversized_event_count];
-    let body = crate::fixtures::http::event_batch_body(5, &messages).into_bytes();
-    let (result, live, peak, elapsed_ns) = crate::fixtures::allocation::measure(|| decode_event_batch(&body));
+    let body = http::event_batch_body(5, &messages).into_bytes();
+    let (result, live, peak, elapsed_ns) = allocation::measure(|| decode_event_batch(&body));
     let total = report_decode("oversized_event_array", body.len(), body.capacity(), live, peak, elapsed_ns, 0, "reject_event_count");
     if total > largest.1 {
         largest = ("oversized_event_array", total);
@@ -166,7 +169,7 @@ fn decode_working_sets() {
     assert!(error.contains("1024-event limit"), "{error}");
     assert!(peak <= (2 * MAX_QUEUED_CAPABILITY_EVENT_BYTES) as i128, "oversized events array was retained: peak={peak}");
     assert!((0..=4096).contains(&live), "rejected decode retained unexpected allocations: {live} bytes");
-    let ((), released, _, _) = crate::fixtures::allocation::measure(|| drop(error));
+    let ((), released, _, _) = allocation::measure(|| drop(error));
     assert_eq!(released, -live, "rejected decode output should release its allocations");
     drop(body);
 
@@ -182,14 +185,14 @@ fn decode_working_sets() {
     xml.push_str(ignored_suffix);
     let body = xml.into_bytes();
     assert!(body.len() <= MAX_EVENT_QUEUE_RESPONSE_BYTES);
-    let (result, live, peak, elapsed_ns) = crate::fixtures::allocation::measure(|| decode_event_batch(&body));
+    let (result, live, peak, elapsed_ns) = allocation::measure(|| decode_event_batch(&body));
     let Ok((id, events)) = result else {
         panic!("a small event should be accepted when its envelope has an ignored map field");
     };
     assert_eq!(id, 5);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].message, "Small");
-    std::assert_matches!(&events[0].body, Value::Undefined);
+    assert_matches!(&events[0].body, Value::Undefined);
     let retained_bytes = capability_event_batch_retained_size(&events, events.capacity());
     assert!(peak <= (2 * MAX_QUEUED_CAPABILITY_EVENT_BYTES) as i128, "ignored envelope map was retained: peak={peak}");
     let total = report_decode(
@@ -205,7 +208,7 @@ fn decode_working_sets() {
     if total > largest.1 {
         largest = ("ignored_envelope_key_map", total);
     }
-    let ((), released, _, _) = crate::fixtures::allocation::measure(|| drop(events));
+    let ((), released, _, _) = allocation::measure(|| drop(events));
     assert_eq!(released, -live, "accepted decoded output should release its allocations");
     drop(body);
 
@@ -227,7 +230,7 @@ fn decode_working_sets() {
         if padded {
             body.resize(MAX_EVENT_QUEUE_RESPONSE_BYTES, b' ');
         }
-        let (result, live, peak, elapsed_ns) = crate::fixtures::allocation::measure(|| decode_event_batch(&body));
+        let (result, live, peak, elapsed_ns) = allocation::measure(|| decode_event_batch(&body));
         let Ok((id, events)) = result else {
             panic!("the representative batch should fit the retained batch limit: {label}");
         };
@@ -237,7 +240,7 @@ fn decode_working_sets() {
         let retained_bytes = capability_event_batch_retained_size(&events, events.capacity());
         assert!(retained_bytes >= MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES * 98 / 100, "retained={retained_bytes}");
         assert!(retained_bytes <= MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, "retained={retained_bytes}");
-        let temporary_bytes = 3 * MAX_QUEUED_CAPABILITY_EVENT_BYTES + (oversized_event_count - 1) * std::mem::size_of::<CapabilityEvent>();
+        let temporary_bytes = 3 * MAX_QUEUED_CAPABILITY_EVENT_BYTES + (oversized_event_count - 1) * size_of::<CapabilityEvent>();
         assert!(
             peak <= live + temporary_bytes as i128,
             "accepted batch copied its input or exceeded parser scratch allowance: {label}, peak={peak}"
@@ -246,7 +249,7 @@ fn decode_working_sets() {
         if total > largest.1 {
             largest = (label, total);
         }
-        let ((), released, _, _) = crate::fixtures::allocation::measure(|| drop(events));
+        let ((), released, _, _) = allocation::measure(|| drop(events));
         assert_eq!(released, -live, "accepted decoded output should release its allocations");
     }
 
@@ -267,7 +270,7 @@ fn decode_working_sets() {
         MAX_QUEUED_CAPABILITY_EVENT_BYTES,
         1024,
         MAX_LLSD_XML_ELEMENTS,
-        MAX_QUEUED_CAPABILITY_EVENT_BYTES / std::mem::size_of::<Value>(),
+        MAX_QUEUED_CAPABILITY_EVENT_BYTES / size_of::<Value>(),
         map_entries,
         nested_map_count,
         regular_map_entries,

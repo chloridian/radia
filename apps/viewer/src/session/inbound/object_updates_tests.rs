@@ -1,11 +1,16 @@
-use super::*;
+use std::assert_matches;
+
 use protocol::messages::CachedObjectReference;
 
-use crate::session::inbound::decode_cached_object;
+use super::*;
+use crate::{
+    session::inbound::{decode_cached_object, object::FLAGS_USE_PHYSICS},
+    test_helpers,
+};
 
 #[test]
 fn fixture_mapping_preserves_packet_order() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let packet = packet(vectors::OBJECT_UPDATE);
     let batch = decode_object_message(region, packet.sequence(), OrderEvidence::Ordered(17), packet.message()).expect("object batch");
 
@@ -26,17 +31,17 @@ fn fixture_mapping_preserves_packet_order() {
 
 #[test]
 fn motion_preserves_physics_fields() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
-    let Message::ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
+    let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects.truncate(1);
     update.region_data.time_dilation = 0x4000;
-    update.objects[0].update_flags |= crate::session::inbound::object::FLAGS_USE_PHYSICS;
+    update.objects[0].update_flags |= FLAGS_USE_PHYSICS;
     let batch = decode_object_message(region, 1, OrderEvidence::Ordered(1), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected full observation") };
     assert_eq!(observation.is_physical, Some(true));
     assert_eq!(observation.time_dilation, Some(f32::from(0x4000_u16) / f32::from(u16::MAX)));
-    let Message::ObjectUpdate(update) = &full else { panic!("expected cached full object fixture") };
+    let ObjectUpdate(update) = &full else { panic!("expected cached full object fixture") };
     let reference = CachedObjectReference {
         local_id: update.objects[0].local_id,
         crc: update.objects[0].crc,
@@ -49,15 +54,15 @@ fn motion_preserves_physics_fields() {
     assert_eq!(cached.time_dilation, observation.time_dilation);
 
     let mut compressed = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED).message().clone();
-    let Message::ObjectUpdateCompressed(update) = &mut compressed else { panic!("expected compressed object fixture") };
+    let ObjectUpdateCompressed(update) = &mut compressed else { panic!("expected compressed object fixture") };
     update.objects.truncate(1);
     update.region_data.time_dilation = 0x8000;
-    update.objects[0].update_flags |= crate::session::inbound::object::FLAGS_USE_PHYSICS;
+    update.objects[0].update_flags |= FLAGS_USE_PHYSICS;
     let batch = decode_object_message(region, 2, OrderEvidence::Ordered(2), &compressed).expect("compressed object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
     assert_eq!(observation.is_physical, Some(true));
     assert_eq!(observation.time_dilation, Some(f32::from(0x8000_u16) / f32::from(u16::MAX)));
-    let Message::ObjectUpdateCompressed(update) = &compressed else { panic!("expected cached compressed object fixture") };
+    let ObjectUpdateCompressed(update) = &compressed else { panic!("expected cached compressed object fixture") };
     let reference = CachedObjectReference {
         local_id: update.objects[0].local_id,
         crc: update.objects[0].crc,
@@ -70,7 +75,7 @@ fn motion_preserves_physics_fields() {
     assert_eq!(cached.time_dilation, observation.time_dilation);
 
     let mut terse = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).message().clone();
-    let Message::ImprovedTerseObjectUpdate(update) = &mut terse else { panic!("expected terse fixture") };
+    let ImprovedTerseObjectUpdate(update) = &mut terse else { panic!("expected terse fixture") };
     update.region_data.time_dilation = u16::MAX;
     let batch = decode_object_message(region, 3, OrderEvidence::Ordered(3), &terse).expect("terse object batch");
     let Some(ObjectOperation::Patch(patch)) = batch.blocks[0].as_ref() else { panic!("expected terse patch") };
@@ -80,12 +85,12 @@ fn motion_preserves_physics_fields() {
 
 #[test]
 fn bad_terse_keeps_later_object() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let fixture = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
-    let Message::ImprovedTerseObjectUpdate(update) = fixture.message() else { panic!("expected terse fixture") };
+    let ImprovedTerseObjectUpdate(update) = fixture.message() else { panic!("expected terse fixture") };
     let mut blocks = update.objects.clone();
     blocks.insert(0, improved_terse_object_update::ObjectBlock::Malformed { packed_data: vec![1], texture_entry: Vec::new() });
-    let message = Message::ImprovedTerseObjectUpdate(improved_terse_object_update::ImprovedTerseObjectUpdate {
+    let message = ImprovedTerseObjectUpdate(improved_terse_object_update::ImprovedTerseObjectUpdate {
         region_data: update.region_data,
         objects: blocks,
     });
@@ -101,7 +106,7 @@ fn bad_terse_keeps_later_object() {
 
 #[test]
 fn invalid_blocks_keep_position() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let mut message = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut message else { panic!("expected full object fixture") };
     update.objects.truncate(2);
@@ -110,19 +115,19 @@ fn invalid_blocks_keep_position() {
 
     assert_eq!(batch.invalid_blocks, 1);
     assert!(batch.blocks[0].is_none());
-    std::assert_matches!(batch.blocks[1].as_ref(), Some(ObjectOperation::Observe(observation)) if observation.parent == ParentUpdate::Root);
+    assert_matches!(batch.blocks[1].as_ref(), Some(ObjectOperation::Observe(observation)) if observation.parent == ParentUpdate::Root);
 }
 
 #[test]
 fn non_object_messages_are_ignored() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let message = Message::StartPingCheck(StartPingCheck::default());
     assert!(decode_object_message(region, 1, OrderEvidence::Ordered(1), &message).is_none());
 }
 
 #[test]
 fn empty_snapshot_clears() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let message = message(0x4175, br"{'id':i7,'te':[],'od':[]}");
     let batch = decode_object_message(region, 5, OrderEvidence::Ordered(5), &message).expect("override batch");
 

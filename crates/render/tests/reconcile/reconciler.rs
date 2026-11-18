@@ -1,5 +1,7 @@
-use std::{assert_matches, collections::HashSet};
+use std::{array, assert_matches, collections::HashSet};
 
+use render::scene::{HiddenReason, MeshBuildError};
+use test_support::texture::RGB_J2C;
 use world::{FaceAppearance, SurfaceAppearance, TerrainPatch, TerrainSettings, TextureMapping};
 
 use super::support::{
@@ -96,7 +98,7 @@ fn mesh_reuse_and_replacement() {
     settle(&mut scene, &mut view, &world, &mut now);
     let changed = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).unwrap();
     assert!(changed.mesh().is_none());
-    assert!(matches!(changed.mesh_state(), Some((_, PreparedMesh::Failed(render::scene::MeshBuildError::UnsupportedShape)))));
+    assert!(matches!(changed.mesh_state(), Some((_, PreparedMesh::Failed(MeshBuildError::UnsupportedShape)))));
     scene.close();
     drop(scene);
     drop(view);
@@ -259,7 +261,7 @@ fn busy_scene_tracks_live_updates() {
         );
         let _ = world.patch_object(patch).unwrap();
     }
-    let terrain_ids = std::array::from_fn(|index| Uuid::from_u128(9100 + index as u128));
+    let terrain_ids = array::from_fn(|index| Uuid::from_u128(9100 + index as u128));
     let _ =
         world.observe_terrain_settings(source(&world, 0, 4100), TerrainSettings::new(terrain_ids, [0.0; 4], [64.0; 4]).unwrap()).unwrap();
     let _ = world.observe_terrain_patch(source(&world, 0, 4101), TerrainPatch::new(0, 0, Box::new([0.0; 256])).unwrap()).unwrap();
@@ -268,7 +270,7 @@ fn busy_scene_tracks_live_updates() {
     scene.set_camera(camera(98.0));
     let initial = settle_materials(&mut scene, &mut view, &world, &mut now);
     for request in initial.requested {
-        let status = prepared_asset(request.request, test_support::texture::RGB_J2C.to_vec());
+        let status = prepared_asset(request.request, RGB_J2C.to_vec());
         scene.complete_asset(request.ticket, status);
     }
     settle_materials(&mut scene, &mut view, &world, &mut now);
@@ -287,7 +289,7 @@ fn busy_scene_tracks_live_updates() {
         }
         let _ = world.patch_object(patch).unwrap();
     }
-    let terrain_ids = std::array::from_fn(|index| Uuid::from_u128(if index == 0 { 9300 } else { 9100 + index as u128 }));
+    let terrain_ids = array::from_fn(|index| Uuid::from_u128(if index == 0 { 9300 } else { 9100 + index as u128 }));
     let _ =
         world.observe_terrain_settings(source(&world, 0, 5100), TerrainSettings::new(terrain_ids, [0.0; 4], [64.0; 4]).unwrap()).unwrap();
     scene.set_camera(camera(99.0));
@@ -296,7 +298,7 @@ fn busy_scene_tracks_live_updates() {
     assert!((2..=5).contains(&arrivals.requested.len()), "pose and terrain updates should request a few new textures");
     assert!(arrivals.requested.iter().all(|request| matches!(request.request, Request::Texture { .. })));
     for request in arrivals.requested {
-        let status = prepared_asset(request.request, test_support::texture::RGB_J2C.to_vec());
+        let status = prepared_asset(request.request, RGB_J2C.to_vec());
         scene.complete_asset(request.ticket, status);
     }
     settle_materials(&mut scene, &mut view, &world, &mut now);
@@ -476,7 +478,7 @@ fn own_signed_dimensions() {
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     let child = view.objects().find(|obj| obj.detail().summary.id == Uuid::from_u128(2)).unwrap();
-    assert_eq!(child.placement(), Placement::Hidden(render::scene::HiddenReason::InvalidDimensions));
+    assert_eq!(child.placement(), Placement::Hidden(HiddenReason::InvalidDimensions));
 }
 
 #[test]

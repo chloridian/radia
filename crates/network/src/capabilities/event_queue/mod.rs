@@ -35,8 +35,8 @@ use super::{
 };
 use crate::{
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
-    event::EventRetention,
-    event::{CapabilityEvent, Event, EventEnvelope, EventQueueBatchOrder, EventSendOutcome, SimulatorId},
+    error,
+    event::{CapabilityEvent, Event, EventEnvelope, EventQueueBatchOrder, EventRetention, EventSendOutcome, SimulatorId},
     http::{self, Response},
 };
 
@@ -428,7 +428,7 @@ async fn discover_capability(context: &EventQueueContext, stop: &Stop) -> Result
                     decoded = spawn_blocking_with_permit(request_permit, move || decode_seed_capabilities(response, &decode_names)) => {
                         match decoded {
                             Ok((decoded, _permit)) => decoded,
-                            Err(error) => Err(crate::error::Error::Capability(format!("Capability decoder task failed: {error}"))),
+                            Err(error) => Err(error::Error::Capability(format!("Capability decoder task failed: {error}"))),
                         }
                     }
                 }

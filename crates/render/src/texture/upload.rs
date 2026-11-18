@@ -194,16 +194,18 @@ impl Textures {
 
 #[cfg(test)]
 mod tests {
-    use assets::{Failure, Priority, TextureHandle, TextureId};
     use std::sync::atomic::Ordering;
+
+    use assets::{Failure, Priority, TextureHandle, TextureId, TextureUsage};
+    use futures::executor::block_on;
+    use test_support::texture::{GRAY_4096_J2C, RGB_J2C, RGBA_J2C};
     use wgpu::{Queue, TextureFormat};
 
     use super::*;
-    use crate::texture::fixtures::{descriptor, loaded, loaded_fixture};
-    use crate::texture::{CompressionQuality, Conversion, PixelSource, allocation_bytes};
-    use assets::TextureUsage;
-    use futures::executor::block_on;
-    use test_support::texture::{GRAY_4096_J2C, RGB_J2C, RGBA_J2C};
+    use crate::texture::{
+        CompressionQuality, Conversion, PixelSource, allocation_bytes,
+        fixtures::{descriptor, loaded, loaded_fixture},
+    };
 
     fn vulkan_device() -> (Device, Queue) {
         block_on(async {

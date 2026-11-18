@@ -1,12 +1,10 @@
-use std::mem::size_of;
-
 use uuid::Uuid;
 
 use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::OBJECT_EXTRA_PARAMS,
@@ -33,22 +31,21 @@ impl TypedMessage for ObjectExtraParams {
     const INBOUND_ONLY: bool = true;
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
-        self::decode(reader)
+        decode(reader)
     }
 
     fn encode(&self, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
-        self::encode(self, writer)
+        encode(self, writer)
     }
 
     fn preflight_allocation_bound(payload: &[u8]) -> Result<usize, LLUdpError> {
-        crate::lludp::message::allocation::with_payload(payload, preflight_allocation_bytes(payload)?)
+        allocation::with_payload(payload, preflight_allocation_bytes(payload)?)
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        let mut bytes =
-            crate::lludp::message::allocation::capacity_bytes(self.object_data.capacity(), std::mem::size_of::<ExtraParamUpdate>());
+        let mut bytes = allocation::capacity_bytes(self.object_data.capacity(), size_of::<ExtraParamUpdate>());
         for update in &self.object_data {
-            crate::lludp::message::allocation::add_capacity(&mut bytes, update.data.capacity(), std::mem::size_of::<u8>());
+            allocation::add_capacity(&mut bytes, update.data.capacity(), size_of::<u8>());
         }
         bytes
     }

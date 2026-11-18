@@ -8,9 +8,12 @@ mod value;
 
 pub mod binary;
 pub mod notation;
+pub mod uuid;
 pub mod xml;
 
-pub use self::error::{Error, Result};
-pub use self::format::from_slice_with_limits;
-pub use self::limits::Limits;
-pub use self::value::{Binary, Date, Map, Uri, Value, uuid};
+pub use self::{
+    error::{Error, Result},
+    format::from_slice_with_limits,
+    limits::Limits,
+    value::{Binary, Date, Map, Uri, Value},
+};

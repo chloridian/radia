@@ -1,10 +1,16 @@
 use std::{
     collections::{HashMap, VecDeque},
+    mem,
+    num::NonZeroU32,
     time::{Duration, Instant},
+    vec::IntoIter,
 };
 
 use network::SimulatorId;
 use protocol::messages::CacheMissType;
+#[cfg(test)]
+use tokio::task;
+use tracing::field;
 use utils::Summary;
 use uuid::Uuid;
 use world::{
@@ -124,13 +130,13 @@ impl IngestSummary {
         self.blocks.push(BlockOutcome::Rejected { address, error });
     }
 
-    pub(super) fn touches_entity(&self, entity: world::Entity) -> bool {
+    pub(super) fn touches_entity(&self, entity: Entity) -> bool {
         self.blocks.iter().filter_map(BlockOutcome::applied).any(|applied| {
             matches!(
                 &applied.outcome,
-                world::ApplyOutcome::Introduced(updated)
+                Introduced(updated)
                     | world::ApplyOutcome::Updated(updated)
-                    | world::ApplyOutcome::AgentHandedOff(updated)
+                    | AgentHandedOff(updated)
                     if *updated == entity
             )
         })
@@ -178,9 +184,7 @@ impl IngestSummary {
                 let BlockOutcome::Applied { applied, recovered, .. } = block else { return None };
                 let (entity, address) = match &applied.outcome {
                     TombstoneRecorded(address) => (None, Some(*address)),
-                    world::ApplyOutcome::Introduced(entity) | world::ApplyOutcome::Updated(entity) | AgentHandedOff(entity) => {
-                        (Some(*entity), *recovered)
-                    }
+                    Introduced(entity) | world::ApplyOutcome::Updated(entity) | AgentHandedOff(entity) => (Some(*entity), *recovered),
                     _ => (None, *recovered),
                 };
                 Some((applied, entity, address))
@@ -195,16 +199,6 @@ impl IngestSummary {
     }
 
     fn rejections(&self) -> IngestRejections {
-        use ApplyError::{
-            AddressGenerationExhausted, EntityBudgetExhausted, EnvironmentBudgetExhausted, FrameGenerationExhausted, InvalidValue,
-            KindMismatch, RegionBudgetExhausted, RegionGenerationExhausted, RegionRetired, RemovalCapacityExhausted, RevisionExhausted,
-            StaleRegion, TerrainBudgetExhausted,
-        };
-        use FieldRejectionReason::{
-            InvalidRotation, InvalidValue as RejectedValue, ParentCycle, ParentDependsOnRejectedParent, ResourceLimit, StaleFrame,
-            StaleVersion, UntrustedSource,
-        };
-
         if let IngestStatus::RegionMetadataRejected(error) = self.status {
             return IngestRejections { region_metadata: Some(error), ..IngestRejections::default() };
         }
@@ -216,28 +210,28 @@ impl IngestSummary {
         for block in &self.blocks {
             let mut rejected = false;
             match block {
-                BlockOutcome::Rejected { error: InvalidValue { .. } | KindMismatch { .. }, .. } => {
+                BlockOutcome::Rejected { error: ApplyError::InvalidValue { .. } | ApplyError::KindMismatch { .. }, .. } => {
                     malformed = malformed.saturating_add(1);
                     rejected = true;
                 }
                 BlockOutcome::Rejected {
                     error:
-                        EntityBudgetExhausted
-                        | TerrainBudgetExhausted
-                        | EnvironmentBudgetExhausted
-                        | world::ApplyError::ParcelBudgetExhausted
-                        | RegionBudgetExhausted
-                        | RegionGenerationExhausted
-                        | RemovalCapacityExhausted
-                        | RevisionExhausted
-                        | FrameGenerationExhausted
-                        | AddressGenerationExhausted,
+                        ApplyError::EntityBudgetExhausted
+                        | ApplyError::TerrainBudgetExhausted
+                        | ApplyError::EnvironmentBudgetExhausted
+                        | ApplyError::ParcelBudgetExhausted
+                        | ApplyError::RegionBudgetExhausted
+                        | ApplyError::RegionGenerationExhausted
+                        | ApplyError::RemovalCapacityExhausted
+                        | ApplyError::RevisionExhausted
+                        | ApplyError::FrameGenerationExhausted
+                        | ApplyError::AddressGenerationExhausted,
                     ..
                 } => {
                     resource_limits = resource_limits.saturating_add(1);
                     rejected = true;
                 }
-                BlockOutcome::Rejected { error: StaleRegion | RegionRetired, .. } => {}
+                BlockOutcome::Rejected { error: ApplyError::StaleRegion | ApplyError::RegionRetired, .. } => {}
                 BlockOutcome::Applied { applied, .. } => {
                     if matches!(&applied.outcome, Deferred(world::DeferredReason::RelationshipCapacity)) {
                         resource_limits = resource_limits.saturating_add(1);
@@ -245,15 +239,20 @@ impl IngestSummary {
                     }
                     for rejection in applied.rejections.iter() {
                         match rejection.reason {
-                            RejectedValue { .. } | InvalidRotation | ParentCycle | ParentDependsOnRejectedParent => {
+                            FieldRejectionReason::InvalidValue { .. }
+                            | FieldRejectionReason::InvalidRotation
+                            | FieldRejectionReason::ParentCycle
+                            | FieldRejectionReason::ParentDependsOnRejectedParent => {
                                 malformed = malformed.saturating_add(1);
                                 rejected = true;
                             }
-                            ResourceLimit { .. } => {
+                            FieldRejectionReason::ResourceLimit { .. } => {
                                 resource_limits = resource_limits.saturating_add(1);
                                 rejected = true;
                             }
-                            StaleFrame | StaleVersion | UntrustedSource => {}
+                            FieldRejectionReason::StaleFrame
+                            | FieldRejectionReason::StaleVersion
+                            | FieldRejectionReason::UntrustedSource => {}
                         }
                     }
                 }
@@ -322,7 +321,7 @@ impl DegradedUpdates {
             sample_simulator = sample.simulator.get(),
             sample_region = sample.region.map(|region| region.get()),
             sample_local_ids = ?sample.local_ids(),
-            last_error = self.last_error.map(tracing::field::display),
+            last_error = self.last_error.map(field::display),
             "world updates were partially rejected; world data may be incomplete"
         );
     }
@@ -353,7 +352,7 @@ impl RejectedValues {
             sample_simulator = sample.simulator.get(),
             sample_region = sample.region.map(|region| region.get()),
             sample_local_ids = ?sample.local_ids(),
-            last_error = self.last_error.map(tracing::field::display),
+            last_error = self.last_error.map(field::display),
             "world updates contained rejected values"
         );
     }
@@ -367,11 +366,7 @@ struct OverrideFailures {
 
 impl OverrideFailures {
     fn report(self) {
-        tracing::warn!(
-            failed = self.failed,
-            last_error = self.last_error.map(tracing::field::display),
-            "cached PBR overrides not restored"
-        );
+        tracing::warn!(failed = self.failed, last_error = self.last_error.map(field::display), "cached PBR overrides not restored");
     }
 }
 
@@ -404,7 +399,7 @@ pub(super) enum ObjectBatchProgress {
 
 pub(super) struct ObjectBatchContinuation {
     summary: IngestSummary,
-    operations: std::vec::IntoIter<Option<ObjectOperation>>,
+    operations: IntoIter<Option<ObjectOperation>>,
     part: IngestSummary,
     current: Option<Option<ObjectOperation>>,
     lookup_index: u8,
@@ -444,7 +439,7 @@ fn operation_lookup(operation: &Option<ObjectOperation>, index: u8) -> Option<Ob
     }
 }
 
-fn operation_parent(operation: &Option<ObjectOperation>) -> Option<(UpdateSource, std::num::NonZeroU32, ParentUpdate)> {
+fn operation_parent(operation: &Option<ObjectOperation>) -> Option<(UpdateSource, NonZeroU32, ParentUpdate)> {
     match operation.as_ref()? {
         ObjectOperation::Observe(observation) => Some((observation.source, observation.local_id, observation.parent)),
         ObjectOperation::Patch(patch) => patch.parent.map(|parent| (patch.source, patch.local_id, parent)),
@@ -563,7 +558,7 @@ impl SessionWorld {
                 ObjectLookupProgress::Hidden { .. } => return None,
                 ObjectLookupProgress::Pending { cursor: next, .. } => {
                     cursor = Some(next);
-                    tokio::task::yield_now().await;
+                    task::yield_now().await;
                 }
             }
         }
@@ -578,7 +573,7 @@ impl SessionWorld {
                 ObjectLookupProgress::Hidden { .. } => return None,
                 ObjectLookupProgress::Pending { cursor: next, .. } => {
                     cursor = Some(next);
-                    tokio::task::yield_now().await;
+                    task::yield_now().await;
                 }
             }
         }
@@ -839,7 +834,7 @@ impl SessionWorld {
                 .collect();
             on_chunk(targets, Vec::new());
             continuation.callback_summary = false;
-            return ObjectBatchProgress::Complete(std::mem::replace(&mut continuation.summary, IngestSummary::new(IngestStatus::Applied)));
+            return ObjectBatchProgress::Complete(mem::replace(&mut continuation.summary, IngestSummary::new(IngestStatus::Applied)));
         }
 
         let mut lookup_work = 0;
@@ -856,7 +851,7 @@ impl SessionWorld {
                     if continuation.current.is_none() {
                         let Some(operation) = continuation.operations.next() else {
                             if continuation.part.blocks.is_empty() && continuation.operation_count == 0 {
-                                let summary = std::mem::replace(&mut continuation.summary, IngestSummary::new(IngestStatus::Applied));
+                                let summary = mem::replace(&mut continuation.summary, IngestSummary::new(IngestStatus::Applied));
                                 on_chunk(Vec::new(), Vec::new());
                                 return ObjectBatchProgress::Complete(summary);
                             }
@@ -945,16 +940,16 @@ impl SessionWorld {
                                         (self.simulator_for_region(address.region()), address, cache_miss_type)
                                     })
                                     .collect();
-                                let updated = std::mem::take(&mut continuation.updated);
+                                let updated = mem::take(&mut continuation.updated);
                                 on_chunk(targets, updated);
                                 continuation
                                     .summary
-                                    .append(std::mem::replace(&mut continuation.part, IngestSummary::new(IngestStatus::Applied)));
+                                    .append(mem::replace(&mut continuation.part, IngestSummary::new(IngestStatus::Applied)));
                                 continuation.operation_count = 0;
                                 continuation.current_cancellation = None;
                                 continuation.cancellation_cursor = None;
                                 if continuation.summary.status != IngestStatus::Applied || continuation.operations.len() == 0 {
-                                    return ObjectBatchProgress::Complete(std::mem::replace(
+                                    return ObjectBatchProgress::Complete(mem::replace(
                                         &mut continuation.summary,
                                         IngestSummary::new(IngestStatus::Applied),
                                     ));
@@ -1000,7 +995,7 @@ impl SessionWorld {
         let mut continuation = self.begin_object_batch(simulator_id, batch)?;
         loop {
             match self.advance_object_batch(&mut continuation, &mut on_chunk) {
-                ObjectBatchProgress::Pending => tokio::task::yield_now().await,
+                ObjectBatchProgress::Pending => task::yield_now().await,
                 ObjectBatchProgress::Complete(summary) => return Some(summary),
             }
         }
@@ -1017,7 +1012,7 @@ impl SessionWorld {
             match self.prepare_object_media_step(simulator_id, request, cursor.take(), MAX_OBJECT_LOOKUP_WORK_ITEMS) {
                 ObjectMediaPreparationProgress::Pending(next) => {
                     cursor = Some(next);
-                    tokio::task::yield_now().await;
+                    task::yield_now().await;
                 }
                 ObjectMediaPreparationProgress::Complete { target, .. } => return target,
             }
@@ -1206,7 +1201,7 @@ impl SessionWorld {
         let mut check = ObjectMediaTargetCheck::default();
         loop {
             match self.object_media_target_is_current_step(target, &mut check, MAX_OBJECT_LOOKUP_WORK_ITEMS) {
-                ObjectMediaTargetCheckProgress::Pending => tokio::task::yield_now().await,
+                ObjectMediaTargetCheckProgress::Pending => task::yield_now().await,
                 ObjectMediaTargetCheckProgress::Complete { current: true, .. } => {
                     return self.apply_object_media_after_check(target, update);
                 }

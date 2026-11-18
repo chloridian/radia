@@ -1,7 +1,6 @@
 use std::{
     error::Error,
     fmt::{self, Display, Formatter},
-    mem::size_of,
 };
 
 use crate::MAX_SURFACE_FACES;

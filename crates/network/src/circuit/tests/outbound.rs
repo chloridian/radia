@@ -1,3 +1,7 @@
+use std::assert_matches;
+
+use protocol::messages::RegionHandshakeReply;
+
 use super::*;
 
 async fn send_pending(pending: PendingSend, circuit: &mut Circuit, simulator: &UdpSocket) -> Packet {
@@ -103,10 +107,8 @@ fn paced_send_expires() {
 #[test]
 fn handshake_reply_survives_send_age() {
     let mut queued = queued_for_test(TrafficClass::Control);
-    queued.message = Message::RegionHandshakeReply(protocol::messages::RegionHandshakeReply {
-        agent_data: Default::default(),
-        region_info: Default::default(),
-    });
+    queued.message =
+        Message::RegionHandshakeReply(RegionHandshakeReply { agent_data: Default::default(), region_info: Default::default() });
     let expired_at = queued.queued_at + MAX_SEND_AGE + MAX_SEND_AGE;
     let mut outbound = OutboundQueue::new();
     assert!(outbound.push(queued, None).is_ok());
@@ -170,7 +172,7 @@ async fn control_keeps_retry_deadline() {
     }
 
     let deferred_since = deferred_retries[&sequence];
-    std::assert_matches!(
+    assert_matches!(
         expire_deferred_retries(&circuit, &mut deferred_retries, deferred_since + MAX_SEND_AGE),
         Err(ConnectionError::ReliableRetryExpired),
         "repeated priority sends cannot extend a due retry's deadline"
@@ -350,7 +352,7 @@ async fn primary_sends_during_retry_storm() {
         pacers.push(budget.handle().register(id as u64, id == 1).await.expect("register simulator pacer"));
     }
 
-    let burst = vec![0; crate::circuit::pacing::MAX_BURST_BYTES as usize];
+    let burst = vec![0; pacing::MAX_BURST_BYTES as usize];
     pacers[0].handle().send(&transports[0], &burst, TrafficClass::Fair).await.expect("drain the initial shared pacing burst");
 
     let now = Instant::now();
@@ -408,7 +410,7 @@ async fn primary_sends_during_retry_storm() {
     control.await.expect("primary control task").expect("send primary ACK");
 
     let deadline_bytes = parse_hex_fixture(vectors::AGENT_UPDATE_INITIAL).expect("parse AgentUpdate fixture");
-    std::assert_matches!(Packet::decode(&deadline_bytes).expect("decode AgentUpdate fixture").message(), Message::AgentUpdate(_));
+    assert_matches!(Packet::decode(&deadline_bytes).expect("decode AgentUpdate fixture").message(), Message::AgentUpdate(_));
     let deadline_pacer = pacers[0].handle();
     let deadline_socket = Arc::clone(&transports[0]);
     let deadline = spawn(async move { deadline_pacer.send(&deadline_socket, &deadline_bytes, TrafficClass::Deadline).await });
@@ -502,7 +504,7 @@ fn duplicate_reack_waits_for_deadline() {
     let mut pending = Some(pending_for_test(&circuit, queued, TrafficClass::Fair));
     let mut queue = OutboundQueue::new();
     let duplicate = circuit.prepare_receive(42, true, [acknowledged_sequence], now).expect("admit duplicate and process its appended ACK");
-    std::assert_matches!(duplicate, ReceiveAdmission::Duplicate(_));
+    assert_matches!(duplicate, ReceiveAdmission::Duplicate(_));
     assert!(!circuit.has_pending(acknowledged_sequence), "a duplicate's appended ACK still acknowledges outgoing data");
     assert!(circuit.has_pending_acks(), "duplicate should enqueue a re-ACK");
 
@@ -539,7 +541,7 @@ async fn due_ack_precedes_payload_retry() {
         .expect("prepare due standalone ACK")
         .expect("due ACK should be prepared first");
     let packet = send_pending(ack, &mut circuit, &simulator).await;
-    std::assert_matches!(packet.message(), Message::PacketAck(_));
+    assert_matches!(packet.message(), Message::PacketAck(_));
     assert!(queue.messages.iter().any(|queued| queued.class == TrafficClass::Fair));
 
     drop(pacer);

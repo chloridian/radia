@@ -1,11 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
+    error,
     fmt::{self, Display, Formatter},
     str::from_utf8,
 };
 
-use ::inventory::{AssetType, CategoryKey, FolderType, InventoryChild, InventoryOwner, InventorySnapshot, InventoryType, Item};
 use futures::{StreamExt, TryStreamExt, stream};
+use inventory::{AssetType, CategoryKey, FolderType, InventoryChild, InventoryOwner, InventorySnapshot, InventoryType, Item};
 use network::{
     AgentSession,
     capabilities::{CapabilityUrl, Client},
@@ -17,7 +18,7 @@ use world::RegionHandle;
 
 use super::{
     favorite_store::MAX_FAVORITES_PER_AGENT,
-    fetch::{fetch_single_folder, fetch_single_items},
+    fetch::{InventoryFetchError, fetch_single_folder, fetch_single_items},
 };
 use crate::session::{RegionGridCell, RegionLookup, RegionLookupError, map_request_coordinates};
 
@@ -97,7 +98,7 @@ impl Display for FavoritesError {
     }
 }
 
-impl std::error::Error for FavoritesError {}
+impl error::Error for FavoritesError {}
 
 pub(crate) async fn load_favorites(
     capabilities: &Client,
@@ -165,7 +166,7 @@ pub async fn fetch_favorite_landmarks(
     let owner = InventoryOwner::new(agent_id);
     let folder = CategoryKey::new(owner, FolderId::new(favorite_folder_id));
     let folder_response = fetch_single_folder(capabilities, ais, descendents, folder).await.map_err(|error| match error {
-        super::fetch::InventoryFetchError::InvalidResponse => FavoritesError::InvalidFavoritesItemList,
+        InventoryFetchError::InvalidResponse => FavoritesError::InvalidFavoritesItemList,
         error => FavoritesError::FetchFavoritesFolder(error.to_string()),
     })?;
     let items = favorite_folder_items(folder_response.children)?;
@@ -365,7 +366,7 @@ fn parse_region_handle(value: &str) -> Option<u64> {
 mod tests {
     use std::{assert_matches, sync::Arc, time::Duration};
 
-    use ::inventory::{
+    use inventory::{
         AssetType, CategoryKey, InventoryChild, InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo,
         SaleType,
     };
@@ -382,12 +383,11 @@ mod tests {
     use uuid::Uuid;
     use world::RegionHandle;
 
-    use crate::inventory::favorite_store::MAX_FAVORITES_PER_AGENT;
-
     use super::{
         FavoritesError, LandmarkDestination, RegionGridCell, favorite_folder_items, global_position, is_link, parse_landmark_asset,
         parse_position, resolve_favorite_items,
     };
+    use crate::inventory::{favorite_store::MAX_FAVORITES_PER_AGENT, fetch::InventoryFetchError};
 
     fn inventory_item(inventory_type: InventoryType, asset_type: AssetType) -> Item {
         let owner = InventoryOwner::new(Uuid::from_u128(1));
@@ -597,7 +597,7 @@ mod tests {
 
         let result = super::fetch_single_items(&client, Some(&ais), None, owner, &[item_id]).await;
 
-        std::assert_matches!(result, Err(crate::inventory::fetch::InventoryFetchError::RequestFailed));
+        assert_matches!(result, Err(InventoryFetchError::RequestFailed));
         timeout(Duration::from_secs(5), peer).await.expect("favorites peer completion").expect("favorites peer task");
     }
 }

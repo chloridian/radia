@@ -4,7 +4,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::GENERIC_MESSAGE,
@@ -74,11 +74,11 @@ impl TypedMessage for GenericMessage {
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        let mut bytes = crate::lludp::message::allocation::capacity_bytes(self.method_data.method.capacity(), std::mem::size_of::<u8>());
+        let mut bytes = allocation::capacity_bytes(self.method_data.method.capacity(), size_of::<u8>());
         if let Some(parameters) = &self.param_list {
-            crate::lludp::message::allocation::add_capacity(&mut bytes, parameters.capacity(), std::mem::size_of::<Parameter>());
+            allocation::add_capacity(&mut bytes, parameters.capacity(), size_of::<Parameter>());
             for parameter in parameters {
-                crate::lludp::message::allocation::add_capacity(&mut bytes, parameter.parameter.capacity(), std::mem::size_of::<u8>());
+                allocation::add_capacity(&mut bytes, parameter.parameter.capacity(), size_of::<u8>());
             }
         }
         bytes

@@ -8,8 +8,7 @@ use std::{
 use futures::{FutureExt, channel::mpsc, pin_mut, sink::SinkExt, stream::StreamExt};
 use llsd::{Map, Value};
 use network::{SimulatorId, capabilities::Client};
-use tokio::runtime::Handle;
-use tokio::sync::watch;
+use tokio::{runtime::Handle, sync::watch, time};
 use tracing::Instrument;
 use uuid::Uuid;
 use world::{
@@ -294,7 +293,7 @@ async fn fetch_with_retries(request: &FetchRequest) -> Result<ObjectMediaUpdate,
             }
         }
         if attempt + 1 < MAX_FETCH_ATTEMPTS {
-            tokio::time::sleep(RETRY_DELAY).await;
+            time::sleep(RETRY_DELAY).await;
         }
     }
     Err(last_error.expect("ObjectMedia fetch attempts are non-empty"))
@@ -428,7 +427,6 @@ pub(super) fn media_version(value: &str) -> Option<u32> {
 mod tests {
     use std::num::NonZeroU32;
 
-    use crate::test_helpers::simulator_id;
     use llsd::{Map, Value};
     use uuid::Uuid;
     use world::{
@@ -436,13 +434,15 @@ mod tests {
         OrderEvidence, ParentUpdate, Shape, UpdateSource,
     };
 
-    use crate::session::{
-        inbound::{ObjectBatch, ObjectMediaRequest, ObjectOperation},
-        world::{SessionWorld, viewer_world_limits},
-    };
-
     use super::{
         FetchError, ObjectMediaTarget, PendingMedia, RetirementState, media_version, parse_entry, parse_response, response_is_stale,
+    };
+    use crate::{
+        session::{
+            inbound::{ObjectBatch, ObjectMediaRequest, ObjectOperation},
+            world::{SessionWorld, viewer_world_limits},
+        },
+        test_helpers::simulator_id,
     };
 
     async fn replacement_targets() -> (ObjectMediaTarget, ObjectMediaTarget) {

@@ -2,14 +2,12 @@ mod de;
 mod ser;
 mod tokens;
 
-pub use self::de::from_slice_with_limits;
-
 use std::io::{Read, Write};
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{Error, Limits, Result, encoding::read_limited};
+pub use self::de::from_slice_with_limits;
+use crate::{Error, Limits, Result, encoding::read_limited, serialization};
 
 pub fn from_slice<T: DeserializeOwned>(input: &[u8]) -> Result<T> {
     from_slice_with_limits(input, Limits::default())
@@ -29,11 +27,11 @@ pub fn from_reader_with_limits<T: DeserializeOwned, R: Read>(mut reader: R, limi
 }
 
 pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    crate::serialization::to_vec::<ser::Encoder, _>(value, None)
+    serialization::to_vec::<ser::Encoder, _>(value, None)
 }
 
 pub fn to_vec_with_max_bytes<T: Serialize + ?Sized>(value: &T, max_bytes: usize) -> Result<Vec<u8>> {
-    crate::serialization::to_vec::<ser::Encoder, _>(value, Some(max_bytes))
+    serialization::to_vec::<ser::Encoder, _>(value, Some(max_bytes))
 }
 
 pub fn to_string<T: Serialize + ?Sized>(value: &T) -> Result<String> {
@@ -41,7 +39,7 @@ pub fn to_string<T: Serialize + ?Sized>(value: &T) -> Result<String> {
 }
 
 pub fn to_writer<T: Serialize + ?Sized, W: Write>(writer: W, value: &T) -> Result<()> {
-    crate::serialization::to_writer::<ser::Encoder, _, _>(writer, value)
+    serialization::to_writer::<ser::Encoder, _, _>(writer, value)
 }
 
 fn is_xml_char(character: char) -> bool {

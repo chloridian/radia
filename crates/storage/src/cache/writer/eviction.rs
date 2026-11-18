@@ -1,14 +1,18 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    iter,
     sync::{Arc, atomic::Ordering},
 };
 
-use super::support::{account_size, effective_entry, lock, read_map, remove_new_candidate, sort_changes, write_map};
 use super::{
     DirectoryId, Entry, EvictionReason, Key, Lru, PlannedChange, ProtectionRegistry, StorageError, UnavailableReason, WorkerState,
+    support::{account_size, effective_entry, lock, read_map, remove_new_candidate, sort_changes, write_map},
 };
-use crate::cache::MAX_VALUE_BYTES;
-use crate::cache::eviction::{EvictionCandidate, EvictionPolicy, OrderedScan};
+use crate::cache::{
+    MAX_VALUE_BYTES,
+    eviction::{EvictionCandidate, EvictionPolicy, OrderedScan},
+    index::MAX_ENTRIES,
+};
 
 const MAX_EVICTIONS_PER_BATCH: usize = 32;
 const MAX_EVICTION_CANDIDATES: usize = 128;
@@ -190,7 +194,7 @@ impl WorkerState {
         let Some((prefixes, shard)) = self.read_state.namespaces.directories(*key) else {
             return Err(StorageError::UnknownNamespace);
         };
-        for directory in prefixes.iter().copied().chain(std::iter::once(shard)) {
+        for directory in prefixes.iter().copied().chain(iter::once(shard)) {
             let current_delta = deltas.get(&directory).copied().unwrap_or(0);
             let existing = self.directory_counts.get(&directory).copied().unwrap_or(0);
             let current =
@@ -349,7 +353,7 @@ impl WorkerState {
     }
 
     fn fits(&self, data_bytes: u64, entry_count: usize, directory_count: u64, limit: u64) -> Result<bool, StorageError> {
-        if entry_count > crate::cache::index::MAX_ENTRIES {
+        if entry_count > MAX_ENTRIES {
             return Ok(false);
         }
         let index_bytes = self.index.estimated_bytes(entry_count)?;

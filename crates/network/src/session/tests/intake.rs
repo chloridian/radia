@@ -1,13 +1,19 @@
 use std::{
+    assert_matches,
     pin::pin,
-    task::{Context, Waker},
+    sync::atomic::{AtomicBool, Ordering},
+    task::{Context, Wake, Waker},
 };
 
-use super::login::*;
-use super::send::{chat_message_with_text, targeted_send_handle};
-use super::*;
-use crate::event::send_client_event;
 use tokio::task::yield_now;
+
+use self::{mpsc::error::TrySendError, oneshot::error::TryRecvError};
+use super::{
+    login::*,
+    send::{chat_message_with_text, targeted_send_handle},
+    *,
+};
+use crate::event::send_client_event;
 
 #[tokio::test]
 async fn session_drop_cancels_login() {
@@ -54,7 +60,7 @@ async fn session_drop_cancels_full_event() {
     let retained_handle = session.handle();
     drop(session);
 
-    std::assert_matches!(
+    assert_matches!(
         timeout(Duration::from_secs(1), publish).await.expect("session drop should release event publication"),
         EventSendOutcome::Shutdown
     );
@@ -83,17 +89,12 @@ async fn receive_releases_capability_bytes() {
     let mut session = test_session(targeted_send_handle(commands, disconnect), event_receiver);
 
     assert_eq!(budget.available_permits(), 15);
-    std::assert_matches!(session.recv_event().await, Some(Event::CapabilityEvent { message, .. }) if message == "TestEvent");
+    assert_matches!(session.recv_event().await, Some(Event::CapabilityEvent { message, .. }) if message == "TestEvent");
     assert_eq!(budget.available_permits(), 32);
 }
 
 #[tokio::test]
 async fn final_loss_wakes_empty_intake() {
-    use std::{
-        sync::atomic::{AtomicBool, Ordering},
-        task::Wake,
-    };
-
     struct WakeFlag(AtomicBool);
     impl Wake for WakeFlag {
         fn wake(self: Arc<Self>) {
@@ -117,7 +118,7 @@ async fn final_loss_wakes_empty_intake() {
     };
 
     assert!(wake.0.load(Ordering::SeqCst), "recording loss wakes an already waiting intake");
-    std::assert_matches!(
+    assert_matches!(
         timeout(Duration::from_secs(1), receive).await.expect("source loss wakes empty intake"),
         Some(Event::CoverageLost { loss: CoverageLoss::Source(record) }) if record.watermark == watermark
     );
@@ -140,7 +141,7 @@ async fn loss_precedes_event_awaits_ack() {
         .expect("fill bounded event queue with covered event");
     let mut session = test_session_with_coverage(targeted_send_handle(commands, disconnect), event_receiver, ledger.clone());
     session.acknowledge_coverage_loss(watermark);
-    std::assert_matches!(
+    assert_matches!(
         session.recv_event().await,
         Some(Event::CoverageLost { loss: CoverageLoss::Source(record) }) if record.watermark == watermark
     );
@@ -152,7 +153,7 @@ async fn loss_precedes_event_awaits_ack() {
         );
     }
     session.acknowledge_coverage_loss(watermark);
-    std::assert_matches!(
+    assert_matches!(
         session.recv_event().await,
         Some(Event::Failed(message)) if message == "covered event"
     );
@@ -179,7 +180,7 @@ async fn inventory_loss_gates_later_event() {
         .expect("queue the accepted inventory event");
     let mut session = test_session_with_coverage(targeted_send_handle(commands, disconnect), event_receiver, ledger.clone());
 
-    std::assert_matches!(session.recv_event().await, Some(Event::CapabilityEvent { message, .. }) if message == "BulkUpdateInventory");
+    assert_matches!(session.recv_event().await, Some(Event::CapabilityEvent { message, .. }) if message == "BulkUpdateInventory");
     assert!(session.report_current_event_loss(CoverageLossReason::InventoryAdmission).is_some());
     let next_watermark = ledger.watermark(simulator_id, coverage_source);
     events
@@ -196,7 +197,7 @@ async fn inventory_loss_gates_later_event() {
         assert!(receive.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
     }
     session.acknowledge_coverage_loss(loss.watermark);
-    std::assert_matches!(session.recv_event().await, Some(Event::Failed(message)) if message == "later source event");
+    assert_matches!(session.recv_event().await, Some(Event::Failed(message)) if message == "later source event");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -206,7 +207,7 @@ async fn preflight_loss_gates_later_event() {
     let (login_url, poll_started, http_task) = fake_http(simulator_address.port()).await;
     let (mut session, _handle, worker) = spawn_test_session(login_url);
 
-    std::assert_matches!(next_event(&mut session.events).await, Event::LoginAccepted { .. });
+    assert_matches!(next_event(&mut session.events).await, Event::LoginAccepted { .. });
     let (_, peer) = receive_udp(&simulator).await;
     simulator.send_to(&server_ack(20, 1), peer).await.expect("ack UseCircuitCode");
     let (_, movement) = receive_client_message(&simulator, peer, |message| matches!(message, Message::CompleteAgentMovement(_))).await;
@@ -276,7 +277,7 @@ async fn preflight_loss_gates_later_event() {
     }
 
     session.acknowledge_coverage_loss(watermark);
-    std::assert_matches!(
+    assert_matches!(
         timeout(CLIENT_TIMEOUT, session.recv_event()).await.expect("acknowledgement should release the event"),
         Some(Event::SimulatorMessage { sequence: 26, message: Message::ChatFromSimulator(_), .. })
     );
@@ -296,17 +297,17 @@ async fn coalesced_loss_caps_at_watermark() {
     let ledger = CoverageLossLedger::new();
     let simulator_id = test_simulator_id(80);
     let source = CoverageSource::Lludp;
-    std::assert_matches!(ledger.record(simulator_id, source, CoverageLossReason::EventAdmission), CoverageRecord::Recorded(_));
+    assert_matches!(ledger.record(simulator_id, source, CoverageLossReason::EventAdmission), CoverageRecord::Recorded(_));
     let event_watermark = ledger.watermark(simulator_id, source);
 
     for id in 81..=335 {
-        std::assert_matches!(ledger.record(test_simulator_id(id), source, CoverageLossReason::EventAdmission), CoverageRecord::Recorded(_));
+        assert_matches!(ledger.record(test_simulator_id(id), source, CoverageLossReason::EventAdmission), CoverageRecord::Recorded(_));
     }
-    std::assert_matches!(
+    assert_matches!(
         ledger.record(test_simulator_id(336), source, CoverageLossReason::EventAdmission),
         CoverageRecord::Overflowed { generation: 1 }
     );
-    std::assert_matches!(ledger.record(simulator_id, source, CoverageLossReason::DecodeAdmission), CoverageRecord::Recorded(_));
+    assert_matches!(ledger.record(simulator_id, source, CoverageLossReason::DecodeAdmission), CoverageRecord::Recorded(_));
 
     let (events, event_receiver) = mpsc::channel(1);
     events
@@ -314,18 +315,18 @@ async fn coalesced_loss_caps_at_watermark() {
         .expect("queue event with the earlier source watermark");
     let mut session = test_session_with_coverage(targeted_send_handle(commands, disconnect), event_receiver, ledger);
 
-    std::assert_matches!(
+    assert_matches!(
         session.recv_event().await,
         Some(Event::CoverageLost { loss: CoverageLoss::Source(record) })
             if record.watermark.generation == event_watermark.generation
                 && record.watermark.overflow_generation == event_watermark.overflow_generation
     );
     session.acknowledge_coverage_loss(event_watermark);
-    std::assert_matches!(
+    assert_matches!(
         session.recv_event().await,
         Some(Event::Failed(message)) if message == "covered before later loss"
     );
-    std::assert_matches!(session.recv_event().await, Some(Event::CoverageLost { loss: CoverageLoss::SessionOverflow { generation: 1 } }));
+    assert_matches!(session.recv_event().await, Some(Event::CoverageLost { loss: CoverageLoss::SessionOverflow { generation: 1 } }));
 }
 
 #[tokio::test]
@@ -334,12 +335,12 @@ async fn session_overflow_requires_ack() {
     let (disconnect, _) = watch::channel(false);
     let ledger = CoverageLossLedger::new();
     for id in 1..=256 {
-        std::assert_matches!(
+        assert_matches!(
             ledger.record(test_simulator_id(id), CoverageSource::Lludp, CoverageLossReason::EventAdmission),
             CoverageRecord::Recorded(_)
         );
     }
-    std::assert_matches!(
+    assert_matches!(
         ledger.record(test_simulator_id(257), CoverageSource::Lludp, CoverageLossReason::EventAdmission),
         CoverageRecord::Overflowed { generation: 1 }
     );
@@ -366,13 +367,13 @@ async fn session_overflow_requires_ack() {
         let _ = event_sender.send(event);
     });
 
-    std::assert_matches!(
+    assert_matches!(
         timeout(Duration::from_secs(1), loss_receiver).await.expect("overflow wakes independently").expect("loss receiver"),
         Some(Event::CoverageLost { loss: CoverageLoss::SessionOverflow { generation: 1 } })
     );
-    assert_eq!(event_receiver.try_recv().err(), Some(oneshot::error::TryRecvError::Empty));
+    assert_eq!(event_receiver.try_recv().err(), Some(TryRecvError::Empty));
     ack_sender.send(()).expect("ask Session to acknowledge surfaced overflow");
-    std::assert_matches!(
+    assert_matches!(
         timeout(Duration::from_secs(1), &mut event_receiver).await.expect("acknowledgement releases overflow-covered event").expect("event receiver"),
         Some(Event::Failed(message)) if message == "global-overflow-covered event"
     );
@@ -387,15 +388,15 @@ async fn earlier_watermark_skips_later_loss() {
     let simulator_id = test_simulator_id(79);
     let source = CoverageSource::Lludp;
     let earlier = ledger.watermark(simulator_id, source);
-    std::assert_matches!(ledger.record(simulator_id, source, CoverageLossReason::EventAdmission), CoverageRecord::Recorded(_));
+    assert_matches!(ledger.record(simulator_id, source, CoverageLossReason::EventAdmission), CoverageRecord::Recorded(_));
     let (events, event_receiver) = mpsc::channel(1);
     events
         .try_send(event_with_coverage_watermark(Event::Failed("earlier event".into()), earlier))
         .expect("queue event predating source loss");
     let mut session = test_session_with_coverage(targeted_send_handle(commands, disconnect), event_receiver, ledger);
 
-    std::assert_matches!(session.recv_event().await, Some(Event::Failed(message)) if message == "earlier event");
-    std::assert_matches!(session.recv_event().await, Some(Event::CoverageLost { loss: CoverageLoss::Source(_) }));
+    assert_matches!(session.recv_event().await, Some(Event::Failed(message)) if message == "earlier event");
+    assert_matches!(session.recv_event().await, Some(Event::CoverageLost { loss: CoverageLoss::Source(_) }));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -406,7 +407,7 @@ async fn session_drop_cancels_saturated() {
     let (mut session, retained_handle, worker, mut probe) = spawn_test_session_with_event_probe(login_url);
     let event_sender = &probe.events;
 
-    std::assert_matches!(next_event(&mut session.events).await, Event::LoginAccepted { .. });
+    assert_matches!(next_event(&mut session.events).await, Event::LoginAccepted { .. });
     let (use_circuit, peer) = receive_udp(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1));
     simulator.send_to(&server_ack(20, 1), peer).await.expect("ack UseCircuitCode");
@@ -442,8 +443,8 @@ async fn session_drop_cancels_saturated() {
     loop {
         match event_sender.try_send(EventEnvelope::new(Event::Failed("hold saturated session events".into()))) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => break,
-            Err(mpsc::error::TrySendError::Closed(_)) => panic!("active session event receiver should remain open"),
+            Err(TrySendError::Full(_)) => break,
+            Err(TrySendError::Closed(_)) => panic!("active session event receiver should remain open"),
         }
     }
     assert_eq!(event_sender.capacity(), 0);

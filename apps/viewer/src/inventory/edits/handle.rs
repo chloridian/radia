@@ -1,5 +1,5 @@
-use ::inventory::{CategoryKey, FolderType, ItemKey};
-use tokio::sync::{mpsc, oneshot};
+use inventory::{CategoryKey, FolderType, ItemKey};
+use tokio::sync::{mpsc, mpsc::error::TrySendError, oneshot};
 
 use super::types::{EditOperation, EditRequest, InventoryEditOutcome, InventoryEditRejection};
 
@@ -49,8 +49,8 @@ impl InventoryEditHandle {
         let (response, result) = oneshot::channel();
         match self.requests.try_send(EditRequest { operation, response }) {
             Ok(()) => result.await.unwrap_or(InventoryEditOutcome::Rejected(InventoryEditRejection::SessionEnded)),
-            Err(mpsc::error::TrySendError::Full(_)) => InventoryEditOutcome::Rejected(InventoryEditRejection::QueueFull),
-            Err(mpsc::error::TrySendError::Closed(_)) => InventoryEditOutcome::Rejected(InventoryEditRejection::SessionEnded),
+            Err(TrySendError::Full(_)) => InventoryEditOutcome::Rejected(InventoryEditRejection::QueueFull),
+            Err(TrySendError::Closed(_)) => InventoryEditOutcome::Rejected(InventoryEditRejection::SessionEnded),
         }
     }
 }

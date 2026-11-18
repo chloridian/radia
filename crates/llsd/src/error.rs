@@ -1,8 +1,12 @@
-use std::{fmt, io};
+use std::{error, fmt, io, result};
 
-use serde::de::{Expected, Unexpected};
+use serde::{
+    de,
+    de::{Expected, Unexpected},
+    ser,
+};
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
@@ -27,8 +31,8 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for Error {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
             _ => None,
@@ -42,13 +46,13 @@ impl From<io::Error> for Error {
     }
 }
 
-impl serde::ser::Error for Error {
+impl ser::Error for Error {
     fn custom<T: fmt::Display>(message: T) -> Self {
         Self::InvalidValue(message.to_string())
     }
 }
 
-impl serde::de::Error for Error {
+impl de::Error for Error {
     fn custom<T: fmt::Display>(message: T) -> Self {
         Self::InvalidValue(message.to_string())
     }

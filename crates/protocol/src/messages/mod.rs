@@ -10,28 +10,30 @@ pub mod parcel;
 pub mod region;
 pub mod terrain;
 
-pub use self::agent::{
-    AgentMovementComplete, AgentThrottle, AgentUpdate, AvatarAppearance, AvatarSitResponse, CompleteAgentMovement, LogoutReply,
-    LogoutRequest, SetAlwaysRun, TeleportCancel, TeleportFailed, TeleportFinish, ThrottleRates,
+pub use self::{
+    agent::{
+        AgentMovementComplete, AgentThrottle, AgentUpdate, AvatarAppearance, AvatarSitResponse, CompleteAgentMovement, LogoutReply,
+        LogoutRequest, SetAlwaysRun, TeleportCancel, TeleportFailed, TeleportFinish, ThrottleRates,
+    },
+    chat::{ChatFromSimulator, ChatFromViewer},
+    circuit::{CompletePingCheck, PacketAck, PingId, StartPingCheck, UseCircuitCode},
+    generic_message::GenericMessage,
+    generic_streaming_message::GenericStreamingMessage,
+    inventory::{
+        BulkUpdateInventory, InventoryFolderBlock, InventoryItemBlock, MoveInventoryFolder, MoveInventoryFolderBlock, MoveInventoryItem,
+        MoveInventoryItemBlock, RemoveInventoryFolder, RemoveInventoryItem, RemoveInventoryObjects, SaveAssetIntoInventory,
+        UpdateCreateInventoryItem,
+    },
+    map::{MapBlockReply, MapBlockRequest},
+    object::{
+        CacheMissType, CachedObjectReference, ExtraParamUpdate, ExtraParameter, ImprovedTerseObjectUpdate, KillObject, ObjectData,
+        ObjectExtraParams, ObjectMotion, ObjectRequest, ObjectSound, ObjectSpecificData, ObjectText, ObjectUpdate, ObjectUpdateCached,
+        ObjectUpdateCompressed, RegionData, RequestAgentData, RequestMultipleObjects,
+    },
+    parcel::{ParcelOverlay, ParcelProperties},
+    region::{
+        ConfirmEnableSimulator, DisableSimulator, EnableSimulator, RegionHandleRequest, RegionHandshake, RegionHandshakeReply,
+        RegionIdAndHandleReply, RegionInfo,
+    },
+    terrain::LayerData,
 };
-pub use self::chat::{ChatFromSimulator, ChatFromViewer};
-pub use self::circuit::{CompletePingCheck, PacketAck, PingId, StartPingCheck, UseCircuitCode};
-pub use self::generic_message::GenericMessage;
-pub use self::generic_streaming_message::GenericStreamingMessage;
-pub use self::inventory::{
-    BulkUpdateInventory, InventoryFolderBlock, InventoryItemBlock, MoveInventoryFolder, MoveInventoryFolderBlock, MoveInventoryItem,
-    MoveInventoryItemBlock, RemoveInventoryFolder, RemoveInventoryItem, RemoveInventoryObjects, SaveAssetIntoInventory,
-    UpdateCreateInventoryItem,
-};
-pub use self::map::{MapBlockReply, MapBlockRequest};
-pub use self::object::{
-    CacheMissType, CachedObjectReference, ExtraParamUpdate, ExtraParameter, ImprovedTerseObjectUpdate, KillObject, ObjectData,
-    ObjectExtraParams, ObjectMotion, ObjectRequest, ObjectSound, ObjectSpecificData, ObjectText, ObjectUpdate, ObjectUpdateCached,
-    ObjectUpdateCompressed, RegionData, RequestAgentData, RequestMultipleObjects,
-};
-pub use self::parcel::{ParcelOverlay, ParcelProperties};
-pub use self::region::{
-    ConfirmEnableSimulator, DisableSimulator, EnableSimulator, RegionHandleRequest, RegionHandshake, RegionHandshakeReply,
-    RegionIdAndHandleReply, RegionInfo,
-};
-pub use self::terrain::LayerData;

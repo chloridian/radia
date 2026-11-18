@@ -1,10 +1,11 @@
 mod avatar;
 mod chat;
 mod object;
-mod pbr;
+pub(in crate::session) mod pbr;
 
-pub(super) use avatar::{AvatarAppearanceMessage, SitTargetUpdate, decode_avatar_appearance_update, decode_sit_target_update};
-pub(crate) use chat::{ChatMessage, display_message, format_avatar_name};
-pub(in crate::session) use object::decode_cached_object;
-pub(super) use object::{ObjectBatch, ObjectMediaRequest, ObjectOperation, decode_object_message, object_media_requests};
-pub(in crate::session) use pbr::{decode_payload as decode_pbr_overrides, encode_payload as encode_pbr_overrides};
+pub(crate) use self::chat::{ChatMessage, display_message, format_avatar_name};
+pub(in crate::session) use self::object::decode_cached_object;
+pub(super) use self::{
+    avatar::{AvatarAppearanceMessage, SitTargetUpdate, decode_avatar_appearance_update, decode_sit_target_update},
+    object::{ObjectBatch, ObjectMediaRequest, ObjectOperation, decode_object_message, object_media_requests},
+};

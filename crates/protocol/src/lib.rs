@@ -8,5 +8,4 @@ pub mod schema {
     include!(concat!(env!("OUT_DIR"), "/schema.rs"));
 }
 
-pub use lludp::{Audible, ChatSourceType, ChatType, Frequency, LLUdpError};
-pub use lludp::{BlockInstance, BlockValues, FieldValue, SchemaMessage};
+pub use self::lludp::{Audible, BlockInstance, BlockValues, ChatSourceType, ChatType, FieldValue, Frequency, LLUdpError, SchemaMessage};

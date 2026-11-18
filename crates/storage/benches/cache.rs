@@ -1,4 +1,5 @@
 use std::{
+    array, assert_matches,
     hint::black_box,
     sync::{Arc, Barrier, mpsc},
     thread,
@@ -54,7 +55,7 @@ pub(crate) fn bench(c: &mut Criterion) {
     assert_eq!(cache.entry_count(), usize::try_from(EXISTING_ENTRIES).expect("entry count fits"));
 
     let hit_key = key(EXISTING_ENTRIES / 2);
-    std::assert_matches!(cache.lookup(hit_key), storage::Lookup::Hit(_));
+    assert_matches!(cache.lookup(hit_key), storage::Lookup::Hit(_));
     let cache_ref = &cache;
     let mut group = c.benchmark_group("storage/scale");
 
@@ -72,7 +73,7 @@ pub(crate) fn bench(c: &mut Criterion) {
 
     group.throughput(Throughput::Elements(BURST_WRITES as u64));
     group.bench_function(BenchmarkId::new("put_burst_16", EXISTING_ENTRIES), |b| {
-        let keys: [Key; BURST_WRITES] = std::array::from_fn(|index| key(EXISTING_ENTRIES + index as u64));
+        let keys: [Key; BURST_WRITES] = array::from_fn(|index| key(EXISTING_ENTRIES + index as u64));
         let start = Barrier::new(BURST_WRITES + 1);
         thread::scope(|scope| {
             let producers: Vec<_> = keys
@@ -117,7 +118,7 @@ pub(crate) fn bench(c: &mut Criterion) {
 
     group.throughput(Throughput::Elements(1));
     group.bench_function(BenchmarkId::new("lookup_hit", EXISTING_ENTRIES), |b| {
-        std::assert_matches!(cache_ref.lookup(hit_key), storage::Lookup::Hit(_));
+        assert_matches!(cache_ref.lookup(hit_key), storage::Lookup::Hit(_));
         b.iter(|| black_box(cache_ref.lookup(hit_key)));
     });
     group.finish();

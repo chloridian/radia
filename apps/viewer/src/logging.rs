@@ -7,6 +7,7 @@ use std::{
 };
 
 use chrono::{Duration, Local};
+use tracing::field;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
     EnvFilter, Layer,
@@ -73,7 +74,7 @@ pub(crate) fn init() -> Option<WorkerGuard> {
         tracing::error!(
             target: "viewer::panic",
             panic = info.payload_as_str().unwrap_or("non-string panic payload"),
-            location = info.location().map(tracing::field::display),
+            location = info.location().map(field::display),
             backtrace = %Backtrace::force_capture(),
             "panic"
         );

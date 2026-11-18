@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use ::inventory::{AssetType, CategoryKey, InventoryOwner, InventorySnapshot, InventoryType, Item, ItemKey};
+use inventory::{AssetType, CategoryKey, InventoryOwner, InventorySnapshot, InventoryType, Item, ItemKey};
 
 const SETTINGS_SUBTYPE_MASK: u32 = 0xff;
 const MAX_ENVIRONMENT_LABEL_CHARS: usize = 128;
@@ -178,17 +178,22 @@ fn environment_setting_label(name: &str, kind: EnvironmentSettingKind, library: 
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        cell::{Cell, RefCell},
+        collections::HashSet,
+        sync::Arc,
+    };
 
-    use ::inventory::{
+    use inventory::{
         AssetType, Category, CategoryKey, FolderType, Inventory, InventoryLimits, InventoryOwner, InventoryType, Item, ItemKey,
         PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
     };
+    use tokio::sync::watch;
     use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
     use uuid::Uuid;
 
     fn environment_items(
-        snapshot: ::inventory::InventorySnapshot,
+        snapshot: inventory::InventorySnapshot,
         previous: Option<Arc<super::EnvironmentMenu>>,
     ) -> Arc<super::EnvironmentMenu> {
         super::environment_items(snapshot, previous, || false).unwrap()
@@ -241,7 +246,7 @@ mod tests {
             inventory.upsert_item(item(personal, id, parent, "Sky", AssetType::Settings, InventoryType::Settings)).unwrap();
         }
         let menu = environment_items(inventory.snapshot(), None);
-        let labels = menu.items().iter().map(|row| row.label()).collect::<std::collections::HashSet<_>>();
+        let labels = menu.items().iter().map(|row| row.label()).collect::<HashSet<_>>();
         assert_eq!(labels.len(), 3);
         for row in menu.items() {
             assert_eq!(menu.label(row.key), Some(row.label()));
@@ -260,9 +265,9 @@ mod tests {
             inventory.upsert_item(item(personal, id, 1, "Sky", AssetType::Settings, InventoryType::Settings)).unwrap();
         }
         for stop_at in [10, 150] {
-            let (sender, receiver) = tokio::sync::watch::channel(());
-            let receiver = std::cell::RefCell::new(Some(receiver));
-            let calls = std::cell::Cell::new(0);
+            let (sender, receiver) = watch::channel(());
+            let receiver = RefCell::new(Some(receiver));
+            let calls = Cell::new(0);
             let cancelled = super::environment_items(inventory.snapshot(), None, || {
                 calls.set(calls.get() + 1);
                 if calls.get() == stop_at {

@@ -5,9 +5,8 @@ use std::{
 
 use world::Region;
 
-use crate::scene::{ExperienceProperty, PropertyChange, PropertyKind, PropertyValue, ViewerEnvironment};
-
 use super::{Evaluated, SkyState, WaterState, blend_sky_property, blend_water_property, overlay, overlay_water};
+use crate::scene::{ExperienceProperty, PropertyChange, PropertyKind, PropertyValue, ViewerEnvironment};
 
 const FRAME_CADENCE: Duration = Duration::from_millis(16);
 

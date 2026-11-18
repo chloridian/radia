@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    mem,
+};
 
 use assets::{
     Content, EnvironmentDescription, EnvironmentSettings, Failure, Priority, Request, Sky, Status, TextureHandle, TextureRef, TextureSize,
@@ -12,7 +15,7 @@ use crate::{
         DEFAULT_BLOOM_TEXTURE, DEFAULT_CLOUD_TEXTURE, DEFAULT_HALO_TEXTURE, DEFAULT_MOON_TEXTURE, DEFAULT_RAINBOW_TEXTURE,
         DEFAULT_SUN_TEXTURE, DEFAULT_WATER_NORMAL_MAP,
     },
-    scene::{AssetChange, AssetRequest, AssetTicket, ViewerEnvironment, region_environment::RegionEnvironment},
+    scene::{AssetChange, AssetRequest, AssetTicket, ExperienceProperty, ViewerEnvironment, region_environment::RegionEnvironment},
 };
 
 const MAX_PER_ENVIRONMENT: usize = 16;
@@ -212,7 +215,7 @@ impl EnvironmentTextures {
     }
 
     pub(in crate::scene) fn take_dirty(&mut self) -> impl Iterator<Item = (AssetId, Option<TextureHandle>)> + '_ {
-        let dirty = std::mem::take(&mut self.dirty);
+        let dirty = mem::take(&mut self.dirty);
         dirty.into_iter().map(|id| (id, self.entries.get(&id).and_then(|entry| entry.handle.clone())))
     }
 
@@ -347,21 +350,27 @@ fn override_water_textures(water: &Water) -> Vec<AssetId> {
     ids
 }
 
-fn property_region(properties: &BTreeMap<String, crate::scene::ExperienceProperty>) -> Option<Region> {
+fn property_region(properties: &BTreeMap<String, ExperienceProperty>) -> Option<Region> {
     properties.values().next().map(|property| property.region())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{assert_matches, collections::HashSet, iter, time::Instant};
+
+    use assets::{Budget, LoadJob, Priority, Resource, Store};
+    use test_support::texture::GRAY_ALPHA_J2C;
     use uuid::Uuid;
+
+    use super::*;
+    use crate::test_support::{registered_region, registered_regions};
 
     fn asset(value: u128) -> AssetId {
         AssetId::new(Uuid::from_u128(value))
     }
 
     fn requested(manager: &mut EnvironmentTextures) -> Vec<AssetId> {
-        std::iter::from_fn(|| manager.event())
+        iter::from_fn(|| manager.event())
             .filter_map(|event| match event {
                 AssetChange::Request(request) => match request.request {
                     Request::Texture { id, .. } => Some(id),
@@ -381,7 +390,7 @@ mod tests {
 
     #[test]
     fn active_textures_precede_background() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = registered_region();
         let mut manager = EnvironmentTextures::new();
         let active = BTreeMap::from([(asset(1), region), (asset(2), region)]);
 
@@ -392,7 +401,7 @@ mod tests {
 
     #[test]
     fn pending_demand_stays_bounded() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = registered_region();
         let mut manager = EnvironmentTextures::new();
         for value in 1..4096 {
             manager.update(&BTreeMap::new(), None, &BTreeMap::from([(asset(value), region)]));
@@ -405,10 +414,10 @@ mod tests {
 
     #[test]
     fn slow_delivery_preserves_leases() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = registered_region();
         let mut manager = EnvironmentTextures::new();
-        let mut issued = std::collections::HashSet::new();
-        let apply = |event, issued: &mut std::collections::HashSet<_>| match event {
+        let mut issued = HashSet::new();
+        let apply = |event, issued: &mut HashSet<_>| match event {
             AssetChange::Request(request) => {
                 assert!(issued.insert(request.ticket));
             }
@@ -451,7 +460,7 @@ mod tests {
 
     #[test]
     fn stale_textures_evict_on_capacity() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = registered_region();
         let mut manager = EnvironmentTextures::new();
         let first = BTreeMap::from([(asset(1), region)]);
         manager.update(&BTreeMap::new(), None, &first);
@@ -460,11 +469,11 @@ mod tests {
         manager.update(&BTreeMap::new(), None, &BTreeMap::from([(asset(2), region)]));
 
         assert!(manager.entries.contains_key(&asset(1)));
-        std::assert_matches!(
+        assert_matches!(
             manager.event(),
             Some(AssetChange::UpdatePriority { ticket, priority: Priority::Background }) if ticket == old_ticket
         );
-        std::assert_matches!(
+        assert_matches!(
             manager.event(),
             Some(AssetChange::Request(AssetRequest { request: Request::Texture { id, .. }, .. })) if id == asset(2)
         );
@@ -473,18 +482,18 @@ mod tests {
 
     #[test]
     fn priority_change_keeps_texture_ticket() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = registered_region();
         let mut manager = EnvironmentTextures::new();
         let id = asset(3);
         manager.request(id, Desired { region, priority: Priority::Background });
         let Some(AssetChange::Request(request)) = manager.event() else { panic!("background texture request") };
         manager.update_existing(id, Desired { region, priority: Priority::Visible });
-        std::assert_matches!(
+        assert_matches!(
             manager.event(),
             Some(AssetChange::UpdatePriority { ticket, priority: Priority::Visible }) if ticket == request.ticket
         );
         manager.update_existing(id, Desired { region, priority: Priority::Background });
-        std::assert_matches!(
+        assert_matches!(
             manager.event(),
             Some(AssetChange::UpdatePriority { ticket, priority: Priority::Background }) if ticket == request.ticket
         );
@@ -493,13 +502,13 @@ mod tests {
 
     #[test]
     fn stale_active_demand_downgrades() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = registered_region();
         let mut manager = EnvironmentTextures::new();
         let id = asset(6);
         manager.request(id, Desired { region, priority: Priority::Visible });
         let Some(AssetChange::Request(request)) = manager.event() else { panic!("active texture request") };
         manager.update(&BTreeMap::new(), None, &BTreeMap::new());
-        std::assert_matches!(
+        assert_matches!(
             manager.event(),
             Some(AssetChange::UpdatePriority { ticket, priority: Priority::Background }) if ticket == request.ticket
         );
@@ -507,7 +516,7 @@ mod tests {
 
     #[test]
     fn route_change_replaces_incomplete_demand() {
-        let (_region_world, regions) = crate::test_support::registered_regions(2);
+        let (_region_world, regions) = registered_regions(2);
         let mut manager = EnvironmentTextures::new();
         let id = asset(4);
         let first_region = regions[0];
@@ -515,7 +524,7 @@ mod tests {
         manager.request(id, Desired { region: first_region, priority: Priority::Background });
         let Some(AssetChange::Request(first)) = manager.event() else { panic!("first texture request") };
         manager.update_existing(id, Desired { region: second_region, priority: Priority::Background });
-        std::assert_matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == first.ticket);
+        assert_matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == first.ticket);
         let Some(AssetChange::Request(second)) = manager.event() else { panic!("route texture request") };
         assert_eq!(second.region, second_region);
         assert_ne!(first.ticket, second.ticket);
@@ -524,7 +533,7 @@ mod tests {
 
     #[test]
     fn route_change_keeps_ready_handle() {
-        let (_region_world, regions) = crate::test_support::registered_regions(2);
+        let (_region_world, regions) = registered_regions(2);
         let mut manager = EnvironmentTextures::new();
         let id = asset(5);
         let first_region = regions[0];
@@ -534,7 +543,7 @@ mod tests {
         let handle = loaded_texture(id);
         assert_eq!(manager.complete(request.ticket, &Status::Ready(Content::Texture(handle.clone()))), Some(true));
         manager.update_existing(id, Desired { region: second_region, priority: Priority::Background });
-        std::assert_matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == request.ticket);
+        assert_matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == request.ticket);
         assert!(manager.event().is_none());
         let entry = manager.entries.get(&id).expect("ready entry is retained");
         assert_eq!(entry.region, second_region);
@@ -543,17 +552,13 @@ mod tests {
     }
 
     fn loaded_texture(id: AssetId) -> TextureHandle {
-        use std::time::Instant;
-
-        use assets::{Budget, LoadJob, Priority, Resource, Store};
-
         let mut store = Store::new(Budget::default());
         let route = store.register_route().expect("texture test route");
         let now = Instant::now();
         let request = Request::new(Resource { id, kind: assets::Kind::Texture });
         let demand = store.request(route, request, Priority::Visible, now).expect("texture test demand");
         let LoadJob::Fetch(fetch) = store.next_job(now).expect("texture fetch") else { panic!("fresh texture request") };
-        let input = fetch.complete(Ok(test_support::texture::GRAY_ALPHA_J2C.to_vec())).expect("texture response");
+        let input = fetch.complete(Ok(GRAY_ALPHA_J2C.to_vec())).expect("texture response");
         let decode = store.start_decode(input).expect("texture decode");
         store.complete(decode.run(), now);
         let Status::Ready(Content::Texture(handle)) = demand.status() else { panic!("decoded texture") };

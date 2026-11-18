@@ -26,7 +26,7 @@ The legacy viewer is a reference for protocol behavior, content compatibility, a
 - Group related functionality by concept. Keep shared types and coordination with the concept they serve. Give a substantial, distinct responsibility its own focused module when that clarifies ownership.
 - Keep sibling modules independent where practical. Place genuinely shared functionality in mod.rs or a dedicated module rather than coupling siblings.
 - Adding a variant should require minimal changes outside its module. Use enums for closed sets and traits for open sets or meaningful abstraction boundaries.
-- Order Rust files as follows: module docs, inner attributes, module declarations (`mod`/`pub mod`), imports, re-exports (`pub use`), constants and statics, type aliases, types with their impls immediately following, free functions, then tests. Group imports as std, external and workspace crates, then crate/self/super together. Keep tests last, including test module declarations.
+- Order Rust files as follows: module docs, inner attributes, module declarations (`mod`/`pub mod`), `use` declarations including re-exports, constants and statics, type aliases, types with their impls immediately following, free functions, then tests. Keep tests last, including test module declarations.
 - A module with submodules is a directory with `mod.rs`; never place `foo.rs` beside `foo/`.
 - Keep unit tests inline in the module they test. Move them to a sibling `<name>_tests.rs` only when they obscure the implementation.
 - Each crate has one bench target: `benches/main.rs` declares every bench as a module, with a single `[[bench]] name = "main"` entry. Select benches with criterion filters, not extra targets. Benchmarks are Criterion modules there, never ignored measurement tests or `src/` files; shared peers and fixtures go in `test-support`.
@@ -65,10 +65,12 @@ The legacy viewer is a reference for protocol behavior, content compatibility, a
 ## Naming
 
 - Concise names; no redundant qualifiers in public APIs. Short locals are fine when context is clear (`pkt`, `req`, `obj`, `ctx`, `r`, `e`, `d`).
-- Import types and traits directly when their names are clear (`HashMap`, `Uuid`). Prefer module-qualified free functions (`fs::read`, `mem::take`), and retain qualifiers that distinguish generic names (`io::Result`, `fmt::Error`).
-- Choose the shortest path that preserves meaning. An inline qualified path is fine for an occasional use; import repeated or long paths. Use `as` only to resolve a collision or distinguish roles, not merely to shorten a name. `use Trait as _` is allowed.
-- Use `super` at most once in a path. Never write `super::super`; use `crate::` for anything above the parent module.
-- Import enum variants by name only if distinctive and not a prelude name. Keep imports explicit, except established `prelude::*` imports and `use super::*` in tests. Let rustfmt format and order imports.
+- Import types and traits directly when their names are clear (`HashMap`, `Uuid`). Import the module for free functions (`fs::read`, `mem::take`), and keep the module on generic names (`io::Result`, `fmt::Error`, `mpsc::channel`).
+- Outside `use` declarations, a path names at most one module: `mem::take`, `wgpu::Buffer`, `Duration::from_secs`, never `std::mem::take` or `crate::scene::Budget`. Visibility paths (`pub(in crate::scene)`) are exempt. Child modules are already in scope; do not prefix them with `self::` in code.
+- Put `use` only at module scope, never inside a function or block. An import needed only under a `#[cfg(..)]` carries the same attribute.
+- Start every `use` path with `std`, `core`, `alloc`, a crate name, `crate`, `self` or `super`: write `use self::child::Item`, not `use child::Item`. Use `super` at most once; use `crate::` for anything above the parent module. Never start a path with `::`. When a local module shares a crate's name, rename the module.
+- Use `as` only for a name collision that importing a module cannot resolve. `use Trait as _` is allowed. Import enum variants by name only if distinctive and not a prelude name. Keep imports explicit, except established `prelude::*` imports and `use super::*` in tests.
+- Format with `cargo xfmt`, not plain `cargo fmt`: it merges imports per crate and groups them as std, external and workspace crates, then `crate`/`self`/`super`. Clippy denies `absolute_paths` and `unused_qualifications`.
 - `Udp` is the generic transport; `LLUdp` is Second Life's protocol. Keep wire-template and external spellings exact.
 
 ## Comments
@@ -84,7 +86,7 @@ Source has no comments or doc comments, and that includes safety comments on `un
 - Use property-based or stateful tests where operations interact (reordering, reparenting, stale updates, ID reuse). Generators must be domain-valid and failures reproducible.
 - Wait on completion signals, never on sleeps or polling. Use production timing constants; test-only timing values and short absence windows do not prove behavior. Test deadlines with a controlled clock or slow-runner-safe bounds, and use generous timeouts only as hang guards.
 - Integration tests are plain `tests/<name>.rs` files, auto-discovered by Cargo; no `[[test]]` entries. Only when one grows into several files does it become `tests/<name>/main.rs` with its submodules.
-- Use `std::assert_matches!` instead of `assert!(matches!(..))`, so failures print the actual value.
+- Use `assert_matches!` instead of `assert!(matches!(..))`, so failures print the actual value.
 - Ask before launching the gui viewer, driving a browser, or any computer use.
 
 ## Versioning

@@ -1,5 +1,6 @@
-use super::error::LLUdpError;
 use math::{Quat, Vec3};
+
+use super::error::LLUdpError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Frequency {
@@ -97,8 +98,9 @@ pub(crate) fn quaternion_from_xyz(value: Vec3) -> Result<Quat, LLUdpError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use math::{Quat, Vec3};
+
+    use super::*;
 
     #[test]
     fn quaternion_w_reconstructs_from_xyz() {

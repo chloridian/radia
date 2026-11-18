@@ -1,4 +1,4 @@
-use std::{io, time::Duration};
+use std::{io, str, time::Duration};
 
 use llsd::{Value, xml};
 use tokio::{
@@ -38,7 +38,7 @@ impl PeerRequest {
     }
 
     pub(super) fn value(&self) -> Value {
-        let body = std::str::from_utf8(&self.body).expect("request LLSD is UTF-8");
+        let body = str::from_utf8(&self.body).expect("request LLSD is UTF-8");
         xml::from_str(body).expect("request body is LLSD XML")
     }
 
@@ -158,7 +158,7 @@ async fn read_request(mut stream: TcpStream) -> io::Result<PeerRequest> {
             continue;
         };
         let header_end = end + 4;
-        let headers = std::str::from_utf8(&bytes[..end]).map_err(io::Error::other)?;
+        let headers = str::from_utf8(&bytes[..end]).map_err(io::Error::other)?;
         let content_length = headers
             .lines()
             .filter_map(|line| line.split_once(':'))
@@ -181,7 +181,7 @@ async fn read_request(mut stream: TcpStream) -> io::Result<PeerRequest> {
         }
         bytes.extend_from_slice(&chunk[..read]);
     }
-    let headers = std::str::from_utf8(&bytes[..header_end - 4]).map_err(io::Error::other)?.to_owned();
+    let headers = str::from_utf8(&bytes[..header_end - 4]).map_err(io::Error::other)?.to_owned();
     let mut line = headers.lines().next().ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?.split_whitespace();
     let method = line.next().ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?.to_owned();
     let path = line.next().ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?.to_owned();

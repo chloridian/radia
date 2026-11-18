@@ -1,7 +1,8 @@
 use criterion::{Criterion, criterion_group, criterion_main};
+use test_support::allocation::CountingAllocator;
 
 #[global_allocator]
-static ALLOCATOR: test_support::allocation::CountingAllocator = test_support::allocation::CountingAllocator;
+static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 mod inventory;
 

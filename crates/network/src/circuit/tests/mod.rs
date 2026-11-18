@@ -2,6 +2,7 @@ mod lifecycle;
 mod outbound;
 mod receive;
 
+use std::assert_matches;
 pub(in crate::circuit) use std::{
     collections::HashSet,
     future, io,
@@ -34,33 +35,33 @@ pub(in crate::circuit) use tokio::{
 pub(in crate::circuit) use url::Url;
 pub(in crate::circuit) use uuid::Uuid;
 
+pub(in crate::circuit) use super::{
+    outbound::{
+        MovementSend, OutboundQueue, PendingSend, PendingSendExpiration, PendingSendFuture, PreparedMeta, QueuedMessage, begin_retry_send,
+        expire_deferred_retries, expire_pending_send, preempt_deferred_send, prepare_next_send, prepare_shutdown_send,
+    },
+    *,
+};
+use crate::fixtures::{circuit, simulator};
 pub(in crate::circuit) use crate::{
     AgentSession, Grid,
     circuit::{
-        UdpTransport,
+        HandoffCancellation, HandoffGeneration, HandoffTarget, LogoutCommand, LogoutReceipt, UdpTransport,
+        admission::{
+            MAX_CONCURRENT_PACKET_DECODES, MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES,
+            MAX_QUEUED_SIMULATOR_EVENT_BYTES, SimulatorMemoryBudget,
+        },
         lludp::{KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, ReceiveAdmission},
         pacing::OutboundBudget,
     },
     coverage::{CoverageLoss, CoverageLossLedger, CoverageLossReason, CoverageSource},
     error::Error,
     event::{Event, SimulatorId},
+    fixtures::{
+        circuit::{NEW_RELIABLE_ACK_CAPACITY, SimulatorMemoryBudgetTestExt, pacer_rate, with_sequence},
+        session::{HandoffEvidence, HandoffState, PendingPromotion, handoff_cancellation},
+    },
 };
-
-pub(in crate::circuit) use crate::circuit::admission::SimulatorMemoryBudget;
-pub(in crate::circuit) use crate::circuit::admission::{
-    MAX_CONCURRENT_PACKET_DECODES, MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES,
-};
-pub(in crate::circuit) use crate::circuit::{HandoffCancellation, HandoffGeneration, HandoffTarget, LogoutCommand, LogoutReceipt};
-pub(in crate::circuit) use crate::fixtures::{
-    circuit::{NEW_RELIABLE_ACK_CAPACITY, SimulatorMemoryBudgetTestExt, pacer_rate, with_sequence},
-    session::{HandoffEvidence, HandoffState, PendingPromotion, handoff_cancellation},
-};
-
-pub(in crate::circuit) use super::outbound::{
-    MovementSend, OutboundQueue, PendingSend, PendingSendExpiration, PendingSendFuture, PreparedMeta, QueuedMessage, begin_retry_send,
-    expire_deferred_retries, expire_pending_send, preempt_deferred_send, prepare_next_send, prepare_shutdown_send,
-};
-pub(in crate::circuit) use super::*;
 
 const WAIT: Duration = Duration::from_secs(2);
 
@@ -246,7 +247,7 @@ pub(in crate::circuit) async fn run_budget_retry(role: ConnectionRole) {
     receive_connected(&mut received_events).await;
     if role == ConnectionRole::Primary {
         let (movement, peer) = receive_packet(&simulator).await;
-        std::assert_matches!(movement.message(), Message::CompleteAgentMovement(_));
+        assert_matches!(movement.message(), Message::CompleteAgentMovement(_));
         send_ack(&simulator, peer, movement.sequence()).await;
     }
 
@@ -273,9 +274,9 @@ pub(in crate::circuit) async fn run_budget_retry(role: ConnectionRole) {
     .await
     .expect("memory rejection is recorded before inspecting acknowledgements");
     drop(full_budget);
-    let fence = Packet::new(sequence + 1, crate::fixtures::circuit::start_ping(77, 0)).encode().expect("encode admission fence");
+    let fence = Packet::new(sequence + 1, circuit::start_ping(77, 0)).encode().expect("encode admission fence");
     simulator.send_to(&fence, peer).await.expect("fence rejected memory admission");
-    let (_, acknowledgements) = crate::fixtures::simulator::receive_message_with_acknowledgements(
+    let (_, acknowledgements) = simulator::receive_message_with_acknowledgements(
         &simulator,
         |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 77),
     )
@@ -294,7 +295,7 @@ pub(in crate::circuit) async fn run_budget_retry(role: ConnectionRole) {
 
     simulator.send_to(&wire, peer).await.expect("retry after byte budget recovers");
     receive_ack(&simulator, sequence).await;
-    std::assert_matches!(receive_message_event(&mut received_events, sequence).await, Event::SimulatorMessage { .. });
+    assert_matches!(receive_message_event(&mut received_events, sequence).await, Event::SimulatorMessage { .. });
 
     shutdown.send_replace(true);
     assert!(timeout(WAIT, task).await.expect("join simulator task").expect("join task").is_ok());

@@ -1,45 +1,62 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    assert_matches,
+    collections::{HashMap, VecDeque},
+    future::pending,
+    num::NonZeroU32,
+    sync::{Arc, mpsc},
+    thread,
+    time::Instant,
+};
 
-use ::inventory::{
+use futures::{FutureExt, future, poll};
+use inventory::{
     AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryDelta, InventoryLimits, InventoryNodeId,
     InventoryNodeKey, InventoryOwner, InventoryPreparationCancellation, InventoryType, Item, ItemKey, PermissionMask, Permissions,
     SaleInfo, SaleType, ServerVersion,
 };
-use tokio::sync::oneshot;
+use math::{Quat, Vec3};
+use network::PacketOrder;
+use protocol::{
+    lludp::Message,
+    messages::{
+        AvatarSitResponse,
+        agent::avatar_sit_response::{SitObject, SitTransform},
+    },
+};
+use tokio::{
+    runtime::Handle,
+    sync::{oneshot, oneshot::error::TryRecvError},
+    task,
+};
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
+use world::{Kind, LocalAddress, ObjectObservation, ObjectPatch, OrderEvidence, Parent, ParentUpdate, SitTarget, UpdateSource};
 
-use crate::inventory::{FolderFetch, FolderFetchProvenance, favorites::FavoritesError};
-use crate::session::coordinator::inventory_cache::InventoryCacheSession;
-
-use super::inventory::{
-    FolderFetchApply, PreparedInventoryFetch, apply_inventory_fetch, cancel_favorites_refresh, confirm_pending_moves,
-    prepare_inventory_fetch, publish_favorites_refresh, stop_favorites_refresh,
-};
 use super::{
-    MoveExpectation, PendingFolderPreparation, PendingHandshakeReplies, cancel_pending_folder_preparation, network_end_after_stream_close,
+    MoveExpectation, PendingFolderPreparation, PendingHandshakeReplies, cancel_pending_folder_preparation,
+    inventory_sync::{
+        FolderFetchApply, PreparedInventoryFetch, apply_inventory_fetch, cancel_favorites_refresh, confirm_pending_moves,
+        prepare_inventory_fetch, publish_favorites_refresh, stop_favorites_refresh,
+    },
+    network_end_after_stream_close,
 };
-use crate::session::{
-    SessionEnd,
-    coordinator::{FavoritesUpdate, PresentationMailbox},
+use crate::{
+    inventory::{FolderApplyOutcome, FolderFetch, FolderFetchProvenance, favorites::FavoritesError},
+    session::{
+        SessionEnd,
+        coordinator::{FavoritesUpdate, PresentationMailbox, inventory_cache::InventoryCacheSession},
+        inbound::{ObjectBatch, ObjectOperation},
+        object_cache::ObjectCacheSession,
+        world::{BlockOutcome, ObjectBatchProgress, SessionWorld, viewer_world_limits},
+    },
+    test_helpers,
+    world_reader::WorldReadHost,
 };
 
 #[tokio::test(flavor = "current_thread")]
 async fn pending_update_serves_read_first() {
-    use std::{future::pending, num::NonZeroU32};
-
-    use futures::{FutureExt, poll};
-    use math::Vec3;
-    use world::{Kind, LocalAddress, ObjectObservation, ObjectPatch, OrderEvidence, ParentUpdate, UpdateSource};
-
-    use crate::session::{
-        inbound::{ObjectBatch, ObjectOperation},
-        world::{BlockOutcome, ObjectBatchProgress, SessionWorld, viewer_world_limits},
-    };
-    use crate::world_reader::WorldReadHost;
-
     const DEPTH: u32 = 600;
-    let simulator = crate::test_helpers::simulator_id();
+    let simulator = test_helpers::simulator_id();
     let mut session = SessionWorld::new(viewer_world_limits());
     let region = session.register_simulator(simulator, None).expect("register simulator");
     for local_id in 1..=DEPTH {
@@ -102,7 +119,7 @@ async fn pending_update_serves_read_first() {
     let revision_before_update = session.world().revision();
     let mut on_chunk = |_, _| {};
 
-    let mut reads = WorldReadHost::new(session.world(), tokio::runtime::Handle::current());
+    let mut reads = WorldReadHost::new(session.world(), Handle::current());
     let reader = reads.reader();
     let mut barrier_read = Box::pin(reader.barrier());
     assert!(poll!(barrier_read.as_mut()).is_pending());
@@ -111,8 +128,8 @@ async fn pending_update_serves_read_first() {
         world.advance_object_batch(&mut continuation, &mut on_chunk)
     })
     .await;
-    std::assert_matches!(turn, super::OwnerTurnProgress::ReadServed);
-    std::assert_matches!(first_progress, Some(ObjectBatchProgress::Pending));
+    assert_matches!(turn, super::OwnerTurnProgress::ReadServed);
+    assert_matches!(first_progress, Some(ObjectBatchProgress::Pending));
     let barrier = barrier_read.await.expect("barrier request is served by the owner");
     assert_eq!(barrier.object_count_upper_bound, DEPTH as usize);
     assert_eq!(session.world().revision(), revision_before_update);
@@ -123,14 +140,14 @@ async fn pending_update_serves_read_first() {
             world.advance_object_batch(&mut continuation, &mut on_chunk)
         })
         .await;
-        std::assert_matches!(turn, super::OwnerTurnProgress::Continue | super::OwnerTurnProgress::ReadServed);
+        assert_matches!(turn, super::OwnerTurnProgress::Continue | super::OwnerTurnProgress::ReadServed);
         match progress.expect("noncancelled owner turn advances the retained update") {
             ObjectBatchProgress::Pending => {}
             ObjectBatchProgress::Complete(summary) => break summary,
         }
     };
 
-    std::assert_matches!(summary.blocks.first(), Some(BlockOutcome::Applied { .. }));
+    assert_matches!(summary.blocks.first(), Some(BlockOutcome::Applied { .. }));
     let entity = session.world().entity_at(address).expect("updated object remains visible");
     assert_eq!(session.world().object(entity).and_then(|object| object.scale()), Some(Vec3::splat(2.0)));
     assert!(session.world().revision() > revision_before_update);
@@ -144,7 +161,7 @@ async fn pending_update_serves_read_first() {
             ObjectBatchProgress::Complete(summary) => break summary,
         }
     };
-    std::assert_matches!(later_summary.blocks.first(), Some(BlockOutcome::Applied { .. }));
+    assert_matches!(later_summary.blocks.first(), Some(BlockOutcome::Applied { .. }));
     let entity = session.world().entity_at(address).expect("later ordered update remains visible");
     assert_eq!(session.world().object(entity).and_then(|object| object.scale()), Some(Vec3::splat(3.0)));
     reads.finish();
@@ -152,20 +169,8 @@ async fn pending_update_serves_read_first() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn pending_parent_yields_in_order() {
-    use std::{future::pending, num::NonZeroU32};
-
-    use futures::{FutureExt, poll};
-    use math::Vec3;
-    use world::{Kind, LocalAddress, ObjectObservation, ObjectPatch, OrderEvidence, Parent, ParentUpdate, UpdateSource};
-
-    use crate::session::{
-        inbound::{ObjectBatch, ObjectOperation},
-        world::{BlockOutcome, ObjectBatchProgress, SessionWorld, viewer_world_limits},
-    };
-    use crate::world_reader::WorldReadHost;
-
     const DEPTH: u32 = 600;
-    let simulator = crate::test_helpers::simulator_id();
+    let simulator = test_helpers::simulator_id();
     let mut session = SessionWorld::new(viewer_world_limits());
     let region = session.register_simulator(simulator, None).expect("register simulator");
     for local_id in 1..=DEPTH {
@@ -258,7 +263,7 @@ async fn pending_parent_yields_in_order() {
     let mut later_patch =
         ObjectPatch::new(UpdateSource::new(region, DEPTH + 8, OrderEvidence::Ordered(u64::from(DEPTH + 8)), 0), child_local);
     later_patch.scale = Some(Vec3::splat(2.0));
-    let mut later_inputs = std::collections::VecDeque::from([
+    let mut later_inputs = VecDeque::from([
         ObjectBatch {
             region,
             region_handle: None,
@@ -294,7 +299,7 @@ async fn pending_parent_yields_in_order() {
         )
         .expect("registered simulator");
     let revision_before_update = session.world().revision();
-    let mut reads = WorldReadHost::new(session.world(), tokio::runtime::Handle::current());
+    let mut reads = WorldReadHost::new(session.world(), Handle::current());
     let reader = reads.reader();
     let cancellation = pending::<()>().boxed().shared();
     let mut on_chunk = |_, _| {};
@@ -307,7 +312,7 @@ async fn pending_parent_yields_in_order() {
             world.advance_object_batch(&mut continuation, &mut on_chunk)
         })
         .await;
-        std::assert_matches!(turn, super::OwnerTurnProgress::ReadServed);
+        assert_matches!(turn, super::OwnerTurnProgress::ReadServed);
         let barrier = read.await.expect("the owner serves each queued barrier");
         assert_eq!(barrier.revision, revision_before_turn);
         if turns == 0 {
@@ -325,7 +330,7 @@ async fn pending_parent_yields_in_order() {
         }
     };
     assert!(turns >= 3, "the 600-edge parent lookup spans bounded owner turns");
-    std::assert_matches!(summary.blocks.first(), Some(BlockOutcome::Applied { .. }));
+    assert_matches!(summary.blocks.first(), Some(BlockOutcome::Applied { .. }));
     let parent = session.world().entity_at(parent_address).expect("deep parent remains visible");
     let child_entity = session.world().entity_at(child_address).expect("child is added after parent validation");
     assert_eq!(session.world().object(child_entity).expect("child is visible").parent(), Parent::Resolved(parent));
@@ -337,13 +342,13 @@ async fn pending_parent_yields_in_order() {
                 world.advance_object_batch(&mut later, &mut on_chunk)
             })
             .await;
-            std::assert_matches!(turn, super::OwnerTurnProgress::Continue | super::OwnerTurnProgress::ReadServed);
+            assert_matches!(turn, super::OwnerTurnProgress::Continue | super::OwnerTurnProgress::ReadServed);
             match progress.expect("noncancelled owner turn advances ordered input") {
                 ObjectBatchProgress::Pending => {}
                 ObjectBatchProgress::Complete(summary) => break summary,
             }
         };
-        std::assert_matches!(later_summary.blocks.first(), Some(BlockOutcome::Applied { .. }));
+        assert_matches!(later_summary.blocks.first(), Some(BlockOutcome::Applied { .. }));
     }
 
     let existing_entity = session.world().entity_at(existing_address).expect("reparented child remains visible");
@@ -359,18 +364,7 @@ async fn pending_parent_yields_in_order() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancellation_precedes_queued_read() {
-    use std::num::NonZeroU32;
-
-    use futures::{FutureExt, poll};
-    use world::{Kind, ObjectObservation, OrderEvidence, ParentUpdate, UpdateSource};
-
-    use crate::session::{
-        inbound::{ObjectBatch, ObjectOperation},
-        world::{SessionWorld, viewer_world_limits},
-    };
-    use crate::world_reader::WorldReadHost;
-
-    let simulator = crate::test_helpers::simulator_id();
+    let simulator = test_helpers::simulator_id();
     let mut session = SessionWorld::new(viewer_world_limits());
     let region = session.register_simulator(simulator, None).expect("register simulator");
     let local_id = NonZeroU32::new(1).expect("nonzero local ID");
@@ -388,17 +382,17 @@ async fn cancellation_precedes_queued_read() {
         invalid_fields: 0,
     };
     let mut continuation = session.begin_object_batch(simulator, batch).expect("registered simulator");
-    let mut reads = WorldReadHost::new(session.world(), tokio::runtime::Handle::current());
+    let mut reads = WorldReadHost::new(session.world(), Handle::current());
     let reader = reads.reader();
     let mut read = Box::pin(reader.barrier());
     assert!(poll!(read.as_mut()).is_pending());
-    let cancellation = futures::future::ready(()).boxed().shared();
+    let cancellation = future::ready(()).boxed().shared();
     let (turn, progress) = super::serve_owner_turn_with_advance(&mut reads, &mut session, &cancellation, |world| {
         world.advance_object_batch(&mut continuation, &mut |_, _| {})
     })
     .await;
 
-    std::assert_matches!(turn, super::OwnerTurnProgress::Cancelled);
+    assert_matches!(turn, super::OwnerTurnProgress::Cancelled);
     assert!(progress.is_none());
     assert!(poll!(read.as_mut()).is_pending(), "cancellation wins before the queued read is served");
     assert_eq!(session.world().object_count(), 0, "the pending update does not advance after cancellation");
@@ -407,22 +401,8 @@ async fn cancellation_precedes_queued_read() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn pending_sit_serves_read_first() {
-    use std::{future::pending, num::NonZeroU32};
-
-    use futures::{FutureExt, poll};
-    use math::{Quat, Vec3};
-    use network::PacketOrder;
-    use world::{Kind, ObjectObservation, OrderEvidence, ParentUpdate, SitTarget, UpdateSource};
-
-    use crate::session::{
-        inbound::{ObjectBatch, ObjectOperation},
-        object_cache::ObjectCacheSession,
-        world::{SessionWorld, viewer_world_limits},
-    };
-    use crate::world_reader::WorldReadHost;
-
     const DEPTH: u32 = 600;
-    let simulator = crate::test_helpers::simulator_id();
+    let simulator = test_helpers::simulator_id();
     let mut session = SessionWorld::new(viewer_world_limits());
     let region = session.register_simulator(simulator, None).expect("register simulator");
     for local_id in 1..=DEPTH {
@@ -454,9 +434,9 @@ async fn pending_sit_serves_read_first() {
     }
 
     let expected = SitTarget { position: Vec3::new(1.0, 2.0, 3.0), rotation: Quat::IDENTITY };
-    let message = protocol::lludp::Message::AvatarSitResponse(protocol::messages::AvatarSitResponse {
-        sit_object: protocol::messages::agent::avatar_sit_response::SitObject { id: Some(Uuid::from_u128(u128::from(DEPTH))) },
-        sit_transform: protocol::messages::agent::avatar_sit_response::SitTransform {
+    let message = Message::AvatarSitResponse(AvatarSitResponse {
+        sit_object: SitObject { id: Some(Uuid::from_u128(u128::from(DEPTH))) },
+        sit_transform: SitTransform {
             auto_pilot: Some(true),
             sit_position: Some(expected.position),
             sit_rotation: Some(expected.rotation),
@@ -482,14 +462,14 @@ async fn pending_sit_serves_read_first() {
         panic!("avatar sit response must retain its visibility lookup");
     };
     let revision_before_update = session.world().revision();
-    std::assert_matches!(handoff.advance_entity_update(&mut session, &mut continuation), super::EntityUpdateProgress::Pending);
+    assert_matches!(handoff.advance_entity_update(&mut session, &mut continuation), super::EntityUpdateProgress::Pending);
 
-    let mut reads = WorldReadHost::new(session.world(), tokio::runtime::Handle::current());
+    let mut reads = WorldReadHost::new(session.world(), Handle::current());
     let reader = reads.reader();
     let mut barrier_read = Box::pin(reader.barrier());
     assert!(poll!(barrier_read.as_mut()).is_pending());
     let cancellation = pending::<()>().boxed().shared();
-    std::assert_matches!(super::serve_owner_turn(&mut reads, &mut session, &cancellation).await, super::OwnerTurnProgress::ReadServed);
+    assert_matches!(super::serve_owner_turn(&mut reads, &mut session, &cancellation).await, super::OwnerTurnProgress::ReadServed);
     let barrier = barrier_read.await.expect("barrier request is served by the owner");
     assert_eq!(barrier.object_count_upper_bound, DEPTH as usize);
     assert_eq!(session.world().revision(), revision_before_update);
@@ -506,7 +486,7 @@ async fn pending_sit_serves_read_first() {
     };
 
     assert!(outcome.summary.is_some());
-    let address = world::LocalAddress::new(region, NonZeroU32::new(DEPTH).expect("leaf local ID is nonzero"));
+    let address = LocalAddress::new(region, NonZeroU32::new(DEPTH).expect("leaf local ID is nonzero"));
     let entity = session.world().entity_at(address).expect("sit response target remains visible");
     assert_eq!(session.world().object(entity).and_then(|object| object.sit_target()), Some(expected));
     assert!(session.world().revision() > revision_before_update);
@@ -629,7 +609,7 @@ fn stale_fetch_keeps_newer_folder() {
         provenance: FolderFetchProvenance::Untracked,
     };
 
-    std::assert_matches!(apply_inventory_fetch(&mut inventory, stale_fetch), Ok(FolderFetchApply::Stale));
+    assert_matches!(apply_inventory_fetch(&mut inventory, stale_fetch), Ok(FolderFetchApply::Stale));
     let snapshot = inventory.snapshot();
     assert_eq!(snapshot.revision(), revision);
     assert_eq!(snapshot.items().count(), 0);
@@ -658,9 +638,9 @@ fn prepared_fetch_precedes_deferred_delta() {
     };
     let cancellation = InventoryPreparationCancellation::default();
     let worker_cancellation = cancellation;
-    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
-    let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
-    let worker = std::thread::spawn(move || {
+    let (started_tx, started_rx) = mpsc::sync_channel(0);
+    let (continue_tx, continue_rx) = mpsc::sync_channel(0);
+    let worker = thread::spawn(move || {
         started_tx.send(()).expect("test is waiting for worker");
         continue_rx.recv().expect("test releases worker");
         prepare_inventory_fetch(&snapshot, fetch, &worker_cancellation)
@@ -676,7 +656,7 @@ fn prepared_fetch_precedes_deferred_delta() {
     let PreparedInventoryFetch::Prepared(prepared) = prepared else {
         panic!("fetch should be prepared against its base revision");
     };
-    let ::inventory::FolderFetchCommit::Applied(_) = inventory.commit_folder_fetch(prepared).expect("owner commits prepared fetch") else {
+    let inventory::FolderFetchCommit::Applied(_) = inventory.commit_folder_fetch(prepared).expect("owner commits prepared fetch") else {
         panic!("base revision is still current");
     };
     let changes = inventory.apply_delta(deferred_delta).expect("deferred live delta applies after the fetch");
@@ -711,9 +691,9 @@ fn folder_change_stales_preparation() {
         provenance: FolderFetchProvenance::StartedAt { folder: generation, owner: owner_generation },
     };
     let worker_cancellation = InventoryPreparationCancellation::default();
-    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
-    let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
-    let worker = std::thread::spawn(move || {
+    let (started_tx, started_rx) = mpsc::sync_channel(0);
+    let (continue_tx, continue_rx) = mpsc::sync_channel(0);
+    let worker = thread::spawn(move || {
         let prepared = prepare_inventory_fetch(&snapshot, fetch, &worker_cancellation);
         started_tx.send(()).expect("test is waiting for prepared candidate");
         continue_rx.recv().expect("test releases preparation");
@@ -732,7 +712,7 @@ fn folder_change_stales_preparation() {
 
     let prepared = worker.join().expect("worker completes").expect("fetch transaction prepares");
     let PreparedInventoryFetch::Prepared(prepared) = prepared else { panic!("response should prepare against its captured snapshot") };
-    let ::inventory::FolderFetchCommit::StaleBase(prepared) = inventory.commit_folder_fetch(prepared).expect("stale base is an outcome")
+    let inventory::FolderFetchCommit::StaleBase(prepared) = inventory.commit_folder_fetch(prepared).expect("stale base is an outcome")
     else {
         panic!("the owner must not publish a result prepared against the changed folder");
     };
@@ -747,7 +727,7 @@ fn folder_change_stales_preparation() {
     let replacement = current
         .prepare_folder_fetch(root, ServerVersion::from_raw(10), Some(1), vec![InventoryChild::Item(item(live_item, root))])
         .expect("next operation prepares from the current revision");
-    let ::inventory::FolderFetchCommit::Applied(_) = inventory.commit_folder_fetch(replacement).expect("next operation commits") else {
+    let inventory::FolderFetchCommit::Applied(_) = inventory.commit_folder_fetch(replacement).expect("next operation commits") else {
         panic!("fresh transaction must commit against the current folder");
     };
     let current = inventory.snapshot();
@@ -764,13 +744,13 @@ async fn shutdown_joins_inventory_preparation() {
     let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(52)));
     let inventory =
         Inventory::new(category(root, None, ServerVersion::UNKNOWN, None), None, InventoryLimits::default()).expect("valid inventory root");
-    let cache = InventoryCacheSession::new(&tokio::runtime::Handle::current());
+    let cache = InventoryCacheSession::new(&Handle::current());
     let disposal = cache.try_reserve_disposal().expect("reserve bounded shutdown reclamation");
     let before = inventory.snapshot();
     let cancellation = InventoryPreparationCancellation::default();
     let (started, started_rx) = oneshot::channel();
-    let (release, release_rx) = std::sync::mpsc::sync_channel(0);
-    let task = tokio::task::spawn_blocking(move || {
+    let (release, release_rx) = mpsc::sync_channel(0);
+    let task = task::spawn_blocking(move || {
         started.send(()).expect("test waits for preparation worker");
         release_rx.recv().expect("test releases active preparation");
         Ok(PreparedInventoryFetch::Stale)
@@ -783,10 +763,7 @@ async fn shutdown_joins_inventory_preparation() {
     assert!(cancellation.is_cancelled());
     release.send(()).expect("active preparation is waiting for shutdown release");
     shutdown.await;
-    std::assert_matches!(
-        applied_rx.await.expect("shutdown acknowledges the pending fetch"),
-        crate::inventory::FolderApplyOutcome::Rejected
-    );
+    assert_matches!(applied_rx.await.expect("shutdown acknowledges the pending fetch"), FolderApplyOutcome::Rejected);
     cache.close().await;
 }
 
@@ -891,10 +868,10 @@ async fn fetch_move_resolves_pending_edit() {
     let selected = changes
         .changes
         .iter()
-        .find(|change| matches!(change, ::inventory::InventoryChange::NodeMoved { node: changed, .. } if *changed == node));
-    std::assert_matches!(
+        .find(|change| matches!(change, inventory::InventoryChange::NodeMoved { node: changed, .. } if *changed == node));
+    assert_matches!(
         selected,
-        Some(::inventory::InventoryChange::NodeMoved { node: changed, from, to })
+        Some(inventory::InventoryChange::NodeMoved { node: changed, from, to })
             if *changed == node && *from == first && *to == second
     );
     confirm_pending_moves(&mut pending, &before, &inventory.snapshot());
@@ -904,8 +881,6 @@ async fn fetch_move_resolves_pending_edit() {
 
 #[test]
 fn snapshot_moves_confirm_only_matches() {
-    use tokio::sync::oneshot::error::TryRecvError;
-
     #[derive(Clone, Copy, Debug)]
     enum Case {
         Match,
@@ -1013,8 +988,6 @@ async fn completed_favorites_refresh_is_superseded() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn favorites_shutdown_reaps_worker() {
-    use std::future::pending;
-
     let (started, started_rx) = oneshot::channel();
     let (dropped, dropped_rx) = oneshot::channel();
     let task = tokio::spawn(async move {

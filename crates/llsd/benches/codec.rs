@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, hint::black_box};
 
-use criterion::{BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, measurement::WallTime};
 use llsd::{Binary, Map, Uri, Value, binary, notation, xml};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -107,7 +107,7 @@ fn event_batch_value(batch: &EventBatch) -> Value {
 }
 
 fn bench_format<T>(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    group: &mut criterion::BenchmarkGroup<'_, WallTime>,
     name: &str,
     value: &T,
     input: &[u8],
@@ -125,7 +125,7 @@ fn bench_format<T>(
     });
 }
 
-fn bench_xml<T>(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>, name: &str, value: &T, input: &[u8])
+fn bench_xml<T>(group: &mut criterion::BenchmarkGroup<'_, WallTime>, name: &str, value: &T, input: &[u8])
 where
     T: Serialize + DeserializeOwned,
 {

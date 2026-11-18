@@ -9,7 +9,11 @@ use std::{
 use tokio::sync::watch;
 use utils::AssetId;
 
-use crate::{Blob, Budget, Failure, Image, PixelFormat, TextureSize, budget::TEXTURE_WORK_BYTES, texture};
+use crate::{
+    Blob, Budget, Failure, Image, PixelFormat, TextureSize,
+    budget::{Reservation, TEXTURE_WORK_BYTES},
+    texture,
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TextureId(u64);
@@ -202,7 +206,7 @@ pub struct TextureDecodeJob {
     texture: WeakTexture,
     source: Blob,
     info: ImageInfo,
-    reservation: crate::budget::Reservation,
+    reservation: Reservation,
 }
 
 impl TextureDecodeJob {
@@ -223,8 +227,7 @@ impl TextureDecodeJob {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches;
-    use std::time::Instant;
+    use std::{assert_matches, time::Instant};
 
     use test_support::texture::{RGBA_J2C, RGBA_RAW};
     use uuid::Uuid;

@@ -5,14 +5,19 @@ use std::{
 };
 
 use llsd::{Value, xml};
-use reqwest::{StatusCode, Url, header::CONTENT_RANGE};
+use reqwest::{
+    StatusCode, Url,
+    header::{CONTENT_RANGE, HeaderValue},
+};
 use tokio::time;
 
-use super::budget::{
-    MAX_CAPABILITY_NAME_BYTES, MAX_CAPABILITY_NAMES, MAX_CAPABILITY_NAMES_BYTES, MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_LLSD_NESTING_DEPTH,
-    MAX_LLSD_XML_ELEMENTS, MAX_SEED_CAPABILITY_RESPONSE_BYTES, capability_llsd_limits,
+use super::{
+    budget::{
+        MAX_CAPABILITY_NAME_BYTES, MAX_CAPABILITY_NAMES, MAX_CAPABILITY_NAMES_BYTES, MAX_CAPABILITY_REQUEST_BODY_BYTES,
+        MAX_LLSD_NESTING_DEPTH, MAX_LLSD_XML_ELEMENTS, MAX_SEED_CAPABILITY_RESPONSE_BYTES, capability_llsd_limits,
+    },
+    client::{ContentRange, RangeResponse},
 };
-use super::client::{ContentRange, RangeResponse};
 use crate::{
     error::Error,
     http::{self, ErrorKind, RedirectPolicy, Response},
@@ -173,7 +178,7 @@ pub(super) async fn get_capability_bytes(
         }
         (None, redirect_policy) => client.get_with_redirect_policy(url, max_response_bytes, redirect_policy).await?,
     };
-    if !response.status.is_success() || response.status == reqwest::StatusCode::PARTIAL_CONTENT {
+    if !response.status.is_success() || response.status == StatusCode::PARTIAL_CONTENT {
         return Err(http::Error::http_status(
             response.status,
             response.elapsed,
@@ -221,7 +226,7 @@ pub(super) async fn get_capability_range_bytes(
     }
 }
 
-fn parse_content_range(value: &reqwest::header::HeaderValue) -> Option<ContentRange> {
+fn parse_content_range(value: &HeaderValue) -> Option<ContentRange> {
     let value = value.to_str().ok()?;
     let (unit, value) = value.split_once(' ')?;
     if !unit.eq_ignore_ascii_case("bytes") {
@@ -260,7 +265,7 @@ fn string_value(value: &Value) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::{future::poll_fn, sync::Arc, task::Poll};
+    use std::{assert_matches, future::poll_fn, sync::Arc, task::Poll};
 
     use llsd::Value;
     use tokio::{task::yield_now, time};
@@ -268,11 +273,12 @@ mod tests {
 
     use crate::{
         Error,
-        capabilities::{CapabilityBudget, CapabilityUrl, Client},
+        capabilities::{
+            CapabilityBudget, CapabilityUrl, Client,
+            budget::{MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS, REQUEST_TIMEOUT},
+        },
         http::{self, ErrorKind},
     };
-
-    use crate::capabilities::budget::{MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS, REQUEST_TIMEOUT};
 
     #[tokio::test]
     async fn early_cancel_releases_slots() {
@@ -317,7 +323,7 @@ mod tests {
         time::advance(REQUEST_TIMEOUT).await;
         let error = request.await.expect_err("a request waiting for admission must hit its deadline");
 
-        std::assert_matches!(error, Error::CapabilityHttp(http::Error { kind: ErrorKind::Timeout, status: None, .. }));
+        assert_matches!(error, Error::CapabilityHttp(http::Error { kind: ErrorKind::Timeout, status: None, .. }));
         assert_eq!(budget.ordinary_requests.available_permits(), 0);
         drop(held);
         assert_eq!(budget.ordinary_requests.available_permits(), MAX_CONCURRENT_CAPABILITY_REQUESTS);

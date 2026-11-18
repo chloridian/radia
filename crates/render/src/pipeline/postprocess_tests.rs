@@ -1,10 +1,13 @@
-use super::*;
-use crate::environment::{Schedule, Sources, evaluate};
+use std::sync::mpsc;
+
 use futures::executor::block_on;
 use wgpu::{
-    Backends, DeviceDescriptor, Extent3d, InstanceDescriptor, MapMode, PollType, RenderPassDepthStencilAttachment, TexelCopyBufferInfo,
-    TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect,
+    Backends, DeviceDescriptor, Extent3d, InstanceDescriptor, MapMode, PipelineLayoutDescriptor, PollType, PrimitiveState,
+    RenderPassDepthStencilAttachment, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect, VertexState,
 };
+
+use super::*;
+use crate::environment::{Schedule, Sources, evaluate};
 
 fn assert_rgba_near(actual: [u8; 4], expected: [u8; 4], tolerance: u8) {
     for (index, (actual, expected)) in actual.into_iter().zip(expected).enumerate() {
@@ -107,8 +110,6 @@ fn render_exposure_scene(
     background: [f64; 4],
     depth_value: f32,
 ) -> [u8; 4] {
-    use wgpu::{PipelineLayoutDescriptor, PrimitiveState, VertexState};
-
     let environment = {
         let mut environment = evaluate(
             &Sources {
@@ -239,7 +240,7 @@ struct VertexOutput { @builtin(position) position: vec4<f32>, }
         Extent3d { width: LUMINANCE_SIZE, height: LUMINANCE_SIZE, depth_or_array_layers: 1 },
     );
     queue.submit([encoder.finish()]);
-    let (send, receive) = std::sync::mpsc::channel();
+    let (send, receive) = mpsc::channel();
     readback.slice(..).map_async(MapMode::Read, move |result| {
         send.send(result).expect("readback receiver remains alive until completion");
     });
@@ -378,7 +379,7 @@ fn render_tonemap_vector(device: &Device, queue: &Queue, color: [f64; 4], exposu
         Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
     );
     queue.submit([encoder.finish()]);
-    let (send, receive) = std::sync::mpsc::channel();
+    let (send, receive) = mpsc::channel();
     readback.slice(..).map_async(MapMode::Read, move |result| {
         send.send(result).expect("readback receiver remains alive until completion");
     });
@@ -405,8 +406,6 @@ fn exposure_interpolates_subpixel_samples() {
 }
 
 fn render_luminance_sample(device: &Device, queue: &Queue) -> f32 {
-    use wgpu::{PipelineLayoutDescriptor, PrimitiveState, VertexState};
-
     let mut postprocess = PostProcess::new(device, queue, TextureFormat::Rgba8UnormSrgb);
     postprocess.resize(device, [LUMINANCE_SIZE, LUMINANCE_SIZE]);
     queue.write_buffer(&postprocess.exposure_uniform, 0, &[0; EXPOSURE_BYTES]);
@@ -532,7 +531,7 @@ struct VertexOutput { @builtin(position) position: vec4<f32>, }
         Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
     );
     queue.submit([encoder.finish()]);
-    let (send, receive) = std::sync::mpsc::channel();
+    let (send, receive) = mpsc::channel();
     readback.slice(..).map_async(MapMode::Read, move |result| {
         send.send(result).expect("readback receiver remains alive until completion");
     });

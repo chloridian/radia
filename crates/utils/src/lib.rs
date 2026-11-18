@@ -10,7 +10,7 @@ use std::{
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
-pub use summary::Summary;
+pub use self::summary::Summary;
 
 const PERSIST_ATTEMPTS: usize = 4;
 const PERSIST_RETRY_DELAY: Duration = Duration::from_millis(10);
@@ -117,6 +117,8 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(windows)]
+    use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
 
     use tempfile::tempdir;
 
@@ -155,8 +157,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn replacement_survives_transient_lock() {
-        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
-
         let directory = tempdir().expect("temporary directory");
         let path = directory.path().join("settings.json");
         fs::write(&path, b"original").expect("create destination");
@@ -175,8 +175,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn locked_destination_keeps_contents() {
-        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
-
         let directory = tempdir().expect("temporary directory");
         let path = directory.path().join("settings.json");
         fs::write(&path, b"original").expect("create destination");
@@ -192,8 +190,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn retry_budget_is_shared() {
-        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
-
         let directory = tempdir().expect("temporary directory");
         let first = directory.path().join("first");
         let second = directory.path().join("second");

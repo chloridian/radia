@@ -1,18 +1,21 @@
 use std::{
     collections::{HashMap, HashSet},
-    mem::size_of,
     time::{Duration, Instant},
 };
 
-use ::inventory::{
+use inventory::{
     CategoryKey, ChangeSet, FolderFetchCommit, Inventory, InventoryChild, InventoryDelta, InventoryError, InventoryNodeId,
     InventoryNodeKey, InventoryPreparationCancellation, InventorySnapshot, PreparedFolderFetch, ServerVersion,
 };
 use network::{AgentSession, CapabilityEvent, capabilities::Client};
-use protocol::lludp::Message;
-use tokio::sync::oneshot;
-use tracing::Instrument;
+use protocol::lludp::{MAX_PACKET_RETAINED_CAPACITY_BYTES, Message};
+use tokio::{
+    sync::{oneshot, watch},
+    task::{JoinError, JoinHandle},
+};
+use tracing::{Instrument, field};
 
+use super::{DeferredInventoryEvent, PendingFolderPreparation, SessionDriver};
 use crate::{
     inventory::{
         AisDelta, FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryEditEvent, InventoryFetchError, InventoryFetchEvent,
@@ -22,14 +25,12 @@ use crate::{
         RegionLookup,
         coordinator::{
             inventory_bootstrap::InventoryBootstrapReport,
+            inventory_cache::{InventoryCacheSession, InventoryDisposalPermit},
             inventory_intake::{self, InventoryIntakeError, InventoryIntakeOutcome},
             presentation::{FavoritesUpdate, PresentationMailbox, ViewerUpdate},
         },
     },
 };
-
-use super::{DeferredInventoryEvent, PendingFolderPreparation, SessionDriver};
-use crate::session::coordinator::inventory_cache::InventoryDisposalPermit;
 
 pub(super) const INVENTORY_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -43,7 +44,7 @@ impl InventoryRejections {
     fn report(self) {
         tracing::warn!(
             rejected_blocks = self.rejected_blocks,
-            last_error = self.last_error.as_ref().map(tracing::field::display),
+            last_error = self.last_error.as_ref().map(field::display),
             "inventory updates contain rejected blocks"
         );
     }
@@ -76,14 +77,12 @@ impl SessionDriver {
             return false;
         }
         if self.inventory_observations_deferred() {
-            return !self.defer_network_inventory(protocol::lludp::MAX_PACKET_RETAINED_CAPACITY_BYTES, || {
-                DeferredInventoryEvent::Udp(message.clone())
-            }) && self.note_inventory_overload();
+            return !self.defer_network_inventory(MAX_PACKET_RETAINED_CAPACITY_BYTES, || DeferredInventoryEvent::Udp(message.clone()))
+                && self.note_inventory_overload();
         }
         let Some(disposal) = self.inventory_cache.try_reserve_disposal() else {
-            return !self.defer_network_inventory(protocol::lludp::MAX_PACKET_RETAINED_CAPACITY_BYTES, || {
-                DeferredInventoryEvent::Udp(message.clone())
-            }) && self.note_inventory_overload();
+            return !self.defer_network_inventory(MAX_PACKET_RETAINED_CAPACITY_BYTES, || DeferredInventoryEvent::Udp(message.clone()))
+                && self.note_inventory_overload();
         };
         self.handle_inventory_udp_now(message, disposal);
         false
@@ -299,7 +298,7 @@ impl SessionDriver {
         capabilities: Client,
         lookup: RegionLookup,
         inventory: Option<InventorySnapshot>,
-    ) -> tokio::task::JoinHandle<FavoritesUpdate> {
+    ) -> JoinHandle<FavoritesUpdate> {
         let username = self.credentials.username.clone();
         self.runtime.spawn(
             async move {
@@ -379,7 +378,7 @@ impl SessionDriver {
                 return self.mark_inventory_folders_incomplete(folders, refresh_disposal);
             }
             if !folders.is_empty() {
-                let bytes = folders.capacity().saturating_mul(std::mem::size_of::<CategoryKey>());
+                let bytes = folders.capacity().saturating_mul(size_of::<CategoryKey>());
                 if self.can_defer_network_inventory(1, bytes) {
                     disposal.reclaim(confirmation);
                     self.defer_inventory(DeferredInventoryEvent::RefreshFolders(folders));
@@ -527,16 +526,16 @@ impl SessionDriver {
     }
 }
 
-pub(super) fn cancel_favorites_refresh(task: &mut Option<tokio::task::JoinHandle<FavoritesUpdate>>) {
+pub(super) fn cancel_favorites_refresh(task: &mut Option<JoinHandle<FavoritesUpdate>>) {
     if let Some(task) = task.take() {
         task.abort();
     }
 }
 
 pub(super) fn publish_favorites_refresh(
-    task: &mut Option<tokio::task::JoinHandle<FavoritesUpdate>>,
+    task: &mut Option<JoinHandle<FavoritesUpdate>>,
     mailbox: &PresentationMailbox,
-    result: Result<FavoritesUpdate, tokio::task::JoinError>,
+    result: Result<FavoritesUpdate, JoinError>,
 ) {
     *task = None;
     match result {
@@ -546,7 +545,7 @@ pub(super) fn publish_favorites_refresh(
     }
 }
 
-pub(super) async fn stop_favorites_refresh(task: &mut Option<tokio::task::JoinHandle<FavoritesUpdate>>) {
+pub(super) async fn stop_favorites_refresh(task: &mut Option<JoinHandle<FavoritesUpdate>>) {
     if let Some(task) = task.take() {
         task.abort();
         if let Err(error) = task.await
@@ -569,7 +568,7 @@ pub(crate) fn confirm_pending_moves(
 fn inventory_node_parent(snapshot: &InventorySnapshot, node: InventoryNodeKey) -> Option<CategoryKey> {
     match node.id() {
         InventoryNodeId::Category(id) => snapshot.category(CategoryKey::new(node.owner(), id)).and_then(|category| category.parent),
-        InventoryNodeId::Item(id) => snapshot.item(::inventory::ItemKey::new(node.owner(), id)).map(|item| item.parent),
+        InventoryNodeId::Item(id) => snapshot.item(inventory::ItemKey::new(node.owner(), id)).map(|item| item.parent),
     }
 }
 
@@ -639,7 +638,7 @@ pub(super) fn prepare_inventory_fetch(
 
 pub(super) fn finish_inventory_fetch_preparation(
     driver: &mut SessionDriver,
-    result: Result<Result<PreparedInventoryFetch, InventoryError>, tokio::task::JoinError>,
+    result: Result<Result<PreparedInventoryFetch, InventoryError>, JoinError>,
 ) {
     let Some(preparation) = driver.pending_folder_preparation.take() else { return };
     let PendingFolderPreparation { folder, before, applied, disposal, .. } = preparation;
@@ -697,8 +696,8 @@ pub(super) fn finish_inventory_fetch_preparation(
 }
 
 pub(super) fn publish_inventory_change(
-    inventory_changes: &tokio::sync::watch::Sender<Option<InventorySnapshot>>,
-    inventory_cache: &mut crate::session::coordinator::inventory_cache::InventoryCacheSession,
+    inventory_changes: &watch::Sender<Option<InventorySnapshot>>,
+    inventory_cache: &mut InventoryCacheSession,
     changes: ChangeSet,
     before: InventorySnapshot,
     after: InventorySnapshot,
@@ -724,7 +723,7 @@ pub(crate) fn apply_inventory_fetch(inventory: &mut Inventory, fetch: FolderFetc
         PreparedInventoryFetch::Stale => return Ok(FolderFetchApply::Stale),
     };
     match inventory.commit_folder_fetch(prepared)? {
-        ::inventory::FolderFetchCommit::Applied(changes) => Ok(FolderFetchApply::Applied(changes)),
-        ::inventory::FolderFetchCommit::StaleBase(_) => Ok(FolderFetchApply::Stale),
+        FolderFetchCommit::Applied(changes) => Ok(FolderFetchApply::Applied(changes)),
+        FolderFetchCommit::StaleBase(_) => Ok(FolderFetchApply::Stale),
     }
 }

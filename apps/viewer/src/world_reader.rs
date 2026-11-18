@@ -1,7 +1,6 @@
 use std::{
     error::Error,
     fmt,
-    mem::size_of,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU8, Ordering},
@@ -10,9 +9,11 @@ use std::{
 };
 
 use futures::{FutureExt, channel::oneshot, pin_mut};
-use tokio::runtime::Handle;
-use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
+use tokio::{
+    runtime::Handle,
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, mpsc::error::TrySendError, watch},
+    time,
+};
 use world::{
     Entity, EnvironmentRead, MAX_ENVIRONMENT_READ_BYTES, MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS,
     MAX_OBJECT_PAGE_ITEMS, MAX_PARCEL_READ_BYTES, MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES,
@@ -264,7 +265,7 @@ impl WorldReader {
         let response = response.fuse();
         let deadline = {
             let _entered = self.runtime.enter();
-            tokio::time::sleep(READ_TIMEOUT)
+            time::sleep(READ_TIMEOUT)
         }
         .fuse();
         pin_mut!(response, deadline);
@@ -365,16 +366,17 @@ fn check_limit(limit: usize, maximum: usize) -> Result<(), ReadError> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
+    use std::{assert_matches, num::NonZeroU32};
 
     use futures::{join, poll};
+    use tokio::time;
     use uuid::Uuid;
     use world::{
-        Kind, MAX_OBJECT_DETAIL_WORK_ITEMS, ObjectDetailResult, ObjectObservation, OrderEvidence, ParentUpdate, Region, UpdateSource,
+        EnvironmentAssignment, EnvironmentScope, EnvironmentSource, Kind, MAX_ENVIRONMENT_SOURCE_BYTES, MAX_OBJECT_DETAIL_WORK_ITEMS,
+        ObjectDetailResult, ObjectObservation, OrderEvidence, ParcelLocalId, ParentUpdate, Region, UpdateSource, WorldLimits,
     };
 
     use super::*;
-    use world::{EnvironmentAssignment, EnvironmentScope, EnvironmentSource, MAX_ENVIRONMENT_SOURCE_BYTES, ParcelLocalId, WorldLimits};
 
     fn world() -> World {
         World::new(WorldLimits {
@@ -442,7 +444,7 @@ mod tests {
         assert!(read.retained_bytes() <= MAX_ENVIRONMENT_READ_BYTES);
         let _ = world.retire_region(region).unwrap();
         assert_eq!(deliver(reader.environment(region), &mut service, &world).await.unwrap(), None);
-        std::assert_matches!(
+        assert_matches!(
             read.region_assignment.unwrap().source,
             EnvironmentSource::Inline(source) if source.len() == MAX_ENVIRONMENT_SOURCE_BYTES
         );
@@ -471,7 +473,7 @@ mod tests {
         assert_ne!(old, replacement);
         let details = deliver(reader.details(&[old, replacement]), &mut service, &world).await.unwrap();
         assert_eq!(details.hydration_revision, world.revision());
-        std::assert_matches!(
+        assert_matches!(
             &details.details[..],
             [ObjectDetailResult::Gone(entity), ObjectDetailResult::Found(detail)]
                 if *entity == old && detail.summary.entity == replacement
@@ -481,7 +483,7 @@ mod tests {
         assert_eq!(regions.regions[0].region, region);
         assert_eq!(regions.hydration_revision, world.revision());
         let source = UpdateSource::new(region, 10, OrderEvidence::Ordered(10), 0);
-        let patch = world::TerrainPatch::new(0, 0, Box::new([0.0; TERRAIN_PATCH_SAMPLES])).unwrap();
+        let patch = TerrainPatch::new(0, 0, Box::new([0.0; TERRAIN_PATCH_SAMPLES])).unwrap();
         let _ = world.observe_terrain_patch(source, patch).unwrap();
         let _ = world.observe_water_height(source, 0.0).unwrap();
         let terrain = deliver(reader.terrain(region, None, 8), &mut service, &world).await.unwrap().unwrap();
@@ -601,7 +603,7 @@ mod tests {
         let second = deliver(reader.details(&entities), &mut service, &world).await.unwrap();
         assert_eq!(second.details, [ObjectDetailResult::Gone(target)]);
         let third = deliver(reader.details(&entities), &mut service, &world).await.unwrap();
-        std::assert_matches!(third.details.as_slice(), [ObjectDetailResult::Gone(entity)] if *entity == second_target);
+        assert_matches!(third.details.as_slice(), [ObjectDetailResult::Gone(entity)] if *entity == second_target);
     }
 
     #[tokio::test]
@@ -662,7 +664,7 @@ mod tests {
         assert!(poll!(replacement.as_mut()).is_pending());
         service.next_request().await.serve(&world);
         let replacement = replacement.await.unwrap();
-        std::assert_matches!(replacement.details.as_slice(), [ObjectDetailResult::Found(detail)] if detail.summary.entity == other);
+        assert_matches!(replacement.details.as_slice(), [ObjectDetailResult::Found(detail)] if detail.summary.entity == other);
 
         assert!(replaced.await.unwrap().details.is_empty());
         assert!(deliver(reader.details(&[target]), &mut service, &world).await.unwrap().details.is_empty());
@@ -725,7 +727,7 @@ mod tests {
         let reader = service.reader();
         let mut timed_out = Box::pin(reader.barrier());
         assert!(poll!(timed_out.as_mut()).is_pending());
-        tokio::time::advance(READ_TIMEOUT).await;
+        time::advance(READ_TIMEOUT).await;
         assert_eq!(timed_out.await, Err(ReadError::Busy));
         service.next_request().await.serve(&world);
         let mut late = Box::pin(reader.barrier());

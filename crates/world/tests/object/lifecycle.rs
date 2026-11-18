@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use super::support::{
     AgentHandedOff, Ambiguous, AmbiguousOrder, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, HashSet, IgnoredStale, Introduced,
     InvalidValue, KindMismatch, LinearMotion, Local, Object, ObjectPatch, Ordered, Parent, ParentCycle, Pending, Pose, Quat, RegionInfo,
@@ -10,11 +12,11 @@ fn object_count_tracks_live_objects() {
     let (mut world, region) = with_region();
     assert_eq!(world.object_count(), 0);
 
-    std::assert_matches!(world.observe_object(object(source(region, 1), 1, 1, Object, Root)).unwrap().outcome, Introduced(_));
-    std::assert_matches!(world.observe_object(object(source(region, 2), 2, 2, Object, Root)).unwrap().outcome, Introduced(_));
+    assert_matches!(world.observe_object(object(source(region, 1), 1, 1, Object, Root)).unwrap().outcome, Introduced(_));
+    assert_matches!(world.observe_object(object(source(region, 2), 2, 2, Object, Root)).unwrap().outcome, Introduced(_));
     assert_eq!(world.object_count(), 2);
 
-    std::assert_matches!(world.observe_object(object(source(region, 3), 1, 3, Object, Root)).unwrap().outcome, Updated(_));
+    assert_matches!(world.observe_object(object(source(region, 3), 1, 3, Object, Root)).unwrap().outcome, Updated(_));
     assert_eq!(world.object_count(), 2);
 
     assert_eq!(world.remove_object(source(region, 4), local_id(3)).unwrap().outcome, Removed(uuid(1)));
@@ -69,11 +71,11 @@ fn world_queries_follow_lifecycle() {
     let mut world = World::new(limits());
     let first_region = world.register_region().unwrap();
     let second_region = world.register_region().unwrap();
-    std::assert_matches!(
+    assert_matches!(
         world.patch_region(first_region, RegionInfo { name: Some("First".to_owned()), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
     );
-    std::assert_matches!(
+    assert_matches!(
         world.patch_region(second_region, RegionInfo { name: Some("Second".to_owned()), ..RegionInfo::default() }).unwrap().outcome,
         world::RegionOutcome::Patched { .. }
     );
@@ -348,7 +350,7 @@ fn agent_region_change_requires_handoff() {
     let return_handoff = object(source(source_region, 104), 40, 10, Avatar, Root);
     assert_eq!(world.handoff_agent(destination_region, return_handoff).unwrap().outcome, AgentHandedOff(agent));
 
-    std::assert_matches!(world.retire_region(source_region).unwrap().outcome, world::RegionOutcome::Retired { entities_removed: 1, .. });
+    assert_matches!(world.retire_region(source_region).unwrap().outcome, world::RegionOutcome::Retired { entities_removed: 1, .. });
     assert_eq!(world.entity(agent_id), None);
     assert!(world.region(source_region).is_none());
 }

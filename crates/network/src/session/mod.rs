@@ -24,21 +24,53 @@ use std::{
     },
 };
 
-use protocol::lludp::Message;
-use protocol::messages::{
-    AgentUpdate, ChatFromViewer, MapBlockRequest, MoveInventoryFolder, MoveInventoryItem, RegionHandleRequest, RequestMultipleObjects,
-    SetAlwaysRun, TeleportCancel,
+use protocol::{
+    lludp::Message,
+    messages::{
+        AgentUpdate, ChatFromViewer, MapBlockRequest, MoveInventoryFolder, MoveInventoryItem, RegionHandleRequest, RequestMultipleObjects,
+        SetAlwaysRun, TeleportCancel,
+    },
 };
 use tokio::sync::{
-    mpsc::{self, Receiver, Sender},
+    mpsc::{
+        Receiver, Sender,
+        error::{TryRecvError, TrySendError},
+    },
     oneshot, watch,
 };
 
-use crate::circuit::{ConnectionError, SimulatorConnection, SimulatorConnectionOptions, admission::SimulatorMemoryBudget};
+pub(crate) use self::error::SessionError;
+#[cfg(test)]
+pub(crate) use self::handoff::{HandoffEvidence, HandoffState, PendingPromotion, handoff_cancellation, matches_handoff_cancellation};
+#[cfg(test)]
+use self::neighbors::neighbor_completion_event;
+#[cfg(test)]
+use self::routing::{EventQueueOutcome, queue_simulator_event};
+#[cfg(test)]
+use self::runtime::{APPLICATION_EVENT_PRESSURE_GRACE_PERIOD, HANDOFF_COMMAND_RETRY_INTERVAL};
+#[cfg(test)]
+use self::simulators::retry_pending_handoff_commands;
+#[cfg(test)]
+pub(crate) use self::tests::{connect_test_connection, connect_test_primary_with_state, run_session};
+#[cfg(test)]
+use self::thread::{Channels, run_client, wait_for_login};
+use self::{
+    runtime::{RuntimeAction, SessionDispatcher},
+    simulators::{
+        ConnectionQueueFailure, ConnectionTaskResult, EventQueueLifecycle, HandoffCommand, NEIGHBOR_COMMAND_CAPACITY, RunState,
+        RuntimeInputs, SessionRuntime, SessionRuntimeOptions, SessionState, SimulatorCapabilitySession, SimulatorConnectionLifecycle,
+        SimulatorRecord, is_current_simulator, queue_connection_message, queue_primary_message, remove_simulator_capability,
+        track_capability_requests,
+    },
+    startup::SessionStartup,
+};
 use crate::{
     LoginCredentials,
-    circuit::lludp::Delivery,
-    circuit::{HandoffTarget, PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome},
+    circuit::{
+        ConnectionError, HandoffTarget, PrimaryState, SimulatorCommand, SimulatorConnection, SimulatorConnectionOptions, SimulatorEvent,
+        SimulatorRequest, SimulatorTaskOutcome, admission::SimulatorMemoryBudget, lludp::Delivery,
+    },
+    coverage,
     coverage::{
         CoverageLoss, CoverageLossLedger, CoverageLossRecord, CoverageSnapshot, CoverageSource, CoverageWatermark,
         record_event_envelope_loss,
@@ -46,32 +78,6 @@ use crate::{
     error::Error,
     event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, SimulatorId},
 };
-
-#[cfg(test)]
-use neighbors::neighbor_completion_event;
-#[cfg(test)]
-use routing::{EventQueueOutcome, queue_simulator_event};
-#[cfg(test)]
-use runtime::{APPLICATION_EVENT_PRESSURE_GRACE_PERIOD, HANDOFF_COMMAND_RETRY_INTERVAL};
-use runtime::{RuntimeAction, SessionDispatcher};
-#[cfg(test)]
-use simulators::retry_pending_handoff_commands;
-use simulators::{
-    ConnectionQueueFailure, ConnectionTaskResult, EventQueueLifecycle, HandoffCommand, NEIGHBOR_COMMAND_CAPACITY, RunState, RuntimeInputs,
-    SessionRuntime, SessionRuntimeOptions, SessionState, SimulatorCapabilitySession, SimulatorConnectionLifecycle, SimulatorRecord,
-    is_current_simulator, queue_connection_message, queue_primary_message, remove_simulator_capability, track_capability_requests,
-};
-use startup::SessionStartup;
-#[cfg(test)]
-use thread::{Channels, run_client, wait_for_login};
-
-pub(crate) use error::SessionError;
-#[cfg(test)]
-pub(crate) use handoff::{HandoffEvidence, HandoffState, PendingPromotion, handoff_cancellation, matches_handoff_cancellation};
-#[cfg(test)]
-pub(crate) use tests::run_session as run_test_session;
-#[cfg(test)]
-pub(crate) use tests::{connect_test_connection, connect_test_primary_with_state};
 
 pub(crate) const COMMAND_CAPACITY: usize = 256;
 const NETWORK_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
@@ -189,13 +195,13 @@ impl Session {
                     self.pending_event = Some(envelope);
                     continue;
                 }
-                Err(mpsc::error::TryRecvError::Disconnected) => {
+                Err(TryRecvError::Disconnected) => {
                     if let Some(loss) = self.next_coverage_loss(None) {
                         return Some(Event::CoverageLost { loss });
                     }
                     return None;
                 }
-                Err(mpsc::error::TryRecvError::Empty) => {}
+                Err(TryRecvError::Empty) => {}
             }
 
             if let Some(loss) = self.next_coverage_loss(None) {
@@ -230,7 +236,7 @@ impl Session {
 
     pub fn report_current_event_loss(&mut self, reason: crate::CoverageLossReason) -> Option<CoverageWatermark> {
         let watermark = self.last_event_watermark.take()?;
-        crate::coverage::record_coverage_loss(&self.coverage_losses, watermark.simulator_id, watermark.source, reason);
+        coverage::record_coverage_loss(&self.coverage_losses, watermark.simulator_id, watermark.source, reason);
         Some(watermark)
     }
 
@@ -396,8 +402,8 @@ impl SessionHandle {
                 return Err(Error::SessionClosed);
             }
             self.commands.try_send(Command::SendTo { simulator_id, message, delivery, completed }).map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => Error::SimulatorCommandQueueFull,
-                mpsc::error::TrySendError::Closed(_) => Error::SessionClosed,
+                TrySendError::Full(_) => Error::SimulatorCommandQueueFull,
+                TrySendError::Closed(_) => Error::SessionClosed,
             })?;
         }
         tokio::select! {
@@ -449,8 +455,8 @@ impl SessionHandle {
                 return Err(Error::SessionClosed);
             }
             self.commands.try_send(Command::ReplyRegionHandshake { simulator_id, flags, completed }).map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => Error::CommandQueueFull,
-                mpsc::error::TrySendError::Closed(_) => Error::SessionClosed,
+                TrySendError::Full(_) => Error::CommandQueueFull,
+                TrySendError::Closed(_) => Error::SessionClosed,
             })?;
         }
         Ok(response)
@@ -504,8 +510,8 @@ fn validate_outbound_message(message: &Message) -> Result<(), Error> {
 
 fn try_send_command(commands: &Sender<Command>, command: Command, closed: Error) -> Result<(), Error> {
     commands.try_send(command).map_err(|error| match error {
-        mpsc::error::TrySendError::Full(_) => Error::CommandQueueFull,
-        mpsc::error::TrySendError::Closed(_) => closed,
+        TrySendError::Full(_) => Error::CommandQueueFull,
+        TrySendError::Closed(_) => closed,
     })
 }
 

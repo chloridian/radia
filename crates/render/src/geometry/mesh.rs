@@ -1,12 +1,12 @@
-use std::mem::size_of;
-
 use math::Frustum;
 use wgpu::Device;
 
 use super::{GeometryRenderer, MAX_MESH_UPLOADS, UPLOAD_BYTES};
-use crate::geometry::storage::Allocation;
-use crate::pipeline::VERTEX_BYTES;
-use crate::scene::{Camera, MeshId, SharedMesh};
+use crate::{
+    geometry::storage::Allocation,
+    pipeline::VERTEX_BYTES,
+    scene::{Camera, MeshId, SharedMesh},
+};
 
 pub(super) struct GpuMesh {
     pub(super) allocation: Allocation,
@@ -66,7 +66,7 @@ impl GeometryRenderer {
         }
         self.queue.write_buffer(&allocation.buffers().vertices, u64::from(allocation.vertices().start) * VERTEX_BYTES as u64, &packed);
         if let Some(composition) = composition {
-            let mut packed = Vec::with_capacity(std::mem::size_of_val(composition));
+            let mut packed = Vec::with_capacity(size_of_val(composition));
             floats_slice(&mut packed, composition);
             let buffer = allocation.buffers().composition.as_ref().expect("composition allocation has a terrain buffer");
             self.queue.write_buffer(buffer, u64::from(allocation.vertices().start) * size_of::<f32>() as u64, &packed);

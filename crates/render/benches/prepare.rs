@@ -1,10 +1,13 @@
+#[cfg(windows)]
+use core::ffi;
 use std::{
+    env,
     f64::consts::PI,
     hint::black_box,
     time::{Duration, Instant},
 };
 
-use criterion::Criterion;
+use criterion::{Criterion, measurement::WallTime};
 use futures::executor::block_on;
 use math::{DVec3, Vec3};
 use render::{
@@ -299,18 +302,17 @@ pub(crate) fn bench(c: &mut Criterion) {
     }))
     .expect("benchmark GPU device");
     let mut group = c.benchmark_group("render/geometry_prepare");
-    if std::env::args().any(|argument| argument.ends_with("live_walk_reprepare_pose4_texture_arrivals")) {
+    if env::args().any(|argument| argument.ends_with("live_walk_reprepare_pose4_texture_arrivals")) {
         bench_live_mix(&mut group, &device, &queue);
         group.finish();
         return;
     }
-    if std::env::args().any(|argument| argument.ends_with("region_load_progress_5000") || argument.ends_with("region_load_progress_65000"))
-    {
+    if env::args().any(|argument| argument.ends_with("region_load_progress_5000") || argument.ends_with("region_load_progress_65000")) {
         bench_region_load_progress(&mut group, &device, &queue);
         group.finish();
         return;
     }
-    if std::env::args().any(|argument| {
+    if env::args().any(|argument| {
         [
             "history_loss_rebuild_1000",
             "history_loss_rebuild_16000",
@@ -353,12 +355,8 @@ pub(crate) fn bench(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_history_loss(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) {
-    let arguments = std::env::args().collect::<Vec<_>>();
+fn bench_history_loss(group: &mut criterion::BenchmarkGroup<'_, WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
+    let arguments = env::args().collect::<Vec<_>>();
     let memory_probe = arguments.iter().any(|argument| argument.starts_with("history_loss_layout_memory_"));
     let layout_change = memory_probe || arguments.iter().any(|argument| argument.starts_with("history_loss_layout_rebuild_"));
     let benchmark_name = |size: usize| {
@@ -639,12 +637,8 @@ fn bench_history_loss(
     }
 }
 
-fn bench_region_load_progress(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) {
-    let arguments = std::env::args().collect::<Vec<_>>();
+fn bench_region_load_progress(group: &mut criterion::BenchmarkGroup<'_, WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
+    let arguments = env::args().collect::<Vec<_>>();
     let selected_size = [5_000, 65_000]
         .into_iter()
         .find(|size| arguments.iter().any(|argument| argument.ends_with(&format!("region_load_progress_{size}"))));
@@ -861,11 +855,7 @@ fn bench_region_load_progress(
     }
 }
 
-fn bench_mesh_objects(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) {
+fn bench_mesh_objects(group: &mut criterion::BenchmarkGroup<'_, WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
     let (_reconciler, view, _world, _now) = support::ready_distinct_mesh_scene(128);
     let camera = Camera::new(DVec3::ZERO, Vec3::X, PI / 3.0, SIZE).expect("mesh preparation camera");
     let mut prepare = GeometryPrepare::new(device, queue, TextureFormat::Rgba8UnormSrgb);
@@ -897,11 +887,7 @@ fn bench_mesh_objects(
     report("camera_change_128_distinct_mesh_assets", latest);
 }
 
-fn bench_unchanged(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) {
+fn bench_unchanged(group: &mut criterion::BenchmarkGroup<'_, WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
     let mut fixture = Fixture::settled(device, queue, 1, 50, 0, 50.0, 512.0);
     let camera = camera_at(50.0, 0.0, 512.0);
     fixture.sample(device, queue, camera);
@@ -925,11 +911,7 @@ fn bench_unchanged(
     report("unchanged_static_camera", latest);
 }
 
-fn bench_camera_walk(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) {
+fn bench_camera_walk(group: &mut criterion::BenchmarkGroup<'_, WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
     let mut fixture = Fixture::settled(device, queue, 7, 50, 0, 896.0, 1024.0);
     let mut generation = 0usize;
     let mut layouts = 0usize;
@@ -956,7 +938,7 @@ fn bench_camera_walk(
 }
 
 fn bench_camera_culling_rotation(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    group: &mut criterion::BenchmarkGroup<'_, WallTime>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     mut fixture: Fixture,
@@ -1009,7 +991,7 @@ fn bench_camera_culling_rotation(
 }
 
 fn bench_camera_culling_edge_sweep(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    group: &mut criterion::BenchmarkGroup<'_, WallTime>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     objects: usize,
@@ -1068,7 +1050,7 @@ fn bench_camera_culling_edge_sweep(
     eprintln!("{name}: cull {}", cull.report());
 }
 
-fn bench_pose(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
+fn bench_pose(group: &mut criterion::BenchmarkGroup<'_, WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
     let mut fixture = Fixture::settled(device, queue, 1, 50, 0, 50.0, 512.0);
     let camera = camera_at(50.0, 0.0, 512.0);
     let mut generation = 0;
@@ -1094,7 +1076,7 @@ fn bench_pose(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::
 }
 
 fn bench_reprepare(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    group: &mut criterion::BenchmarkGroup<'_, WallTime>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     mesh_count: usize,
@@ -1145,7 +1127,7 @@ fn bench_reprepare(
     report(name, latest);
 }
 
-fn bench_live_mix(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
+fn bench_live_mix(group: &mut criterion::BenchmarkGroup<'_, WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
     let mut fixture = Fixture::settled(device, queue, 7, 50, 0, 768.0, 1024.0);
     let mut generation = 0u64;
     let mut order = 20_000_000;
@@ -1201,7 +1183,7 @@ fn bench_live_mix(group: &mut criterion::BenchmarkGroup<'_, criterion::measureme
     report("live_walk_reprepare_pose4_texture_arrivals", latest);
 }
 
-fn bench_animated(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
+fn bench_animated(group: &mut criterion::BenchmarkGroup<'_, WallTime>, device: &wgpu::Device, queue: &wgpu::Queue) {
     let mut fixture = Fixture::settled(device, queue, 1, 50, ANIMATED_OBJECTS, 50.0, 512.0);
     let camera = camera_at(50.0, 0.0, 512.0);
     let mut visited = 0usize;
@@ -1283,8 +1265,8 @@ fn prepare_sample(
 fn thread_cpu_cycles() -> Option<u64> {
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn GetCurrentThread() -> *mut core::ffi::c_void;
-        fn QueryThreadCycleTime(thread: *mut core::ffi::c_void, cycles: *mut u64) -> i32;
+        fn GetCurrentThread() -> *mut ffi::c_void;
+        fn QueryThreadCycleTime(thread: *mut ffi::c_void, cycles: *mut u64) -> i32;
     }
 
     let mut cycles = 0;
@@ -1317,15 +1299,15 @@ fn process_memory() -> Option<ProcessMemory> {
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn GetCurrentProcess() -> *mut core::ffi::c_void;
+        fn GetCurrentProcess() -> *mut ffi::c_void;
     }
 
     #[link(name = "psapi")]
     unsafe extern "system" {
-        fn GetProcessMemoryInfo(process: *mut core::ffi::c_void, counters: *mut ProcessMemoryCountersEx, size: u32) -> i32;
+        fn GetProcessMemoryInfo(process: *mut ffi::c_void, counters: *mut ProcessMemoryCountersEx, size: u32) -> i32;
     }
 
-    let mut counters = ProcessMemoryCountersEx { cb: std::mem::size_of::<ProcessMemoryCountersEx>() as u32, ..Default::default() };
+    let mut counters = ProcessMemoryCountersEx { cb: size_of::<ProcessMemoryCountersEx>() as u32, ..Default::default() };
     let size = counters.cb;
     let succeeded = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) };
     (succeeded != 0).then_some(ProcessMemory {

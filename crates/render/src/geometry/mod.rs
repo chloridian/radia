@@ -11,6 +11,7 @@ mod visibility;
 
 use std::{
     collections::{HashMap, HashSet},
+    mem,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -26,22 +27,22 @@ use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
-
 use world::{Entity, WorldTransform};
 
-use self::cache::FrameCache;
-use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, ViewDraws};
-use self::instance::{INITIAL_FACE_INSTANCES, InstanceBuffers};
-use self::items::ItemIndex;
-use self::mesh::GpuMesh;
-use self::storage::Storage;
-use crate::scene::{AgentPose, Camera, MAX_REGIONS, MeshId, ViewVersion};
+pub use self::pick::PickError;
+use self::{
+    cache::FrameCache,
+    draw_list::{DrawList, INDIRECT_DRAW_BYTES, ViewDraws},
+    instance::{INITIAL_FACE_INSTANCES, InstanceBuffers},
+    items::ItemIndex,
+    mesh::GpuMesh,
+    storage::Storage,
+};
 use crate::{
     pipeline::{FACE_INDEX_BYTES, Pipeline, Sky, SurfacePipelines, VoidWater},
+    scene::{AgentPose, Camera, MAX_REGIONS, MeshId, ViewVersion},
     texture::{GeometryTextureState, TextureCompletion, TextureJob, TextureState, Textures},
 };
-
-pub use pick::PickError;
 
 const MESH_BYTES: usize = 64 * 1024 * 1024;
 const DEPTH_BYTES: usize = 128 * 1024 * 1024;
@@ -557,7 +558,7 @@ impl GeometryRenderer {
 
     pub(crate) fn submitted(&mut self, frame: FrameLease) {
         self.textures.submitted(&self.queue);
-        let retired = std::mem::take(&mut self.retired);
+        let retired = mem::take(&mut self.retired);
         self.queue.on_submitted_work_done(move || {
             drop(retired);
             drop(frame);

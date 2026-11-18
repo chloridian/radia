@@ -1,17 +1,15 @@
-use std::mem::size_of;
-
 use math::{Vec3, Vec4};
 
 use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     messages::object::{ObjectMotion, RegionData, decode_quantized, encode_quantized, rotation_from_u16},
     schema::ids::IMPROVED_TERSE_OBJECT_UPDATE,
-    types::{TextureEntry, decode_texture_entry as decode_texture_entry_payload},
+    types::{self, TextureEntry},
 };
 
 pub const MAX_TEXTURE_ENTRY_FIELD_BYTES: usize = 1024;
@@ -73,7 +71,7 @@ pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpE
     }
     let end = 4_usize.checked_add(length).ok_or(LLUdpError::InvalidMessage)?;
     let payload = bytes.get(4..end).ok_or(LLUdpError::InvalidMessage)?;
-    decode_texture_entry_payload(payload).map_err(|_| LLUdpError::InvalidMessage)
+    types::decode_texture_entry(payload).map_err(|_| LLUdpError::InvalidMessage)
 }
 
 impl TypedMessage for ImprovedTerseObjectUpdate {
@@ -82,7 +80,7 @@ impl TypedMessage for ImprovedTerseObjectUpdate {
     const INBOUND_ONLY: bool = true;
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
-        self::decode(reader)
+        decode(reader)
     }
 
     fn encode(&self, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
@@ -125,19 +123,17 @@ impl TypedMessage for ImprovedTerseObjectUpdate {
     }
 
     fn preflight_allocation_bound(payload: &[u8]) -> Result<usize, LLUdpError> {
-        crate::lludp::message::allocation::with_payload(payload, preflight_allocation_bytes(payload)?)
+        allocation::with_payload(payload, preflight_allocation_bytes(payload)?)
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        let mut bytes = crate::lludp::message::allocation::capacity_bytes(self.objects.capacity(), std::mem::size_of::<ObjectBlock>());
+        let mut bytes = allocation::capacity_bytes(self.objects.capacity(), size_of::<ObjectBlock>());
         for block in &self.objects {
             match block {
-                ObjectBlock::Decoded(object) => {
-                    crate::lludp::message::allocation::add_capacity(&mut bytes, object.texture_entry.capacity(), std::mem::size_of::<u8>())
-                }
+                ObjectBlock::Decoded(object) => allocation::add_capacity(&mut bytes, object.texture_entry.capacity(), size_of::<u8>()),
                 ObjectBlock::Malformed { packed_data, texture_entry } => {
-                    crate::lludp::message::allocation::add_capacity(&mut bytes, packed_data.capacity(), std::mem::size_of::<u8>());
-                    crate::lludp::message::allocation::add_capacity(&mut bytes, texture_entry.capacity(), std::mem::size_of::<u8>());
+                    allocation::add_capacity(&mut bytes, packed_data.capacity(), size_of::<u8>());
+                    allocation::add_capacity(&mut bytes, texture_entry.capacity(), size_of::<u8>());
                 }
             }
         }

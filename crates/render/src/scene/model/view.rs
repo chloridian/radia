@@ -1,18 +1,19 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque, btree_map::Entry},
     error::Error,
     fmt::{self, Display, Formatter},
-    mem::size_of,
+    ops::Bound,
     time::Instant,
 };
 
 use assets::TextureHandle;
+use math::motion::RegionBounds;
 use utils::AssetId;
 use uuid::Uuid;
 use world::{Entity, Region, WorldRevision};
 
 use super::{Batch, Change, MeshChange, Mirror, SceneLifetime, Status};
-use crate::scene::{Object, Patch, RegionData, Surface, ViewerEnvironment, region_environment::RegionEnvironment};
+use crate::scene::{Object, Patch, RegionData, Surface, SurfaceKind, ViewerEnvironment, region_environment::RegionEnvironment, surface};
 
 const CHANGE_HISTORY: usize = 64;
 const CHANGE_HISTORY_BYTES: usize = 4 * 1024 * 1024;
@@ -21,7 +22,7 @@ const FILTERED_OBJECT_PAGE_LIMIT: usize = 128;
 #[derive(Default)]
 pub(crate) struct SceneChanges {
     pub(crate) objects: Vec<Entity>,
-    pub(crate) surfaces: Vec<(Region, crate::scene::SurfaceKind)>,
+    pub(crate) surfaces: Vec<(Region, SurfaceKind)>,
     pub(crate) regions: Vec<Region>,
     pub(crate) retired: Vec<Region>,
     pub(crate) motion_changed: Vec<Entity>,
@@ -63,7 +64,7 @@ impl SceneChanges {
     fn retained_bytes(&self) -> usize {
         size_of::<Self>()
             + self.objects.capacity() * size_of::<Entity>()
-            + self.surfaces.capacity() * size_of::<(Region, crate::scene::SurfaceKind)>()
+            + self.surfaces.capacity() * size_of::<(Region, SurfaceKind)>()
             + self.regions.capacity() * size_of::<Region>()
             + self.retired.capacity() * size_of::<Region>()
             + self.motion_changed.capacity() * size_of::<Entity>()
@@ -171,7 +172,7 @@ impl SceneView {
 
     fn insert_object_order(&mut self, id: Uuid, entity: Entity, sequence: u64) {
         self.object_order.insert(id, entity);
-        if let std::collections::btree_map::Entry::Vacant(entry) = self.changed_objects.entry(id) {
+        if let Entry::Vacant(entry) = self.changed_objects.entry(id) {
             entry.insert(ObjectChangeSequence { latest: sequence, added: sequence });
             self.changed_sequences.insert((sequence, id));
             self.added_objects.insert((sequence, id));
@@ -362,7 +363,7 @@ impl SceneView {
         }
     }
 
-    pub fn resume_motion(&mut self, region: Region, now: Instant, regions: &[math::motion::RegionBounds]) {
+    pub fn resume_motion(&mut self, region: Region, now: Instant, regions: &[RegionBounds]) {
         for object in self.mirror.objects.values_mut().filter(|object| object.detail().summary.address.region() == region) {
             object.resume_motion_at(now, regions);
         }
@@ -427,9 +428,9 @@ impl SceneView {
             return (Vec::new(), after, true);
         }
         let lower = after.unwrap_or((since, Uuid::from_u128(u128::MAX)));
-        let page = index.range((std::ops::Bound::Excluded(lower), std::ops::Bound::Unbounded)).take(limit).copied().collect::<Vec<_>>();
+        let page = index.range((Bound::Excluded(lower), Bound::Unbounded)).take(limit).copied().collect::<Vec<_>>();
         let cursor = page.last().copied().or(after);
-        let done = index.range((std::ops::Bound::Excluded(cursor.unwrap_or(lower)), std::ops::Bound::Unbounded)).next().is_none();
+        let done = index.range((Bound::Excluded(cursor.unwrap_or(lower)), Bound::Unbounded)).next().is_none();
         (page, cursor, done)
     }
 
@@ -440,7 +441,7 @@ impl SceneView {
         let needs_filter = !self.mirror.invalidations.is_empty() || !self.mirror.retired_regions.is_empty();
         let limit = if needs_filter { limit.min(FILTERED_OBJECT_PAGE_LIMIT) } else { limit };
         let entries = match after {
-            Some(after) => self.object_order.range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded)),
+            Some(after) => self.object_order.range((Bound::Excluded(after), Bound::Unbounded)),
             None => self.object_order.range(..),
         }
         .take(limit.saturating_add(1))
@@ -498,7 +499,7 @@ impl SceneView {
         if !self.session.is_active() || !position.is_finite() {
             return None;
         }
-        crate::scene::surface::terrain_height_at(&self.mirror, position)
+        surface::height_at(&self.mirror, position)
     }
     pub fn water_height(&self, region: Region) -> Option<f32> {
         if self.session.is_active() { self.mirror.water.get(&region).copied().flatten() } else { None }
@@ -510,14 +511,14 @@ impl SceneView {
 
     pub(crate) fn surface_page(
         &self,
-        after: Option<(Region, crate::scene::SurfaceKind)>,
+        after: Option<(Region, SurfaceKind)>,
         limit: usize,
-    ) -> (Vec<&Surface>, Option<(Region, crate::scene::SurfaceKind)>, bool) {
+    ) -> (Vec<&Surface>, Option<(Region, SurfaceKind)>, bool) {
         if !self.session.is_active() || limit == 0 {
             return (Vec::new(), after, true);
         }
         let entries = match after {
-            Some(after) => self.mirror.surfaces.range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded)),
+            Some(after) => self.mirror.surfaces.range((Bound::Excluded(after), Bound::Unbounded)),
             None => self.mirror.surfaces.range(..),
         }
         .take(limit.saturating_add(1))
@@ -529,7 +530,7 @@ impl SceneView {
         (surfaces, next, done)
     }
 
-    pub(crate) fn surface(&self, region: Region, kind: crate::scene::SurfaceKind) -> Option<&Surface> {
+    pub(crate) fn surface(&self, region: Region, kind: SurfaceKind) -> Option<&Surface> {
         if self.session.is_active() { self.mirror.surfaces.get(&(region, kind)) } else { None }
     }
 
@@ -566,13 +567,19 @@ fn change_affects_geometry(change: &Change) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{assert_matches, num::NonZeroU32};
+
     use math::DVec3;
     use world::{RegionInfo, RegionSummary, TERRAIN_PATCH_SAMPLES, TerrainPatch};
 
-    use crate::scene::model::Receipt;
-    use crate::scene::model::SceneLifetime;
-    use crate::scene::{Budget, Camera, ReadFailure, ReadQuery, ReadReply, ReconcileStep, Reconciler};
+    use super::*;
+    use crate::{
+        scene::{
+            Budget, Camera, ReadFailure, ReadQuery, ReadReply, ReconcileStep, Reconciler,
+            model::{Receipt, SceneLifetime},
+        },
+        test_support,
+    };
 
     struct PageState {
         entries: Vec<(Uuid, Option<Entity>)>,
@@ -609,7 +616,7 @@ mod tests {
         order: u64,
         parent: world::ParentUpdate,
     ) -> Entity {
-        let local_id = std::num::NonZeroU32::new(local_id).expect("fixture local id");
+        let local_id = NonZeroU32::new(local_id).expect("fixture local id");
         let mut observation = world::ObjectObservation::new(
             world::UpdateSource::new(region, u32::try_from(order).expect("fixture order"), world::OrderEvidence::Ordered(order), 0),
             id,
@@ -649,7 +656,7 @@ mod tests {
 
     #[test]
     fn status_change_skips_full_rebuild() {
-        let (_scene, mut view) = Reconciler::new(crate::scene::Budget::default());
+        let (_scene, mut view) = Reconciler::new(Budget::default());
         let version = view.version();
         view.status = Status::Ready;
 
@@ -688,7 +695,7 @@ mod tests {
             second_id,
             2,
             2,
-            world::ParentUpdate::Local(std::num::NonZeroU32::new(1).expect("parent local id")),
+            world::ParentUpdate::Local(NonZeroU32::new(1).expect("parent local id")),
         );
         let third = membership_entity(&mut world, region, third_id, 3, 3, world::ParentUpdate::Root);
         let budget = Budget::default();
@@ -744,7 +751,7 @@ mod tests {
         let _removal = world
             .remove_object(
                 world::UpdateSource::new(region, 4, world::OrderEvidence::Ordered(4), 0),
-                std::num::NonZeroU32::new(3).expect("removed local id"),
+                NonZeroU32::new(3).expect("removed local id"),
             )
             .expect("fixture removal applies");
         let reused = membership_entity(&mut world, region, third_id, 4, 5, world::ParentUpdate::Root);
@@ -905,7 +912,7 @@ mod tests {
         let mut observation = world::ObjectObservation::new(
             world::UpdateSource::new(region, 1, world::OrderEvidence::Ordered(1), 0),
             id,
-            std::num::NonZeroU32::new(1).expect("fixture local id"),
+            NonZeroU32::new(1).expect("fixture local id"),
             world::Kind::Object,
             world::ParentUpdate::Root,
         );
@@ -915,10 +922,7 @@ mod tests {
         observation.appearance = world::FieldUpdate::Set(world::Appearance::Surface);
         observation.surface_appearance =
             Some(world::SurfaceAppearance::new(world::FaceAppearance::default(), Vec::new()).expect("fixture appearance"));
-        std::assert_matches!(
-            world.observe_object(observation).expect("fixture object applies").outcome,
-            world::ApplyOutcome::Introduced(_)
-        );
+        assert_matches!(world.observe_object(observation).expect("fixture object applies").outcome, world::ApplyOutcome::Introduced(_));
         let (mut scene, mut view) = Reconciler::new(Budget::default());
         scene.set_camera(Camera::new(DVec3::ZERO, math::Vec3::X, 1.0, [128, 128]).expect("fixture camera"));
 
@@ -982,7 +986,7 @@ mod tests {
 
     #[test]
     fn terrain_height_interpolates() {
-        let (_region_world, regions) = crate::test_support::registered_regions(2);
+        let (_region_world, regions) = test_support::registered_regions(2);
         let [west, east] = regions.as_slice() else { unreachable!() };
         let (west, east) = (*west, *east);
         let both = [(west, DVec3::ZERO), (east, DVec3::new(256.0, 0.0, 0.0))];

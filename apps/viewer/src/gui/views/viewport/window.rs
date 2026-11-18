@@ -2,6 +2,7 @@ use std::{
     error::Error,
     fmt,
     future::Future,
+    mem,
     ops::{Deref, DerefMut},
     sync::{
         Arc,
@@ -13,8 +14,8 @@ use std::{
 };
 
 use egui::{Context, DragValue, Slider, ViewportId};
-use render::scene;
-use render::{CompressionQuality, FrameInput, Overlay, Renderer, RendererInit, Retirement, TextureCompletion};
+use render::{CompressionQuality, FrameInput, Overlay, Renderer, RendererInit, Retirement, TextureCompletion, scene};
+use storage::EvictionReason;
 use tokio::{runtime::Handle, task::JoinHandle};
 use tracing::Instrument;
 use utils::Summary;
@@ -22,6 +23,7 @@ use utils::Summary;
 use winit::platform::startup_notify::{EventLoopExtStartupNotify, WindowAttributesExtStartupNotify, reset_activation_token_env};
 use winit::{
     dpi::{LogicalSize, PhysicalPosition},
+    error::OsError,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow},
     keyboard::{Key, ModifiersState, NamedKey},
@@ -50,7 +52,7 @@ fn display_refresh_interval(window: &Window) -> Duration {
 
 #[derive(Debug)]
 pub(crate) enum SceneWindowError {
-    WindowCreation(winit::error::OsError),
+    WindowCreation(OsError),
     Renderer(render::Error),
     RendererInitializationStopped,
     RecoveryExhausted,
@@ -242,7 +244,7 @@ impl<P, R> RendererLifecycle<P, R> {
     }
 
     fn retire_ready(&mut self) -> Option<R> {
-        let state = std::mem::replace(&mut self.state, RendererState::Failed);
+        let state = mem::replace(&mut self.state, RendererState::Failed);
         match state {
             RendererState::Ready(renderer) => {
                 self.state = RendererState::Recovering { pending: None };
@@ -256,7 +258,7 @@ impl<P, R> RendererLifecycle<P, R> {
     }
 
     fn complete<E>(&mut self, token: RendererToken, result: Result<R, E>) -> InitializationOutcome<R, E> {
-        let state = std::mem::replace(&mut self.state, RendererState::Failed);
+        let state = mem::replace(&mut self.state, RendererState::Failed);
         match state {
             RendererState::Initializing { token: expected, pending } => {
                 drop(pending);
@@ -301,7 +303,7 @@ impl<P, R> RendererLifecycle<P, R> {
     }
 
     fn close(&mut self) -> (Option<R>, Option<P>) {
-        let state = std::mem::replace(&mut self.state, RendererState::Failed);
+        let state = mem::replace(&mut self.state, RendererState::Failed);
         match state {
             RendererState::Ready(renderer) => (Some(renderer), None),
             RendererState::Initializing { pending, .. } => (None, Some(pending)),
@@ -659,11 +661,11 @@ impl SceneWindow {
             self.retired.push(renderer.retire());
         }
         drop(pending);
-        std::mem::take(&mut self.retired)
+        mem::take(&mut self.retired)
     }
 
     pub(super) fn take_retired(&mut self) -> Vec<Retirement> {
-        std::mem::take(&mut self.retired)
+        mem::take(&mut self.retired)
     }
 
     fn release_drag(&mut self, restore: bool) {
@@ -1076,11 +1078,11 @@ impl SceneWindow {
                                 .iter()
                                 .filter_map(|reason| {
                                     reason.map(|reason| match reason {
-                                        assets::cache::CacheEvictionReason::Infrequent => "infrequent",
-                                        assets::cache::CacheEvictionReason::Stale => "stale",
-                                        assets::cache::CacheEvictionReason::LowReconstructionCost => "low decode cost",
-                                        assets::cache::CacheEvictionReason::LeastRecentlyUsed => "least recent",
-                                        assets::cache::CacheEvictionReason::LowUtility => "low utility",
+                                        EvictionReason::Infrequent => "infrequent",
+                                        EvictionReason::Stale => "stale",
+                                        EvictionReason::LowReconstructionCost => "low decode cost",
+                                        EvictionReason::LeastRecentlyUsed => "least recent",
+                                        EvictionReason::LowUtility => "low utility",
                                     })
                                 })
                                 .collect::<Vec<_>>()
@@ -1380,12 +1382,13 @@ fn debug_ui(window: &Window) -> (Context, egui_winit::State) {
 #[cfg(test)]
 mod tests {
     use std::{
+        assert_matches,
         future::Future,
         pin::Pin,
         sync::{
             Arc, Barrier,
             atomic::{AtomicUsize, Ordering},
-            mpsc as sync_mpsc,
+            mpsc,
         },
         task::{Context, Poll},
         time::{Duration, Instant},
@@ -1397,15 +1400,13 @@ mod tests {
         keyboard::{Key, NamedKey},
     };
 
+    use super::{
+        InitializationOutcome, PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, RendererLifecycle, RendererToken, SceneWindowError,
+        deadline_passed, poll_initialization, spawn_initialization,
+    };
     use crate::{
         agent_movement::HeldControls,
         camera::{CameraMode, handle_keyboard_input},
-    };
-
-    use super::deadline_passed;
-    use super::{
-        InitializationOutcome, PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, RendererLifecycle, RendererToken, SceneWindowError,
-        poll_initialization, spawn_initialization,
     };
 
     struct TestPending;
@@ -1419,7 +1420,7 @@ mod tests {
         let token = lifecycle.pending_token().expect("initialization has a completion token");
         let stale = RendererToken { generation: 8, attempt: token.attempt };
 
-        std::assert_matches!(lifecycle.complete(stale, Ok::<_, &str>(TestRenderer(3))), InitializationOutcome::Stale(Ok(TestRenderer(3))));
+        assert_matches!(lifecycle.complete(stale, Ok::<_, &str>(TestRenderer(3))), InitializationOutcome::Stale(Ok(TestRenderer(3))));
         assert!(lifecycle.is_failed());
         assert_eq!(lifecycle.ready(), None);
     }
@@ -1428,12 +1429,12 @@ mod tests {
     fn recovery_failure_allows_retry() {
         let mut lifecycle = RendererLifecycle::initializing(9, TestPending);
         let token = lifecycle.pending_token().expect("initialization has a completion token");
-        std::assert_matches!(lifecycle.complete(token, Ok::<_, &str>(TestRenderer(3))), InitializationOutcome::InitialReady);
+        assert_matches!(lifecycle.complete(token, Ok::<_, &str>(TestRenderer(3))), InitializationOutcome::InitialReady);
         assert_eq!(lifecycle.retire_ready().expect("ready renderer can be retired"), TestRenderer(3));
         let retry = lifecycle.recovery_token().expect("retirement starts recovery state");
         assert!(lifecycle.start_recovery(retry, TestPending));
 
-        std::assert_matches!(
+        assert_matches!(
             lifecycle.complete(retry, Err("adapter unavailable")),
             InitializationOutcome::RecoveryFailed("adapter unavailable")
         );
@@ -1470,7 +1471,7 @@ mod tests {
         let mut lifecycle = RendererLifecycle::<_, ()>::initializing(11, pending);
         started_receiver.await.expect("initialization reaches the completion gate");
         assert!(lifecycle.is_initializing());
-        std::assert_matches!(poll_initialization(lifecycle.pending_mut().expect("initialization remains pending")), Ok(None));
+        assert_matches!(poll_initialization(lifecycle.pending_mut().expect("initialization remains pending")), Ok(None));
 
         let mut controls = HeldControls::default();
         let mut camera_mode = CameraMode::Follow;
@@ -1500,7 +1501,7 @@ mod tests {
         let mut lifecycle = RendererLifecycle::<_, ()>::initializing(12, pending);
 
         wake_receiver.await.expect("task termination wakes the event loop");
-        std::assert_matches!(
+        assert_matches!(
             poll_initialization(lifecycle.pending_mut().expect("renderer initialization is pending")),
             Err(SceneWindowError::RendererInitializationStopped)
         );
@@ -1541,7 +1542,7 @@ mod tests {
     }
 
     struct CompleteAfterClose {
-        started: Option<sync_mpsc::SyncSender<()>>,
+        started: Option<mpsc::SyncSender<()>>,
         barrier: Arc<Barrier>,
         retirements: Arc<AtomicUsize>,
     }
@@ -1566,7 +1567,7 @@ mod tests {
         let init_barrier = Arc::clone(&barrier);
         let retirements = Arc::new(AtomicUsize::new(0));
         let init_retirements = Arc::clone(&retirements);
-        let (started_sender, started_receiver) = sync_mpsc::sync_channel(1);
+        let (started_sender, started_receiver) = mpsc::sync_channel(1);
         let (wake_sender, wake_receiver) = oneshot::channel();
         let initialize = CompleteAfterClose { started: Some(started_sender), barrier: init_barrier, retirements: init_retirements };
         let token = RendererToken { generation: 14, attempt: 0 };
@@ -1608,7 +1609,7 @@ mod tests {
             .expect("completion is available");
         let mut current = RendererLifecycle::<TestPending, RetirementProbe>::initializing(16, TestPending);
 
-        std::assert_matches!(current.complete(completion.0, completion.1), InitializationOutcome::Stale(Ok(_)));
+        assert_matches!(current.complete(completion.0, completion.1), InitializationOutcome::Stale(Ok(_)));
         assert!(current.ready().is_none());
         assert_eq!(retirements.load(Ordering::Acquire), 1);
     }

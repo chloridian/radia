@@ -1,7 +1,9 @@
 use std::{
+    array,
     cmp::Ordering,
     collections::{BinaryHeap, HashMap, HashSet},
     hash::Hash,
+    mem,
     ops::Range,
     sync::Arc,
     time::{Duration, Instant},
@@ -851,7 +853,7 @@ impl DrawList {
                     build.face_cursor += 1;
                     faces_visited += 1;
                     build.faces_visited += 1;
-                    byte_work += std::mem::size_of::<CachedFace>();
+                    byte_work += size_of::<CachedFace>();
                 }
                 LayoutPhase::ClearInitialCounts => {
                     build.commands.clear();
@@ -926,7 +928,7 @@ impl DrawList {
                         self.hide_face(face);
                         faces_visited += 1;
                         build.faces_visited += 1;
-                        byte_work += std::mem::size_of::<CachedFace>();
+                        byte_work += size_of::<CachedFace>();
                     }
                     build.face_cursor += 1;
                 }
@@ -956,7 +958,7 @@ impl DrawList {
                         {
                             build.state.active_terrain.push(TerrainDemand {
                                 region,
-                                textures: group.terrain_textures.clone().unwrap_or_else(|| std::array::from_fn(|_| None)),
+                                textures: group.terrain_textures.clone().unwrap_or_else(|| array::from_fn(|_| None)),
                             });
                         }
                         if !group.key.blended()
@@ -1063,7 +1065,7 @@ impl DrawList {
                     build.face_cursor += 1;
                     faces_visited += 1;
                     build.faces_visited += 1;
-                    byte_work += std::mem::size_of::<CachedFace>();
+                    byte_work += size_of::<CachedFace>();
                 }
                 LayoutPhase::EmitBlended => {
                     let Some(blended) = build.blended.pop() else {
@@ -1133,13 +1135,13 @@ impl DrawList {
         if complete {
             let commit_started = Instant::now();
             build.state.layout_items =
-                if build.over_capacity() { std::mem::take(&mut build.layout_items) } else { std::mem::take(&mut build.visible) };
+                if build.over_capacity() { mem::take(&mut build.layout_items) } else { mem::take(&mut build.visible) };
             build.state.visible_items = build.visible_items;
             build.state.omitted = build.omitted;
             build.state.valid = true;
             let omitted_faces = build.omitted;
             let stale = build.stale;
-            std::mem::swap(&mut self.committed, &mut build.state);
+            mem::swap(&mut self.committed, &mut build.state);
             self.layout = build.layout;
             self.cull_dirty = true;
             self.retired = Some(build);
@@ -1249,7 +1251,7 @@ impl DrawList {
         }
         let changed = view.encoded != view.indirect_bytes;
         if changed {
-            std::mem::swap(&mut view.encoded, &mut view.indirect_bytes);
+            mem::swap(&mut view.encoded, &mut view.indirect_bytes);
         }
         CullStats { commands: view.first_instances.len(), changed, blended_sorted }
     }
@@ -1293,7 +1295,7 @@ impl DrawList {
                 view.blended_keys.push((view.blended_distances[index], blended.order, record));
             }
         };
-        let previous = std::mem::take(&mut view.blended);
+        let previous = mem::take(&mut view.blended);
         for record in previous.iter().copied() {
             push(view, record);
         }

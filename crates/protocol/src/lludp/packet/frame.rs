@@ -229,13 +229,17 @@ impl Packet {
 
 #[cfg(test)]
 mod tests {
+    use test_support::{lludp::vectors, parse_hex_fixture};
+
     use super::*;
-    use crate::messages::{PacketAck, circuit::packet_ack::Packets};
+    use crate::{
+        lludp::schema_message::SchemaMessage,
+        messages::{PacketAck, circuit::packet_ack::Packets},
+        schema,
+    };
 
     #[test]
     fn schema_bounds_cover_typed_messages() {
-        use test_support::{lludp::vectors, parse_hex_fixture};
-
         for fixture in [
             vectors::AGENT_MOVEMENT_COMPLETE,
             vectors::PACKET_ACK,
@@ -261,9 +265,9 @@ mod tests {
             };
             let message_bytes = data.get(frame.extra_header_len..).expect("decoded extra header has its declared size");
             let (id, id_len) = MessageId::decode(message_bytes).expect("decode fixture message ID");
-            let metadata = crate::schema::find_by_id(id).expect("typed fixture has generated schema");
-            let schema_bound = crate::lludp::schema_message::SchemaMessage::allocation_bound(metadata, &message_bytes[id_len..])
-                .expect("generated schema bounds typed message body");
+            let metadata = schema::find_by_id(id).expect("typed fixture has generated schema");
+            let schema_bound =
+                SchemaMessage::allocation_bound(metadata, &message_bytes[id_len..]).expect("generated schema bounds typed message body");
             let packet = Packet::decode(&bytes).expect("decode typed fixture");
             let retained_message_bytes = packet.message.retained_capacity_bytes() + packet.trailing_message_bytes.capacity();
 

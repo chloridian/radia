@@ -1,26 +1,40 @@
-pub(super) mod inventory;
+pub(super) mod inventory_sync;
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     future::pending,
+    mem,
+    net::SocketAddr,
     ops::ControlFlow,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use ::inventory::{CategoryKey, Inventory, InventoryChild, InventoryNodeKey, InventoryPreparationCancellation, InventorySnapshot};
+use assets::cache::AssetCache;
 use futures::{
     FutureExt,
     channel::oneshot,
     executor::block_on,
     future::{BoxFuture, Shared},
 };
+use inventory::{CategoryKey, Inventory, InventoryChild, InventoryNodeKey, InventoryPreparationCancellation, InventorySnapshot};
 use network::{
     AgentSession, CircuitMotionStatus, CoverageLoss, CoverageLossReason, CoverageSource, Event, Grid, PacketOrder, SimulatorId,
     capabilities::Client,
 };
-use protocol::{lludp::Message, login::ResponseData, messages::RequestAgentData};
-use tokio::{runtime::Handle, sync::watch};
+use protocol::{
+    lludp::Message,
+    login::ResponseData,
+    messages::{AgentMovementComplete, CacheMissType, RequestAgentData},
+};
+use tokio::{
+    runtime::Handle,
+    sync::{oneshot as tokio_oneshot, watch},
+    task,
+    task::{JoinError, JoinHandle},
+};
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use tracing::field;
 use utils::Summary;
 use uuid::Uuid;
 use world::{MAX_OBJECT_LOOKUP_WORK_ITEMS, ObjectLookupCursor, ObjectLookupProgress, UpdateSource};
@@ -38,6 +52,8 @@ use super::{
     media::{ObjectMediaApplyProgress, ObjectMediaIntake, PendingObjectMediaApply},
     presentation::{AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, SessionEnd, SessionReadyUpdate, ViewerUpdate},
 };
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use crate::session::experience_environment::{EnvironmentInbox, EnvironmentQueueError, EnvironmentSender, PushOutcome};
 use crate::{
     asset_coordinator::AssetCoordinator,
     inventory::{
@@ -61,9 +77,6 @@ use crate::{
     world_reader::{ReadRequest, WorldReadHost},
 };
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use crate::session::experience_environment::{EnvironmentInbox, EnvironmentQueueError, EnvironmentSender, PushOutcome};
-
 type Cancellation = Shared<BoxFuture<'static, ()>>;
 
 fn network_end_after_stream_close(disconnect_requested: bool, failure: Option<String>, primary_disconnected: bool) -> SessionEnd {
@@ -83,11 +96,11 @@ enum DriverInput {
     InventoryCache(Option<InventoryCacheEvent>),
     ObjectCache(Option<ObjectCacheEvent>),
     InventoryEdit(Option<InventoryEditEvent>),
-    InventoryPreparation(Result<Result<self::inventory::PreparedInventoryFetch, ::inventory::InventoryError>, tokio::task::JoinError>),
-    InventoryOwnerRefresh(Result<Result<Inventory, ::inventory::InventoryError>, tokio::task::JoinError>),
+    InventoryPreparation(Result<Result<inventory_sync::PreparedInventoryFetch, inventory::InventoryError>, JoinError>),
+    InventoryOwnerRefresh(Result<Result<Inventory, inventory::InventoryError>, JoinError>),
     InventoryDisposal(Option<InventoryDisposalPermit>),
-    InventoryBootstrap(Result<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>, tokio::task::JoinError>),
-    Favorites(Result<FavoritesUpdate, tokio::task::JoinError>),
+    InventoryBootstrap(Result<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>, JoinError>),
+    Favorites(Result<FavoritesUpdate, JoinError>),
     Relationships,
     Removals,
     MediaWorkTurn,
@@ -96,8 +109,8 @@ enum DriverInput {
 struct PendingSimulatorObjectUpdate {
     simulator_id: SimulatorId,
     packet_order: PacketOrder,
-    source: std::net::SocketAddr,
-    received_at: std::time::Instant,
+    source: SocketAddr,
+    received_at: Instant,
     primary_origin_before: Option<math::DVec3>,
     region: Option<world::Region>,
     message: Message,
@@ -123,7 +136,7 @@ enum ObjectMessageFinalizationStage {
 struct ObjectMessageFinalization {
     outcome: SimulatorMessageOutcome,
     has_summary: bool,
-    recovery_targets: Vec<(Option<SimulatorId>, world::LocalAddress, protocol::messages::CacheMissType)>,
+    recovery_targets: Vec<(Option<SimulatorId>, world::LocalAddress, CacheMissType)>,
     cancellations: Vec<(Option<world::Entity>, world::LocalAddress)>,
     cancellation_index: usize,
     cancellation_cursor: Option<ObjectLookupCursor>,
@@ -183,7 +196,7 @@ async fn select_owner_turn_input(reads: &mut WorldReadHost, cancellation: &Cance
         biased;
         _ = cancellation.clone() => OwnerTurnInput::Cancelled,
         request = reads.next_request() => OwnerTurnInput::WorldRead(request),
-        () = tokio::task::yield_now() => OwnerTurnInput::Continue,
+        () = task::yield_now() => OwnerTurnInput::Continue,
     }
 }
 
@@ -260,7 +273,7 @@ impl DroppedPushes {
             invalid = self.invalid,
             sample_simulator = simulator.get(),
             sample_region = region.get(),
-            last_error = self.last_error.as_ref().map(tracing::field::display),
+            last_error = self.last_error.as_ref().map(field::display),
             "experience environment pushes dropped"
         );
     }
@@ -282,16 +295,16 @@ enum DeferredInventoryEvent {
 struct PendingFolderPreparation {
     folder: CategoryKey,
     before: InventorySnapshot,
-    applied: tokio::sync::oneshot::Sender<FolderApplyOutcome>,
+    applied: tokio_oneshot::Sender<FolderApplyOutcome>,
     cancellation: InventoryPreparationCancellation,
     disposal: InventoryDisposalPermit,
-    task: tokio::task::JoinHandle<Result<self::inventory::PreparedInventoryFetch, ::inventory::InventoryError>>,
+    task: JoinHandle<Result<inventory_sync::PreparedInventoryFetch, inventory::InventoryError>>,
 }
 
 struct PendingOwnerRefresh {
     before: InventorySnapshot,
     disposal: InventoryDisposalPermit,
-    task: tokio::task::JoinHandle<Result<Inventory, ::inventory::InventoryError>>,
+    task: JoinHandle<Result<Inventory, inventory::InventoryError>>,
 }
 
 #[derive(Default)]
@@ -367,20 +380,20 @@ struct SessionDriver {
     active_login_data: Option<ResponseData>,
     active_capabilities: Option<Client>,
     favorites_enabled: bool,
-    favorites_load: Option<tokio::task::JoinHandle<FavoritesUpdate>>,
-    inventory_bootstrap: Option<tokio::task::JoinHandle<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>>>,
+    favorites_load: Option<JoinHandle<FavoritesUpdate>>,
+    inventory_bootstrap: Option<JoinHandle<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>>>,
     inventory_bootstrap_dirty: bool,
     inventory: Option<Inventory>,
     inventory_cache: InventoryCacheSession,
     object_cache: ObjectCacheSession,
     pending_handshake_replies: Arc<Mutex<PendingHandshakeReplies>>,
     inventory_changes: watch::Sender<Option<InventorySnapshot>>,
-    rejected_inventory_blocks: Summary<self::inventory::InventoryRejections>,
-    inventory_fetch_failures: Summary<self::inventory::InventoryFetchFailures>,
+    rejected_inventory_blocks: Summary<inventory_sync::InventoryRejections>,
+    inventory_fetch_failures: Summary<inventory_sync::InventoryFetchFailures>,
     inventory_fetch: InventoryFetchController,
     inventory_edits: InventoryEditController,
-    inventory_pending_moves: HashMap<InventoryNodeKey, (MoveExpectation, tokio::sync::oneshot::Sender<()>)>,
-    inventory_failed: std::collections::HashSet<CategoryKey>,
+    inventory_pending_moves: HashMap<InventoryNodeKey, (MoveExpectation, tokio_oneshot::Sender<()>)>,
+    inventory_failed: HashSet<CategoryKey>,
     pending_folder_preparation: Option<PendingFolderPreparation>,
     pending_owner_refresh: Option<PendingOwnerRefresh>,
     deferred_inventory: VecDeque<(DeferredInventoryEvent, usize)>,
@@ -455,7 +468,7 @@ impl SessionDriver {
             return;
         }
         let disposal = self.inventory_cache.reserve_disposal().await.expect("inventory reclaimer remains open until session close");
-        let deferred_inventory = std::mem::take(&mut self.deferred_inventory);
+        let deferred_inventory = mem::take(&mut self.deferred_inventory);
         let mut payloads: Vec<Box<dyn Send>> = Vec::new();
         for (event, _) in deferred_inventory {
             match event {
@@ -530,9 +543,9 @@ impl SessionDriver {
 
     fn finish_inventory_fetch_preparation(
         &mut self,
-        result: Result<Result<self::inventory::PreparedInventoryFetch, ::inventory::InventoryError>, tokio::task::JoinError>,
+        result: Result<Result<inventory_sync::PreparedInventoryFetch, inventory::InventoryError>, JoinError>,
     ) {
-        self::inventory::finish_inventory_fetch_preparation(self, result);
+        inventory_sync::finish_inventory_fetch_preparation(self, result);
     }
 
     fn new(
@@ -542,7 +555,7 @@ impl SessionDriver {
         mailbox: PresentationMailbox,
         cancellation: oneshot::Receiver<()>,
         credentials: CredentialPersistence,
-        cache: Option<Arc<assets::cache::AssetCache>>,
+        cache: Option<Arc<AssetCache>>,
     ) -> Self {
         let cancellation = async move {
             match cancellation.await {
@@ -607,12 +620,12 @@ impl SessionDriver {
             object_cache,
             pending_handshake_replies,
             inventory_changes,
-            rejected_inventory_blocks: Summary::new(self::inventory::INVENTORY_FAILURE_REPORT_INTERVAL),
-            inventory_fetch_failures: Summary::new(self::inventory::INVENTORY_FAILURE_REPORT_INTERVAL),
+            rejected_inventory_blocks: Summary::new(inventory_sync::INVENTORY_FAILURE_REPORT_INTERVAL),
+            inventory_fetch_failures: Summary::new(inventory_sync::INVENTORY_FAILURE_REPORT_INTERVAL),
             inventory_fetch,
             inventory_edits,
             inventory_pending_moves: HashMap::new(),
-            inventory_failed: std::collections::HashSet::new(),
+            inventory_failed: HashSet::new(),
             pending_folder_preparation: None,
             pending_owner_refresh: None,
             deferred_inventory: VecDeque::new(),
@@ -735,16 +748,16 @@ impl SessionDriver {
                 disposal = inventory_disposal => DriverInput::InventoryDisposal(disposal),
                 bootstrap = inventory_bootstrap => DriverInput::InventoryBootstrap(bootstrap.expect("bootstrap task must be pending")),
                 favorites = favorites_load => DriverInput::Favorites(favorites.expect("favorites task must be pending")),
-                () = tokio::task::yield_now(), if relationships_pending => DriverInput::Relationships,
-                () = tokio::task::yield_now(), if removals_pending => DriverInput::Removals,
-                () = tokio::task::yield_now(), if media_flush_pending || self.pending_media_apply.is_some() => DriverInput::MediaWorkTurn,
+                () = task::yield_now(), if relationships_pending => DriverInput::Relationships,
+                () = task::yield_now(), if removals_pending => DriverInput::Removals,
+                () = task::yield_now(), if media_flush_pending || self.pending_media_apply.is_some() => DriverInput::MediaWorkTurn,
             };
             let flow = match input {
                 DriverInput::Relationships => self.resolve_relationships().await,
                 DriverInput::Removals => self.reclaim_removals().await,
                 DriverInput::MediaWorkTurn => ControlFlow::Continue(()),
                 DriverInput::Favorites(result) => {
-                    self::inventory::publish_favorites_refresh(&mut self.favorites_load, &self.mailbox, result);
+                    inventory_sync::publish_favorites_refresh(&mut self.favorites_load, &self.mailbox, result);
                     ControlFlow::Continue(())
                 }
                 DriverInput::InventoryPreparation(result) => {
@@ -967,7 +980,7 @@ impl SessionDriver {
 
     async fn advance_pending_object_batch_turn(&mut self) -> ControlFlow<()> {
         let Some(mut pending) = self.pending_object_update.take() else { return ControlFlow::Continue(()) };
-        let stage = std::mem::replace(&mut pending.stage, PendingSimulatorObjectUpdateStage::Finished);
+        let stage = mem::replace(&mut pending.stage, PendingSimulatorObjectUpdateStage::Finished);
         let PendingSimulatorObjectUpdateStage::Batch(mut continuation) = stage else {
             pending.stage = stage;
             self.pending_object_update = Some(pending);
@@ -1008,7 +1021,7 @@ impl SessionDriver {
 
     async fn advance_pending_object_update(&mut self) -> ControlFlow<()> {
         let Some(mut pending) = self.pending_object_update.take() else { return ControlFlow::Continue(()) };
-        let stage = std::mem::replace(&mut pending.stage, PendingSimulatorObjectUpdateStage::Finished);
+        let stage = mem::replace(&mut pending.stage, PendingSimulatorObjectUpdateStage::Finished);
         let outcome = match stage {
             PendingSimulatorObjectUpdateStage::Cache(mut continuation) => {
                 match self.object_cache.advance_resolve_cached(&mut self.session_world, &mut continuation) {
@@ -1073,7 +1086,7 @@ impl SessionDriver {
                         pending.stage = PendingSimulatorObjectUpdateStage::Finalize(ObjectMessageFinalization::new(
                             &mut self.session_world,
                             outcome,
-                            std::mem::take(&mut pending.media_requests),
+                            mem::take(&mut pending.media_requests),
                         ));
                         self.pending_object_update = Some(pending);
                         return ControlFlow::Continue(());
@@ -1091,7 +1104,7 @@ impl SessionDriver {
                         pending.stage = PendingSimulatorObjectUpdateStage::Finalize(ObjectMessageFinalization::new(
                             &mut self.session_world,
                             outcome,
-                            std::mem::take(&mut pending.media_requests),
+                            mem::take(&mut pending.media_requests),
                         ));
                         self.pending_object_update = Some(pending);
                         return ControlFlow::Continue(());
@@ -1145,7 +1158,7 @@ impl SessionDriver {
         continuation: &mut ObjectMessageFinalization,
         simulator_id: SimulatorId,
         packet_order: PacketOrder,
-        received_at: std::time::Instant,
+        received_at: Instant,
         message: &Message,
     ) -> ObjectMessageFinalizationProgress {
         let mut lookup_work = 0;
@@ -1188,8 +1201,8 @@ impl SessionDriver {
                             .as_ref()
                             .map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
                         self.recovery.schedule(
-                            std::mem::take(&mut continuation.recovery_targets),
-                            std::mem::take(&mut continuation.updated),
+                            mem::take(&mut continuation.recovery_targets),
+                            mem::take(&mut continuation.updated),
                             agent_data,
                         );
                     }
@@ -1262,26 +1275,20 @@ impl SessionDriver {
     }
 
     async fn handle_event(&mut self, event: Event) -> ControlFlow<()> {
-        use Event::{
-            CapabilityError, CapabilityEvent, CapabilityEventBatch, CoverageLost, EventQueueCoverageLost, Failed, LoginAccepted,
-            MfaRequired, SendFailed, SessionReady, SimulatorCapabilities, SimulatorConnectFailed, SimulatorConnected,
-            SimulatorDisconnected, SimulatorFailed, SimulatorMessage, SimulatorPromoted,
-        };
-
         match event {
-            CoverageLost { loss } => {
+            Event::CoverageLost { loss } => {
                 self.handle_coverage_loss(&loss);
                 ControlFlow::Continue(())
             }
-            MfaRequired { challenge } => {
+            Event::MfaRequired { challenge } => {
                 self.mailbox.publish(ViewerUpdate::Authentication(AuthenticationUpdate::MfaRequired(challenge)));
                 ControlFlow::Continue(())
             }
-            LoginAccepted { mfa_hash } => {
+            Event::LoginAccepted { mfa_hash } => {
                 self.handle_login_accepted(mfa_hash);
                 ControlFlow::Continue(())
             }
-            SessionReady { simulator_id, session, capabilities, login_data } => {
+            Event::SessionReady { simulator_id, session, capabilities, login_data } => {
                 self.handoff.session_ready(&mut self.session_world, simulator_id, session.agent_id);
                 if self.inventory.is_none() && self.inventory_bootstrap.is_none() {
                     self.inventory_bootstrap = Some(spawn_inventory_build(&self.runtime, session.agent_id, login_data.clone()));
@@ -1294,7 +1301,7 @@ impl SessionDriver {
                 self.on_primary_changed(simulator_id, *session, capabilities, Some(login_data));
                 ControlFlow::Continue(())
             }
-            SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
+            Event::SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
                 if let Some(region) = self.session_world.region_for(simulator_id)
                     && let Err(error) = self.environment_pushes.clear_region(region)
@@ -1333,7 +1340,7 @@ impl SessionDriver {
                     if self.process_ingest_summary(simulator_id, summary).await.is_break() {
                         return ControlFlow::Break(());
                     }
-                    if touched_agent && self.publish_world_agent_motion(std::time::Instant::now()).await.is_break() {
+                    if touched_agent && self.publish_world_agent_motion(Instant::now()).await.is_break() {
                         return ControlFlow::Break(());
                     }
                 }
@@ -1347,7 +1354,7 @@ impl SessionDriver {
                 self.publish_region_motion();
                 ControlFlow::Continue(())
             }
-            SimulatorConnected { simulator_id, region_handle, .. } => {
+            Event::SimulatorConnected { simulator_id, region_handle, .. } => {
                 let primary_origin_before = (self.primary_simulator == Some(simulator_id)).then(|| self.primary_region_origin()).flatten();
                 self.handoff.simulator_connected(&mut self.session_world, simulator_id, region_handle);
                 if region_handle.is_none() {
@@ -1365,7 +1372,7 @@ impl SessionDriver {
                 self.publish_region_motion();
                 ControlFlow::Continue(())
             }
-            SimulatorMessage { simulator_id, sequence, packet_order, source, received_at, ping_delay, message } => {
+            Event::SimulatorMessage { simulator_id, sequence, packet_order, source, received_at, ping_delay, message } => {
                 let terminal_inventory_overload = self.handle_inventory_udp(&message);
                 if self
                     .handle_simulator_message(simulator_id, sequence, packet_order, source, received_at, ping_delay, message)
@@ -1380,7 +1387,7 @@ impl SessionDriver {
                 }
                 ControlFlow::Continue(())
             }
-            SendFailed(error) => {
+            Event::SendFailed(error) => {
                 let due = self.send_failures.record(Instant::now(), |failures| {
                     failures.failed = failures.failed.saturating_add(1);
                     failures.last_error = Some(error);
@@ -1390,18 +1397,18 @@ impl SessionDriver {
                 }
                 ControlFlow::Continue(())
             }
-            EventQueueCoverageLost { reason, simulator_id, .. } => {
+            Event::EventQueueCoverageLost { reason, simulator_id, .. } => {
                 let region = self.session_world.region_for(simulator_id).map(|region| region.get());
                 tracing::warn!(simulator = simulator_id.get(), region, %reason, "simulator event delivery may have a gap; world data may be incomplete");
                 ControlFlow::Continue(())
             }
-            Failed(error) => {
+            Event::Failed(error) => {
                 self.mailbox.publish(ViewerUpdate::Failed(error));
                 ControlFlow::Break(())
             }
-            SimulatorDisconnected { simulator_id, .. } => self.handle_simulator_disconnect(simulator_id, None),
-            SimulatorFailed { simulator_id, reason, .. } => self.handle_simulator_disconnect(simulator_id, Some(reason)),
-            CapabilityEvent { simulator_id, message, body, .. } => {
+            Event::SimulatorDisconnected { simulator_id, .. } => self.handle_simulator_disconnect(simulator_id, None),
+            Event::SimulatorFailed { simulator_id, reason, .. } => self.handle_simulator_disconnect(simulator_id, Some(reason)),
+            Event::CapabilityEvent { simulator_id, message, body, .. } => {
                 let terminal_inventory_overload = self.handle_inventory_event_queue(&message, &body);
                 self.environments.capability(&mut self.session_world, simulator_id, &message, &body, self.primary_simulator);
                 if terminal_inventory_overload {
@@ -1410,7 +1417,7 @@ impl SessionDriver {
                 }
                 ControlFlow::Continue(())
             }
-            CapabilityEventBatch { simulator_id, events, .. } => {
+            Event::CapabilityEventBatch { simulator_id, events, .. } => {
                 let terminal_inventory_overload = self.handle_inventory_event_queue_batch(&events);
                 self.environments.capability_batch(
                     &mut self.session_world,
@@ -1424,8 +1431,8 @@ impl SessionDriver {
                 }
                 ControlFlow::Continue(())
             }
-            CapabilityError { .. } | SimulatorConnectFailed { .. } => ControlFlow::Continue(()),
-            SimulatorCapabilities { simulator_id, capabilities, .. } => {
+            Event::CapabilityError { .. } | Event::SimulatorConnectFailed { .. } => ControlFlow::Continue(()),
+            Event::SimulatorCapabilities { simulator_id, capabilities, .. } => {
                 self.environments.simulator_capabilities(&mut self.session_world, simulator_id, &capabilities, self.primary_simulator);
                 if let Some(region) = self.session_world.region_for(simulator_id) {
                     self.assets.register(region, capabilities.clone());
@@ -1490,10 +1497,7 @@ impl SessionDriver {
         false
     }
 
-    fn finish_inventory_owner_refresh(
-        &mut self,
-        result: Result<Result<Inventory, ::inventory::InventoryError>, tokio::task::JoinError>,
-    ) -> bool {
+    fn finish_inventory_owner_refresh(&mut self, result: Result<Result<Inventory, inventory::InventoryError>, JoinError>) -> bool {
         let Some(refresh) = self.pending_owner_refresh.take() else { return false };
         let PendingOwnerRefresh { before, disposal, .. } = refresh;
         let inventory = match result {
@@ -1582,9 +1586,9 @@ impl SessionDriver {
         simulator_id: SimulatorId,
         sequence: u32,
         packet_order: PacketOrder,
-        source: std::net::SocketAddr,
-        received_at: std::time::Instant,
-        ping_delay: Option<std::time::Duration>,
+        source: SocketAddr,
+        received_at: Instant,
+        ping_delay: Option<Duration>,
         message: Message,
     ) -> ControlFlow<()> {
         let primary_origin_before = (self.primary_simulator == Some(simulator_id)).then(|| self.primary_region_origin()).flatten();
@@ -1684,8 +1688,8 @@ impl SessionDriver {
         &mut self,
         simulator_id: SimulatorId,
         packet_order: PacketOrder,
-        source: std::net::SocketAddr,
-        received_at: std::time::Instant,
+        source: SocketAddr,
+        received_at: Instant,
         primary_origin_before: Option<math::DVec3>,
         region: Option<world::Region>,
         message: Message,
@@ -1738,8 +1742,8 @@ impl SessionDriver {
     fn finish_simulator_message_tail(
         &mut self,
         simulator_id: SimulatorId,
-        source: std::net::SocketAddr,
-        received_at: std::time::Instant,
+        source: SocketAddr,
+        received_at: Instant,
         primary_origin_before: Option<math::DVec3>,
         region: Option<world::Region>,
         message: Message,
@@ -1819,7 +1823,7 @@ impl SessionDriver {
         self.media.forget_simulator(simulator_id);
         if Some(simulator_id) == self.primary_simulator {
             self.primary_simulator = None;
-            self::inventory::cancel_favorites_refresh(&mut self.favorites_load);
+            inventory_sync::cancel_favorites_refresh(&mut self.favorites_load);
             self.camera.request_update();
         }
         ControlFlow::Continue(())
@@ -1872,7 +1876,7 @@ impl SessionDriver {
         };
         let targets = route_recovery_targets(
             &self.session_world,
-            resolution.recovery.requests.into_iter().map(|address| (address, protocol::messages::CacheMissType::Full)),
+            resolution.recovery.requests.into_iter().map(|address| (address, CacheMissType::Full)),
         );
         let agent_data =
             self.active_session.as_ref().map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
@@ -1886,7 +1890,7 @@ impl SessionDriver {
             Err(()) => return ControlFlow::Break(()),
         };
         self.recovery.schedule(targets, cancellations, agent_data);
-        if resolution.revision.is_some() && self.publish_world_agent_motion(std::time::Instant::now()).await.is_break() {
+        if resolution.revision.is_some() && self.publish_world_agent_motion(Instant::now()).await.is_break() {
             return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
@@ -1896,7 +1900,7 @@ impl SessionDriver {
         let progress = self.session_world.reclaim_removals();
         let targets = route_recovery_targets(
             &self.session_world,
-            progress.recovery.requests.into_iter().map(|address| (address, protocol::messages::CacheMissType::Full)),
+            progress.recovery.requests.into_iter().map(|address| (address, CacheMissType::Full)),
         );
         let agent_data =
             self.active_session.as_ref().map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
@@ -1910,7 +1914,7 @@ impl SessionDriver {
             Err(()) => return ControlFlow::Break(()),
         };
         self.recovery.schedule(targets, cancellations, agent_data);
-        if progress.revision.is_some() && self.publish_world_agent_motion(std::time::Instant::now()).await.is_break() {
+        if progress.revision.is_some() && self.publish_world_agent_motion(Instant::now()).await.is_break() {
             return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
@@ -1921,7 +1925,7 @@ impl SessionDriver {
         Ok(self.lookup_entity_on_owner_turn(agent_id).await?.is_some_and(|entity| summary.touches_entity(entity)))
     }
 
-    async fn publish_world_agent_motion(&mut self, received_at: std::time::Instant) -> ControlFlow<()> {
+    async fn publish_world_agent_motion(&mut self, received_at: Instant) -> ControlFlow<()> {
         let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return ControlFlow::Continue(()) };
         let entity = match self.lookup_entity_on_owner_turn(agent_id).await {
             Ok(entity) => entity,
@@ -1932,7 +1936,7 @@ impl SessionDriver {
         ControlFlow::Continue(())
     }
 
-    fn publish_world_agent_motion_for_entity(&mut self, entity: world::Entity, received_at: std::time::Instant) {
+    fn publish_world_agent_motion_for_entity(&mut self, entity: world::Entity, received_at: Instant) {
         let Ok(detail) = self.session_world.world().object_detail(entity) else { return };
         self.agent_motion.publish_world_detail(&detail, received_at);
     }
@@ -1955,12 +1959,7 @@ impl SessionDriver {
         self.region_motion_sender.send_replace(circuits);
     }
 
-    fn publish_arrival_agent_motion(
-        &mut self,
-        simulator_id: SimulatorId,
-        movement: &protocol::messages::AgentMovementComplete,
-        received_at: std::time::Instant,
-    ) {
+    fn publish_arrival_agent_motion(&mut self, simulator_id: SimulatorId, movement: &AgentMovementComplete, received_at: Instant) {
         let Some(session) = self.active_session.as_ref() else { return };
         let Some(region) = self.session_world.region_for(simulator_id) else { return };
         let Some(origin) = self.session_world.world().region(region).and_then(world::RegionInfo::resolved_origin) else {
@@ -2045,7 +2044,7 @@ impl SessionDriver {
             }
         }
         self.reject_deferred_inventory().await;
-        self::inventory::stop_favorites_refresh(&mut self.favorites_load).await;
+        inventory_sync::stop_favorites_refresh(&mut self.favorites_load).await;
         if let Some(inventory_bootstrap) = self.inventory_bootstrap.take() {
             inventory_bootstrap.abort();
         }
@@ -2064,13 +2063,13 @@ impl SessionDriver {
         let mut failures = self.session_world.retire_all();
         while self.session_world.world().has_pending_removals() {
             drop(self.session_world.reclaim_removals());
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
         if !failures.is_empty() {
             failures = self.session_world.retire_all();
             while self.session_world.world().has_pending_removals() {
                 drop(self.session_world.reclaim_removals());
-                tokio::task::yield_now().await;
+                task::yield_now().await;
             }
         }
         for (simulator_id, error) in failures {
@@ -2130,14 +2129,14 @@ fn reply_region_handshake(
     }));
 }
 
-fn cancel_pending_folder_preparation(preparation: PendingFolderPreparation) -> impl std::future::Future<Output = ()> {
+fn cancel_pending_folder_preparation(preparation: PendingFolderPreparation) -> impl Future<Output = ()> {
     preparation.cancellation.cancel();
     async move {
         match preparation.task.await {
-            Ok(Ok(self::inventory::PreparedInventoryFetch::Prepared(prepared))) => {
+            Ok(Ok(inventory_sync::PreparedInventoryFetch::Prepared(prepared))) => {
                 preparation.disposal.reclaim((prepared, preparation.before));
             }
-            Ok(Ok(self::inventory::PreparedInventoryFetch::Stale)) | Ok(Err(_)) | Err(_) => {
+            Ok(Ok(inventory_sync::PreparedInventoryFetch::Stale)) | Ok(Err(_)) | Err(_) => {
                 preparation.disposal.reclaim(preparation.before);
             }
         }
@@ -2175,7 +2174,7 @@ fn is_inventory_lifecycle_barrier(event: &Event) -> bool {
 }
 
 fn deferred_inventory_event_bytes(event: &DeferredInventoryEvent) -> usize {
-    std::mem::size_of::<DeferredInventoryEvent>().saturating_add(match event {
+    size_of::<DeferredInventoryEvent>().saturating_add(match event {
         DeferredInventoryEvent::Udp(_) => MAX_DEFERRED_NETWORK_EVENT_BYTES,
         DeferredInventoryEvent::EventQueue { name, body } => name.capacity().saturating_add(body.estimated_heap_bytes()),
         DeferredInventoryEvent::Fetch(InventoryFetchEvent::Folder { fetch, .. }) => estimate_folder_fetch(fetch),
@@ -2185,22 +2184,20 @@ fn deferred_inventory_event_bytes(event: &DeferredInventoryEvent) -> usize {
         DeferredInventoryEvent::Edit(InventoryEditEvent::MoveStarted { .. })
         | DeferredInventoryEvent::Edit(InventoryEditEvent::MoveAborted { .. })
         | DeferredInventoryEvent::Edit(InventoryEditEvent::MoveTimedOut { .. }) => 0,
-        DeferredInventoryEvent::RefreshFolders(folders) => folders.capacity().saturating_mul(std::mem::size_of::<CategoryKey>()),
+        DeferredInventoryEvent::RefreshFolders(folders) => folders.capacity().saturating_mul(size_of::<CategoryKey>()),
         DeferredInventoryEvent::Edit(InventoryEditEvent::RefreshFolders { folders, .. }) => {
-            folders.capacity().saturating_mul(std::mem::size_of::<CategoryKey>())
+            folders.capacity().saturating_mul(size_of::<CategoryKey>())
         }
         DeferredInventoryEvent::Cache(_) => 0,
     })
 }
 
 fn estimate_folder_fetch(fetch: &FolderFetch) -> usize {
-    let children_bytes = fetch.children.capacity().saturating_mul(std::mem::size_of::<InventoryChild>());
-    fetch.children.iter().fold(std::mem::size_of::<FolderFetch>().saturating_add(children_bytes), |bytes, child| {
+    let children_bytes = fetch.children.capacity().saturating_mul(size_of::<InventoryChild>());
+    fetch.children.iter().fold(size_of::<FolderFetch>().saturating_add(children_bytes), |bytes, child| {
         let child_bytes = match child {
-            InventoryChild::Category(category) => category.name.len().saturating_add(2 * std::mem::size_of::<usize>()),
-            InventoryChild::Item(item) => {
-                item.name.len().saturating_add(item.description.len()).saturating_add(4 * std::mem::size_of::<usize>())
-            }
+            InventoryChild::Category(category) => category.name.len().saturating_add(2 * size_of::<usize>()),
+            InventoryChild::Item(item) => item.name.len().saturating_add(item.description.len()).saturating_add(4 * size_of::<usize>()),
         };
         bytes.saturating_add(child_bytes)
     })
@@ -2214,7 +2211,7 @@ pub(crate) async fn drain_session(
     mailbox: PresentationMailbox,
     cancellation: oneshot::Receiver<()>,
     credentials: CredentialPersistence,
-    cache: Option<Arc<assets::cache::AssetCache>>,
+    cache: Option<Arc<AssetCache>>,
 ) {
     SessionDriver::new(session, session_handle, runtime, mailbox, cancellation, credentials, cache).run().await;
 }

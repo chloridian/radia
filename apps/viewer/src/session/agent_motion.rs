@@ -160,13 +160,16 @@ mod tests {
     };
 
     use math::{DVec3, Quat, Vec3};
-    use protocol::{lludp::Message, messages::AgentMovementComplete};
+    use protocol::{
+        lludp::{Message, Packet},
+        messages::AgentMovementComplete,
+    };
+    use test_support::lludp::vectors::AGENT_MOVEMENT_COMPLETE;
     use uuid::Uuid;
     use world::{Kind, LinearMotion, ObjectObservation, OrderEvidence::Ordered, ParentUpdate, Pose, RegionInfo, UpdateSource, World};
 
-    use crate::session::world::viewer_world_limits;
-
     use super::{AgentMotionPublisher, AgentMotionSample};
+    use crate::{session::world::viewer_world_limits, test_helpers};
 
     fn publish_agent(publisher: &AgentMotionPublisher, world: &World, agent_id: Uuid, received_at: Instant) -> bool {
         let entity = world.entity(agent_id).expect("agent entity");
@@ -175,20 +178,20 @@ mod tests {
     }
 
     fn arrival() -> AgentMovementComplete {
-        let bytes = test_support::parse_hex_fixture(test_support::lludp::vectors::AGENT_MOVEMENT_COMPLETE).expect("movement fixture");
-        let packet = protocol::lludp::Packet::decode(&bytes).expect("valid movement packet");
+        let bytes = test_support::parse_hex_fixture(AGENT_MOVEMENT_COMPLETE).expect("movement fixture");
+        let packet = Packet::decode(&bytes).expect("valid movement packet");
         let Message::AgentMovementComplete(movement) = packet.message() else { panic!("movement-complete fixture") };
         movement.clone()
     }
 
     #[test]
     fn arrival_flattens_look_bounds_position() {
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         let mut publisher = AgentMotionPublisher::new();
         let mut movement = arrival();
         movement.data.position = Vec3::new(10.0, 20.0, 30.0);
         movement.data.look_at = Vec3::new(0.0, 1.0, 10.0);
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         assert!(publisher.publish_arrival(
             movement.agent_data.agent_id,
             movement.agent_data.session_id,
@@ -220,11 +223,11 @@ mod tests {
 
     #[test]
     fn arrival_keeps_existing_motion() {
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         let mut publisher = AgentMotionPublisher::new();
         let movement = arrival();
         let (agent_id, session_id) = (movement.agent_data.agent_id, movement.agent_data.session_id);
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         assert!(publisher.publish_arrival(agent_id, session_id, &movement, region, DVec3::ZERO, now, None));
         let first = publisher.receiver().borrow().expect("arrival sample");
         assert!(!publisher.publish_arrival(
@@ -266,7 +269,7 @@ mod tests {
         let _ = world.observe_object(agent).expect("agent observation");
 
         let publisher = AgentMotionPublisher::new();
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         assert!(publish_agent(&publisher, &world, agent_id, now));
         let sample = publisher.receiver().borrow().expect("world sample");
         assert_eq!(sample.position, DVec3::new(266.0, 20.0, 1.0));
@@ -285,7 +288,7 @@ mod tests {
         let agent_id = Uuid::from_u128(1);
         world.set_self_agent(agent_id).expect("self agent");
         let rotation = Quat::from_rotation_z(0.4);
-        let received_at = std::time::Instant::now();
+        let received_at = Instant::now();
         let ping_delay = Some(Duration::from_millis(120));
         let mut agent = ObjectObservation::new(
             UpdateSource::new(region, 1, Ordered(1), 0).with_motion_timing(received_at, ping_delay),
@@ -329,7 +332,7 @@ mod tests {
         let _ = world.observe_object(agent).expect("agent observation");
 
         let publisher = AgentMotionPublisher::new();
-        assert!(publish_agent(&publisher, &world, agent_id, std::time::Instant::now()));
+        assert!(publish_agent(&publisher, &world, agent_id, Instant::now()));
         let sample = publisher.receiver().borrow().expect("world sample");
         assert_eq!(sample.position, DVec3::new(10.0, 20.0, 3.0));
         assert_eq!(sample.velocity, Vec3::ZERO);
@@ -338,7 +341,7 @@ mod tests {
 
     #[test]
     fn non_finite_sample_is_rejected() {
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         let sample = AgentMotionSample {
             region,
             position: DVec3::ZERO,
@@ -349,7 +352,7 @@ mod tests {
             ping_delay: None,
             parented: false,
             simulator_rotation: Quat::IDENTITY,
-            received_at: std::time::Instant::now(),
+            received_at: Instant::now(),
             seed: 0,
         };
         assert!(!sample.is_finite());

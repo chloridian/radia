@@ -1,25 +1,29 @@
-use std::collections::{HashMap, HashSet};
-use std::num::NonZeroU32;
+use std::{
+    collections::{HashMap, HashSet},
+    mem,
+    num::NonZeroU32,
+};
 
 use network::SimulatorId;
 use protocol::messages::{
     CacheMissType::{CrcMismatch, Full},
     ObjectUpdateCached,
 };
+#[cfg(test)]
+use tokio::task;
 use uuid::Uuid;
 use world::{LocalAddress, ObjectLookupCursor, ObjectLookupProgress, OrderEvidence, Region, UpdateSource};
 
-use crate::session::inbound::{
-    ObjectBatch, ObjectMediaRequest, ObjectOperation, decode_cached_object, decode_pbr_overrides, object_media_requests,
+use crate::session::{
+    inbound::{ObjectBatch, ObjectMediaRequest, ObjectOperation, decode_cached_object, object_media_requests, pbr},
+    object_cache::{
+        CacheScope, CachedOverride, EncodedEntry, LoadedRegion, MAX_REGION_BYTES, MAX_REGION_ENTRIES, MAX_REGION_OVERRIDE_BYTES,
+        MAX_REGION_OVERRIDES, MAX_TOTAL_BYTES, MAX_TOTAL_ENTRIES, ObjectCacheSession, OverrideWrite, StoredScope, now_millis,
+        store::make_access_submission,
+        validation::{decode_entry, set_region_data, stored_entry},
+    },
+    world::{MAX_OBJECTS_PER_INTAKE_QUANTUM, SessionWorld},
 };
-use crate::session::object_cache::storage::make_access_submission;
-use crate::session::object_cache::validation::{decode_entry, set_region_data, stored_entry};
-use crate::session::object_cache::{
-    CacheScope, CachedOverride, EncodedEntry, LoadedRegion, MAX_REGION_BYTES, MAX_REGION_ENTRIES, MAX_REGION_OVERRIDE_BYTES,
-    MAX_REGION_OVERRIDES, MAX_TOTAL_BYTES, MAX_TOTAL_ENTRIES, ObjectCacheSession, OverrideWrite, StoredScope, now_millis,
-};
-use crate::session::world::MAX_OBJECTS_PER_INTAKE_QUANTUM;
-use crate::session::world::SessionWorld;
 
 pub(in crate::session) struct CachedObjectContinuation {
     simulator_id: SimulatorId,
@@ -142,14 +146,14 @@ impl ObjectCacheSession {
                     self.touch_loaded_region(continuation.simulator_id, scope);
                     self.remove_loaded_entries(continuation.simulator_id, &continuation.stale);
                     if !continuation.stale.is_empty() {
-                        self.enqueue(make_access_submission(scope.clone(), std::mem::take(&mut continuation.stale), now_millis()));
+                        self.enqueue(make_access_submission(scope.clone(), mem::take(&mut continuation.stale), now_millis()));
                     }
                     if !continuation.stale_overrides.is_empty() {
-                        self.write_overrides(continuation.simulator_id, scope.clone(), std::mem::take(&mut continuation.stale_overrides));
+                        self.write_overrides(continuation.simulator_id, scope.clone(), mem::take(&mut continuation.stale_overrides));
                     }
                 }
                 return CachedObjectProgress::Complete(
-                    std::mem::replace(
+                    mem::replace(
                         &mut continuation.batch,
                         ObjectBatch {
                             region: continuation.region,
@@ -159,8 +163,8 @@ impl ObjectCacheSession {
                             invalid_fields: 0,
                         },
                     ),
-                    std::mem::take(&mut continuation.media_requests),
-                    std::mem::take(&mut continuation.cached_overrides),
+                    mem::take(&mut continuation.media_requests),
+                    mem::take(&mut continuation.cached_overrides),
                 );
             }
 
@@ -258,7 +262,7 @@ impl ObjectCacheSession {
         else {
             return;
         };
-        match decode_pbr_overrides(&stored.payload) {
+        match pbr::decode_payload(&stored.payload) {
             Ok(decoded) if decoded.local_id == local_id && observed_id.is_none_or(|id| id == stored.object_id) => {
                 continuation.cached_overrides.push(CachedOverride {
                     source,
@@ -285,7 +289,7 @@ impl ObjectCacheSession {
         let mut continuation = self.begin_resolve_cached(simulator_id, region, sequence, order, update.clone(), batch);
         loop {
             match self.advance_resolve_cached(world, &mut continuation) {
-                CachedObjectProgress::Pending => tokio::task::yield_now().await,
+                CachedObjectProgress::Pending => task::yield_now().await,
                 CachedObjectProgress::Complete(batch, media_requests, overrides) => return (batch, media_requests, overrides),
             }
         }
@@ -454,6 +458,8 @@ impl ObjectCacheSession {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use network::Grid;
     use protocol::{lludp::Message, messages::CachedObjectReference};
     use rusqlite::params;
@@ -461,7 +467,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::session::object_cache::test_support::*;
+    use crate::session::object_cache::test_support::{
+        CACHE_ID, NEXT_CACHE_ID, REGION_HANDLE, REGION_ID, SIMULATOR, cache_count, cached_message, cached_references, decoded_cached_batch,
+        fixture_message, flush, load_region, open_cache, region_handshake, region_world, resolve, vectors,
+    };
     #[tokio::test(start_paused = true)]
     async fn payloads_survive_restart_as_hits() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
@@ -485,10 +494,7 @@ mod tests {
             let resolved = resolve(&mut cache, &cached, 40).await;
             assert_eq!(resolved.blocks.len(), cached.objects.len());
             assert!(
-                resolved
-                    .blocks
-                    .iter()
-                    .all(|operation| matches!(operation, Some(super::ObjectOperation::Observe(_) | super::ObjectOperation::Patch(_))))
+                resolved.blocks.iter().all(|operation| matches!(operation, Some(ObjectOperation::Observe(_) | ObjectOperation::Patch(_))))
             );
         }
         flush(&mut cache).await;
@@ -511,7 +517,7 @@ mod tests {
                 resolved
                     .blocks
                     .iter()
-                    .all(|operation| { matches!(operation, Some(super::ObjectOperation::Observe(_) | super::ObjectOperation::Patch(_))) })
+                    .all(|operation| { matches!(operation, Some(ObjectOperation::Observe(_) | ObjectOperation::Patch(_))) })
             );
         }
         reopened.close().await;
@@ -608,23 +614,14 @@ mod tests {
         references.push(CachedObjectReference { local_id: 0x7fff_fffe, crc: 1, update_flags: 0 });
 
         let resolved = resolve(&mut cache, &cached_message(region_data, references), 51).await;
-        std::assert_matches!(
-            resolved.blocks[0],
-            Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::CrcMismatch, .. })
-        );
-        std::assert_matches!(
-            resolved.blocks.last(),
-            Some(Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. }))
-        );
+        assert_matches!(resolved.blocks[0], Some(ObjectOperation::Cached { cache_miss_type: CrcMismatch, .. }));
+        assert_matches!(resolved.blocks.last(), Some(Some(ObjectOperation::Cached { cache_miss_type: Full, .. })));
 
         flush(&mut cache).await;
         let (region_data, mut references) = cached_references(&full);
         references.truncate(1);
         let resolved = resolve(&mut cache, &cached_message(region_data, references), 52).await;
-        std::assert_matches!(
-            resolved.blocks[0],
-            Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. })
-        );
+        assert_matches!(resolved.blocks[0], Some(ObjectOperation::Cached { cache_miss_type: Full, .. }));
         cache.close().await;
     }
 
@@ -642,9 +639,9 @@ mod tests {
         let (region_data, references) = cached_references(&full);
         let update = cached_message(region_data, references);
         let before_load = resolve(&mut cache, &update, 55).await;
-        assert!(before_load.blocks.iter().all(|operation| {
-            matches!(operation, Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. }))
-        }));
+        assert!(
+            before_load.blocks.iter().all(|operation| { matches!(operation, Some(ObjectOperation::Cached { cache_miss_type: Full, .. })) })
+        );
 
         assert_eq!(load_region(&mut cache).await, 5);
         let after_load = resolve(&mut cache, &update, 56).await;
@@ -652,7 +649,7 @@ mod tests {
             after_load
                 .blocks
                 .iter()
-                .all(|operation| { matches!(operation, Some(super::ObjectOperation::Observe(_) | super::ObjectOperation::Patch(_))) })
+                .all(|operation| { matches!(operation, Some(ObjectOperation::Observe(_) | ObjectOperation::Patch(_))) })
         );
         cache.close().await;
     }
@@ -685,10 +682,7 @@ mod tests {
 
         let first = cached_message(region_data, references[..1].to_vec());
         let resolved = resolve(&mut cache, &first, 60).await;
-        std::assert_matches!(
-            resolved.blocks[0],
-            Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. })
-        );
+        assert_matches!(resolved.blocks[0], Some(ObjectOperation::Cached { cache_miss_type: Full, .. }));
         flush(&mut cache).await;
         assert_eq!(cache_count(cache.db.as_ref().expect("cache database is open")).await, references.len() - 1);
         cache.close().await;
@@ -708,10 +702,7 @@ mod tests {
 
         let resolved = resolve(&mut cache, &cached_message(region_data, references.clone()), 61).await;
 
-        std::assert_matches!(
-            resolved.blocks[0],
-            Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. })
-        );
+        assert_matches!(resolved.blocks[0], Some(ObjectOperation::Cached { cache_miss_type: Full, .. }));
         flush(&mut cache).await;
         assert_eq!(cache_count(cache.db.as_ref().expect("cache database is open")).await, references.len() - 1);
         cache.close().await;
@@ -740,10 +731,7 @@ mod tests {
 
         assert_eq!(cache_count(cache.db.as_ref().expect("cache database is open")).await, 0);
         let resolved = resolve(&mut cache, &cached_message(region_data, references), 62).await;
-        std::assert_matches!(
-            resolved.blocks[0],
-            Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. })
-        );
+        assert_matches!(resolved.blocks[0], Some(ObjectOperation::Cached { cache_miss_type: Full, .. }));
         cache.close().await;
     }
 
@@ -764,10 +752,7 @@ mod tests {
         assert_eq!(load_region(&mut cache).await, 7);
         let (region_data, references) = cached_references(&full);
         let result = resolve(&mut cache, &cached_message(region_data, references[..1].to_vec()), 71).await;
-        std::assert_matches!(
-            result.blocks[0],
-            Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. })
-        );
+        assert_matches!(result.blocks[0], Some(ObjectOperation::Cached { cache_miss_type: Full, .. }));
         cache.close().await;
     }
 }

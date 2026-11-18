@@ -205,7 +205,7 @@ fn page_bytes(vertices: usize, indices: usize, has_composition: bool) -> Option<
 mod tests {
     use std::sync::Arc;
 
-    use proptest::prelude::*;
+    use proptest::{collection, prelude::*};
 
     use super::*;
 
@@ -263,7 +263,7 @@ mod tests {
     proptest! {
         #[test]
         fn churn_matches_occupancy(
-            ops in prop::collection::vec((0u8..3, 0usize..16, 1u32..17, 1u32..9), 1..256),
+            ops in collection::vec((0u8..3, 0usize..16, 1u32..17, 1u32..9), 1..256),
         ) {
             let memory = Arc::new(Accounting::default());
             let mut layout = Layout::new(32, 48);

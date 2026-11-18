@@ -6,17 +6,18 @@ use protocol::{
     messages::{
         ChatFromViewer, CompleteAgentMovement, CompletePingCheck, LogoutReply, LogoutRequest, MapBlockReply, MapBlockRequest, PacketAck,
         PingId, RegionHandleRequest, RegionHandshakeReply, RegionIdAndHandleReply, StartPingCheck, UseCircuitCode,
-        agent::complete_agent_movement,
-        agent::logout_reply::{self, InventoryData},
-        agent::logout_request,
+        agent::{
+            complete_agent_movement,
+            logout_reply::{self, InventoryData},
+            logout_request,
+        },
         chat::chat_from_viewer::{AgentData, ChatData},
-        circuit::packet_ack::Packets,
-        circuit::use_circuit_code::CircuitCode,
-        map::map_block_reply,
-        map::map_block_request::{self, PositionData},
-        region::region_handle_request::RequestBlock,
-        region::region_handshake_reply,
-        region::region_id_and_handle_reply::ReplyBlock,
+        circuit::{packet_ack::Packets, use_circuit_code::CircuitCode},
+        map::{
+            map_block_reply,
+            map_block_request::{self, PositionData},
+        },
+        region::{region_handle_request::RequestBlock, region_handshake_reply, region_id_and_handle_reply::ReplyBlock},
     },
     schema::MessageEncoding,
 };

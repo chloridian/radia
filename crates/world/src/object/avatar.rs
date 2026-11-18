@@ -279,10 +279,10 @@ impl Error for AvatarAppearanceError {}
 
 #[cfg(test)]
 mod tests {
+    use utils::AssetId;
     use uuid::Uuid;
 
     use super::{AvatarAppearance, AvatarAppearanceUpdate, AvatarBakeSlot, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex};
-    use utils::AssetId;
 
     #[test]
     fn index_bounds_hold() {

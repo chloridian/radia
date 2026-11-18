@@ -1,17 +1,15 @@
 use std::{
     error::Error,
     fmt::{self, Display, Formatter},
-    mem::size_of,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
 
-use assets::mesh::MeshError;
 use assets::{
     MeshAsset,
-    mesh::{LodGeometry, Mesh, MeshLod},
+    mesh::{LodGeometry, Mesh, MeshError, MeshLod},
 };
 use utils::AssetId;
 

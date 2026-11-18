@@ -27,6 +27,34 @@ use tokio::{
     time::{self, Instant},
 };
 
+#[cfg(test)]
+pub(crate) use self::lludp::test_values::NEW_RELIABLE_ACK_CAPACITY;
+#[cfg(test)]
+pub(crate) use self::lludp::test_values::with_sequence;
+pub(super) use self::outbound::bound_send_error;
+use self::outbound::{
+    MovementSend, OutboundQueue, PendingSend, QueuedMessage, active_queue_class, agent_throttle_message, expire_deferred_retries,
+    expire_pending_send, fail_queued_on_close, flush_send_notifications, logout_message, message_class, preempt_deferred_send,
+    prepare_next_send, prepare_shutdown_send, queue_internal, queue_send_notification, report_queued_failure, send_prepared,
+};
+#[cfg(test)]
+pub(crate) use self::pacing::test_values::pacer_rate;
+#[cfg(test)]
+pub(crate) use self::receive::queue_neighbor_event;
+#[cfg(test)]
+pub(crate) use self::udp::test_values::set_send_gate;
+pub(crate) use self::{
+    admission::{ConnectionRole, SimulatorMemoryBudget},
+    error::ConnectionError,
+    link::{
+        ACK_INTERVAL, HandoffCancellation, HandoffGeneration, HandoffTarget, LOGOUT_REPLY_TIMEOUT, LOGOUT_TIMEOUT, LogoutCommand,
+        LogoutReceipt, MAX_CONNECTION_PRECONNECT_EVENTS, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS,
+        MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS,
+        NeighborEventQueueOutcome, PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome,
+        connection_message_has_application_event,
+    },
+    udp::{UdpError, UdpTransport},
+};
 use crate::{
     AgentSession,
     circuit::{
@@ -36,31 +64,6 @@ use crate::{
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
     event::{CircuitMotionStatus, EventEnvelope, SimulatorId},
 };
-use outbound::{
-    MovementSend, OutboundQueue, PendingSend, QueuedMessage, active_queue_class, agent_throttle_message, expire_deferred_retries,
-    expire_pending_send, fail_queued_on_close, flush_send_notifications, logout_message, message_class, preempt_deferred_send,
-    prepare_next_send, prepare_shutdown_send, queue_internal, queue_send_notification, report_queued_failure, send_prepared,
-};
-
-pub(crate) use admission::{ConnectionRole, SimulatorMemoryBudget};
-pub(crate) use error::ConnectionError;
-pub(crate) use link::{
-    ACK_INTERVAL, HandoffCancellation, HandoffGeneration, HandoffTarget, LOGOUT_REPLY_TIMEOUT, LOGOUT_TIMEOUT, LogoutCommand,
-    LogoutReceipt, MAX_CONNECTION_PRECONNECT_EVENTS, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PENDING_SIMULATOR_EVENTS,
-    MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS, NeighborEventQueueOutcome, PrimaryState,
-    SimulatorCommand, SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome, connection_message_has_application_event,
-};
-#[cfg(test)]
-pub(crate) use lludp::test_values::NEW_RELIABLE_ACK_CAPACITY;
-#[cfg(test)]
-pub(crate) use lludp::test_values::with_sequence;
-pub(super) use outbound::bound_send_error;
-#[cfg(test)]
-pub(crate) use pacing::test_values::pacer_rate;
-pub(crate) use receive::queue_neighbor_event;
-#[cfg(test)]
-pub(crate) use udp::test_values::set_send_gate;
-pub(crate) use udp::{UdpError, UdpTransport};
 
 const MAX_PENDING_SENDS: usize = 8;
 const CONTROL_SEND_RESERVE: usize = 2;
@@ -304,11 +307,11 @@ fn preflight_loss_reason(error: LLUdpError, message_id: MessageId) -> CoverageLo
 pub(crate) mod test_values {
     use std::sync::Arc;
 
-    use super::{CircuitHandoff, HandoffMovement, HandoffTarget, SimulatorConnection, udp};
+    use super::{CircuitHandoff, HandoffMovement, HandoffTarget, SimulatorConnection, udp::test_values};
     use crate::fixtures::circuit::SendGate;
 
     pub(crate) fn set_send_gate(connection: &mut SimulatorConnection, send_gate: SendGate) {
-        udp::test_values::set_send_gate(Arc::get_mut(&mut connection.socket).expect("test connection owns its socket"), send_gate);
+        test_values::set_send_gate(Arc::get_mut(&mut connection.socket).expect("test connection owns its socket"), send_gate);
     }
 
     pub(crate) fn set_handoff(connection: &mut SimulatorConnection, handoff: HandoffTarget) {

@@ -1,13 +1,17 @@
 use std::{
     fmt::{self, Debug, Formatter},
-    ops::Deref,
+    ops::{Deref, Range},
     sync::Arc,
 };
 
 use crate::{
     Blob, EnvironmentDescription, Failure, Image, Kind, MaterialDescription, Request, Resource, TextureHandle, TextureSize, WeakTexture,
     budget::{Reservation, Resident},
-    envelope, environment, material, mesh, texture,
+    cache,
+    cache::{MESH_HEADER_FRAME_BYTES, MESH_LOD_FRAME_BYTES},
+    envelope, environment,
+    material::{legacy, pbr},
+    mesh, texture,
 };
 
 #[derive(Clone)]
@@ -250,9 +254,9 @@ fn persist_mesh_source(source: CacheSource, data: &Data, reservation: &mut Reser
             let Data::MeshHeader { header, .. } = data else { return None };
             let length = usize::try_from(header.header_size()).ok()?;
             let header_bytes = bytes.get(..length)?;
-            let capacity = crate::cache::MESH_HEADER_FRAME_BYTES.checked_add(header_bytes.len())?;
+            let capacity = MESH_HEADER_FRAME_BYTES.checked_add(header_bytes.len())?;
             reserve_cache_payload(reservation, capacity)?;
-            (capacity, crate::cache::mesh_header_frame(total_length, header_bytes)?)
+            (capacity, cache::mesh_header_frame(total_length, header_bytes)?)
         }
         CacheSource::MeshLod { bytes, request, full } => {
             let block = if full {
@@ -263,9 +267,9 @@ fn persist_mesh_source(source: CacheSource, data: &Data, reservation: &mut Reser
             } else {
                 bytes.as_slice()
             };
-            let capacity = crate::cache::MESH_LOD_FRAME_BYTES.checked_add(block.len())?;
+            let capacity = MESH_LOD_FRAME_BYTES.checked_add(block.len())?;
             reserve_cache_payload(reservation, capacity)?;
-            (capacity, crate::cache::mesh_lod_frame(request, block)?)
+            (capacity, cache::mesh_lod_frame(request, block)?)
         }
         CacheSource::Payload(_) => return None,
     };
@@ -354,7 +358,7 @@ pub(crate) fn prepare_disk(
     let data = if resource.kind == Kind::Mesh {
         match request {
             Request::MeshHeader(_) => {
-                let (total_length, header_bytes) = crate::cache::parse_mesh_header_frame(&bytes).ok_or(Failure::MalformedBlock)?;
+                let (total_length, header_bytes) = cache::parse_mesh_header_frame(&bytes).ok_or(Failure::MalformedBlock)?;
                 let data = decode_mesh(request, header_bytes, Some(total_length), None, bytes.capacity(), reservation, &cancelled)?;
                 let Data::MeshHeader { header, .. } = &data else { return Err(Failure::MalformedBlock) };
                 let header_size = usize::try_from(header.header_size()).map_err(|_| Failure::MalformedBlock)?;
@@ -364,7 +368,7 @@ pub(crate) fn prepare_disk(
                 data
             }
             Request::MeshLod(block) => {
-                let block_bytes = crate::cache::parse_mesh_lod_frame(block, &bytes).ok_or(Failure::MalformedBlock)?;
+                let block_bytes = cache::parse_mesh_lod_frame(block, &bytes).ok_or(Failure::MalformedBlock)?;
                 let input_capacity = bytes.capacity().min(mesh::MAX_MESH_BLOCK_BYTES);
                 decode_mesh(request, block_bytes, Some(block.asset_length()), Some(block.range()), input_capacity, reservation, &cancelled)?
             }
@@ -399,8 +403,8 @@ fn mesh_lod_prefix(id: utils::AssetId, header: mesh::MeshHeader, bytes: &[u8]) -
 fn decode_payload(resource: Resource, size: TextureSize, bytes: &[u8], cancelled: &impl Fn() -> bool) -> Result<Data, Failure> {
     match resource.kind {
         Kind::Texture => texture::decode(bytes, size, cancelled).map(Data::Texture),
-        Kind::PbrMaterial => material::pbr::decode(bytes).map(Data::Material),
-        Kind::LegacyMaterial => material::legacy::decode(bytes).map(Data::Material),
+        Kind::PbrMaterial => pbr::decode(bytes).map(Data::Material),
+        Kind::LegacyMaterial => legacy::decode(bytes).map(Data::Material),
         Kind::Environment => environment::decode(bytes).map(Data::Environment),
         Kind::Mesh => Err(Failure::Malformed),
     }
@@ -410,7 +414,7 @@ fn decode_mesh(
     request: Request,
     bytes: &[u8],
     total_length: Option<u64>,
-    range: Option<std::ops::Range<u64>>,
+    range: Option<Range<u64>>,
     input_capacity: usize,
     reservation: &mut Reservation,
     cancelled: &impl Fn() -> bool,
@@ -422,7 +426,7 @@ fn decode_mesh(
         Request::MeshHeader(id) => {
             let parse_bytes = input_capacity
                 .checked_add(mesh::MAX_MESH_HEADER_BYTES)
-                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<MeshHeaderInner>()))
+                .and_then(|bytes| bytes.checked_add(size_of::<MeshHeaderInner>()))
                 .ok_or(Failure::TooLarge)?;
             if !reservation.resize(parse_bytes) {
                 return Err(Failure::MemoryPressure);

@@ -6,16 +6,17 @@ use wgpu::{
     ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat, VertexState,
 };
 
-use super::atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values};
-use super::surface::{CAMERA_NEAR_PLANE, camera_view};
-use super::water::water_surface_values;
+use super::{
+    TexturePair,
+    atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values},
+    surface::{CAMERA_NEAR_PLANE, camera_view},
+    water::water_surface_values,
+};
 use crate::{
     environment::Evaluated,
     scene::{Camera, MAX_REGIONS},
     texture::{TextureViewState, Textures},
 };
-
-use super::TexturePair;
 
 const VOID_WATER_REGION_FLOATS: usize = MAX_REGIONS * 4;
 const VOID_WATER_UNIFORM_FLOATS: usize = 32 + 4 + 4 + 36 + ATMOSPHERE_FLOATS + VOID_WATER_REGION_FLOATS;
@@ -191,9 +192,9 @@ fn append<const N: usize>(target: &mut [f32; VOID_WATER_UNIFORM_FLOATS], offset:
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use math::{DVec3, Vec3};
 
+    use super::*;
     use crate::pipeline::projection;
 
     #[test]

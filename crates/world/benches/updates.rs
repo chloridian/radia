@@ -1,12 +1,13 @@
 #![allow(unexpected_cfgs)]
 
-use std::hint::black_box;
-use std::num::NonZeroU8;
 #[cfg(world_bench_detailed)]
 use std::time::Instant;
+use std::{hint::black_box, num::NonZeroU8};
 
 use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, measurement::WallTime};
 use math::{Quat, Vec3};
+#[cfg(not(world_bench_uninstrumented))]
+use test_support::allocation;
 use utils::AssetId;
 use uuid::Uuid;
 use world::{
@@ -357,11 +358,11 @@ fn bench_facet_layout(c: &mut Criterion) {
     }
     #[cfg(not(world_bench_uninstrumented))]
     {
-        let before = test_support::allocation::live_bytes();
-        let (profile, allocation) = test_support::allocation::measure(FacetWorkload::new);
+        let before = allocation::live_bytes();
+        let (profile, allocation) = allocation::measure(FacetWorkload::new);
         eprintln!(
             "facet-layout-memory fixture=synthetic_10k_sparse retained_delta_bytes={} peak_delta_bytes={} allocation_calls={} reallocation_calls={}",
-            test_support::allocation::live_bytes() - before,
+            allocation::live_bytes() - before,
             allocation.peak_bytes,
             allocation.allocation_calls,
             allocation.reallocation_calls,

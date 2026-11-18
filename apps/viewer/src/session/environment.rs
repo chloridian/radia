@@ -13,7 +13,7 @@ use llsd::{Limits, Map, Value, notation, xml};
 use math::Vec3;
 use network::{PacketOrder, SimulatorId, capabilities::Client};
 use protocol::{lludp::Message, messages::ParcelProperties};
-use tokio::{runtime::Handle, sync::Semaphore};
+use tokio::{runtime::Handle, sync::Semaphore, time};
 use uuid::Uuid;
 use world::{
     EnvironmentAssignment, EnvironmentScope, EnvironmentSource, EnvironmentTarget, MAX_ENVIRONMENT_SOURCE_BYTES,
@@ -458,7 +458,7 @@ async fn fetch(request: &Request, runtime: Handle, decoders: Arc<Semaphore>) -> 
         let bytes = match request.client.get_bytes_with_response_limit(&url, MAX_ENVIRONMENT_SOURCE_BYTES).await {
             Ok(bytes) => bytes,
             Err(_) if attempt < 2 => {
-                tokio::time::sleep(Duration::from_millis(250 << attempt)).await;
+                time::sleep(Duration::from_millis(250 << attempt)).await;
                 continue;
             }
             Err(_) => return Err(FetchError::Network),
@@ -482,7 +482,7 @@ async fn fetch(request: &Request, runtime: Handle, decoders: Arc<Semaphore>) -> 
             && version < expected
         {
             if attempt < 2 {
-                tokio::time::sleep(Duration::from_millis(250 << attempt)).await;
+                time::sleep(Duration::from_millis(250 << attempt)).await;
                 continue;
             }
             return Err(FetchError::Superseded);
@@ -749,7 +749,8 @@ fn parcel_message(message: &ParcelProperties) -> Result<Option<ParcelNotice>, Fe
 
 #[cfg(test)]
 mod tests {
-    use crate::test_helpers::simulator_id;
+    use std::assert_matches;
+
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -757,7 +758,7 @@ mod tests {
     use url::Url;
 
     use super::*;
-    use crate::session::world::viewer_world_limits;
+    use crate::{session::world::viewer_world_limits, test_helpers::simulator_id};
 
     const RESPONSE: &str = r#"<llsd><map><key>environment</key><map>
     <key>region_id</key><uuid>00112233-4455-6677-8899-aabbccddeeff</uuid>
@@ -1037,7 +1038,7 @@ mod tests {
         intake.complete(&mut world, *completion);
         let observed = world.world().environment(region).unwrap().parcel.unwrap().assignment.unwrap();
         assert_eq!(observed.version, Some(7));
-        std::assert_matches!(observed.source, EnvironmentSource::Inline(_));
+        assert_matches!(observed.source, EnvironmentSource::Inline(_));
         assert_eq!(server.await.unwrap().len(), 2);
     }
 }
