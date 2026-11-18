@@ -1,4 +1,7 @@
-use std::fmt::{self, Display, Formatter};
+use std::{
+    error,
+    fmt::{self, Display, Formatter},
+};
 
 use network::Grid;
 use serde::{Deserialize, Serialize};
@@ -29,7 +32,7 @@ impl Display for CredentialStoreError {
     }
 }
 
-impl std::error::Error for CredentialStoreError {}
+impl error::Error for CredentialStoreError {}
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct RememberedLogin {
@@ -72,15 +75,16 @@ fn grid_key(grid: Grid) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
+    use std::{any::Any, assert_matches};
 
+    use keyring::credential::CredentialBuilderApi;
     use network::Grid;
 
     use super::{CredentialStoreError, load};
 
     struct FailingCredentialBuilder;
 
-    impl keyring::credential::CredentialBuilderApi for FailingCredentialBuilder {
+    impl CredentialBuilderApi for FailingCredentialBuilder {
         fn build(&self, _: Option<&str>, _: &str, _: &str) -> keyring::Result<Box<keyring::Credential>> {
             Err(keyring::Error::Invalid("keyring".into(), "unavailable".into()))
         }
@@ -99,7 +103,7 @@ mod tests {
             Ok(_) => panic!("keyring access failure must be reported"),
         };
 
-        std::assert_matches!(&error, CredentialStoreError::Open(_));
+        assert_matches!(&error, CredentialStoreError::Open(_));
         assert!(error.to_string().starts_with("Could not open the system credential store:"));
     }
 }

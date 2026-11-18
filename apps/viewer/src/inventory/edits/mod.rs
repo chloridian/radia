@@ -4,11 +4,15 @@ mod handle;
 mod policy;
 mod types;
 
-pub(crate) use controller::{InventoryEditController, InventoryEditEvent};
-pub(crate) use delta::AisDelta;
-pub use handle::InventoryEditHandle;
-pub(crate) use types::MoveExpectation;
-pub use types::{InventoryEditOutcome, InventoryEditRejection};
+pub(crate) use self::{
+    controller::{InventoryEditController, InventoryEditEvent},
+    delta::AisDelta,
+    types::MoveExpectation,
+};
+pub use self::{
+    handle::InventoryEditHandle,
+    types::{InventoryEditOutcome, InventoryEditRejection},
+};
 
 #[cfg(test)]
 mod controller_tests;

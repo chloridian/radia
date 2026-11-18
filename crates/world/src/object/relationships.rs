@@ -5,18 +5,20 @@ use std::{
 
 use uuid::Uuid;
 
-use crate::history::{
-    WorldChange::{EntityUpdated, SubtreeInvalidated},
-    WorldChangeClasses,
+use self::ParentResolution::{Accepted, Cycle};
+use crate::{
+    ApplyError, AttachmentPoint, Binding, Entity, Kind, LocalAddress, ObjectRecord, Parent, ParentUpdate, Recovery, RecoveryCancellation,
+    Region, UpdateSource, World, WorldRevision,
+    history::{
+        WorldChange::{EntityUpdated, SubtreeInvalidated},
+        WorldChangeClasses,
+    },
+    identity::WorldId,
+    mutation::Effects,
+    read::{MAX_OBJECT_LOOKUP_WORK_ITEMS, ObjectLookupCursor, ObjectLookupProgress},
+    removal::{VisibilityCache, VisibilityCursor, VisibilityStep},
+    update::{FieldStamp, Stamp},
 };
-use crate::mutation::Effects;
-use crate::read::{MAX_OBJECT_LOOKUP_WORK_ITEMS, ObjectLookupCursor, ObjectLookupProgress};
-use crate::removal::{VisibilityCache, VisibilityCursor, VisibilityStep};
-use crate::update::{FieldStamp, Stamp};
-use crate::{ApplyError, Recovery, RecoveryCancellation, UpdateSource, WorldRevision};
-use crate::{AttachmentPoint, Entity, Kind, LocalAddress, ObjectRecord, Parent, ParentUpdate, Region};
-use crate::{Binding, World};
-use ParentResolution::{Accepted, Cycle};
 
 const IMMEDIATE_RELATIONSHIPS: usize = 64;
 
@@ -101,7 +103,7 @@ enum ParentResolutionStage {
 
 #[derive(Clone, Copy)]
 pub struct ParentResolutionCursor {
-    world: crate::identity::WorldId,
+    world: WorldId,
     revision: WorldRevision,
     source: UpdateSource,
     local_id: NonZeroU32,
@@ -120,7 +122,7 @@ pub struct ParentResolutionCursor {
 
 #[derive(Clone, Copy)]
 pub struct ParentResolutionPlan {
-    pub(crate) world: crate::identity::WorldId,
+    pub(crate) world: WorldId,
     pub(crate) revision: WorldRevision,
     pub(crate) source: UpdateSource,
     pub(crate) local_id: NonZeroU32,
@@ -920,19 +922,21 @@ impl World {
 
 #[cfg(test)]
 mod tests {
-    use crate::{ApplyError, WorldLimits};
+    use std::assert_matches;
+
     use math::{DVec3, Quat, Vec3};
     use uuid::Uuid;
 
     use super::*;
     use crate::{
+        ApplyError,
         ApplyOutcome::{Introduced, Removed, Unchanged},
         Kind::{Avatar, Object},
         ObjectObservation,
         OrderEvidence::Ordered,
         Parent::Pending,
         ParentUpdate::{Local, Root},
-        Pose, RegionInfo, UpdateSource, WorldRevision,
+        Pose, RegionInfo, UpdateSource, WorldLimits, WorldRevision,
     };
 
     const DEEP_CHAIN: u32 = MAX_OBJECT_LOOKUP_WORK_ITEMS as u32 + 44;
@@ -1139,7 +1143,7 @@ mod tests {
     fn generation_limit_detaches_avatar() {
         let mut world = World::new(test_limits());
         let region = world.register_region().unwrap();
-        std::assert_matches!(
+        assert_matches!(
             world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap().outcome,
             crate::RegionOutcome::Patched { .. }
         );
@@ -1213,7 +1217,7 @@ mod tests {
         let parent = observation(&mut world, region, 1, 1, Object, Root);
         let child = observation(&mut world, region, 2, 2, Avatar, Local(NonZeroU32::new(1).unwrap()));
         let retired = world.retire_region(region).unwrap();
-        std::assert_matches!(retired.outcome, crate::RegionOutcome::Retired { entities_removed: 2, .. });
+        assert_matches!(retired.outcome, crate::RegionOutcome::Retired { entities_removed: 2, .. });
         assert!(world.object(parent).is_none());
         assert!(world.object(child).is_none());
         assert!(retired.recovery_cancellations.is_empty());

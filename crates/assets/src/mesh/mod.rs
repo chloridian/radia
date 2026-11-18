@@ -1,20 +1,18 @@
 mod asset;
 
-pub use asset::{
-    AssetError, MAX_MESH_ASSET_BYTES, MAX_MESH_BLOCK_BYTES, MAX_MESH_HEADER_BYTES, MESH_HEADER_BYTES, MeshHeader, MeshLod, MeshLodRequest,
-    decode_header, decode_lod, decode_lod_cancellable, header_needs_more,
-};
-
-pub(crate) use asset::decode_lod_cancellable_reserved;
-
 use std::{
     error::Error,
     fmt::{self, Display, Formatter},
-    mem::size_of,
     ops::Range,
 };
 
 use math::{Bounds, Vec2, Vec3};
+
+pub(crate) use self::asset::decode_lod_cancellable_reserved;
+pub use self::asset::{
+    AssetError, MAX_MESH_ASSET_BYTES, MAX_MESH_BLOCK_BYTES, MAX_MESH_HEADER_BYTES, MESH_HEADER_BYTES, MeshHeader, MeshLod, MeshLodRequest,
+    decode_header, decode_lod, decode_lod_cancellable, header_needs_more,
+};
 
 pub const MAX_MESH_VERTICES_PER_FACE: usize = 65_535;
 pub const MAX_MESH_INDICES_PER_FACE: usize = 3 * MAX_MESH_VERTICES_PER_FACE;

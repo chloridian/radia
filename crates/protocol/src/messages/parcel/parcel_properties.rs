@@ -7,7 +7,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::PARCEL_PROPERTIES,
@@ -195,7 +195,7 @@ impl TypedMessage for ParcelProperties {
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        let mut bytes = crate::lludp::message::allocation::capacity_bytes(1, std::mem::size_of::<ParcelData>());
+        let mut bytes = allocation::capacity_bytes(1, size_of::<ParcelData>());
         for value in [
             &self.parcel_data.bitmap,
             &self.parcel_data.name,
@@ -206,7 +206,7 @@ impl TypedMessage for ParcelProperties {
         .into_iter()
         .flatten()
         {
-            crate::lludp::message::allocation::add_capacity(&mut bytes, value.capacity(), std::mem::size_of::<u8>());
+            allocation::add_capacity(&mut bytes, value.capacity(), size_of::<u8>());
         }
         bytes
     }

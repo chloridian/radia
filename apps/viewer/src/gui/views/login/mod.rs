@@ -9,13 +9,14 @@ use std::{
     sync::Arc,
 };
 
-use ::inventory::{CategoryKey, FolderType, InventorySnapshot};
+use futures::channel::oneshot;
 use gpui::{AppContext, Context, Window};
 use gpui_component::{
     IndexPath,
     input::{InputEvent, InputState},
     select::{SelectEvent, SelectState},
 };
+use inventory::{CategoryKey, FolderType, InventorySnapshot};
 use network::{AgentSession, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
 use tokio::sync::watch;
 
@@ -23,10 +24,12 @@ use self::{
     favorites::Favorites,
     spawn::{SpawnChoice, SpawnOption, spawn_options},
 };
-use crate::gui::views::chat::ChatScreen;
-use crate::inventory::{FavoriteLocation, InventoryFetchHandle, InventoryFetchRequestError, favorite_store};
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use crate::gui::scene::{end_session, start_session};
 use crate::{
-    gui::{SessionLifecycle, window_geometry::observe},
+    gui,
+    gui::{SessionLifecycle, views::chat::ChatScreen, window_geometry::observe},
+    inventory::{FavoriteLocation, InventoryFetchHandle, InventoryFetchRequestError, favorite_store},
     remembered_login::{self, CredentialStoreError, RememberedLogin},
     session::{
         AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, Session, SessionEnd,
@@ -234,7 +237,7 @@ pub struct LoginScreen {
 
 struct ActiveSession {
     _session_handle: SessionHandle,
-    _cancel: futures::channel::oneshot::Sender<()>,
+    _cancel: oneshot::Sender<()>,
     presentation_mailbox: PresentationMailbox,
     ready: Option<ReadySession>,
 }
@@ -499,7 +502,7 @@ impl LoginScreen {
         };
         let session_handle = network_session.handle();
         let (mailbox, mut presentation) = PresentationMailbox::new(self.session_generation);
-        let (cancel_sender, cancel_receiver) = futures::channel::oneshot::channel();
+        let (cancel_sender, cancel_receiver) = oneshot::channel();
         let active = ActiveSession {
             _session_handle: session_handle.clone(),
             _cancel: cancel_sender,
@@ -510,8 +513,8 @@ impl LoginScreen {
         self.active_session = Some(active);
         self.chat_screen.update(cx, |chat, cx| chat.set_session_handle(session_handle.clone(), cx));
 
-        let background = crate::gui::service_runtime(cx);
-        let asset_cache = crate::gui::asset_cache(cx);
+        let background = gui::service_runtime(cx);
+        let asset_cache = gui::asset_cache(cx);
         let credential_write_lock = self.credential_write_lock.clone();
         let grid = self.credential_load.grid();
 
@@ -650,7 +653,7 @@ impl LoginScreen {
         });
 
         #[cfg(any(target_os = "windows", target_os = "linux"))]
-        crate::gui::scene::start_session(
+        start_session(
             self.session_generation,
             &ready.world_reader,
             ready.environments,
@@ -667,7 +670,7 @@ impl LoginScreen {
 
     pub(crate) fn end_session(&mut self, end: SessionEnd, cx: &mut Context<Self>) {
         #[cfg(any(target_os = "windows", target_os = "linux"))]
-        crate::gui::scene::end_session(self.session_generation, cx);
+        end_session(self.session_generation, cx);
         match &end {
             SessionEnd::Requested => tracing::info!("viewer session ended normally"),
             SessionEnd::Failed(_) => tracing::warn!("viewer session ended after a failure"),
@@ -733,11 +736,15 @@ fn split_username(username: &str) -> Option<(String, String)> {
 mod tests {
     use std::{collections::VecDeque, sync::Arc};
 
+    use futures::executor;
     use network::Grid;
 
     use super::{CredentialLoad, CredentialLoadCompletion, LoginMessage, LoginPhase, LoginScreen, LoginStatus};
-    use crate::remembered_login::CredentialStoreError;
-    use crate::session::{ChatMessage, PresentationMailbox, PresentationSnapshot, SessionEnd, ViewerUpdate};
+    use crate::{
+        gui::SessionLifecycle,
+        remembered_login::CredentialStoreError,
+        session::{ChatMessage, PresentationMailbox, PresentationSnapshot, SessionEnd, ViewerUpdate},
+    };
 
     fn credential_error(detail: &str) -> CredentialStoreError {
         CredentialStoreError::Open(detail.to_owned())
@@ -770,7 +777,7 @@ mod tests {
     #[gpui::test]
     fn stale_presentation_cannot_end_relogin(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
-        let session_lifecycle = Arc::new(crate::gui::SessionLifecycle::default());
+        let session_lifecycle = Arc::new(SessionLifecycle::default());
         let (screen, visual) = cx.add_window_view(|window, cx| LoginScreen::new(window, cx, session_lifecycle));
         let snapshot = PresentationSnapshot {
             generation: 1,
@@ -816,7 +823,7 @@ mod tests {
 
         assert_eq!(status.displayed(Vec::new(), false), None);
 
-        status.end_session(crate::session::SessionEnd::Requested);
+        status.end_session(SessionEnd::Requested);
 
         assert_eq!(status.displayed(Vec::new(), false), Some(warning.to_string()));
     }
@@ -840,7 +847,7 @@ mod tests {
         let mut status = LoginStatus { session_failure: Some("previous session failed".into()), ..LoginStatus::default() };
         let (mailbox, mut receiver) = PresentationMailbox::new(1);
         mailbox.publish(ViewerUpdate::Ended);
-        let end = futures::executor::block_on(receiver.next()).expect("normal end update").session_end.expect("session end");
+        let end = executor::block_on(receiver.next()).expect("normal end update").session_end.expect("session end");
 
         status.end_session(end);
 
@@ -848,7 +855,7 @@ mod tests {
 
         let (mailbox, mut receiver) = PresentationMailbox::new(2);
         mailbox.publish(ViewerUpdate::Failed("heartbeat timeout".into()));
-        let end = futures::executor::block_on(receiver.next()).expect("failure update").session_end.expect("session end");
+        let end = executor::block_on(receiver.next()).expect("failure update").session_end.expect("session end");
 
         status.end_session(end);
 

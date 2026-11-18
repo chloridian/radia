@@ -1,9 +1,9 @@
 use std::{
+    array,
     num::NonZeroU64,
     time::{Duration, Instant},
 };
 
-use crate::environment::Evaluated;
 use math::{DVec3, Mat4};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
@@ -15,6 +15,7 @@ use wgpu::{
 };
 
 use super::{atmosphere::sky_hdr_scale, water::water_fog_values};
+use crate::environment::Evaluated;
 
 pub(crate) const SCENE_CLEAR: Color = Color { r: 0.012, g: 0.012, b: 0.012, a: 0.5 };
 const HDR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
@@ -160,12 +161,12 @@ impl PostProcess {
             exposure_uniform_binding,
             tone_uniform_binding,
             luminance_sampler,
-            reduction_bindings: std::array::from_fn(|_| None),
+            reduction_bindings: array::from_fn(|_| None),
             size: [0, 0],
             _scene_texture: None,
             scene_view: None,
-            _luminance_textures: std::array::from_fn(|_| None),
-            luminance_views: std::array::from_fn(|_| None),
+            _luminance_textures: array::from_fn(|_| None),
+            luminance_views: array::from_fn(|_| None),
             _exposure_textures: [None, None],
             exposure_views: [None, None],
             scene_bindings: [None, None],
@@ -192,7 +193,7 @@ impl PostProcess {
         }
         let scene_texture = render_texture(device, "Linear scene color", size, HDR_FORMAT);
         let scene_view = scene_texture.create_view(&TextureViewDescriptor::default());
-        let luminance_textures = std::array::from_fn(|level| {
+        let luminance_textures = array::from_fn(|level| {
             let edge = LUMINANCE_SIZE >> level;
             Some(render_texture(device, "Environment luminance", [edge, edge], HDR_FORMAT))
         });
@@ -204,7 +205,7 @@ impl PostProcess {
             render_texture(device, "Exposure history B", [1, 1], HDR_FORMAT),
         ];
         let exposure_views = exposure_textures.each_ref().map(|texture| texture.create_view(&TextureViewDescriptor::default()));
-        let scene_bindings = std::array::from_fn(|index| {
+        let scene_bindings = array::from_fn(|index| {
             Some(source_binding(
                 device,
                 "Scene luminance inputs",
@@ -215,7 +216,7 @@ impl PostProcess {
                 &self.dummy_depth_view,
             ))
         });
-        let exposure_bindings = std::array::from_fn(|index| {
+        let exposure_bindings = array::from_fn(|index| {
             Some(source_binding(
                 device,
                 "Reduced luminance inputs",
@@ -226,7 +227,7 @@ impl PostProcess {
                 &self.dummy_depth_view,
             ))
         });
-        let reduction_bindings = std::array::from_fn(|index| {
+        let reduction_bindings = array::from_fn(|index| {
             Some(reduction_binding(
                 device,
                 "Luminance reduction input",
@@ -234,7 +235,7 @@ impl PostProcess {
                 luminance_views[index].as_ref().expect("luminance source is initialized"),
             ))
         });
-        let tone_bindings = std::array::from_fn(|index| {
+        let tone_bindings = array::from_fn(|index| {
             Some(source_binding(
                 device,
                 "Tonemap inputs",
@@ -263,7 +264,7 @@ impl PostProcess {
     pub(crate) fn set_depth_view(&mut self, device: &Device, depth: Option<&TextureView>) {
         let depth = depth.unwrap_or(&self.dummy_depth_view);
         let Some(scene_view) = self.scene_view.as_ref() else { return };
-        self.exposure_bindings = std::array::from_fn(|index| {
+        self.exposure_bindings = array::from_fn(|index| {
             Some(source_binding(
                 device,
                 "Reduced luminance inputs",
@@ -274,7 +275,7 @@ impl PostProcess {
                 depth,
             ))
         });
-        self.scene_bindings = std::array::from_fn(|index| {
+        self.scene_bindings = array::from_fn(|index| {
             Some(source_binding(
                 device,
                 "Scene luminance inputs",
@@ -285,7 +286,7 @@ impl PostProcess {
                 depth,
             ))
         });
-        self.tone_bindings = std::array::from_fn(|index| {
+        self.tone_bindings = array::from_fn(|index| {
             Some(source_binding(
                 device,
                 "Tonemap inputs",

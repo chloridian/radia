@@ -1,13 +1,17 @@
-use std::assert_matches;
+use std::{assert_matches, ptr};
+
+use proptest::collection;
+use render::scene::{ApplyError, MAX_OBJECTS};
+use test_support::{allocation, allocation::CountingAllocator};
 
 use super::support::{
     BTreeMap, BTreeSet, Budget, Duration, Instant, NonZeroU32, ParentUpdate, Placement, ProptestConfig, ReadFailure, ReadQuery, ReadReply,
-    ReconcileStep, Reconciler, RecoveryReason, Status, Uuid, WorldReadError, add, ids, move_root, positions, prop, prop_assert_eq,
-    proptest, reply, settle, source, world, world_region,
+    ReconcileStep, Reconciler, RecoveryReason, Status, Uuid, WorldReadError, add, ids, move_root, positions, prop_assert_eq, proptest,
+    reply, settle, source, world, world_region,
 };
 
 #[global_allocator]
-static ALLOCATOR: test_support::allocation::CountingAllocator = test_support::allocation::CountingAllocator;
+static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 #[test]
 fn atomic_region_retirement() {
@@ -46,7 +50,7 @@ fn atomic_region_retirement() {
     assert!(view.region(region).is_none(), "retirement removes the region lookup with its objects");
     assert_eq!(view.objects().count(), 0);
     assert_eq!(view.object_count(), 0);
-    let (tracked_count, allocations) = test_support::allocation::measure(|| view.tracked_object_count());
+    let (tracked_count, allocations) = allocation::measure(|| view.tracked_object_count());
     assert_eq!(tracked_count, 300);
     assert_eq!(allocations.allocation_calls, 0);
     assert_eq!(allocations.reallocation_calls, 0);
@@ -187,7 +191,7 @@ fn abandoned_publication_recovery() {
                     if reject_foreign {
                         let version = other_view.version();
                         let revision = other_view.revision();
-                        assert_eq!(other_view.apply(batch), Err(render::scene::ApplyError::StaleSession));
+                        assert_eq!(other_view.apply(batch), Err(ApplyError::StaleSession));
                         assert_eq!(other_view.version(), version);
                         assert_eq!(other_view.revision(), revision);
                         assert_eq!(positions(&other_view), BTreeMap::from([(1, 1.0)]));
@@ -238,7 +242,7 @@ fn bounded_reconciliation() {
     let movement_time = start.elapsed();
     assert!(movement_reads <= 3, "local movement should only hydrate the affected subtree");
     let after = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(2048)).unwrap();
-    assert!(std::ptr::eq(unchanged.detail(), after.detail()));
+    assert!(ptr::eq(unchanged.detail(), after.detail()));
     let child = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(3)).unwrap();
     assert_matches!(child.placement(), Placement::Ready(transform) if transform.pose.position.x == 12.0);
     eprintln!(
@@ -277,7 +281,7 @@ fn recovery_memory_admission() {
         panic!("expected new barrier");
     };
     let mut oversized = world.read_barrier();
-    oversized.object_count_upper_bound = render::scene::MAX_OBJECTS + 1;
+    oversized.object_count_upper_bound = MAX_OBJECTS + 1;
     scene.complete_read(job, Ok(ReadReply::Barrier(oversized)), now);
     settle(&mut scene, &mut view, &world, &mut now);
     assert_matches!(view.status(), Status::Ready);
@@ -295,7 +299,7 @@ fn read_continuation_keeps_pending() {
     for _ in 0..100 {
         match scene.poll(now) {
             ReconcileStep::Read(job) if matches!(job.query(), ReadQuery::Details(_)) => {
-                let batch = ::world::ObjectDetailBatch { hydration_revision: world.revision(), details: Vec::new(), has_more: true };
+                let batch = world::ObjectDetailBatch { hydration_revision: world.revision(), details: Vec::new(), has_more: true };
                 scene.complete_read(job, Ok(ReadReply::Details(batch)), now);
                 intercepted = true;
                 break;
@@ -338,7 +342,7 @@ fn read_continuation_keeps_pending() {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
     #[test]
-    fn incarnation_churn(ops in prop::collection::vec((0u8..3, 1u32..17), 1..100)) {
+    fn incarnation_churn(ops in collection::vec((0u8..3, 1u32..17), 1..100)) {
         let mut world = world();
         let (mut scene, mut view) = Reconciler::new(Budget::default());
         let mut now = Instant::now();

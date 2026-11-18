@@ -1,9 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
+    f64::consts::TAU,
     time::{Duration, Instant},
 };
 
-use math::{DVec3, Quat, Vec3, motion as kinematics};
+use math::{DVec3, Quat, Vec3, motion};
 use world::{Entity, MotionUpdateKind, Parent, Region, WorldPose, WorldTransform};
 
 use super::SceneView;
@@ -40,7 +41,7 @@ pub(crate) struct MotionSample {
 pub(crate) struct MotionState {
     sampled_at: Instant,
     angular_offset: Quat,
-    linear_trajectory: Option<kinematics::LinearTrajectory>,
+    linear_trajectory: Option<motion::LinearTrajectory>,
 }
 
 impl MotionState {
@@ -94,25 +95,22 @@ impl MotionState {
         self.linear_trajectory = Some(trajectory);
     }
 
-    pub(in crate::scene) fn resume_linear_at(&mut self, sample: MotionSample, now: Instant, regions: &[kinematics::RegionBounds]) {
+    pub(in crate::scene) fn resume_linear_at(&mut self, sample: MotionSample, now: Instant, regions: &[motion::RegionBounds]) {
         let Some(mut trajectory) = self.linear_trajectory else { return };
         trajectory.resume_at(sample.region.get(), now, regions);
         self.linear_trajectory = Some(trajectory);
     }
 
-    fn linear_position(self, sample: MotionSample, now: Instant, regions: &[kinematics::RegionBounds]) -> DVec3 {
+    fn linear_position(self, sample: MotionSample, now: Instant, regions: &[motion::RegionBounds]) -> DVec3 {
         self.linear_trajectory.unwrap_or_else(|| linear_trajectory(sample, self.sampled_at)).position_at(sample.region.get(), now, regions)
     }
 }
 
-fn linear_trajectory(sample: MotionSample, sampled_at: Instant) -> kinematics::LinearTrajectory {
-    let frame_dt = if sample.source.and_then(world::UpdateSource::motion_received_at).is_some() {
-        kinematics::FRAME_INTERVAL.as_secs_f64()
-    } else {
-        0.0
-    };
-    let lead = kinematics::half_ping_lead(f64::from(sample.time_dilation), sample.ping_delay, frame_dt);
-    kinematics::LinearTrajectory::new(
+fn linear_trajectory(sample: MotionSample, sampled_at: Instant) -> motion::LinearTrajectory {
+    let frame_dt =
+        if sample.source.and_then(world::UpdateSource::motion_received_at).is_some() { motion::FRAME_INTERVAL.as_secs_f64() } else { 0.0 };
+    let lead = motion::half_ping_lead(f64::from(sample.time_dilation), sample.ping_delay, frame_dt);
+    motion::LinearTrajectory::new(
         sample.transform.pose.position + sample.velocity.as_dvec3() * lead,
         sample.velocity,
         sample.acceleration,
@@ -184,13 +182,13 @@ pub(crate) fn fill_placement_pair(
     entities: &[Entity],
     placements: &mut HashMap<Entity, WorldTransform>,
     future_placements: &mut HashMap<Entity, WorldTransform>,
-    regions: &mut Vec<kinematics::RegionBounds>,
+    regions: &mut Vec<motion::RegionBounds>,
 ) {
     placements.clear();
     future_placements.clear();
     regions.clear();
     regions.extend(view.regions().filter_map(|region| {
-        region.summary().info.resolved_origin().map(|origin| kinematics::RegionBounds { region_id: region.summary().region.get(), origin })
+        region.summary().info.resolved_origin().map(|origin| motion::RegionBounds { region_id: region.summary().region.get(), origin })
     }));
     for entity in entities {
         let _ = placement_pair(*entity, view, now, future, placements, future_placements, regions, 0);
@@ -204,7 +202,7 @@ fn placement_pair(
     future: Instant,
     placements: &mut HashMap<Entity, WorldTransform>,
     future_placements: &mut HashMap<Entity, WorldTransform>,
-    regions: &[kinematics::RegionBounds],
+    regions: &[motion::RegionBounds],
     depth: usize,
 ) -> Option<(WorldTransform, WorldTransform)> {
     if let (Some(current), Some(future)) = (placements.get(&entity), future_placements.get(&entity)) {
@@ -278,18 +276,18 @@ fn rotation_delta(angular_velocity: Vec3, elapsed: f64) -> Quat {
     if !rate.is_finite() || rate * rate <= 0.000_01 || !elapsed.is_finite() || elapsed <= 0.0 {
         return Quat::IDENTITY;
     }
-    let angle = (rate * elapsed).rem_euclid(std::f64::consts::TAU) as f32;
+    let angle = (rate * elapsed).rem_euclid(TAU) as f32;
     Quat::from_axis_angle((velocity / rate).as_vec3(), angle)
 }
 
 #[cfg(test)]
-fn linear_position(sample: MotionSample, state: MotionState, now: Instant, regions: &[kinematics::RegionBounds]) -> DVec3 {
+fn linear_position(sample: MotionSample, state: MotionState, now: Instant, regions: &[motion::RegionBounds]) -> DVec3 {
     linear_position_raw(sample, state, now, regions)
 }
 
 #[cfg(test)]
 fn position_at_effective(sample: MotionSample, elapsed: f64) -> DVec3 {
-    kinematics::position_at_effective(sample.transform.pose.position, sample.velocity, sample.acceleration, elapsed)
+    motion::position_at_effective(sample.transform.pose.position, sample.velocity, sample.acceleration, elapsed)
 }
 
 fn linear_position_with_view(
@@ -297,13 +295,13 @@ fn linear_position_with_view(
     sample: MotionSample,
     state: MotionState,
     now: Instant,
-    regions: &[kinematics::RegionBounds],
+    regions: &[motion::RegionBounds],
 ) -> DVec3 {
     let position = linear_position_raw(sample, state, now, regions);
     if sample.velocity == Vec3::ZERO && sample.acceleration == Vec3::ZERO { position } else { clamp_motion_height(view, sample, position) }
 }
 
-fn linear_position_raw(sample: MotionSample, state: MotionState, now: Instant, regions: &[kinematics::RegionBounds]) -> DVec3 {
+fn linear_position_raw(sample: MotionSample, state: MotionState, now: Instant, regions: &[motion::RegionBounds]) -> DVec3 {
     if sample.is_attachment || (sample.velocity == Vec3::ZERO && sample.acceleration == Vec3::ZERO) {
         let start = sample.transform.pose.position;
         return start;
@@ -332,14 +330,16 @@ fn clamp_motion_height(view: &SceneView, sample: MotionSample, mut position: DVe
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroU32, time::Duration};
+    use std::{assert_matches, f32::consts::FRAC_PI_2, num::NonZeroU32, time::Duration};
 
     use uuid::Uuid;
     use world::{LinearMotion, ObjectObservation, OrderEvidence, ParentUpdate, Pose, Region, RegionInfo, UpdateSource, World, WorldLimits};
 
-    use crate::scene::{Budget, ReadFailure, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView};
-
     use super::*;
+    use crate::{
+        scene::{Budget, Placement, ReadFailure, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView},
+        test_support,
+    };
 
     fn sample(
         region: Region,
@@ -490,19 +490,19 @@ mod tests {
 
     #[test]
     fn acceleration_uses_average_velocity_timestep() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let now = Instant::now();
         let sample = sample(region, DVec3::ZERO, Vec3::new(2.0, -1.0, 0.0), Vec3::new(4.0, 2.0, 0.0), Vec3::ZERO, false);
         let position = position_at_effective(sample, 1.0);
-        let expected = DVec3::new(2.0 + 2.0 * (1.0 - kinematics::PHYSICS_TIMESTEP), -1.0 + (1.0 - kinematics::PHYSICS_TIMESTEP), 0.0);
-        assert_eq!(kinematics::effective_elapsed(1.0, 1.0), 1.0);
+        let expected = DVec3::new(2.0 + 2.0 * (1.0 - motion::PHYSICS_TIMESTEP), -1.0 + (1.0 - motion::PHYSICS_TIMESTEP), 0.0);
+        assert_eq!(motion::effective_elapsed(1.0, 1.0), 1.0);
         close_vec(position, expected);
         assert_eq!(MotionState::new(now).elapsed(now), 0.0);
     }
 
     #[test]
     fn sample_uses_ping_and_lead() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let received_at = Instant::now();
         let mut sample = sample(region, DVec3::ZERO, Vec3::X * 2.0, Vec3::ZERO, Vec3::ZERO, false);
         sample.time_dilation = 0.5;
@@ -517,9 +517,9 @@ mod tests {
 
     #[test]
     fn prediction_recovers_from_taper() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let sampled_at = Instant::now();
-        let phase_out_at = sampled_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
+        let phase_out_at = sampled_at + Duration::from_secs_f64(motion::PHASE_OUT_TIME);
         let recovered_at = phase_out_at + Duration::from_millis(500);
         let sample = sample(region, DVec3::ZERO, Vec3::X, Vec3::ZERO, Vec3::ZERO, false);
         let mut state = MotionState::new(sampled_at);
@@ -529,18 +529,18 @@ mod tests {
 
         state.resume_linear_at(sample, recovered_at, &[]);
 
-        assert_eq!(before_taper, DVec3::X * kinematics::PHASE_OUT_TIME);
+        assert_eq!(before_taper, DVec3::X * motion::PHASE_OUT_TIME);
         assert_eq!(linear_position_raw(sample, state, recovered_at, &[]), displayed);
         assert_eq!(linear_position_raw(sample, state, recovered_at + Duration::from_millis(100), &[]), displayed + DVec3::X * 0.1);
     }
 
     #[test]
     fn disconnect_tapers_object_early() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let sampled_at = Instant::now();
-        let disconnect_after = Duration::from_secs_f64(kinematics::PHASE_OUT_TIME / 4.0);
+        let disconnect_after = Duration::from_secs_f64(motion::PHASE_OUT_TIME / 4.0);
         let disconnected_at = sampled_at + disconnect_after;
-        let phase_out_duration = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
+        let phase_out_duration = Duration::from_secs_f64(motion::MAX_INTERPOLATION_TIME - motion::PHASE_OUT_TIME);
         let phase_out_end = disconnected_at + phase_out_duration;
         let sample = sample(region, DVec3::ZERO, Vec3::X, Vec3::ZERO, Vec3::ZERO, false);
         let mut state = MotionState::new(sampled_at);
@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn omega_uses_axis_and_rate() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let now = Instant::now();
         let sample = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z * 2.0, false);
         let state = MotionState::new(now);
@@ -565,11 +565,11 @@ mod tests {
 
     #[test]
     fn omega_uses_parent_frame() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let now = Instant::now();
         for (omega, side) in [(2.0, 0.174_941), (-2.0, -0.174_941)] {
             let mut sample = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z * omega, false);
-            sample.local_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+            sample.local_rotation = Quat::from_rotation_x(FRAC_PI_2);
             let actual = MotionState::new(now).local_rotation(sample, now + Duration::from_millis(250));
             close_rotation(actual, Quat::from_xyzw(0.685_124_5, side, side, 0.685_124_5));
         }
@@ -577,10 +577,10 @@ mod tests {
 
     #[test]
     fn update_rebases_keeps_spin() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let now = Instant::now();
         let mut old = sample(region, DVec3::ZERO, Vec3::X * 2.0, Vec3::ZERO, Vec3::Z * 2.0, false);
-        old.local_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        old.local_rotation = Quat::from_rotation_x(FRAC_PI_2);
         let old_state = MotionState::new(now);
         let update_at = now + Duration::from_millis(500);
         let old_position = position_at_effective(old, old_state.elapsed(update_at));
@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn scale_update_keeps_clock() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let now = Instant::now();
         let moving = sample(region, DVec3::ZERO, Vec3::X * 2.0, Vec3::ZERO, Vec3::Z, false);
         let state = MotionState::new(now);
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn stopped_motion_stays_stopped() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let now = Instant::now();
         let moving = sample(region, DVec3::ZERO, Vec3::X, Vec3::ZERO, Vec3::Z, false);
         let moving_state = MotionState::new(now);
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn zero_velocity_stops_linear_projection() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let now = Instant::now();
         let moving = sample(region, DVec3::ZERO, Vec3::X, Vec3::ZERO, Vec3::ZERO, false);
         let state = MotionState::new(now);
@@ -642,7 +642,7 @@ mod tests {
 
     #[test]
     fn zero_omega_stops_local_rotation() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let now = Instant::now();
         let moving = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z, false);
         let state = MotionState::new(now);
@@ -655,7 +655,7 @@ mod tests {
 
     #[test]
     fn zero_omega_resets_rotation() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let received_at = Instant::now();
         let moving = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z, false);
         let state = MotionState::new(received_at);
@@ -670,7 +670,7 @@ mod tests {
 
     #[test]
     fn missing_compressed_omega_keeps_spin() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let received_at = Instant::now();
         let moving = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z, false);
         let state = MotionState::new(received_at);
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn attachment_spins_without_linear_extrapolation() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let now = Instant::now();
         let mut attachment = sample(region, DVec3::X, Vec3::X, Vec3::ZERO, Vec3::Z, false);
         attachment.is_attachment = true;
@@ -695,20 +695,20 @@ mod tests {
 
     #[test]
     fn physical_update_resets_spin() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let now = Instant::now();
         let moving = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z, true);
         let state = MotionState::new(now);
         let at = now + Duration::from_secs(1);
         let mut update = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z * 2.0, true);
-        update.source = Some(world::UpdateSource::new(region, 2, world::OrderEvidence::Ordered(2), 0));
+        update.source = Some(UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0));
         let updated = MotionState::updated(state, moving, update, at);
         close_rotation(updated.local_rotation(update, at), Quat::IDENTITY);
     }
 
     #[test]
     fn authoritative_rotation_resets_spin_offset() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let now = Instant::now();
         let moving = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z, false);
         let state = MotionState::new(now);
@@ -721,9 +721,9 @@ mod tests {
 
     #[test]
     fn linkset_children_follow_root_rotation() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let now = Instant::now();
-        let root = sample(region, DVec3::ZERO, Vec3::X * 2.0, Vec3::ZERO, Vec3::Z * std::f32::consts::FRAC_PI_2, false);
+        let root = sample(region, DVec3::ZERO, Vec3::X * 2.0, Vec3::ZERO, Vec3::Z * FRAC_PI_2, false);
         let root_state = MotionState::new(now);
         let child_time = now + Duration::from_secs(1);
         let root_transform = WorldTransform {
@@ -737,20 +737,20 @@ mod tests {
         child.local_position = Vec3::X * 2.0;
         let child_transform = child_transform(root_transform, child, MotionState::new(now), child_time);
         close_vec(child_transform.pose.position, DVec3::new(2.0, 2.0, 0.0));
-        close_rotation(child_transform.pose.rotation, Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
+        close_rotation(child_transform.pose.rotation, Quat::from_rotation_z(FRAC_PI_2));
     }
 
     #[test]
     fn child_spin_uses_parent_frame() {
-        let (_region_world, region) = crate::test_support::registered_region();
+        let (_region_world, region) = test_support::registered_region();
         let now = Instant::now();
         let parent = WorldTransform {
-            pose: WorldPose { position: DVec3::new(10.0, 20.0, 30.0), rotation: Quat::from_rotation_x(std::f32::consts::FRAC_PI_2) },
+            pose: WorldPose { position: DVec3::new(10.0, 20.0, 30.0), rotation: Quat::from_rotation_x(FRAC_PI_2) },
             scale: Vec3::ONE,
         };
         let mut child = sample(region, DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z * 2.0, false);
         child.local_position = Vec3::Y * 2.0;
-        child.local_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        child.local_rotation = Quat::from_rotation_x(FRAC_PI_2);
         let transform = child_transform(parent, child, MotionState::new(now), now + Duration::from_millis(250));
 
         close_vec(transform.pose.position, DVec3::new(10.0, 20.0, 32.0));
@@ -763,7 +763,7 @@ mod tests {
             let (_world, _scene, view) = child_scene(scale);
             let root = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("root is published");
             let child = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(2)).expect("child is published");
-            std::assert_matches!(root.placement(), crate::scene::Placement::Hidden(_));
+            assert_matches!(root.placement(), Placement::Hidden(_));
             let child_entity = child.detail().summary.entity;
             let at = root.motion_state().sampled_at + Duration::from_millis(500);
             let mut placements = HashMap::new();
@@ -877,12 +877,12 @@ mod tests {
 
     #[test]
     fn crossing_extrapolation_clips() {
-        let (_region_world, regions) = crate::test_support::registered_regions(2);
+        let (_region_world, regions) = test_support::registered_regions(2);
         let region = regions[0];
         let now = Instant::now();
         let both = [
-            kinematics::RegionBounds { region_id: region.get(), origin: DVec3::ZERO },
-            kinematics::RegionBounds { region_id: regions[1].get(), origin: DVec3::new(256.0, 0.0, 0.0) },
+            motion::RegionBounds { region_id: region.get(), origin: DVec3::ZERO },
+            motion::RegionBounds { region_id: regions[1].get(), origin: DVec3::new(256.0, 0.0, 0.0) },
         ];
         let cases = [
             ("crossing stops at one second", 255.0, 100.0, 1500, &both[..], 356.0),

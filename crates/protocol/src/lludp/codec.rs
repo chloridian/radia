@@ -349,9 +349,10 @@ fn decode_string(bytes: &[u8]) -> Result<String, LLUdpError> {
 
 #[cfg(test)]
 mod tests {
+    use math::Quat;
+
     use super::{Reader, Writer};
     use crate::lludp::LLUdpError;
-    use math::Quat;
 
     fn encode_quaternion(value: Quat) -> Result<Vec<u8>, LLUdpError> {
         let mut output = Vec::new();

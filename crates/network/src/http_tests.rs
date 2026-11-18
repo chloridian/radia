@@ -1,24 +1,26 @@
 use std::{
+    assert_matches, future,
     future::Future,
+    io,
     task::Poll,
     time::{Duration, UNIX_EPOCH},
 };
 
 use reqwest::{
     StatusCode,
-    header::{HeaderMap, HeaderValue},
+    header::{CONTENT_TYPE, HeaderMap, HeaderValue},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net,
+    sync::oneshot,
     task::JoinHandle,
     time::{self, Instant},
 };
 use url::Url;
 
-use crate::fixtures::http::{LocalServer, response};
-
 use super::{Client, Error, ErrorKind, RedirectPolicy, Response, retry_after_delay, validate_http_url};
+use crate::fixtures::http::{LocalServer, response};
 
 #[test]
 fn retry_after_values() {
@@ -202,10 +204,10 @@ async fn truncated_body_keeps_response_metadata() {
     assert_eq!(server.finish().len(), 1);
 }
 
-async fn held_body_response() -> (Url, tokio::sync::oneshot::Sender<()>, JoinHandle<()>) {
+async fn held_body_response() -> (Url, oneshot::Sender<()>, JoinHandle<()>) {
     let listener = net::TcpListener::bind("127.0.0.1:0").await.expect("bind local HTTP server");
     let address = listener.local_addr().expect("read local listener address");
-    let (release_body, body_released) = tokio::sync::oneshot::channel();
+    let (release_body, body_released) = oneshot::channel();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept HTTP request");
         let mut request = Vec::new();
@@ -226,9 +228,9 @@ async fn held_body_response() -> (Url, tokio::sync::oneshot::Sender<()>, JoinHan
             .expect("write response headers");
         body_released.await.expect("release held response body");
         if let Err(error) = stream.write_all(b"data").await {
-            std::assert_matches!(
+            assert_matches!(
                 error.kind(),
-                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted,
+                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted,
                 "write response body after the client stopped reading: {error}"
             );
         }
@@ -267,7 +269,7 @@ async fn post_headers_precede_body() {
     server.await.expect("server should finish");
 
     assert_eq!(response.status, StatusCode::OK);
-    assert_eq!(response.headers.get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()), Some("text/plain"));
+    assert_eq!(response.headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()), Some("text/plain"));
     assert_eq!(response.retry_after(), Some(Duration::from_secs(2)));
     assert_eq!(response.body, b"data");
 }
@@ -313,7 +315,7 @@ async fn body_deadline_preserves_response_metadata() {
     time::pause();
     time::advance(Duration::from_secs(5)).await;
     let mut body = Box::pin(incoming.read());
-    let body_read_pending = std::future::poll_fn(|context| Poll::Ready(body.as_mut().poll(context).is_pending())).await;
+    let body_read_pending = future::poll_fn(|context| Poll::Ready(body.as_mut().poll(context).is_pending())).await;
     assert!(body_read_pending, "body read should be pending with response metadata available");
     time::advance(deadline.saturating_duration_since(Instant::now())).await;
     let error = body.await.expect_err("body read must hit its deadline");

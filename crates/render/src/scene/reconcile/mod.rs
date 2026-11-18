@@ -4,7 +4,6 @@ mod read;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-    mem::size_of,
     sync::{Arc, Weak},
     time::{Duration, Instant},
 };
@@ -188,7 +187,7 @@ struct DirtySet {
     patches: BTreeSet<(Region, TerrainPatchId)>,
     water: BTreeSet<Region>,
     surfaces: BTreeSet<(Region, SurfaceKind)>,
-    environment_textures: BTreeSet<utils::AssetId>,
+    environment_textures: BTreeSet<AssetId>,
 }
 
 impl DirtySet {

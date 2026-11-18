@@ -368,7 +368,7 @@ fn response_retry_after(headers: &HeaderMap) -> Option<Duration> {
     retry_after_delay(value, SystemTime::now())
 }
 
-async fn send_with_deadline<F>(send: F, deadline: Option<time::Instant>, started: Instant) -> Result<reqwest::Response, Error>
+async fn send_with_deadline<F>(send: F, deadline: Option<Instant>, started: Instant) -> Result<reqwest::Response, Error>
 where
     F: Future<Output = Result<reqwest::Response, reqwest::Error>>,
 {

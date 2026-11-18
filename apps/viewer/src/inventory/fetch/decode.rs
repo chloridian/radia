@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
-use ::inventory::{
-    AssetType, Category, CategoryKey, FolderType, InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo,
-    SaleType, ServerVersion,
+use inventory::{
+    AssetType, CategoryKey, FolderType, InventoryOwner, InventoryType, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType,
+    ServerVersion,
 };
-use protocol::inventory::{Category as WireCategory, Item as WireItem};
+use protocol::inventory::{Category, Child, Item};
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
 use super::{FolderFetch, FolderFetchProvenance, InventoryFetchError};
 
-pub(super) fn ais_folders(root: &WireCategory, requested: CategoryKey) -> Result<Vec<FolderFetch>, InventoryFetchError> {
+pub(super) fn ais_folders(root: &Category, requested: CategoryKey) -> Result<Vec<FolderFetch>, InventoryFetchError> {
     if root.id != requested.id().uuid() {
         return Err(InventoryFetchError::InvalidResponse);
     }
@@ -22,22 +22,18 @@ pub(super) fn ais_folders(root: &WireCategory, requested: CategoryKey) -> Result
     Ok(folders)
 }
 
-pub(super) fn append_ais_folder(
-    wire: &WireCategory,
-    owner: InventoryOwner,
-    folders: &mut Vec<FolderFetch>,
-) -> Result<(), InventoryFetchError> {
+pub(super) fn append_ais_folder(wire: &Category, owner: InventoryOwner, folders: &mut Vec<FolderFetch>) -> Result<(), InventoryFetchError> {
     let folder = CategoryKey::new(owner, FolderId::new(wire.id));
     let Some(wire_children) = &wire.children else { return Ok(()) };
     let mut children = Vec::with_capacity(wire_children.len());
     let mut child_categories = Vec::new();
     for child in wire_children {
         match child {
-            protocol::inventory::Child::Category(category) => {
-                children.push(::inventory::InventoryChild::Category(to_category(category, owner, Some(folder))?));
+            Child::Category(category) => {
+                children.push(inventory::InventoryChild::Category(to_category(category, owner, Some(folder))?));
                 child_categories.push(category);
             }
-            protocol::inventory::Child::Item(item) => children.push(::inventory::InventoryChild::Item(to_item(item, owner, folder)?)),
+            Child::Item(item) => children.push(inventory::InventoryChild::Item(to_item(item, owner, folder)?)),
         }
     }
     let fetch = FolderFetch {
@@ -55,15 +51,15 @@ pub(super) fn append_ais_folder(
 }
 
 pub(crate) fn to_category(
-    wire: &WireCategory,
+    wire: &Category,
     owner: InventoryOwner,
     parent: Option<CategoryKey>,
-) -> Result<Category, InventoryFetchError> {
+) -> Result<inventory::Category, InventoryFetchError> {
     validate_identity(wire.owner_id, wire.parent_id, owner, parent)?;
-    if wire.name.len() > ::inventory::MAX_INVENTORY_NAME_BYTES {
+    if wire.name.len() > inventory::MAX_INVENTORY_NAME_BYTES {
         return Err(InventoryFetchError::InvalidResponse);
     }
-    Ok(Category {
+    Ok(inventory::Category {
         key: CategoryKey::new(owner, FolderId::new(wire.id)),
         parent,
         preferred_folder_type: FolderType::from_raw(wire.preferred_folder_type.unwrap_or(-1)),
@@ -73,14 +69,14 @@ pub(crate) fn to_category(
     })
 }
 
-pub(crate) fn to_item(wire: &WireItem, owner: InventoryOwner, parent: CategoryKey) -> Result<Item, InventoryFetchError> {
+pub(crate) fn to_item(wire: &Item, owner: InventoryOwner, parent: CategoryKey) -> Result<inventory::Item, InventoryFetchError> {
     validate_identity(wire.owner_id, wire.parent_id, owner, Some(parent))?;
-    if wire.name.len() > ::inventory::MAX_INVENTORY_NAME_BYTES || wire.description.len() > ::inventory::MAX_INVENTORY_DESCRIPTION_BYTES {
+    if wire.name.len() > inventory::MAX_INVENTORY_NAME_BYTES || wire.description.len() > inventory::MAX_INVENTORY_DESCRIPTION_BYTES {
         return Err(InventoryFetchError::InvalidResponse);
     }
     let permissions = &wire.permissions;
     let sale = &wire.sale_info;
-    Ok(Item {
+    Ok(inventory::Item {
         key: ItemKey::new(owner, ItemId::new(wire.id)),
         parent,
         asset_id: AssetId::new(wire.asset_id.unwrap_or_else(Uuid::nil)),

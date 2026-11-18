@@ -1,18 +1,17 @@
 use uuid::Uuid;
 
+use super::{
+    blocks::{MoveInventoryItemBlock, read_move, write_move},
+    read_blocks, read_bool, validate_agent_id, write_bool, write_count,
+};
 use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::MOVE_INVENTORY_ITEM,
-};
-
-use super::{
-    blocks::{MoveInventoryItemBlock, read_move, write_move},
-    read_blocks, read_bool, validate_agent_id, write_bool, write_count,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,13 +51,9 @@ impl TypedMessage for MoveInventoryItem {
 
     fn retained_capacity_bytes(&self) -> usize {
         let mut bytes = 0;
-        crate::lludp::message::allocation::add_capacity(
-            &mut bytes,
-            self.inventory_data.capacity(),
-            std::mem::size_of::<MoveInventoryItemBlock>(),
-        );
+        allocation::add_capacity(&mut bytes, self.inventory_data.capacity(), size_of::<MoveInventoryItemBlock>());
         for block in &self.inventory_data {
-            crate::lludp::message::allocation::add_string_capacity(&mut bytes, &block.new_name);
+            allocation::add_string_capacity(&mut bytes, &block.new_name);
         }
         bytes
     }

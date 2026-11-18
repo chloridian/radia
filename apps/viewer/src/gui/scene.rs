@@ -15,7 +15,11 @@ use crate::{
         AppLifecycle,
         components::window_chrome,
         login_options, service_runtime, shutdown,
-        views::viewport::{Viewport, ViewportError},
+        views::{
+            chat::ChatScreen,
+            viewport::{Viewport, ViewportError, ViewportEvent},
+        },
+        window_geometry,
     },
     scene_feed::SceneSources,
     session::{AgentMotionSample, EnvironmentInbox, SessionEnd},
@@ -72,7 +76,7 @@ pub(crate) fn start_session(
     generation: u64,
     reader: &WorldReader,
     environments: EnvironmentInbox,
-    inventory_updates: watch::Receiver<Option<::inventory::InventorySnapshot>>,
+    inventory_updates: watch::Receiver<Option<inventory::InventorySnapshot>>,
     assets: &AssetHandle,
     agent_id: Uuid,
     camera: watch::Sender<Option<Camera>>,
@@ -173,9 +177,7 @@ fn connect_world(
     }
 }
 
-fn viewport_event(event: crate::gui::views::viewport::ViewportEvent, cx: &mut App) {
-    use crate::gui::views::viewport::ViewportEvent;
-
+fn viewport_event(event: ViewportEvent, cx: &mut App) {
     if cx.global::<AppLifecycle>().quitting {
         return;
     }
@@ -266,13 +268,7 @@ fn show_chat(focus: bool, cx: &mut App) {
             appears_transparent: window_chrome::appears_transparent(),
             ..Default::default()
         }),
-        window_bounds: Some(WindowBounds::Windowed(super::window_geometry::restore_bounds(
-            "chat",
-            None,
-            size(px(640.), px(520.)),
-            minimum,
-            cx,
-        ))),
+        window_bounds: Some(WindowBounds::Windowed(window_geometry::restore_bounds("chat", None, size(px(640.), px(520.)), minimum, cx))),
         window_min_size: Some(minimum),
         focus,
         ..Default::default()
@@ -287,18 +283,18 @@ fn show_chat(focus: bool, cx: &mut App) {
 }
 
 struct ChatWindow {
-    chat: Entity<super::views::chat::ChatScreen>,
+    chat: Entity<ChatScreen>,
     _geometry: Subscription,
 }
 
 impl ChatWindow {
-    fn new(chat: Entity<super::views::chat::ChatScreen>, window: &mut Window, cx: &mut gpui::Context<Self>) -> Self {
-        Self { chat, _geometry: super::window_geometry::observe("chat", window, cx) }
+    fn new(chat: Entity<ChatScreen>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self { chat, _geometry: window_geometry::observe("chat", window, cx) }
     }
 }
 
 impl Render for ChatWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::global(cx).colors;
         let titlebar = window_chrome::titlebar(window, Some("Nearby Chat"), theme);
         let content = div().size_full().flex().flex_col().bg(theme.background).text_color(theme.foreground);
@@ -311,9 +307,11 @@ impl Render for ChatWindow {
 mod tests {
     use std::sync::Arc;
 
+    use render::scene::ApplyError;
+
     use super::{MainWindow, end_session, start_scene, viewport_event};
     use crate::gui::{
-        AppLifecycle, install_lifecycle,
+        AppLifecycle, SessionLifecycle, install_lifecycle,
         views::{
             login::LoginScreen,
             viewport::{ViewportError, ViewportEvent},
@@ -322,7 +320,7 @@ mod tests {
 
     #[gpui::test]
     fn handoff_preserves_window_lifetimes(cx: &mut gpui::TestAppContext) {
-        let session = Arc::new(crate::gui::SessionLifecycle::default());
+        let session = Arc::new(SessionLifecycle::default());
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_quit_mode(gpui::QuitMode::Explicit);
@@ -349,7 +347,7 @@ mod tests {
             assert!(!start_scene(1, cx), "older readiness must not replace the active scene");
             assert_eq!(cx.global::<AppLifecycle>().scene.main, MainWindow::Scene(2));
             viewport_event(ViewportEvent::Closed(1), cx);
-            viewport_event(ViewportEvent::Failed(1, ViewportError::ScenePublication(render::scene::ApplyError::StaleSession)), cx);
+            viewport_event(ViewportEvent::Failed(1, ViewportError::ScenePublication(ApplyError::StaleSession)), cx);
             assert!(!cx.global::<AppLifecycle>().quitting);
             let chat = cx.global::<AppLifecycle>().scene.chat_window.unwrap();
             chat.update(cx, |_, window, _| window.remove_window()).unwrap();
@@ -374,7 +372,7 @@ mod tests {
     fn early_end_rejects_ready(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             cx.set_quit_mode(gpui::QuitMode::Explicit);
-            install_lifecycle(Arc::new(crate::gui::SessionLifecycle::default()), cx);
+            install_lifecycle(Arc::new(SessionLifecycle::default()), cx);
         });
         let login = cx.add_empty_window().update(|window, _| window.window_handle());
         cx.update(|cx| {
@@ -395,7 +393,7 @@ mod tests {
     fn close_discards_late_ready(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             cx.set_quit_mode(gpui::QuitMode::Explicit);
-            install_lifecycle(Arc::new(crate::gui::SessionLifecycle::default()), cx);
+            install_lifecycle(Arc::new(SessionLifecycle::default()), cx);
         });
         let login = cx.add_empty_window().update(|window, _| window.window_handle());
         cx.update(|cx| {

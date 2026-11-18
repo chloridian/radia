@@ -1,10 +1,9 @@
 mod frame;
 
-use std::{mem::size_of, ops::BitOr};
-
-use crate::lludp::{error::LLUdpError, message::Message, zero_code};
+use std::ops::BitOr;
 
 pub use self::frame::{PacketFrame, PacketPreflight, PreflightedPacketFrame};
+use crate::lludp::{error::LLUdpError, message::Message, zero_code};
 
 const FLAG_ZEROCODED: u8 = 0x80;
 const FLAG_RELIABLE: u8 = 0x40;
@@ -286,12 +285,14 @@ impl Packet {
 mod tests {
     use std::assert_matches;
 
+    use test_support::{lludp::vectors, parse_hex_fixture};
+
+    use super::*;
     use crate::{
         lludp::{AllocationStrategy, MessageId},
         messages::{CompletePingCheck, PacketAck, PingId, circuit::packet_ack::Packets},
+        schema::ids::PACKET_ACK,
     };
-
-    use super::*;
 
     #[test]
     fn resent_requires_reliable() {
@@ -455,13 +456,11 @@ mod tests {
         let bytes = packet.encode().expect("encode zero-coded PacketAck");
         let frame = Packet::inspect(&bytes).expect("inspect PacketAck");
 
-        assert_eq!(frame.message_id(), Ok(crate::schema::ids::PACKET_ACK));
+        assert_eq!(frame.message_id(), Ok(PACKET_ACK));
     }
 
     #[test]
     fn typed_preflight_covers_packed_compatibility() {
-        use test_support::{lludp::vectors, parse_hex_fixture};
-
         for fixture in [
             vectors::REGION_HANDSHAKE,
             vectors::REGION_HANDSHAKE_INFO4,

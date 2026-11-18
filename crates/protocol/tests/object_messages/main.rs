@@ -5,7 +5,7 @@ mod edges;
 mod full;
 mod terse;
 
-use support::{
+use self::support::{
     CacheMissType, CachedObjectReference, ExtraParameter, KillObject, LLUdpError, Message, ObjectData, ObjectMotion, ObjectRequest,
     ObjectShape, ObjectSound, ObjectSpecificData, ObjectText, ObjectUpdate, ObjectUpdateCached, Packet, Quat, RegionData, RequestAgentData,
     RequestMultipleObjects, Vec3, Vec4, add_motion_extension, assert_reencodes, decode, empty_object_message, fixture,

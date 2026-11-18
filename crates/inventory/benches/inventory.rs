@@ -1,14 +1,16 @@
 use std::{
+    collections::HashSet,
+    fs,
     hint::black_box,
-    mem::size_of,
+    path::{Path, PathBuf},
     sync::Arc,
+    thread,
     time::{Duration, Instant},
 };
 
-use ::inventory as inventory_model;
 use criterion::{BatchSize, Criterion};
 use futures::executor::block_on;
-use inventory_model::{
+use inventory::{
     AssetType, Category, CategoryKey, Inventory, InventoryCache, InventoryCacheLoad, InventoryChild, InventoryDelta, InventoryLimits,
     InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
 };
@@ -126,7 +128,7 @@ fn bench_folder_fetch_delete(criterion: &mut Criterion) {
 fn report_prepared_fetch(label: &str, replace: bool) {
     let worker_started = Instant::now();
     let (mut inventory, before, prepared, worker_time, worker_allocations, worker_retained, worker_peak_upper_bound) =
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             let inventory = item_inventory();
             let children = if replace { replacement_item_children() } else { Vec::new() };
             let before = inventory.snapshot();
@@ -174,7 +176,7 @@ fn report_prepared_fetch(label: &str, replace: bool) {
     black_box(inventory);
 }
 
-fn prepared_fetch_fixture(replace: bool) -> (Inventory, inventory_model::InventorySnapshot, inventory_model::PreparedFolderFetch) {
+fn prepared_fetch_fixture(replace: bool) -> (Inventory, inventory::InventorySnapshot, inventory::PreparedFolderFetch) {
     let inventory = item_inventory();
     let before = inventory.snapshot();
     let children = if replace { replacement_item_children() } else { Vec::new() };
@@ -207,7 +209,7 @@ fn bench_cache(criterion: &mut Criterion) {
     black_box(path);
 }
 
-fn populate_cache(root: &std::path::Path) -> std::path::PathBuf {
+fn populate_cache(root: &Path) -> PathBuf {
     let mut inventory = root_inventory();
     let before = inventory.snapshot();
     let folder = inventory.roots().personal();
@@ -237,7 +239,7 @@ fn bench_folder_restore(criterion: &mut Criterion) {
     let mut verification = inventory.clone();
     let mut units = 0;
     loop {
-        let progress = restore.apply_next(&mut verification, &std::collections::HashSet::new()).expect("verify restore units");
+        let progress = restore.apply_next(&mut verification, &HashSet::new()).expect("verify restore units");
         units += progress.units_processed;
         if progress.finished {
             break;
@@ -254,7 +256,7 @@ fn bench_folder_restore(criterion: &mut Criterion) {
     block_on(cache.close()).expect("close folder restore cache");
 }
 
-fn report_cache_load_times(root: &std::path::Path, path: &std::path::Path) {
+fn report_cache_load_times(root: &Path, path: &Path) {
     let (cache, _) = InventoryCache::open_at_root(root, "agni", owner().id(), None).expect("benchmark first cache open");
     let mut cold_inventory = cache_skeleton();
     let cold_skeleton = cold_inventory.snapshot();
@@ -280,17 +282,17 @@ fn report_cache_load_times(root: &std::path::Path, path: &std::path::Path) {
     block_on(cache.close()).expect("benchmark warm cache close");
     eprintln!(
         "inventory cache at {ENTRY_COUNT} items: file={} bytes, first read/apply={} ms ({cold_applied} folders), warm median read/apply={} ms",
-        std::fs::metadata(path).expect("benchmark database metadata").len(),
+        fs::metadata(path).expect("benchmark database metadata").len(),
         duration_millis(cold),
         duration_millis(warm),
     );
 }
 
-fn apply_restore(load: InventoryCacheLoad, inventory: &mut Inventory, skeleton: &inventory_model::InventorySnapshot) -> usize {
+fn apply_restore(load: InventoryCacheLoad, inventory: &mut Inventory, skeleton: &inventory::InventorySnapshot) -> usize {
     let mut restore = load.prepare_restore(skeleton).expect("benchmark cache restore preparation");
     let mut applied = 0usize;
     loop {
-        let progress = restore.apply_next(inventory, &std::collections::HashSet::new()).expect("benchmark cache restore batch");
+        let progress = restore.apply_next(inventory, &HashSet::new()).expect("benchmark cache restore batch");
         applied = applied.saturating_add(progress.units_applied);
         if progress.finished {
             return applied;
@@ -306,7 +308,7 @@ fn cache_skeleton() -> Inventory {
     let root = Category {
         key: category_key(ROOT_ID),
         parent: None,
-        preferred_folder_type: inventory_model::FolderType::RootInventory,
+        preferred_folder_type: inventory::FolderType::RootInventory,
         name: Arc::from("root"),
         server_version: ServerVersion::from_raw(1),
         server_descendent_count: Some(ENTRY_COUNT as u32),
@@ -369,7 +371,7 @@ fn root_inventory() -> Inventory {
     let root = Category {
         key: category_key(ROOT_ID),
         parent: None,
-        preferred_folder_type: inventory_model::FolderType::RootInventory,
+        preferred_folder_type: inventory::FolderType::RootInventory,
         name: Arc::from("root"),
         server_version: ServerVersion::UNKNOWN,
         server_descendent_count: None,
@@ -416,7 +418,7 @@ fn folder_children(count: usize) -> Vec<InventoryChild> {
             InventoryChild::Category(Category {
                 key: category_key(index as u128 + 2),
                 parent: Some(category_key(ROOT_ID)),
-                preferred_folder_type: inventory_model::FolderType::None,
+                preferred_folder_type: inventory::FolderType::None,
                 name: Arc::from(format!("folder-{index}")),
                 server_version: ServerVersion::UNKNOWN,
                 server_descendent_count: None,
@@ -469,9 +471,9 @@ fn apply_fetch(
     version: ServerVersion,
     descendent_count: Option<u32>,
     children: Vec<InventoryChild>,
-) -> Result<inventory_model::ChangeSet, inventory_model::InventoryError> {
+) -> Result<inventory::ChangeSet, inventory::InventoryError> {
     let prepared = inventory.snapshot().prepare_folder_fetch(folder, version, descendent_count, children)?;
-    let inventory_model::FolderFetchCommit::Applied(changes) = inventory.commit_folder_fetch(prepared)? else {
+    let inventory::FolderFetchCommit::Applied(changes) = inventory.commit_folder_fetch(prepared)? else {
         panic!("single-owner fetch preparation became stale before commit");
     };
     Ok(changes)

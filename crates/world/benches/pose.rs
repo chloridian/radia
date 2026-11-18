@@ -1,4 +1,4 @@
-use std::{hint::black_box, num::NonZeroU32};
+use std::{assert_matches, hint::black_box, num::NonZeroU32};
 
 use criterion::{BenchmarkId, Criterion, Throughput};
 use math::{DVec3, Quat, Vec3};
@@ -42,7 +42,7 @@ fn world_with_chain(edge_depth: usize) -> (World, Region, Entity) {
     });
     let region = world.register_region().unwrap();
 
-    std::assert_matches!(
+    assert_matches!(
         world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("region origin").outcome,
         world::RegionOutcome::Patched { .. }
     );
@@ -82,7 +82,7 @@ fn assert_chain_depth(world: &World, target: Entity, edge_depth: usize) {
         };
         current = parent;
     }
-    std::assert_matches!(world.object(current).map(|object| object.parent()), Some(Parent::Root));
+    assert_matches!(world.object(current).map(|object| object.parent()), Some(Parent::Root));
 }
 
 fn assert_pose_contract(scenario: &Scenario) {

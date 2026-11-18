@@ -1,4 +1,4 @@
-use std::{collections::HashMap, future::Future, mem::size_of, time::Duration};
+use std::{collections::HashMap, future::Future, time::Duration};
 
 use futures::{FutureExt, future::BoxFuture};
 use network::{
@@ -9,9 +9,11 @@ use network::{
     },
     SessionHandle, SimulatorId,
 };
-use protocol::lludp::{Message, Packet};
-use protocol::messages::{CacheMissType, ObjectRequest, RequestAgentData, RequestMultipleObjects};
-use tokio::time::Instant;
+use protocol::{
+    lludp::{Message, Packet},
+    messages::{CacheMissType, ObjectRequest, RequestAgentData, RequestMultipleObjects},
+};
+use tokio::{time, time::Instant};
 use utils::Summary;
 use world::{LocalAddress, Region};
 
@@ -410,7 +412,7 @@ impl RecoveryIntake {
             .next_deadline()
             .map(|deadline| self.next_send_at.map_or(deadline, |send_at| deadline.max(send_at)))
             .unwrap_or(now + RECOVERY_IDLE_WAIT);
-        tokio::time::sleep_until(deadline).await;
+        time::sleep_until(deadline).await;
         let now = Instant::now();
         RecoveryCompletion::Deadline { aged_out: self.scheduler.take_expired(now), due: self.scheduler.take_due(now) }
     }
@@ -517,21 +519,26 @@ fn recovery_request_with_types(agent_data: RequestAgentData, targets: &[(LocalAd
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, num::NonZeroU32, time::Duration};
+    use std::{assert_matches, collections::HashSet, num::NonZeroU32, time::Duration};
 
+    use futures::{channel::oneshot, future};
     use network::Error;
-    use protocol::lludp::{Message, Packet};
-    use protocol::messages::{CacheMissType::Full, RequestAgentData};
-    use tokio::time::Instant;
+    use protocol::{
+        lludp::{Message, Packet},
+        messages::{CacheMissType::Full, RequestAgentData},
+    };
+    use tokio::{time, time::Instant};
     use uuid::Uuid;
     use world::{LocalAddress, Region};
-
-    use crate::test_helpers::{registered_regions, simulator_id};
 
     use super::{
         MAX_RECOVERY_OBJECTS_PER_REQUEST, MAX_RECOVERY_REQUEST_BYTES, RECOVERY_ENTRY_BYTES, RECOVERY_IDLE_WAIT, RECOVERY_MAX_AGE,
         RECOVERY_MAX_SENDS, RECOVERY_REQUEST_INTERVAL, RECOVERY_RETRY_INTERVAL, RecoveryCompletion, RecoveryIntake, RecoveryPressure,
         RecoveryScheduler, recovery_request,
+    };
+    use crate::{
+        session::world::MAX_WORLD_ENTITIES,
+        test_helpers::{registered_regions, simulator_id},
     };
 
     fn address(region: Region, local_id: u32) -> LocalAddress {
@@ -662,7 +669,7 @@ mod tests {
         let now = Instant::now();
         let mut scheduler = RecoveryScheduler::new();
         let mut expected = HashSet::new();
-        let targets_per_simulator = crate::session::world::MAX_WORLD_ENTITIES / simulators.len();
+        let targets_per_simulator = MAX_WORLD_ENTITIES / simulators.len();
         for (simulator, region) in simulators.into_iter().zip(regions.iter().copied()) {
             for local_id in 1..=targets_per_simulator {
                 let target = address(region, local_id as u32);
@@ -800,7 +807,7 @@ mod tests {
         let RecoveryCompletion::Deadline { due, aged_out } = intake.next_completion().await else { panic!("first batch is due") };
         assert!(aged_out.is_empty());
         assert_eq!(due.len(), 1);
-        let (send, sent) = futures::channel::oneshot::channel();
+        let (send, sent) = oneshot::channel();
         intake.start_send_future(due, async move { sent.await.expect("send result") });
         let completion = {
             let send_completion = intake.next_completion();
@@ -810,16 +817,16 @@ mod tests {
             send_completion.await
         };
         let RecoveryCompletion::Send { recoveries, result, completed_at } = completion else { panic!("send completion is returned") };
-        std::assert_matches!(result, Ok(()));
+        assert_matches!(result, Ok(()));
         let sent_simulator = recoveries[0].simulator_id;
         intake.mark_sent(&recoveries, completed_at);
 
         let next_batch = intake.next_completion();
         tokio::pin!(next_batch);
         assert!(futures::poll!(next_batch.as_mut()).is_pending());
-        tokio::time::advance(RECOVERY_REQUEST_INTERVAL - Duration::from_millis(1)).await;
+        time::advance(RECOVERY_REQUEST_INTERVAL - Duration::from_millis(1)).await;
         assert!(futures::poll!(next_batch.as_mut()).is_pending());
-        tokio::time::advance(Duration::from_millis(1)).await;
+        time::advance(Duration::from_millis(1)).await;
 
         let RecoveryCompletion::Deadline { due, aged_out } = next_batch.await else { panic!("paced batch is due") };
         assert!(aged_out.is_empty());
@@ -829,7 +836,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_drops_pending_send() {
-        struct DropSignal(Option<futures::channel::oneshot::Sender<()>>);
+        struct DropSignal(Option<oneshot::Sender<()>>);
 
         impl Drop for DropSignal {
             fn drop(&mut self) {
@@ -840,11 +847,11 @@ mod tests {
         }
 
         let mut intake = RecoveryIntake::new();
-        let (signal, dropped) = futures::channel::oneshot::channel();
+        let (signal, dropped) = oneshot::channel();
         let signal = DropSignal(Some(signal));
         intake.start_send_future(vec![], async move {
             let _signal = signal;
-            futures::future::pending::<Result<(), Error>>().await
+            future::pending::<Result<(), Error>>().await
         });
 
         intake.cancel();
@@ -858,9 +865,9 @@ mod tests {
         let next = intake.next_completion();
         tokio::pin!(next);
         assert!(futures::poll!(next.as_mut()).is_pending());
-        tokio::time::advance(RECOVERY_IDLE_WAIT - Duration::from_millis(1)).await;
+        time::advance(RECOVERY_IDLE_WAIT - Duration::from_millis(1)).await;
         assert!(futures::poll!(next.as_mut()).is_pending());
-        tokio::time::advance(Duration::from_millis(1)).await;
+        time::advance(Duration::from_millis(1)).await;
 
         let RecoveryCompletion::Deadline { aged_out, due } = next.await else { panic!("idle deadline is returned") };
         assert!(aged_out.is_empty());

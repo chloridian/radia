@@ -4,8 +4,12 @@ mod scene;
 mod views;
 mod window_geometry;
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::{
+    mem,
+    sync::{Arc, Mutex, PoisonError},
+};
 
+use assets::cache::AssetCache;
 use futures::FutureExt;
 use gpui::{
     AnyWindowHandle, App, AppContext, ColorExt, Entity, Global, QuitMode, Subscription, TitlebarOptions, WindowBounds, WindowOptions, px,
@@ -14,7 +18,8 @@ use gpui::{
 use gpui_component::{Root, Theme, ThemeMode};
 use tokio::{runtime::Handle, task::JoinHandle};
 
-use crate::{gui::views::login::LoginScreen, gui::window_geometry::restore_bounds};
+use self::components::window_chrome;
+use crate::gui::{views::login::LoginScreen, window_geometry::restore_bounds};
 
 struct AppLifecycle {
     _window_closed: Subscription,
@@ -69,7 +74,7 @@ impl SessionLifecycle {
     async fn wait_for_drains(&self) {
         let drains = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            std::mem::take(&mut state.drains)
+            mem::take(&mut state.drains)
         };
         for drain in drains {
             if let Err(error) = drain.await {
@@ -81,7 +86,7 @@ impl SessionLifecycle {
 
 struct ServiceRuntime {
     runtime: Handle,
-    asset_cache: Option<Arc<assets::cache::AssetCache>>,
+    asset_cache: Option<Arc<AssetCache>>,
 }
 
 impl Global for ServiceRuntime {}
@@ -90,11 +95,11 @@ pub(crate) fn service_runtime(cx: &App) -> Handle {
     cx.global::<ServiceRuntime>().runtime.clone()
 }
 
-pub(crate) fn asset_cache(cx: &App) -> Option<Arc<assets::cache::AssetCache>> {
+pub(crate) fn asset_cache(cx: &App) -> Option<Arc<AssetCache>> {
     cx.global::<ServiceRuntime>().asset_cache.clone()
 }
 
-pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<assets::cache::AssetCache>>) {
+pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>) {
     let session_lifecycle = Arc::new(SessionLifecycle::default());
     cx.set_global(ServiceRuntime { runtime: services, asset_cache });
     cx.set_quit_mode(QuitMode::Explicit);
@@ -148,7 +153,7 @@ fn login_options(cx: &App) -> WindowOptions {
     WindowOptions {
         titlebar: Some(TitlebarOptions {
             title: Some("Radia".into()),
-            appears_transparent: components::window_chrome::appears_transparent(),
+            appears_transparent: window_chrome::appears_transparent(),
             ..Default::default()
         }),
         window_bounds: Some(WindowBounds::Windowed(restore_bounds("login", None, size(px(720.), px(480.)), minimum, cx))),
@@ -254,6 +259,8 @@ fn set_dark_theme(cx: &mut App) {
 mod tests {
     use std::sync::Arc;
 
+    use tokio::sync::oneshot;
+
     use super::{AppLifecycle, SessionLifecycle, install_lifecycle, shutdown};
 
     #[gpui::test]
@@ -290,8 +297,8 @@ mod tests {
     async fn session_drains_survive_relogin() {
         let lifecycle = SessionLifecycle::default();
 
-        let (old_started_tx, old_started_rx) = tokio::sync::oneshot::channel();
-        let (old_release_tx, old_release_rx) = tokio::sync::oneshot::channel();
+        let (old_started_tx, old_started_rx) = oneshot::channel();
+        let (old_release_tx, old_release_rx) = oneshot::channel();
         let old_drain = tokio::spawn(async move {
             old_started_tx.send(()).expect("old drain start is observed");
             old_release_rx.await.expect("old drain is released");
@@ -299,9 +306,9 @@ mod tests {
         lifecycle.track_drain(old_drain);
         old_started_rx.await.expect("old drain started");
 
-        let (new_started_tx, new_started_rx) = tokio::sync::oneshot::channel();
-        let (new_release_tx, new_release_rx) = tokio::sync::oneshot::channel();
-        let (new_finished_tx, new_finished_rx) = tokio::sync::oneshot::channel();
+        let (new_started_tx, new_started_rx) = oneshot::channel();
+        let (new_release_tx, new_release_rx) = oneshot::channel();
+        let (new_finished_tx, new_finished_rx) = oneshot::channel();
         let new_drain = tokio::spawn(async move {
             new_started_tx.send(()).expect("new drain start is observed");
             new_release_rx.await.expect("new drain is released");

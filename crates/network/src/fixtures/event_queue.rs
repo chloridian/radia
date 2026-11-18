@@ -1,14 +1,17 @@
-use std::{net::SocketAddr, str};
+use std::{assert_matches, iter, net::SocketAddr, str};
 
 use llsd::{Value, xml};
 use reqwest::Url;
-use tokio::sync::{OwnedSemaphorePermit, mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, mpsc, mpsc::error::TryRecvError, watch};
 
 use crate::{
     capabilities::{CapabilityBudget, Client, EVENT_QUEUE_NAME, EventQueueTask},
     coverage::{CoverageLossLedger, CoverageWatermark},
     event::{Event, EventEnvelope, EventRetention, SimulatorId},
-    fixtures::http::{EventQueueTestServer, EventServerResponse, request_line, seed_grant},
+    fixtures::{
+        http::{EventQueueTestServer, EventServerResponse, request_line, seed_grant},
+        simulator,
+    },
 };
 
 pub(crate) struct EventReceiver(mpsc::Receiver<EventEnvelope>);
@@ -22,7 +25,7 @@ impl EventReceiver {
         self.0.recv().await.map(EventEnvelope::into_event)
     }
 
-    pub(crate) fn try_recv(&mut self) -> Result<Event, mpsc::error::TryRecvError> {
+    pub(crate) fn try_recv(&mut self) -> Result<Event, TryRecvError> {
         self.0.try_recv().map(EventEnvelope::into_event)
     }
 }
@@ -119,7 +122,7 @@ impl EventQueueHarness {
             |base| {
                 let mut event_url = base.clone();
                 event_url.set_path(path);
-                std::iter::once(EventServerResponse::Response(seed_grant(&event_url))).chain(follow_up).collect()
+                iter::once(EventServerResponse::Response(seed_grant(&event_url))).chain(follow_up).collect()
             },
             event_capacity,
         )
@@ -132,7 +135,7 @@ impl EventQueueHarness {
     }
 
     pub(crate) fn start_queue(&self) -> EventQueueTask {
-        self.start_queue_for(crate::fixtures::simulator::test_simulator_id(1), crate::fixtures::simulator::test_source())
+        self.start_queue_for(simulator::test_simulator_id(1), simulator::test_source())
     }
 
     pub(crate) fn start_queue_for(&self, simulator_id: SimulatorId, source: SocketAddr) -> EventQueueTask {
@@ -168,7 +171,7 @@ pub(crate) fn map_field<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
 
 pub(crate) async fn receive_poll_error(events: &mut EventReceiver) -> String {
     let loss = events.recv().await.expect("coverage loss should be reported before the poll error");
-    std::assert_matches!(loss, Event::EventQueueCoverageLost { .. });
+    assert_matches!(loss, Event::EventQueueCoverageLost { .. });
 
     let event = events.recv().await.expect("poll error should be reported after coverage loss");
     let Event::CapabilityError { capability, reason, .. } = event else {

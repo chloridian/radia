@@ -13,6 +13,7 @@ use reqwest::Url;
 use serde::Serialize;
 use tokio::{
     runtime::Handle,
+    sync,
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
     task::AbortHandle,
     time,
@@ -22,8 +23,8 @@ use tracing::Instrument;
 use super::{
     SetupError,
     budget::{
-        CapabilityBudget, EVENT_QUEUE_REQUEST_TIMEOUT, MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES, REQUEST_TIMEOUT,
-        spawn_blocking_with_permit,
+        CapabilityBudget, EVENT_QUEUE_REQUEST_TIMEOUT, MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES,
+        MAX_SEED_CAPABILITY_RESPONSE_BYTES, REQUEST_TIMEOUT, spawn_blocking_with_permit,
     },
     event_queue::{self, EventQueueContext, EventQueueTask, Stop},
     request::{
@@ -175,8 +176,7 @@ impl Client {
         let request_names = names.clone();
         let (response, permit) = self
             .run_with_permit(deadline, move |http, permit| async move {
-                let response =
-                    request_capabilities_response(&http, &seed, &request_names, super::budget::MAX_SEED_CAPABILITY_RESPONSE_BYTES).await?;
+                let response = request_capabilities_response(&http, &seed, &request_names, MAX_SEED_CAPABILITY_RESPONSE_BYTES).await?;
                 Ok((response, permit))
             })
             .await?;
@@ -600,7 +600,7 @@ impl Client {
 #[derive(Default)]
 struct GrantCache {
     grants: Mutex<HashMap<String, Option<CapabilityUrl>>>,
-    discovery: tokio::sync::Mutex<()>,
+    discovery: sync::Mutex<()>,
 }
 
 impl GrantCache {

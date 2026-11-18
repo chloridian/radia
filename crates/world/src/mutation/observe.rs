@@ -1,18 +1,22 @@
 use uuid::Uuid;
 
-use super::fields::{Draft, Fields, Settlement, validate_uuid};
-use super::{Effects, Origin};
-use crate::ParentUpdate::Local;
-use crate::UpdateAuthority::Untracked;
-use crate::history::WorldChange::{EntityAdded, EntityRebound, EntityTransferred, EntityUpdated};
-use crate::mutation::facet::FacetSet;
-use crate::object::relationships::{ParentResolution, ParentResolutionPlan};
-use crate::removal::RemovalCause;
-use crate::{
-    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, ObjectObservation, Parent, ParentUpdate,
-    RecoveryCancellation, Region, Rejections,
+use super::{
+    Effects, Origin,
+    fields::{Draft, Fields, Settlement, validate_uuid},
 };
-use crate::{Binding, ObjectOrdering, ObjectRecord, ObjectState, World, newer_field};
+use crate::{
+    Applied, ApplyError, ApplyOutcome, Binding, DeferredReason, Entity, Kind, LocalAddress, ObjectObservation, ObjectOrdering,
+    ObjectRecord, ObjectState, Parent, ParentUpdate,
+    ParentUpdate::Local,
+    RecoveryCancellation, Region, Rejections,
+    UpdateAuthority::Untracked,
+    World,
+    history::WorldChange::{EntityAdded, EntityRebound, EntityTransferred, EntityUpdated},
+    mutation::facet::FacetSet,
+    newer_field,
+    object::relationships::{ParentResolution, ParentResolutionPlan},
+    removal::RemovalCause,
+};
 
 struct Observed {
     id: Uuid,
@@ -338,17 +342,20 @@ impl World {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
+    use std::{assert_matches, num::NonZeroU32};
 
     use math::Vec3;
     use uuid::Uuid;
 
     use crate::{
-        ApplyError, ApplyError::RevisionExhausted, ApplyOutcome, Kind, LinearMotion, LocalAddress, MotionUpdateKind, ObjectObservation,
-        ObjectPatch, OrderEvidence::Ordered, ParentUpdate::Root, Pose, UpdateSource, WorldRevision,
+        ApplyError,
+        ApplyError::RevisionExhausted,
+        ApplyOutcome, Kind, LinearMotion, LocalAddress, MotionUpdateKind, ObjectObservation, ObjectPatch,
+        OrderEvidence::Ordered,
+        ParentUpdate::Root,
+        Pose, UpdateSource, WorldRevision,
+        mutation::tests::{observation, test_world},
     };
-
-    use crate::mutation::tests::{observation, test_world};
 
     #[test]
     fn handoff_revision_exhaustion_is_atomic() {
@@ -500,7 +507,7 @@ mod tests {
         let journal = world.journal.entries.iter().map(|entry| (entry.revision, entry.changes.clone())).collect::<Vec<_>>();
         let result = world.observe_object(observation(region, 27, 2, 3));
 
-        std::assert_matches!(result, Err(ApplyError::AddressGenerationExhausted));
+        assert_matches!(result, Err(ApplyError::AddressGenerationExhausted));
         assert_eq!(world.revision(), revision);
         assert_eq!(world.journal.entries.iter().map(|entry| (entry.revision, entry.changes.clone())).collect::<Vec<_>>(), journal);
         assert_eq!(world.entity(Uuid::from_u128(27)), Some(first));

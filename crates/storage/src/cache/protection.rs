@@ -1,5 +1,7 @@
 use std::{
+    array,
     collections::{HashMap, HashSet},
+    sync,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -134,7 +136,7 @@ pub(super) struct EvictionHistory {
 
 impl Default for EvictionHistory {
     fn default() -> Self {
-        Self { sequence: AtomicU64::new(0), reasons: std::array::from_fn(|_| AtomicU64::new(0)) }
+        Self { sequence: AtomicU64::new(0), reasons: array::from_fn(|_| AtomicU64::new(0)) }
     }
 }
 
@@ -166,7 +168,7 @@ impl EvictionHistory {
     }
 }
 
-pub(super) fn lock_protection(state: &Mutex<ProtectionRegistry>) -> std::sync::MutexGuard<'_, ProtectionRegistry> {
+pub(super) fn lock_protection(state: &Mutex<ProtectionRegistry>) -> sync::MutexGuard<'_, ProtectionRegistry> {
     match state.lock() {
         Ok(state) => state,
         Err(poisoned) => poisoned.into_inner(),

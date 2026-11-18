@@ -1,20 +1,19 @@
 use uuid::Uuid;
 
-use crate::{
-    LLUdpError,
-    lludp::{
-        codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
-        types::MessageId,
-    },
-    schema::ids::BULK_UPDATE_INVENTORY,
-};
-
 use super::{
     blocks::{
         InventoryFolderBlock, InventoryItemBlock, ItemBlockOrder, add_item_capacity, read_folder, read_item, write_folder, write_item,
     },
     read_blocks, read_blocks_with_count, validate_agent_id, write_count,
+};
+use crate::{
+    LLUdpError,
+    lludp::{
+        codec::{Reader, Writer},
+        message::{AllocationStrategy, TypedMessage, allocation},
+        types::MessageId,
+    },
+    schema::ids::BULK_UPDATE_INVENTORY,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,14 +57,10 @@ impl TypedMessage for BulkUpdateInventory {
 
     fn retained_capacity_bytes(&self) -> usize {
         let mut bytes = 0;
-        crate::lludp::message::allocation::add_capacity(
-            &mut bytes,
-            self.folder_data.capacity(),
-            std::mem::size_of::<InventoryFolderBlock>(),
-        );
-        crate::lludp::message::allocation::add_capacity(&mut bytes, self.item_data.capacity(), std::mem::size_of::<InventoryItemBlock>());
+        allocation::add_capacity(&mut bytes, self.folder_data.capacity(), size_of::<InventoryFolderBlock>());
+        allocation::add_capacity(&mut bytes, self.item_data.capacity(), size_of::<InventoryItemBlock>());
         for block in &self.folder_data {
-            crate::lludp::message::allocation::add_string_capacity(&mut bytes, &block.name);
+            allocation::add_string_capacity(&mut bytes, &block.name);
         }
         self.item_data.iter().for_each(|block| add_item_capacity(&mut bytes, block));
         bytes

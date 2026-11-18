@@ -3,10 +3,10 @@ use std::sync::Arc;
 use utils::{FolderId, ItemId};
 use uuid::Uuid;
 
-use crate::state::{InventoryLimits, InventoryState};
 use crate::{
     AssetType, Category, CategoryKey, FolderType, InventoryNodeId, InventoryNodeKey, InventoryOwner, InventoryRevision, Item, ItemKey,
-    LinkResolution,
+    LinkResolution, state,
+    state::{InventoryLimits, InventoryState},
 };
 
 #[derive(Clone)]
@@ -24,7 +24,7 @@ impl InventorySnapshot {
         self.state.folder_generations.get(&key).copied()
     }
 
-    pub fn owner_refresh_generation(&self, owner: crate::InventoryOwner) -> u64 {
+    pub fn owner_refresh_generation(&self, owner: InventoryOwner) -> u64 {
         self.state.owner_refresh_generations.get(&owner).copied().unwrap_or_default()
     }
 
@@ -85,7 +85,7 @@ impl InventorySnapshot {
     }
 
     pub fn is_complete(&self, key: CategoryKey) -> bool {
-        crate::state::category_is_complete(&self.state, key)
+        state::category_is_complete(&self.state, key)
     }
 
     pub fn category_with_type(&self, owner: InventoryOwner, folder_type: FolderType) -> Option<&Category> {
@@ -97,8 +97,8 @@ impl InventorySnapshot {
     pub fn link_resolution(&self, key: ItemKey) -> Option<LinkResolution> {
         let item = self.item(key)?;
         let target = match item.asset_type {
-            crate::AssetType::Link => InventoryNodeId::Item(ItemId::new(item.asset_id.uuid())),
-            crate::AssetType::LinkFolder => InventoryNodeId::Category(FolderId::new(item.asset_id.uuid())),
+            AssetType::Link => InventoryNodeId::Item(ItemId::new(item.asset_id.uuid())),
+            AssetType::LinkFolder => InventoryNodeId::Category(FolderId::new(item.asset_id.uuid())),
             _ => return Some(LinkResolution::NotLink),
         };
         let node_key = InventoryNodeKey::new(key.owner(), target);

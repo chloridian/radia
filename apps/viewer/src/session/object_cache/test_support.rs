@@ -1,9 +1,12 @@
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{Arc, mpsc},
+};
 
 use network::{Grid, SimulatorId};
 use protocol::{
     lludp::{Message, Packet},
-    messages::{CachedObjectReference, ObjectUpdateCached, RegionHandshake, region::region_handshake::RegionInfo2},
+    messages::{CachedObjectReference, ObjectUpdateCached, RegionHandshake, object::RegionData, region::region_handshake::RegionInfo2},
 };
 use rusqlite::Transaction;
 use storage::sqlite::{SqliteBatch, SqliteDb};
@@ -13,10 +16,11 @@ use tokio::{runtime::Handle, task::spawn_blocking};
 use uuid::Uuid;
 use world::{OrderEvidence, Region, RegionHandle};
 
-use crate::session::inbound::{ObjectBatch, decode_object_message};
-use crate::session::object_cache::storage::open_at;
-use crate::session::object_cache::{CacheScope, CacheWriteWorker, ObjectCacheEvent, ObjectCacheSession};
-use crate::session::world::{SessionWorld, viewer_world_limits};
+use crate::session::{
+    inbound::{ObjectBatch, decode_object_message},
+    object_cache::{CacheScope, CacheWriteWorker, ObjectCacheEvent, ObjectCacheSession, store::open_at},
+    world::{SessionWorld, viewer_world_limits},
+};
 pub(super) const SIMULATOR: SimulatorId = SimulatorId::new(77);
 pub(super) const REGION_HANDLE: u64 = 0x2222_0000_0000_0002;
 pub(super) const REGION_ID: Uuid = Uuid::from_u128(0x1234);
@@ -45,15 +49,15 @@ pub(super) fn region_handshake(cache_id: Uuid) -> RegionHandshake {
 pub(super) fn open_cache(path: impl AsRef<Path>) -> ObjectCacheSession {
     let (db, status) = open_at(path).expect("open test database");
     let mut cache = ObjectCacheSession::new(Grid::Agni);
-    let db = std::sync::Arc::new(db);
-    let writer = CacheWriteWorker::start(std::sync::Arc::clone(&db), Handle::current()).expect("start cache writer");
+    let db = Arc::new(db);
+    let writer = CacheWriteWorker::start(Arc::clone(&db), Handle::current()).expect("start cache writer");
     assert!(cache.handle_event(ObjectCacheEvent::Ready { db, status, writer }).is_none());
     cache.set_region_identity(SIMULATOR, &region_handshake(CACHE_ID));
     cache
 }
 
 pub(super) async fn load_region(cache: &mut ObjectCacheSession) -> u32 {
-    let (release_clock, clock_released) = std::sync::mpsc::channel();
+    let (release_clock, clock_released) = mpsc::channel();
     let clock_hold = spawn_blocking(move || clock_released.recv());
     let flags = match cache.begin_region_load(SIMULATOR, &Handle::current()) {
         Some(flags) => flags,
@@ -69,7 +73,7 @@ pub(super) async fn load_region(cache: &mut ObjectCacheSession) -> u32 {
     flags
 }
 
-pub(super) fn cached_references(message: &Message) -> (protocol::messages::object::RegionData, Vec<CachedObjectReference>) {
+pub(super) fn cached_references(message: &Message) -> (RegionData, Vec<CachedObjectReference>) {
     match message {
         Message::ObjectUpdate(update) => {
             let references = update.objects.iter().map(|object| CachedObjectReference {
@@ -91,10 +95,7 @@ pub(super) fn cached_references(message: &Message) -> (protocol::messages::objec
     }
 }
 
-pub(super) fn cached_message(
-    region_data: protocol::messages::object::RegionData,
-    objects: Vec<CachedObjectReference>,
-) -> ObjectUpdateCached {
+pub(super) fn cached_message(region_data: RegionData, objects: Vec<CachedObjectReference>) -> ObjectUpdateCached {
     ObjectUpdateCached { region_data, objects }
 }
 

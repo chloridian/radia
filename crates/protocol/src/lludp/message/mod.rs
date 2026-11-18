@@ -1,14 +1,24 @@
 pub(crate) mod allocation;
 
-use std::mem::size_of;
-
 use super::{
     codec::{Reader, Writer},
     error::LLUdpError,
     schema_message::SchemaMessage,
     types::MessageId,
 };
-use crate::schema;
+use crate::{
+    messages::{
+        AgentMovementComplete, AgentThrottle, AgentUpdate, AvatarAppearance, AvatarSitResponse, BulkUpdateInventory, ChatFromSimulator,
+        ChatFromViewer, CompleteAgentMovement, CompletePingCheck, ConfirmEnableSimulator, DisableSimulator, EnableSimulator,
+        GenericMessage, GenericStreamingMessage, ImprovedTerseObjectUpdate, KillObject, LayerData, LogoutReply, LogoutRequest,
+        MapBlockReply, MapBlockRequest, MoveInventoryFolder, MoveInventoryItem, ObjectExtraParams, ObjectUpdate, ObjectUpdateCached,
+        ObjectUpdateCompressed, PacketAck, ParcelOverlay, ParcelProperties, RegionHandleRequest, RegionHandshake, RegionHandshakeReply,
+        RegionIdAndHandleReply, RegionInfo, RemoveInventoryFolder, RemoveInventoryItem, RemoveInventoryObjects, RequestMultipleObjects,
+        SaveAssetIntoInventory, SetAlwaysRun, StartPingCheck, TeleportCancel, TeleportFailed, TeleportFinish, UpdateCreateInventoryItem,
+        UseCircuitCode,
+    },
+    schema,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AllocationStrategy {
@@ -150,71 +160,70 @@ macro_rules! messages {
 }
 
 messages! {
-    UseCircuitCode(crate::messages::UseCircuitCode),
-    CompleteAgentMovement(crate::messages::CompleteAgentMovement),
-    RegionHandshake(crate::messages::RegionHandshake),
-    RegionHandshakeReply(crate::messages::RegionHandshakeReply),
-    AgentMovementComplete(crate::messages::AgentMovementComplete),
-    AgentUpdate(crate::messages::AgentUpdate),
-    SetAlwaysRun(crate::messages::SetAlwaysRun),
-    AgentThrottle(crate::messages::AgentThrottle),
-    StartPingCheck(crate::messages::StartPingCheck),
-    CompletePingCheck(crate::messages::CompletePingCheck),
-    PacketAck(crate::messages::PacketAck),
-    TeleportCancel(crate::messages::TeleportCancel),
-    LogoutRequest(crate::messages::LogoutRequest),
-    LogoutReply(crate::messages::LogoutReply),
-    ChatFromViewer(crate::messages::ChatFromViewer),
-    ChatFromSimulator(crate::messages::ChatFromSimulator),
-    RegionHandleRequest(crate::messages::RegionHandleRequest),
-    RegionIdAndHandleReply(crate::messages::RegionIdAndHandleReply),
-    MapBlockRequest(crate::messages::MapBlockRequest),
-    MapBlockReply(crate::messages::MapBlockReply),
-    EnableSimulator(crate::messages::EnableSimulator),
-    DisableSimulator(crate::messages::DisableSimulator),
-    ConfirmEnableSimulator(crate::messages::ConfirmEnableSimulator),
-    ObjectUpdate(crate::messages::ObjectUpdate),
-    ObjectUpdateCompressed(crate::messages::ObjectUpdateCompressed),
-    ImprovedTerseObjectUpdate(crate::messages::ImprovedTerseObjectUpdate),
-    ObjectUpdateCached(crate::messages::ObjectUpdateCached),
-    KillObject(crate::messages::KillObject),
-    RequestMultipleObjects(crate::messages::RequestMultipleObjects),
-    ObjectExtraParams(crate::messages::ObjectExtraParams),
-    GenericStreamingMessage(crate::messages::GenericStreamingMessage),
-    AvatarAppearance(crate::messages::AvatarAppearance),
-    AvatarSitResponse(crate::messages::AvatarSitResponse),
-    UpdateCreateInventoryItem(crate::messages::UpdateCreateInventoryItem),
-    RemoveInventoryItem(crate::messages::RemoveInventoryItem),
-    RemoveInventoryFolder(crate::messages::RemoveInventoryFolder),
-    RemoveInventoryObjects(crate::messages::RemoveInventoryObjects),
-    SaveAssetIntoInventory(crate::messages::SaveAssetIntoInventory),
-    BulkUpdateInventory(crate::messages::BulkUpdateInventory),
-    MoveInventoryItem(crate::messages::MoveInventoryItem),
-    MoveInventoryFolder(crate::messages::MoveInventoryFolder),
-    ParcelProperties(crate::messages::ParcelProperties),
-    ParcelOverlay(crate::messages::ParcelOverlay),
-    GenericMessage(crate::messages::GenericMessage),
-    LayerData(crate::messages::LayerData),
-    RegionInfo(crate::messages::RegionInfo),
-    TeleportFinish(crate::messages::TeleportFinish),
-    TeleportFailed(crate::messages::TeleportFailed),
+    UseCircuitCode(UseCircuitCode),
+    CompleteAgentMovement(CompleteAgentMovement),
+    RegionHandshake(RegionHandshake),
+    RegionHandshakeReply(RegionHandshakeReply),
+    AgentMovementComplete(AgentMovementComplete),
+    AgentUpdate(AgentUpdate),
+    SetAlwaysRun(SetAlwaysRun),
+    AgentThrottle(AgentThrottle),
+    StartPingCheck(StartPingCheck),
+    CompletePingCheck(CompletePingCheck),
+    PacketAck(PacketAck),
+    TeleportCancel(TeleportCancel),
+    LogoutRequest(LogoutRequest),
+    LogoutReply(LogoutReply),
+    ChatFromViewer(ChatFromViewer),
+    ChatFromSimulator(ChatFromSimulator),
+    RegionHandleRequest(RegionHandleRequest),
+    RegionIdAndHandleReply(RegionIdAndHandleReply),
+    MapBlockRequest(MapBlockRequest),
+    MapBlockReply(MapBlockReply),
+    EnableSimulator(EnableSimulator),
+    DisableSimulator(DisableSimulator),
+    ConfirmEnableSimulator(ConfirmEnableSimulator),
+    ObjectUpdate(ObjectUpdate),
+    ObjectUpdateCompressed(ObjectUpdateCompressed),
+    ImprovedTerseObjectUpdate(ImprovedTerseObjectUpdate),
+    ObjectUpdateCached(ObjectUpdateCached),
+    KillObject(KillObject),
+    RequestMultipleObjects(RequestMultipleObjects),
+    ObjectExtraParams(ObjectExtraParams),
+    GenericStreamingMessage(GenericStreamingMessage),
+    AvatarAppearance(AvatarAppearance),
+    AvatarSitResponse(AvatarSitResponse),
+    UpdateCreateInventoryItem(UpdateCreateInventoryItem),
+    RemoveInventoryItem(RemoveInventoryItem),
+    RemoveInventoryFolder(RemoveInventoryFolder),
+    RemoveInventoryObjects(RemoveInventoryObjects),
+    SaveAssetIntoInventory(SaveAssetIntoInventory),
+    BulkUpdateInventory(BulkUpdateInventory),
+    MoveInventoryItem(MoveInventoryItem),
+    MoveInventoryFolder(MoveInventoryFolder),
+    ParcelProperties(ParcelProperties),
+    ParcelOverlay(ParcelOverlay),
+    GenericMessage(GenericMessage),
+    LayerData(LayerData),
+    RegionInfo(RegionInfo),
+    TeleportFinish(TeleportFinish),
+    TeleportFailed(TeleportFailed),
 }
 
 #[cfg(test)]
 mod tests {
-    use super::allocation::fallback_allocation_bound;
-    use super::*;
-    use crate::lludp::error::LLUdpError;
+    use super::{allocation::fallback_allocation_bound, *};
+    use crate::{lludp::error::LLUdpError, schema::ids};
 
     #[test]
     fn allocation_routes_are_explicit() {
         for (id, strategy) in [
-            (schema::ids::USE_CIRCUIT_CODE, AllocationStrategy::NoAlloc),
-            (schema::ids::COMPLETE_AGENT_MOVEMENT, AllocationStrategy::NoAlloc),
-            (schema::ids::REGION_HANDSHAKE, AllocationStrategy::Specialized),
-            (schema::ids::AGENT_MOVEMENT_COMPLETE, AllocationStrategy::SchemaDerived),
-            (schema::ids::PACKET_ACK, AllocationStrategy::SchemaDerived),
-            (schema::ids::OBJECT_UPDATE, AllocationStrategy::Specialized),
+            (ids::USE_CIRCUIT_CODE, AllocationStrategy::NoAlloc),
+            (ids::COMPLETE_AGENT_MOVEMENT, AllocationStrategy::NoAlloc),
+            (ids::REGION_HANDSHAKE, AllocationStrategy::Specialized),
+            (ids::AGENT_MOVEMENT_COMPLETE, AllocationStrategy::SchemaDerived),
+            (ids::PACKET_ACK, AllocationStrategy::SchemaDerived),
+            (ids::OBJECT_UPDATE, AllocationStrategy::Specialized),
         ] {
             assert_eq!(Message::typed_allocation_strategy(id), Some(strategy));
             assert_eq!(Message::allocation_strategy(id), strategy);

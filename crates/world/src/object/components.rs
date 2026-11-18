@@ -1,9 +1,9 @@
 use math::Vec3;
 use uuid::Uuid;
 
-use crate::update::{FieldStamp, Stamp};
 use crate::{
     AttachmentPoint, Kind, LinearMotion, LocalAddress, Parent, Region, Transform, UpdateAuthority, UpdateSource, WorldPose, WorldRevision,
+    update::{FieldStamp, Stamp},
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

@@ -9,8 +9,10 @@ use std::{
 #[cfg(test)]
 use network::Event;
 use network::{AgentSession, PacketOrder, SimulatorId};
-use protocol::lludp::Message;
-use protocol::messages::{AgentMovementComplete, ParcelProperties};
+use protocol::{
+    lludp::Message,
+    messages::{AgentMovementComplete, CacheMissType, ParcelProperties},
+};
 use uuid::Uuid;
 use world::{
     Applied, Entity, LocalAddress, MAX_OBJECT_LOOKUP_WORK_ITEMS, ObjectLookupCursor, ObjectLookupProgress, ObjectObservation,
@@ -175,8 +177,8 @@ pub(super) enum ObjectUpdatePreparation {
 
 pub(super) fn route_recovery_targets(
     world: &SessionWorld,
-    targets: impl Iterator<Item = (LocalAddress, protocol::messages::CacheMissType)>,
-) -> Vec<(Option<SimulatorId>, LocalAddress, protocol::messages::CacheMissType)> {
+    targets: impl Iterator<Item = (LocalAddress, CacheMissType)>,
+) -> Vec<(Option<SimulatorId>, LocalAddress, CacheMissType)> {
     targets.map(|(address, cache_miss_type)| (world.simulator_for_region(address.region()), address, cache_miss_type)).collect()
 }
 
@@ -416,18 +418,16 @@ impl WorldHandoff {
         event: &Event,
         agent_id: Option<Uuid>,
     ) -> Option<(SimulatorId, IngestSummary)> {
-        use Event::{SessionReady, SimulatorConnected, SimulatorDisconnected, SimulatorFailed, SimulatorMessage};
-
         match event {
-            SessionReady { simulator_id, session, .. } => {
+            Event::SessionReady { simulator_id, session, .. } => {
                 self.session_ready(world, *simulator_id, session.agent_id);
                 None
             }
-            SimulatorConnected { simulator_id, region_handle, .. } => {
+            Event::SimulatorConnected { simulator_id, region_handle, .. } => {
                 self.simulator_connected(world, *simulator_id, *region_handle);
                 None
             }
-            SimulatorMessage { simulator_id, sequence, packet_order, received_at, ping_delay, message, .. } => {
+            Event::SimulatorMessage { simulator_id, sequence, packet_order, received_at, ping_delay, message, .. } => {
                 let update =
                     decode_simulator_world_update(world, *simulator_id, *sequence, *packet_order, *received_at, *ping_delay, message)?;
                 let entity = match &update {
@@ -437,7 +437,7 @@ impl WorldHandoff {
                 };
                 self.apply_update(world, *simulator_id, update, agent_id, entity)
             }
-            SimulatorDisconnected { simulator_id, .. } | SimulatorFailed { simulator_id, .. } => {
+            Event::SimulatorDisconnected { simulator_id, .. } | Event::SimulatorFailed { simulator_id, .. } => {
                 self.simulator_disconnected(world, *simulator_id);
                 None
             }
@@ -457,7 +457,7 @@ impl WorldHandoff {
         message: &Message,
         agent_id: Option<Uuid>,
         object_cache: &mut ObjectCacheSession,
-        on_object_chunk: &mut impl FnMut(Vec<(Option<SimulatorId>, LocalAddress, protocol::messages::CacheMissType)>, Vec<LocalAddress>),
+        on_object_chunk: &mut impl FnMut(Vec<(Option<SimulatorId>, LocalAddress, CacheMissType)>, Vec<LocalAddress>),
         media_requests: &mut Vec<ObjectMediaRequest>,
     ) -> Option<SimulatorMessageOutcome> {
         let update = decode_simulator_world_update(world, simulator_id, sequence, packet_order, received_at, ping_delay, message)?;
@@ -1211,18 +1211,18 @@ pub(super) fn should_replace_handoff_observation(current: &ObjectObservation, ca
         return true;
     }
     match (current.source.order(), candidate.source.order()) {
-        (OrderEvidence::Ordered(current_order), OrderEvidence::Ordered(candidate_order)) => {
+        (Ordered(current_order), Ordered(candidate_order)) => {
             (candidate_order, candidate.source.block_ordinal()) > (current_order, current.source.block_ordinal())
         }
-        (OrderEvidence::Ambiguous | OrderEvidence::Degraded, OrderEvidence::Ordered(_)) => true,
-        (OrderEvidence::Ordered(_), OrderEvidence::Ambiguous | OrderEvidence::Degraded)
+        (OrderEvidence::Ambiguous | OrderEvidence::Degraded, Ordered(_)) => true,
+        (Ordered(_), OrderEvidence::Ambiguous | OrderEvidence::Degraded)
         | (OrderEvidence::Ambiguous | OrderEvidence::Degraded, OrderEvidence::Ambiguous | OrderEvidence::Degraded) => false,
     }
 }
 
 pub(super) fn order_evidence(packet_order: PacketOrder) -> OrderEvidence {
     match packet_order {
-        PacketOrder::Ordered(order) => OrderEvidence::Ordered(order),
+        PacketOrder::Ordered(order) => Ordered(order),
         PacketOrder::Ambiguous => OrderEvidence::Ambiguous,
         PacketOrder::Degraded => OrderEvidence::Degraded,
     }
@@ -1237,19 +1237,17 @@ pub(super) fn handle_simulator_message(
     region_name: Option<&str>,
     mailbox: &PresentationMailbox,
 ) {
-    use Message::{ChatFromSimulator, RegionHandshake};
-
     if matches!(scope, SimulatorScope::Primary) {
         if let Some(region_lookup) = region_lookup {
             region_lookup.handle_message(source, message);
         }
-        if matches!(&message, RegionHandshake(_))
+        if matches!(&message, Message::RegionHandshake(_))
             && let Some(name) = region_name
         {
             mailbox.publish(ViewerUpdate::RegionName(name.to_owned()));
         }
     }
-    if let ChatFromSimulator(message) = message
+    if let Message::ChatFromSimulator(message) = message
         && let Some(chat_message) = display_message(message.chat_data.clone(), session)
     {
         mailbox.publish(ViewerUpdate::ChatMessage(chat_message));

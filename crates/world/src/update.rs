@@ -2,7 +2,6 @@ use std::{
     collections::HashSet,
     error::Error,
     fmt::{self, Display, Formatter},
-    mem::size_of,
     num::NonZeroU32,
     time::{Duration, Instant},
 };
@@ -10,13 +9,11 @@ use std::{
 use math::Vec3;
 use uuid::Uuid;
 
-use crate::AvatarAppearanceUpdate;
-use crate::ObjectMediaUpdate;
+use self::OrderEvidence::{Ambiguous, Degraded, Ordered};
 use crate::{
-    Appearance, AttachmentPoint, Entity, Kind, LinearMotion, LocalAddress, ParentUpdate, PbrMaterialAssignments, PbrMaterialOverrides,
-    Pose, Region, Shape, SurfaceAppearance, TextureAnimation,
+    Appearance, AttachmentPoint, AvatarAppearanceUpdate, Entity, Kind, LinearMotion, LocalAddress, ObjectMediaUpdate, ParentUpdate,
+    PbrMaterialAssignments, PbrMaterialOverrides, Pose, Region, Shape, SurfaceAppearance, TextureAnimation,
 };
-use OrderEvidence::{Ambiguous, Degraded, Ordered};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OrderEvidence {

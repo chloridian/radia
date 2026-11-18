@@ -1,7 +1,9 @@
 mod mesh;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    array,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque, btree_map},
+    mem,
     ops::Bound::{Excluded, Unbounded},
     sync::{
         Arc,
@@ -10,19 +12,20 @@ use std::{
 };
 
 use assets::{
-    Content, Failure, Kind, MaterialDescription, Priority, Request, Resource, Status, TextureHandle, TextureRef, TextureSize, mesh::MeshLod,
+    Content, Failure, Kind, MaterialDescription, Priority, Request, Resource, Status, TextureHandle, TextureRef, TextureSize,
+    mesh::{LodGeometry, MeshLod},
 };
 use math::DVec3;
 use utils::AssetId;
 use uuid::Uuid;
 use world::{Entity, FaceAppearance, Region};
 
-use crate::material::{self, AssetState, FaceMaterial, FaceParams, Resolution};
-use crate::scene::{Budget, Camera, MAX_OBJECTS, Object, Placement, budget::Lease, model::Mirror};
-
-use self::mesh::{MeshAssets, MeshResolution};
-
 pub(in crate::scene) use self::mesh::MeshPublication;
+use self::mesh::{MeshAssets, MeshResolution};
+use crate::{
+    material::{self, AssetState, FaceMaterial, FaceParams, Resolution},
+    scene::{Budget, Camera, DrawnMeshKey, Geometry, MAX_OBJECTS, Object, Placement, budget::Lease, model::Mirror},
+};
 
 const MAX_TARGETS: usize = MAX_OBJECTS;
 const MAX_FACES: usize = 32_768;
@@ -259,7 +262,7 @@ impl AssetDemand {
     }
 
     pub(in crate::scene) fn invalidate(&mut self, object: &Object) {
-        if self.dirty.len() < crate::scene::MAX_OBJECTS {
+        if self.dirty.len() < MAX_OBJECTS {
             self.dirty.insert(object.detail().summary.id, object.detail().summary.entity);
         }
     }
@@ -277,12 +280,12 @@ impl AssetDemand {
     }
 
     pub(in crate::scene) fn take_terrain_changes(&mut self) -> Vec<Region> {
-        std::mem::take(&mut self.terrain_changes).into_iter().collect()
+        mem::take(&mut self.terrain_changes).into_iter().collect()
     }
 
-    pub(in crate::scene) fn terrain_textures(&self, region: Region) -> [Option<assets::TextureHandle>; 4] {
+    pub(in crate::scene) fn terrain_textures(&self, region: Region) -> [Option<TextureHandle>; 4] {
         let Some(target) = self.terrain_targets.get(&region) else { return [None, None, None, None] };
-        std::array::from_fn(|index| {
+        array::from_fn(|index| {
             let key = AssetKey {
                 region,
                 resource: Resource { id: AssetId::new(target.textures[index]), kind: Kind::Texture },
@@ -329,8 +332,8 @@ impl AssetDemand {
                 (AssetUnit::MeshLod(lod), Kind::Mesh, Content::Mesh(mesh)) => {
                     mesh.lod() == lod
                         && match mesh.geometry() {
-                            assets::mesh::LodGeometry::Geometry(mesh) => mesh.faces().len() <= 8,
-                            assets::mesh::LodGeometry::Empty { face_count } => usize::from(*face_count) <= 8,
+                            LodGeometry::Geometry(mesh) => mesh.faces().len() <= 8,
+                            LodGeometry::Empty { face_count } => usize::from(*face_count) <= 8,
                         }
                 }
                 _ => false,
@@ -658,7 +661,7 @@ impl AssetDemand {
                     || changes.iter().any(|change| change.source.detail().summary.entity == entity))
             {
                 let mesh = match object.geometry() {
-                    crate::scene::Geometry::Mesh(_) => MeshPublication::Clear,
+                    Geometry::Mesh(_) => MeshPublication::Clear,
                     _ => MeshPublication::Keep,
                 };
                 changes.push(MaterialChange { source: object.clone(), materials: None, mesh });
@@ -683,7 +686,7 @@ impl AssetDemand {
             })
             .collect();
         let mesh_asset = match object.geometry() {
-            crate::scene::Geometry::Mesh(asset) => Some(asset),
+            Geometry::Mesh(asset) => Some(asset),
             _ => None,
         };
         let (interested, importance) = match (mesh_asset, object.placement()) {
@@ -804,7 +807,7 @@ impl AssetDemand {
             return MeshResolution::Failed;
         }
         let current = object.mesh().and_then(|(key, _)| match key {
-            crate::scene::DrawnMeshKey::Asset { asset: current, lod } if current == asset => Some(lod),
+            DrawnMeshKey::Asset { asset: current, lod } if current == asset => Some(lod),
             _ => None,
         });
         let previous_desired = self.meshes.previous_desired(asset, object.detail().summary.entity);
@@ -860,7 +863,7 @@ impl AssetDemand {
             resolution => resolution,
         };
         let published = match &resolution {
-            MeshResolution::Ready(crate::scene::DrawnMeshKey::Asset { asset: published, lod }, _) if *published == asset => Some(*lod),
+            MeshResolution::Ready(DrawnMeshKey::Asset { asset: published, lod }, _) if *published == asset => Some(*lod),
             MeshResolution::Waiting => current,
             _ => None,
         };
@@ -1032,14 +1035,14 @@ fn increment<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) {
 
 fn decrement<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) {
     match counts.entry(value) {
-        std::collections::btree_map::Entry::Occupied(mut entry) => {
+        btree_map::Entry::Occupied(mut entry) => {
             if *entry.get() == 1 {
                 entry.remove();
             } else {
                 *entry.get_mut() -= 1;
             }
         }
-        std::collections::btree_map::Entry::Vacant(_) => unreachable!("every user demand has an aggregate count"),
+        btree_map::Entry::Vacant(_) => unreachable!("every user demand has an aggregate count"),
     }
 }
 

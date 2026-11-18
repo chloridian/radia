@@ -2,22 +2,25 @@ use std::num::NonZeroU32;
 
 use uuid::Uuid;
 
-use super::facet::{FacetChanges, FacetSet};
-use super::fields::{Draft, Fields, Settlement, normalized_rotation, validate_uuid, validate_vec3};
-use super::{Effects, Origin};
-use crate::FieldRejectionReason::UntrustedSource;
-use crate::UpdateAuthority::{Tracked, Untracked};
-use crate::history::WorldChange::EntityUpdated;
-use crate::history::WorldChangeClasses;
-use crate::history::retained::RetainedOverride;
-use crate::object::components::Fenced;
-use crate::object::relationships::{ParentResolution, ParentResolutionPlan};
-use crate::update::FieldStamp;
-use crate::{
-    Applied, ApplyError, ApplyOutcome, AvatarAppearance, DeferredReason, FieldGroup, FieldRejectionReason, LocalAddress, ObjectPatch,
-    PbrMaterialOverrides, Recovery, Rejections, SitTarget, UpdateSource,
+use super::{
+    Effects, Origin,
+    facet::{FacetChanges, FacetSet},
+    fields::{Draft, Fields, Settlement, normalized_rotation, validate_uuid, validate_vec3},
 };
-use crate::{RegionalStamp, World, newer_field, newer_region_field};
+use crate::{
+    Applied, ApplyError, ApplyOutcome, AvatarAppearance, DeferredReason, FieldGroup, FieldRejectionReason,
+    FieldRejectionReason::UntrustedSource,
+    LocalAddress, ObjectPatch, PbrMaterialOverrides, Recovery, RegionalStamp, Rejections, SitTarget,
+    UpdateAuthority::{Tracked, Untracked},
+    UpdateSource, World,
+    history::{WorldChange::EntityUpdated, WorldChangeClasses, retained::RetainedOverride},
+    newer_field, newer_region_field,
+    object::{
+        components::Fenced,
+        relationships::{ParentResolution, ParentResolutionPlan},
+    },
+    update::FieldStamp,
+};
 
 const UNKNOWN_COF_VERSION: i32 = -1;
 
@@ -226,12 +229,9 @@ mod tests {
 
     use crate::{
         Appearance, ApplyOutcome, ApplyOutcome::Introduced, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, Kind,
-        LinearMotion, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate::Root, Pose,
-        UpdateSource,
+        LinearMotion, MAX_OBJECT_MEDIA_BYTES, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence::Ordered,
+        ParentUpdate::Root, Pose, UpdateSource, mutation::tests::test_world,
     };
-
-    use crate::MAX_OBJECT_MEDIA_BYTES;
-    use crate::mutation::tests::test_world;
 
     #[test]
     fn invalid_patch_keeps_valid_groups() {
@@ -245,7 +245,7 @@ mod tests {
             ..ObjectObservation::new(source, Uuid::from_u128(23), NonZeroU32::new(1).unwrap(), Kind::Object, Root)
         };
         let introduced = world.observe_object(observation).unwrap();
-        let ApplyOutcome::Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
+        let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
         let revision = world.revision();
 
         let patch = ObjectPatch {

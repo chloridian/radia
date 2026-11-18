@@ -3,9 +3,9 @@ mod schema;
 mod write;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     error::Error,
-    fmt, fs,
+    fmt, fs, io, iter, mem,
     path::Path,
     sync::{
         Arc,
@@ -16,16 +16,14 @@ use std::{
 use rusqlite::{Transaction, params};
 use storage::{
     StorageError, default_cache_dir,
-    sqlite::{SqliteBatch, SqliteControl, SqliteDb, SqliteError, SqliteReceipt},
+    sqlite::{OpenStatus, SqliteBatch, SqliteControl, SqliteDb, SqliteError, SqliteReceipt},
 };
 use uuid::Uuid;
 
-use crate::mutation::CachedFolderApply;
 use crate::{
     Category, CategoryKey, ChangeSet, Inventory, InventoryChild, InventoryError, InventoryLimits, InventoryNodeId, InventorySnapshot,
+    mutation::CachedFolderApply,
 };
-
-pub use storage::sqlite::OpenStatus as InventoryCacheOpenStatus;
 
 const MAX_READ_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const MAX_RESTORE_UNITS_PER_TURN: usize = 128;
@@ -91,7 +89,7 @@ pub(super) struct CacheIdentity {
 
 impl CacheIdentity {
     fn owners(&self) -> impl Iterator<Item = Uuid> {
-        std::iter::once(self.personal_owner).chain(self.library_owner)
+        iter::once(self.personal_owner).chain(self.library_owner)
     }
 }
 
@@ -151,7 +149,7 @@ impl fmt::Debug for InventoryCacheWrite {
 
 impl InventoryCacheWrite {
     pub fn take_affected_categories(&mut self) -> Vec<CategoryKey> {
-        std::mem::take(&mut self.affected_categories)
+        mem::take(&mut self.affected_categories)
     }
 
     pub async fn wait(self) -> Result<(), InventoryCacheError> {
@@ -298,11 +296,7 @@ pub(super) struct CachedFolder {
 }
 
 impl InventoryCache {
-    pub fn open(
-        grid_id: &str,
-        agent_id: Uuid,
-        library_owner: Option<Uuid>,
-    ) -> Result<(Self, InventoryCacheOpenStatus), InventoryCacheError> {
+    pub fn open(grid_id: &str, agent_id: Uuid, library_owner: Option<Uuid>) -> Result<(Self, OpenStatus), InventoryCacheError> {
         let root = default_cache_dir()?;
         Self::open_at_root(root, grid_id, agent_id, library_owner)
     }
@@ -312,7 +306,7 @@ impl InventoryCache {
         grid_id: &str,
         agent_id: Uuid,
         library_owner: Option<Uuid>,
-    ) -> Result<(Self, InventoryCacheOpenStatus), InventoryCacheError> {
+    ) -> Result<(Self, OpenStatus), InventoryCacheError> {
         if !valid_identity(grid_id) || agent_id.is_nil() || library_owner.is_some_and(|owner| owner.is_nil() || owner == agent_id) {
             return Err(InventoryCacheError::InvalidIdentity);
         }
@@ -359,7 +353,7 @@ impl InventoryCache {
         after: &InventorySnapshot,
     ) -> Result<InventoryCacheWrite, InventoryCacheError> {
         let affected = write::affected_categories(changes, before, after);
-        let owners = affected.iter().copied().map(|key| key.owner().id()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let owners = affected.iter().copied().map(|key| key.owner().id()).collect::<BTreeSet<_>>().into_iter().collect();
         let batches = write::changeset(changes, after, &self.identity, affected.clone())?;
         Ok(self.submit(batches, owners, affected))
     }
@@ -459,14 +453,14 @@ fn discard_legacy_layout(path: &Path) {
             }
         }
         if let Err(error) = fs::remove_dir(grid.path())
-            && error.kind() != std::io::ErrorKind::NotFound
+            && error.kind() != io::ErrorKind::NotFound
             && has_entries(&grid.path())
         {
             skipped = true;
         }
     }
     if let Err(error) = fs::remove_dir(path)
-        && error.kind() != std::io::ErrorKind::NotFound
+        && error.kind() != io::ErrorKind::NotFound
         && has_entries(path)
     {
         skipped = true;

@@ -9,12 +9,14 @@ use protocol::{
     lludp::Message,
     messages::{
         AgentThrottle, LogoutRequest,
-        agent::agent_throttle::{AgentData, Throttle},
-        agent::logout_request,
+        agent::{
+            agent_throttle::{AgentData, Throttle},
+            logout_request,
+        },
     },
 };
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{mpsc, mpsc::error::TrySendError, oneshot, watch},
     time::{self, Instant},
 };
 
@@ -354,8 +356,8 @@ pub(super) fn queue_send_notification(
 
     match events.try_send(event) {
         Ok(()) => Ok(()),
-        Err(mpsc::error::TrySendError::Full(event)) => push_send_notification(pending, event),
-        Err(mpsc::error::TrySendError::Closed(_)) => Err(ConnectionError::SimulatorManagerClosed),
+        Err(TrySendError::Full(event)) => push_send_notification(pending, event),
+        Err(TrySendError::Closed(_)) => Err(ConnectionError::SimulatorManagerClosed),
     }
 }
 

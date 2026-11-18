@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    mem,
     sync::{Arc, Condvar, Mutex, mpsc::SyncSender},
     time::{Duration, Instant},
 };
@@ -9,8 +10,8 @@ use super::{
     support::{is_simulated_crash, lock, reply_result},
 };
 use crate::cache::{
-    Key, MAX_QUEUED_WRITE_BYTES, MAX_QUEUED_WRITES, StorageError, UnavailableReason, writer::QUEUE_SWEEP_CHUNK,
-    writer::eviction::low_watermark,
+    Key, MAX_QUEUED_WRITE_BYTES, MAX_QUEUED_WRITES, StorageError, UnavailableReason,
+    writer::{QUEUE_SWEEP_CHUNK, eviction::low_watermark},
 };
 
 const SWEEP_INTERVAL: Duration = Duration::from_millis(5);
@@ -164,7 +165,7 @@ impl WriteQueue {
             state.pending_commands = 0;
             self.ready.notify_all();
             self.space.notify_all();
-            std::mem::take(&mut state.commands)
+            mem::take(&mut state.commands)
         };
         drop(commands);
     }
@@ -341,7 +342,10 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
 
 #[cfg(test)]
 mod tests {
+    use std::{assert_matches, sync::mpsc};
+
     use super::*;
+    use crate::cache::NamespaceId;
 
     #[test]
     fn failures_back_off_to_cap() {
@@ -377,15 +381,11 @@ mod tests {
     #[test]
     fn byte_limit_releases_admission() {
         let queue = WriteQueue::default();
-        let empty_put = || Command::Put {
-            key: Key::new(crate::cache::NamespaceId::new(0), [0; 16]),
-            bytes: Vec::new(),
-            reply: std::sync::mpsc::sync_channel(0).0,
-        };
+        let empty_put = || Command::Put { key: Key::new(NamespaceId::new(0), [0; 16]), bytes: Vec::new(), reply: mpsc::sync_channel(0).0 };
 
         queue.try_send(empty_put(), MAX_QUEUED_WRITE_BYTES).expect("admit exact byte limit");
-        std::assert_matches!(queue.try_send(empty_put(), 1), Err(StorageError::Unavailable(UnavailableReason::WriteQueueFull)));
-        std::assert_matches!(queue.try_send(empty_put(), usize::MAX), Err(StorageError::Unavailable(UnavailableReason::WriteQueueFull)));
+        assert_matches!(queue.try_send(empty_put(), 1), Err(StorageError::Unavailable(UnavailableReason::WriteQueueFull)));
+        assert_matches!(queue.try_send(empty_put(), usize::MAX), Err(StorageError::Unavailable(UnavailableReason::WriteQueueFull)));
 
         for queued in queue.receive_batch().commands {
             queue.complete(queued.bytes);
@@ -393,6 +393,6 @@ mod tests {
         queue.try_send(empty_put(), MAX_QUEUED_WRITE_BYTES).expect("admit after completion");
 
         queue.close();
-        std::assert_matches!(queue.try_send(empty_put(), 0), Err(StorageError::Unavailable(UnavailableReason::WriterStopped)));
+        assert_matches!(queue.try_send(empty_put(), 0), Err(StorageError::Unavailable(UnavailableReason::WriterStopped)));
     }
 }

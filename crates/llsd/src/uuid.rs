@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serializer, de::Visitor};
+use serde::{Deserialize, Deserializer, Serializer, de, de::Visitor};
 use uuid::Uuid;
 
 use crate::value::UUID_NEWTYPE;
@@ -14,16 +14,16 @@ impl<'de> Visitor<'de> for UuidVisitor {
         formatter.write_str("a UUID")
     }
 
-    fn visit_newtype_struct<D: Deserializer<'de>>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error> {
+    fn visit_newtype_struct<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         let value = String::deserialize(deserializer)?;
-        Uuid::parse_str(&value).map_err(serde::de::Error::custom)
+        Uuid::parse_str(&value).map_err(de::Error::custom)
     }
 }
 
-pub fn serialize<S: Serializer>(value: &Uuid, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+pub fn serialize<S: Serializer>(value: &Uuid, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_newtype_struct(UUID_NEWTYPE, &value.to_string())
 }
 
-pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Uuid, D::Error> {
+pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Uuid, D::Error> {
     deserializer.deserialize_newtype_struct(UUID_NEWTYPE, UuidVisitor)
 }

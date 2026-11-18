@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, fmt};
+use std::{error, fmt};
 
 use super::logout::LogoutAttemptError;
 use crate::{capabilities::SetupError, circuit::ConnectionError, error::Error, login::LoginError};
@@ -42,8 +42,8 @@ impl fmt::Display for SessionError {
     }
 }
 
-impl StdError for SessionError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+impl error::Error for SessionError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Login(error) => Some(error),
             Self::Connection(error) => Some(error),

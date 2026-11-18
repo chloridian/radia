@@ -5,7 +5,6 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use ::inventory::InventorySnapshot;
 use futures::{
     FutureExt, StreamExt,
     channel::oneshot,
@@ -13,15 +12,21 @@ use futures::{
     pin_mut,
     stream::FuturesUnordered,
 };
-use math::motion::{self as kinematics};
+use inventory::InventorySnapshot;
+use math::motion;
 use network::CircuitMotionStatus;
-use render::environment::{ActiveEnvironment, Evaluated};
-use render::scene::{
-    ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, EnvironmentChoice, MotionCircuit, Object, ReadFailure,
-    ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView,
+use render::{
+    environment::{ActiveEnvironment, Evaluated},
+    scene::{
+        ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, EnvironmentChoice, MotionCircuit, Object, ReadFailure,
+        ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView, Status,
+    },
 };
-use tokio::runtime::Handle;
-use tokio::sync::{mpsc, watch};
+use tokio::{
+    runtime::Handle,
+    sync::{mpsc, mpsc::error::TrySendError, watch},
+    task, time,
+};
 use tracing::Instrument;
 use utils::AssetId;
 use uuid::Uuid;
@@ -31,7 +36,7 @@ use world::{
 };
 
 use crate::{
-    agent_movement::MovementObservation,
+    agent_movement::{BODY_ROTATION_DOT_THRESHOLD, MovementObservation},
     asset_coordinator::{AssetHandle, RequestError},
     inventory::environments::{self, EnvironmentItems},
     session::{AgentMotionSample, EnvironmentInbox},
@@ -41,26 +46,22 @@ use crate::{
 #[path = "scene_feed/motion_circuit.rs"]
 mod motion_circuit;
 
-use motion_circuit::MotionCircuitWake;
+use self::motion_circuit::MotionCircuitWake;
 
 const MIN_ACTIVE_MOTION_SQUARED: f32 = 1e-6;
 
 #[derive(Default)]
 struct DeadReckoning {
     sample: Option<AgentMotionSample>,
-    trajectory: Option<kinematics::LinearTrajectory>,
+    trajectory: Option<motion::LinearTrajectory>,
 }
 
 impl DeadReckoning {
     fn replace(&mut self, sample: Option<AgentMotionSample>) {
         match sample {
             Some(sample) if sample.is_finite() => {
-                let lead = kinematics::half_ping_lead(
-                    f64::from(sample.time_dilation),
-                    sample.ping_delay,
-                    kinematics::FRAME_INTERVAL.as_secs_f64(),
-                );
-                self.trajectory = Some(kinematics::LinearTrajectory::new(
+                let lead = motion::half_ping_lead(f64::from(sample.time_dilation), sample.ping_delay, motion::FRAME_INTERVAL.as_secs_f64());
+                self.trajectory = Some(motion::LinearTrajectory::new(
                     sample.position + sample.velocity.as_dvec3() * lead,
                     sample.velocity,
                     sample.acceleration,
@@ -85,14 +86,14 @@ impl DeadReckoning {
         }
     }
 
-    fn resume_at(&mut self, now: Instant, regions: &[kinematics::RegionBounds]) {
+    fn resume_at(&mut self, now: Instant, regions: &[motion::RegionBounds]) {
         let Some(sample) = self.sample else { return };
         if let Some(trajectory) = &mut self.trajectory {
             trajectory.resume_at(sample.region.get(), now, regions);
         }
     }
 
-    fn pose(&self, now: Instant, regions: &[kinematics::RegionBounds]) -> Option<WorldPose> {
+    fn pose(&self, now: Instant, regions: &[motion::RegionBounds]) -> Option<WorldPose> {
         let sample = self.sample?;
         let position = self.trajectory?.position_at(sample.region.get(), now, regions);
         Some(WorldPose { position, rotation: sample.simulator_rotation })
@@ -118,7 +119,7 @@ pub(crate) struct SceneSources {
     pub(crate) reader: WorldReader,
     pub(crate) assets: AssetHandle,
     pub(crate) environments: EnvironmentInbox,
-    pub(crate) motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<CircuitMotionStatus>)>>,
+    pub(crate) motion_circuits: watch::Receiver<Vec<(Region, watch::Receiver<CircuitMotionStatus>)>>,
     pub(crate) inventory_updates: watch::Receiver<Option<InventorySnapshot>>,
 }
 
@@ -134,10 +135,10 @@ pub(crate) struct SceneFeed {
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
     agent_motion: watch::Receiver<Option<AgentMotionSample>>,
-    motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<CircuitMotionStatus>)>>,
+    motion_circuits: watch::Receiver<Vec<(Region, watch::Receiver<CircuitMotionStatus>)>>,
     motion_circuit_scratch: Vec<MotionCircuit>,
-    motion_region_scratch: Vec<kinematics::RegionBounds>,
-    motion_active: HashMap<world::Region, bool>,
+    motion_region_scratch: Vec<motion::RegionBounds>,
+    motion_active: HashMap<Region, bool>,
     dead_reckoning: DeadReckoning,
     last_movement: Option<MovementObservation>,
     environment_selection: watch::Sender<EnvironmentSelection>,
@@ -255,11 +256,7 @@ impl SceneFeed {
     pub(crate) fn refresh_motion_circuits(&mut self, now: Instant) {
         self.motion_region_scratch.clear();
         self.motion_region_scratch.extend(self.view.regions().filter_map(|region| {
-            region
-                .summary()
-                .info
-                .resolved_origin()
-                .map(|origin| kinematics::RegionBounds { region_id: region.summary().region.get(), origin })
+            region.summary().info.resolved_origin().map(|origin| motion::RegionBounds { region_id: region.summary().region.get(), origin })
         }));
         self.motion_circuit_scratch.clear();
         {
@@ -276,7 +273,7 @@ impl SceneFeed {
         regions.extend(self.motion_circuit_scratch.iter().map(|circuit| circuit.region));
         for region in regions.iter().copied() {
             let circuit = self.motion_circuit_scratch.iter().find(|circuit| circuit.region == region).copied();
-            let active = circuit.is_some_and(|circuit| kinematics::circuit_active(now, circuit.last_packet_received_at, circuit.connected));
+            let active = circuit.is_some_and(|circuit| motion::circuit_active(now, circuit.last_packet_received_at, circuit.connected));
             let previous = self.motion_active.insert(region, active);
             if previous == Some(active) {
                 continue;
@@ -291,12 +288,12 @@ impl SceneFeed {
                     Some(true) => Some(
                         circuit
                             .filter(|circuit| circuit.connected)
-                            .map_or(now, |circuit| circuit.last_packet_received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME)),
+                            .map_or(now, |circuit| circuit.last_packet_received_at + Duration::from_secs_f64(motion::PHASE_OUT_TIME)),
                     ),
                     Some(false) => continue,
                     None => circuit
                         .filter(|circuit| circuit.connected)
-                        .map(|circuit| circuit.last_packet_received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME)),
+                        .map(|circuit| circuit.last_packet_received_at + Duration::from_secs_f64(motion::PHASE_OUT_TIME)),
                 };
                 self.view.start_motion_phase_out(region, phase_out_at);
                 if self.dead_reckoning.sample.is_some_and(|sample| sample.region == region) {
@@ -323,7 +320,7 @@ impl SceneFeed {
             previous.control_flags != movement.control_flags
                 || previous.always_run != movement.always_run
                 || previous.stop_sequence != movement.stop_sequence
-                || previous.body_rotation.dot(movement.body_rotation).abs() < crate::agent_movement::BODY_ROTATION_DOT_THRESHOLD
+                || previous.body_rotation.dot(movement.body_rotation).abs() < BODY_ROTATION_DOT_THRESHOLD
         });
         if changed {
             self.last_movement = Some(movement);
@@ -410,7 +407,7 @@ impl SceneFeed {
     }
 
     pub(crate) fn drain(&mut self) -> Result<(), ApplyError> {
-        if self.view.status() == render::scene::Status::Closed {
+        if self.view.status() == Status::Closed {
             self.agent = None;
             self.water_height = None;
             self.incoming.close();
@@ -643,7 +640,7 @@ async fn acquire_asset_demand(handle: AssetHandle, request: AssetRequest) -> Ass
         match handle.request_with_importance(request.region, request.request, request.priority, request.importance).await {
             Ok(demand) => return AssetStatusEvent { ticket: request.ticket, status: demand.status(), demand: Some(demand) },
             Err(RequestError::Busy) => {
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                time::sleep(Duration::from_millis(250)).await;
             }
             Err(error) => {
                 let failure = match error {
@@ -727,11 +724,11 @@ async fn run(
             ReconcileStep::Publish(batch) => {
                 match sender.try_send(batch) {
                     Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(_)) => {
+                    Err(TrySendError::Full(_)) => {
                         tracing::error!("scene publication exceeded its single-batch limit");
                         break;
                     }
-                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                    Err(TrySendError::Closed(_)) => break,
                 }
                 wake();
                 Some(Instant::now())
@@ -761,8 +758,8 @@ async fn run(
             let selected = environment.changed().fuse();
             let timer = async {
                 match until {
-                    Some(until) if until <= Instant::now() => tokio::task::yield_now().await,
-                    Some(until) => tokio::time::sleep_until(tokio::time::Instant::from_std(until)).await,
+                    Some(until) if until <= Instant::now() => task::yield_now().await,
+                    Some(until) => time::sleep_until(time::Instant::from_std(until)).await,
                     None => pending().await,
                 }
             }

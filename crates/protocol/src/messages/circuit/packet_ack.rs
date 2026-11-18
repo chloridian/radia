@@ -2,7 +2,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::PACKET_ACK,
@@ -42,6 +42,6 @@ impl TypedMessage for PacketAck {
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        crate::lludp::message::allocation::capacity_bytes(self.packets.capacity(), std::mem::size_of::<Packets>())
+        allocation::capacity_bytes(self.packets.capacity(), size_of::<Packets>())
     }
 }

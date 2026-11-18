@@ -6,7 +6,7 @@ use world::{
 use super::{
     Arc, Change, Entity, Instant, Lease, MAX_OBJECT_PAGE_ITEMS, MAX_OBJECTS, MAX_PATCHES, MAX_PENDING, MAX_REGIONS, MAX_RETAINED_BYTES,
     Object, PATCH_BYTES, PageState, Patch, READ_BYTES, ReadFailure, ReadIdentity, ReadJob, ReadQuery, ReadReply, ReadState, ReconcileStep,
-    Reconciler, RecoveryReason, Region, RegionData, RegionSummary, SurfaceKind, Weak, WorldReadError, size_of,
+    Reconciler, RecoveryReason, Region, RegionData, RegionSummary, SurfaceKind, Weak, WorldReadError,
 };
 use crate::scene::region_environment::RegionEnvironmentResolver;
 

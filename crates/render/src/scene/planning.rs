@@ -330,7 +330,7 @@ fn object_priority(camera: Camera, object: &Object) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use std::{assert_matches, collections::BTreeMap, num::NonZeroU32, sync::atomic::AtomicBool};
+    use std::{assert_matches, collections::BTreeMap, f64::consts::FRAC_PI_2, num::NonZeroU32, sync::atomic::AtomicBool};
 
     use math::{DVec3, Quat, Vec3};
     use uuid::Uuid;
@@ -339,6 +339,7 @@ mod tests {
         RegionOutcome, Shape, UpdateSource, World, WorldLimits,
     };
 
+    use super::{Completion, Detail, MeshCompletion, MeshPlanner};
     use crate::scene::{
         Camera, DrawnMeshKey, MeshBuildError, PreparedMesh,
         budget::Budget,
@@ -347,8 +348,6 @@ mod tests {
         model::{Change, MeshChange, Mirror, Object},
         prim::tessellate,
     };
-
-    use super::{Completion, Detail, MeshCompletion, MeshPlanner};
 
     #[derive(Debug, PartialEq, Eq)]
     enum MeshStatus {
@@ -430,7 +429,7 @@ mod tests {
     }
 
     fn camera(x: f64, draw_distance: f64) -> Camera {
-        Camera::new(DVec3::new(x, 0.0, 0.0), Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000])
+        Camera::new(DVec3::new(x, 0.0, 0.0), Vec3::X, FRAC_PI_2, [1000, 1000])
             .expect("fixture camera")
             .with_quality(draw_distance, 1.0)
             .expect("fixture camera quality")

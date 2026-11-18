@@ -1,14 +1,13 @@
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, de::Visitor, ser};
 use time::{
-    Date as CalendarDate, OffsetDateTime, Time as TimeOfDay, UtcOffset,
+    OffsetDateTime, Time, UtcOffset,
     format_description::{parse_borrowed, well_known::Rfc3339},
 };
 
-use crate::Error;
-
 use super::DATE_NEWTYPE;
+use crate::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Date(OffsetDateTime);
@@ -44,8 +43,8 @@ impl Date {
             datetime
         } else {
             let format = parse_borrowed::<3>("[year]-[month]-[day]").map_err(|error| Error::InvalidValue(error.to_string()))?;
-            let date = CalendarDate::parse(value, &format).map_err(|error| Error::InvalidValue(error.to_string()))?;
-            date.with_time(TimeOfDay::MIDNIGHT).assume_utc()
+            let date = time::Date::parse(value, &format).map_err(|error| Error::InvalidValue(error.to_string()))?;
+            date.with_time(Time::MIDNIGHT).assume_utc()
         };
         Ok(Self(datetime.to_offset(UtcOffset::UTC)))
     }
@@ -68,14 +67,14 @@ impl From<Date> for OffsetDateTime {
 }
 
 impl Serialize for Date {
-    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        let value = self.0.format(&Rfc3339).map_err(serde::ser::Error::custom)?;
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let value = self.0.format(&Rfc3339).map_err(ser::Error::custom)?;
         serializer.serialize_newtype_struct(DATE_NEWTYPE, &value)
     }
 }
 
 impl<'de> Deserialize<'de> for Date {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_newtype_struct(DATE_NEWTYPE, DateVisitor)
     }
 }
@@ -89,7 +88,7 @@ impl<'de> Visitor<'de> for DateVisitor {
         formatter.write_str("an LLSD date")
     }
 
-    fn visit_newtype_struct<D: Deserializer<'de>>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error> {
+    fn visit_newtype_struct<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         deserializer.deserialize_any(DatePayloadVisitor)
     }
 }
@@ -103,15 +102,15 @@ impl<'de> Visitor<'de> for DatePayloadVisitor {
         formatter.write_str("an LLSD date or Unix timestamp")
     }
 
-    fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
         Date::parse(value).map_err(E::custom)
     }
 
-    fn visit_string<E: serde::de::Error>(self, value: String) -> std::result::Result<Self::Value, E> {
+    fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
         self.visit_str(&value)
     }
 
-    fn visit_f64<E: serde::de::Error>(self, value: f64) -> std::result::Result<Self::Value, E> {
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
         Date::from_unix_seconds(value).ok_or_else(|| E::custom(Error::InvalidValue("invalid LLSD date timestamp".into())))
     }
 }

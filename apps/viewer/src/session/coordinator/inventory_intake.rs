@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use ::inventory::{
+use inventory::{
     AssetType, Category, CategoryKey, ChangeSet, FolderType, Inventory, InventoryDelta, InventoryError, InventoryOwner, InventorySnapshot,
     InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType,
 };
@@ -187,7 +187,7 @@ fn add_category_updates(
             parent: Some(parent),
             preferred_folder_type: FolderType::from_raw(i32::from(block.folder_type)),
             name: Arc::from(block.name.as_str()),
-            server_version: ::inventory::ServerVersion::UNKNOWN,
+            server_version: inventory::ServerVersion::UNKNOWN,
             server_descendent_count: None,
         };
         if snapshot.roots().contains(key) || candidates.contains_key(&key) {
@@ -358,14 +358,14 @@ fn add_item_moves(
         let Some(mut item) = previous_moves.get(&key).cloned().or_else(|| snapshot.item(key).cloned()) else {
             let destination = CategoryKey::new(owner, FolderId::new(block.folder_id));
             if snapshot.category(destination).is_some() {
-                delta.updated_category_versions.push((destination, ::inventory::ServerVersion::UNKNOWN));
+                delta.updated_category_versions.push((destination, inventory::ServerVersion::UNKNOWN));
             }
             *rejected_blocks = rejected_blocks.saturating_add(1);
             continue;
         };
         let destination = CategoryKey::new(owner, FolderId::new(block.folder_id));
         if snapshot.category(destination).is_none() {
-            delta.updated_category_versions.push((item.parent, ::inventory::ServerVersion::UNKNOWN));
+            delta.updated_category_versions.push((item.parent, inventory::ServerVersion::UNKNOWN));
             *rejected_blocks = rejected_blocks.saturating_add(1);
             continue;
         }
@@ -392,17 +392,17 @@ fn add_folder_moves(
         let destination = CategoryKey::new(owner, FolderId::new(block.parent_id));
         let Some(current) = snapshot.category(key) else {
             if snapshot.category(destination).is_some() {
-                delta.updated_category_versions.push((destination, ::inventory::ServerVersion::UNKNOWN));
+                delta.updated_category_versions.push((destination, inventory::ServerVersion::UNKNOWN));
             }
             *rejected_blocks = rejected_blocks.saturating_add(1);
             continue;
         };
         if snapshot.roots().contains(key) || candidates.contains_key(&key) || snapshot.category(destination).is_none() {
             if let Some(parent) = current.parent {
-                delta.updated_category_versions.push((parent, ::inventory::ServerVersion::UNKNOWN));
+                delta.updated_category_versions.push((parent, inventory::ServerVersion::UNKNOWN));
             }
             if snapshot.category(destination).is_some() {
-                delta.updated_category_versions.push((destination, ::inventory::ServerVersion::UNKNOWN));
+                delta.updated_category_versions.push((destination, inventory::ServerVersion::UNKNOWN));
             }
             *rejected_blocks = rejected_blocks.saturating_add(1);
             continue;
@@ -417,10 +417,10 @@ fn add_folder_moves(
         let Some(category) = candidates.get(&key) else { continue };
         if folder_move_creates_cycle(key, category.parent, &candidates, snapshot) {
             if let Some(parent) = snapshot.category(key).and_then(|category| category.parent) {
-                delta.updated_category_versions.push((parent, ::inventory::ServerVersion::UNKNOWN));
+                delta.updated_category_versions.push((parent, inventory::ServerVersion::UNKNOWN));
             }
             if let Some(parent) = category.parent {
-                delta.updated_category_versions.push((parent, ::inventory::ServerVersion::UNKNOWN));
+                delta.updated_category_versions.push((parent, inventory::ServerVersion::UNKNOWN));
             }
             *rejected_blocks = rejected_blocks.saturating_add(1);
         } else {

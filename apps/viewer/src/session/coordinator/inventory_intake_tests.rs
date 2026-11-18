@@ -1,10 +1,11 @@
 use std::{collections::HashSet, sync::Arc};
 
-use ::inventory::{
+use inventory::{
     AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryDelta, InventoryLimits, InventoryNodeId,
     InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
 };
 use llsd::Value;
+use proptest::{collection, prelude, test_runner::Config};
 use protocol::{
     lludp::Message,
     messages::{BulkUpdateInventory, InventoryFolderBlock, InventoryItemBlock, SaveAssetIntoInventory, UpdateCreateInventoryItem},
@@ -24,9 +25,9 @@ fn apply_fetch(
     version: ServerVersion,
     descendent_count: Option<u32>,
     children: Vec<InventoryChild>,
-) -> Result<::inventory::ChangeSet, ::inventory::InventoryError> {
+) -> Result<inventory::ChangeSet, inventory::InventoryError> {
     let prepared = inventory.snapshot().prepare_folder_fetch(folder, version, descendent_count, children)?;
-    let ::inventory::FolderFetchCommit::Applied(changes) = inventory.commit_folder_fetch(prepared)? else {
+    let inventory::FolderFetchCommit::Applied(changes) = inventory.commit_folder_fetch(prepared)? else {
         panic!("single-owner fetch preparation became stale before commit");
     };
     Ok(changes)
@@ -346,10 +347,10 @@ fn inventory_invariants_hold(inventory: &Inventory, owner: InventoryOwner) -> bo
 }
 
 proptest::proptest! {
-    #![proptest_config(proptest::test_runner::Config { cases: 24, ..proptest::test_runner::Config::default() })]
+    #![proptest_config(Config { cases: 24, ..Config::default() })]
 
     #[test]
-    fn interleaved_sources_preserve_inventory(operations in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..32)) {
+    fn interleaved_sources_preserve_inventory(operations in collection::vec(prelude::any::<u8>(), 1..32)) {
         let agent = uuid(1);
         let (mut inventory, owner, folders) = inventory_with_two_folders(agent);
         for (index, operation) in operations.into_iter().enumerate() {

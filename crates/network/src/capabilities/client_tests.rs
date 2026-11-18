@@ -1,9 +1,12 @@
 use std::{
+    assert_matches,
     collections::VecDeque,
     future::{Future, poll_fn},
     io::{self, ErrorKind},
-    sync::Arc,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     task::{Context, Poll, Wake, Waker},
     thread,
     time::{Duration, Instant},
@@ -21,19 +24,21 @@ use tokio::{
 };
 use url::Url;
 
-use crate::capabilities::budget::{
-    MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_ASSET_REQUESTS, MAX_CONCURRENT_CAPABILITY_REQUESTS,
-    MAX_SEED_CAPABILITY_RESPONSE_BYTES,
-};
-use crate::fixtures::event_queue::decode_request_body;
-use crate::fixtures::{
-    http::{ConcurrentCapabilityTestServer, LocalServer, llsd_response, response},
-    simulator::{test_simulator_id, test_source},
-};
 use crate::{
     Error::{Capability, CapabilityHttp},
-    capabilities::{CapabilityBudget, CapabilityUrl, Client, ContentRange, RangeResponse},
+    capabilities::{
+        CapabilityBudget, CapabilityUrl, Client, ContentRange, RangeResponse,
+        budget::{
+            MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_ASSET_REQUESTS,
+            MAX_CONCURRENT_CAPABILITY_REQUESTS, MAX_SEED_CAPABILITY_RESPONSE_BYTES,
+        },
+    },
     event::Event,
+    fixtures::{
+        event_queue::decode_request_body,
+        http::{ConcurrentCapabilityTestServer, LocalServer, llsd_response, response},
+        simulator::{test_simulator_id, test_source},
+    },
     http::{self, RedirectPolicy},
 };
 
@@ -233,7 +238,7 @@ async fn ignored_range_respects_limit() {
             .get_range_with_response_limit_and_redirect_policy(&url, 0..1, 4, RedirectPolicy::None)
             .await
             .expect_err("a server that ignores Range must respect the response limit");
-        std::assert_matches!(error, CapabilityHttp(error) if error.kind == http::ErrorKind::ResourceExhausted, "{case}");
+        assert_matches!(error, CapabilityHttp(error) if error.kind == http::ErrorKind::ResourceExhausted, "{case}");
         assert_eq!(server.finish().len(), 1, "{case}");
     }
 }
@@ -251,7 +256,7 @@ async fn invalid_content_range_rejected() {
         .get_range_with_response_limit_and_redirect_policy(&url, 0..2, 8, RedirectPolicy::None)
         .await
         .expect_err("a range beyond the stated total is malformed");
-    std::assert_matches!(error, CapabilityHttp(error) if error.kind == http::ErrorKind::InvalidResponse);
+    assert_matches!(error, CapabilityHttp(error) if error.kind == http::ErrorKind::InvalidResponse);
 
     let response = client
         .get_range_with_response_limit_and_redirect_policy(&url, 0..2, 8, RedirectPolicy::None)
@@ -405,7 +410,7 @@ async fn errors_redact_urls() {
     let error = Client::new(seed).expect_err("embedded credentials should be rejected");
     let debug = format!("{error:?}");
 
-    std::assert_matches!(error, Capability(_));
+    assert_matches!(error, Capability(_));
     assert!(!debug.contains("user"));
     assert!(!debug.contains("password"));
     assert!(!debug.contains("secret-token"));
@@ -446,7 +451,7 @@ async fn patch_delete_preserve_gone() {
     assert_eq!(patched, b"<llsd><map/></llsd>");
     let deleted = client.delete_bytes_with_response_limit(&url, 1024).await.expect("DELETE response body");
     assert_eq!(deleted, b"<llsd><map/></llsd>");
-    std::assert_matches!(
+    assert_matches!(
         client.delete_bytes_with_response_limit(&url, 1024).await,
         Err(CapabilityHttp(error)) if error.status == Some(StatusCode::GONE)
     );
@@ -472,18 +477,18 @@ async fn raw_body_limits_enforced() {
     let client = Client::new(server.url("/seed")).unwrap();
     let url = CapabilityUrl::parse(server.url("/raw").as_str()).unwrap();
     assert_eq!(client.get_bytes_with_response_limit(&url, 5).await.unwrap(), b"12345");
-    std::assert_matches!(
+    assert_matches!(
         client.get_bytes_with_response_limit(&url, 5).await,
         Err(CapabilityHttp(http::Error { kind: http::ErrorKind::ResourceExhausted, .. }))
     );
-    std::assert_matches!(
+    assert_matches!(
         client.post_bytes_with_response_limit(&url, &Value::Undefined, 5).await,
         Err(CapabilityHttp(http::Error { kind: http::ErrorKind::ResourceExhausted, .. }))
     );
     assert_eq!(client.post_bytes_with_response_limit(&url, &Value::Undefined, 5).await.unwrap(), b"12345");
     for limit in [0, MAX_CAPABILITY_RESPONSE_BYTES + 1] {
-        std::assert_matches!(client.get_bytes_with_response_limit(&url, limit).await, Err(Capability(_)));
-        std::assert_matches!(client.post_bytes_with_response_limit(&url, &Value::Undefined, limit).await, Err(Capability(_)));
+        assert_matches!(client.get_bytes_with_response_limit(&url, limit).await, Err(Capability(_)));
+        assert_matches!(client.post_bytes_with_response_limit(&url, &Value::Undefined, limit).await, Err(Capability(_)));
     }
     let requests = server.finish();
     assert_eq!(requests.len(), 4, "invalid limits never reach the peer");
@@ -496,7 +501,7 @@ async fn full_get_rejects_partial_content() {
     let client = Client::new(server.url("/seed")).unwrap();
     let url = CapabilityUrl::parse(server.url("/resource").as_str()).unwrap();
 
-    std::assert_matches!(
+    assert_matches!(
         client.get_bytes_with_response_limit(&url, MAX_CAPABILITY_RESPONSE_BYTES).await,
         Err(CapabilityHttp(http::Error { kind: http::ErrorKind::HttpStatus, status: Some(StatusCode::PARTIAL_CONTENT), .. }))
     );
@@ -565,7 +570,7 @@ async fn post_is_not_retried() {
         .await
         .expect_err("ordinary POST reports the server failure");
 
-    std::assert_matches!(
+    assert_matches!(
         &error,
         CapabilityHttp(http::Error {
             kind: http::ErrorKind::HttpStatus,
@@ -634,7 +639,7 @@ async fn failed_lookup_caches_nothing() {
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
 
     let error = client.request_capabilities(&["GrantedCapability"]).await.expect_err("seed failure is reported");
-    std::assert_matches!(error, CapabilityHttp(http::Error { status: Some(StatusCode::SERVICE_UNAVAILABLE), .. }));
+    assert_matches!(error, CapabilityHttp(http::Error { status: Some(StatusCode::SERVICE_UNAVAILABLE), .. }));
     let capabilities = client.request_capabilities(&["GrantedCapability"]).await.expect("retried lookup");
 
     assert!(capabilities.contains_key("GrantedCapability"));
@@ -692,7 +697,7 @@ async fn cached_lookup_skips_pending_discovery() {
     server.release_response(held);
     timeout(TEST_TIMEOUT, pending).await.expect("pending lookup finishes").expect("lookup task").expect("pending lookup succeeds");
     client.close_session();
-    std::assert_matches!(client.request_capabilities(&["TestCapability"]).await, Err(crate::Error::CapabilitySessionClosed));
+    assert_matches!(client.request_capabilities(&["TestCapability"]).await, Err(crate::Error::CapabilitySessionClosed));
     server.finish();
 }
 
@@ -717,7 +722,7 @@ async fn close_releases_waiting_lookup() {
 
     for lookup in [first, second] {
         let result = timeout(TEST_TIMEOUT, lookup).await.expect("close releases the lookup").expect("lookup task");
-        std::assert_matches!(result, Err(crate::Error::CapabilitySessionClosed));
+        assert_matches!(result, Err(crate::Error::CapabilitySessionClosed));
     }
     server.finish();
 }
@@ -728,10 +733,7 @@ async fn declared_seed_oversize_rejected() {
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
 
     let error = client.request_capabilities(&["TestCapability"]).await.expect_err("oversized seed response should fail");
-    std::assert_matches!(
-        &error,
-        CapabilityHttp(http::Error { kind: http::ErrorKind::ResourceExhausted, status: Some(StatusCode::OK), .. })
-    );
+    assert_matches!(&error, CapabilityHttp(http::Error { kind: http::ErrorKind::ResourceExhausted, status: Some(StatusCode::OK), .. }));
 
     assert_eq!(server.finish().len(), 1);
 }
@@ -746,10 +748,7 @@ async fn declared_capability_oversize_rejected() {
         .post_with_response_limit(&url, &Value::Undefined, MAX_CAPABILITY_RESPONSE_BYTES)
         .await
         .expect_err("oversized LLSD response should fail");
-    std::assert_matches!(
-        &error,
-        CapabilityHttp(http::Error { kind: http::ErrorKind::ResourceExhausted, status: Some(StatusCode::OK), .. })
-    );
+    assert_matches!(&error, CapabilityHttp(http::Error { kind: http::ErrorKind::ResourceExhausted, status: Some(StatusCode::OK), .. }));
 
     assert_eq!(server.finish().len(), 1);
 }
@@ -768,7 +767,7 @@ async fn request_body_is_bounded() {
             .post_with_response_limit(&url, &payload, MAX_CAPABILITY_RESPONSE_BYTES)
             .await
             .expect_err("an oversized request body should fail");
-        std::assert_matches!(error, Capability(_));
+        assert_matches!(error, Capability(_));
     }
 
     let value = timeout(TEST_TIMEOUT, client.post_with_response_limit(&url, &Value::Undefined, body.len()))
@@ -874,7 +873,7 @@ async fn posts_encode_once_admitted() {
     })
     .await
     .expect("admitted POSTs and held requests should finish");
-    std::assert_matches!(value, Value::Map(fields) if fields.get("TestCapability") == Some(&Value::String(capability_url.clone())));
+    assert_matches!(value, Value::Map(fields) if fields.get("TestCapability") == Some(&Value::String(capability_url.clone())));
     assert_eq!(bytes, format!("<llsd><map><key>TestCapability</key><string>{capability_url}</string></map></llsd>").into_bytes());
 }
 
@@ -885,7 +884,7 @@ async fn bad_cap_urls_are_rejected() {
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
 
     let error = client.request_capabilities(&["TestCapability"]).await.expect_err("FTP capability URLs are not supported");
-    std::assert_matches!(&error, Capability(_));
+    assert_matches!(&error, Capability(_));
     assert!(error.to_string().contains("invalid TestCapability capability"));
     server.finish();
 }

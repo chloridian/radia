@@ -1,11 +1,13 @@
 use std::num::NonZeroU32;
 
 use super::Effects;
-use crate::UpdateAuthority::Untracked;
-use crate::removal::RemovalCause;
-use crate::update::{FieldStamp, Stamp};
-use crate::{Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, LocalAddress, Region, UpdateAuthority, UpdateSource};
-use crate::{World, newer_field};
+use crate::{
+    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, LocalAddress, Region, UpdateAuthority,
+    UpdateAuthority::Untracked,
+    UpdateSource, World, newer_field,
+    removal::RemovalCause,
+    update::{FieldStamp, Stamp},
+};
 
 impl World {
     pub fn remove_object(&mut self, source: UpdateSource, local_id: NonZeroU32) -> Result<Applied, ApplyError> {

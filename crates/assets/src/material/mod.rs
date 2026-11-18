@@ -2,12 +2,14 @@ mod json;
 pub(crate) mod legacy;
 pub(crate) mod pbr;
 
-pub use legacy::{LegacyAlphaMode, LegacyMaterial, TextureMapping};
-pub use pbr::{PbrAlphaMode, PbrMaterial};
-
 use math::UvTransform;
 use utils::AssetId;
 use uuid::Uuid;
+
+pub use self::{
+    legacy::{LegacyAlphaMode, LegacyMaterial, TextureMapping},
+    pbr::{PbrAlphaMode, PbrMaterial},
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Filter {

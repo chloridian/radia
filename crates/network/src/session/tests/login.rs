@@ -1,5 +1,7 @@
 use std::{
+    assert_matches,
     collections::HashMap,
+    io,
     net::SocketAddr,
     str::from_utf8,
     sync::{Arc, Mutex},
@@ -7,32 +9,34 @@ use std::{
     time::Duration,
 };
 
-use protocol::lludp::{Message, Packet};
-use protocol::messages::TeleportFinish;
+use protocol::{
+    lludp::{Message, Packet},
+    messages::TeleportFinish,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
     runtime::Builder,
     spawn,
-    task::{JoinHandle, spawn_blocking},
-};
-use tokio::{
     sync::{mpsc, oneshot, watch},
+    task::{JoinHandle, spawn_blocking},
     time::timeout,
 };
 use uuid::Uuid;
 
-use super::SessionError;
-use super::send::chat_message_with_text;
-use super::send_logout_reply;
-use super::{COMMAND_CAPACITY, Channels, NETWORK_THREAD_STACK_SIZE, Session, SessionHandle, SessionOptions, run_client};
-use crate::coverage::{CoverageLoss, CoverageLossLedger, CoverageSource};
-use crate::event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY};
-use crate::fixtures::{
-    http::response,
-    session::{acknowledge_initial_movement, login_xml, receive_client_message, server_ack, set_sequence, test_fixture},
+use super::{
+    COMMAND_CAPACITY, Channels, NETWORK_THREAD_STACK_SIZE, Session, SessionError, SessionHandle, SessionOptions, run_client,
+    send::chat_message_with_text, send_logout_reply,
 };
-use crate::{Delivery, Grid, LoginCredentials, StartLocation};
+use crate::{
+    Delivery, Grid, LoginCredentials, StartLocation,
+    coverage::{CoverageLoss, CoverageLossLedger, CoverageSource},
+    event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY},
+    fixtures::{
+        http::response,
+        session::{acknowledge_initial_movement, login_xml, receive_client_message, server_ack, set_sequence, test_fixture},
+    },
+};
 
 const AGENT_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
 const CIRCUIT_CODE: u32 = 0x1122_3344;
@@ -176,7 +180,7 @@ pub(super) async fn fake_mfa_challenge_server() -> (String, oneshot::Sender<()>,
         listener.set_nonblocking(true).expect("inspect pending MFA connections without blocking");
         match listener.accept() {
             Ok(_) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
             Err(error) => panic!("check for an unexpected MFA response request: {error}"),
         }
     });
@@ -426,7 +430,7 @@ async fn network_thread_login() {
     let (login_url, poll_started, http_task) = fake_http(simulator_address.port()).await;
     let (mut session, retained_handle, worker) = spawn_network_thread_session(test_credentials(), login_url);
 
-    std::assert_matches!(login_next_event(&mut session.events).await, Event::LoginAccepted { .. });
+    assert_matches!(login_next_event(&mut session.events).await, Event::LoginAccepted { .. });
     let (use_circuit, peer, movement, movement_packet) = acknowledge_initial_movement(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1));
     assert_eq!(movement, expected_complete_movement(movement_packet.sequence()));
@@ -467,7 +471,7 @@ pub(super) async fn event_queue_loss_keeps_session() {
     let (login_url, poll_started, fail_poll, http_task) = fake_http_with_event_queue_failure(simulator_address.port()).await;
     let (mut session, retained_handle, worker) = spawn_network_thread_session(test_credentials(), login_url);
 
-    std::assert_matches!(login_next_event(&mut session.events).await, Event::LoginAccepted { .. });
+    assert_matches!(login_next_event(&mut session.events).await, Event::LoginAccepted { .. });
     let (use_circuit, peer, movement, movement_packet) = acknowledge_initial_movement(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1));
     assert_eq!(movement, expected_complete_movement(movement_packet.sequence()));
@@ -492,7 +496,7 @@ pub(super) async fn event_queue_loss_keeps_session() {
     while !saw_coverage_loss || !saw_queue_failure {
         match timeout(CLIENT_TIMEOUT, session.recv_event()).await.expect("session should keep publishing after EventQueueGet failure") {
             Some(Event::CoverageLost { loss: CoverageLoss::Source(record) }) => {
-                std::assert_matches!(record.watermark.source, CoverageSource::EventQueue { .. });
+                assert_matches!(record.watermark.source, CoverageSource::EventQueue { .. });
                 session.acknowledge_coverage_loss(record.watermark);
                 saw_coverage_loss = true;
             }
@@ -515,7 +519,7 @@ pub(super) async fn event_queue_loss_keeps_session() {
     }
     send_result.expect("session should still accept simulator commands");
     assert!(!*retained_handle.worker_finished.borrow(), "EventQueueGet failure must not finish the network worker");
-    std::assert_matches!(chat_packet.message(), Message::ChatFromViewer(message) if message.chat_data.message == "still connected");
+    assert_matches!(chat_packet.message(), Message::ChatFromViewer(message) if message.chat_data.message == "still connected");
     simulator.send_to(&server_ack(25, chat_packet.sequence()), peer).await.expect("ack post-failure chat");
 
     drop(session);

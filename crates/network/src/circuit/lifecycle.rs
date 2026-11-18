@@ -2,9 +2,8 @@ use std::mem;
 
 use tokio::{sync::oneshot, time::Instant};
 
-use crate::error::Error;
-
 use super::{ConnectionError, LOGOUT_REPLY_TIMEOUT, LOGOUT_TIMEOUT, LogoutCommand, LogoutReceipt};
+use crate::error::Error;
 
 pub(super) enum Phase {
     Connecting { region_handshake_seen: bool },

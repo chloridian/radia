@@ -1,3 +1,11 @@
+use std::assert_matches;
+
+use protocol::messages::{
+    RegionHandshakeReply,
+    region::region_handshake_reply::{AgentData, RegionInfo},
+};
+
+use self::{mpsc::error, oneshot::error::TryRecvError};
 use super::*;
 use crate::fixtures::{
     circuit::{new_send_gate, set_send_gate},
@@ -30,7 +38,7 @@ async fn fill_promoted_outbound_queue(
         .await
         .expect("queue first chat");
     let (first_sent, _) = receive_packet(simulator).await;
-    std::assert_matches!(first_sent.message(), Message::ChatFromViewer(_));
+    assert_matches!(first_sent.message(), Message::ChatFromViewer(_));
 
     let (pending_completed, pending_response) = oneshot::channel();
     commands
@@ -66,7 +74,7 @@ async fn fill_promoted_outbound_queue(
         })
         .await
         .expect("send command to full outbound queue");
-    std::assert_matches!(
+    assert_matches!(
         timeout(WAIT, full_response).await.expect("full queue response").expect("completion sender"),
         Err(Error::SimulatorCommandQueueFull)
     );
@@ -122,23 +130,20 @@ async fn handshake_reply_waits_for_space() {
     }
 
     let (completed, response) = oneshot::channel();
-    let reply = Message::RegionHandshakeReply(protocol::messages::RegionHandshakeReply {
-        agent_data: protocol::messages::region::region_handshake_reply::AgentData {
-            agent_id: agent_session.agent_id,
-            session_id: agent_session.session_id,
-        },
-        region_info: protocol::messages::region::region_handshake_reply::RegionInfo { flags: 0 },
+    let reply = Message::RegionHandshakeReply(RegionHandshakeReply {
+        agent_data: AgentData { agent_id: agent_session.agent_id, session_id: agent_session.session_id },
+        region_info: RegionInfo { flags: 0 },
     });
     commands.send(SimulatorCommand::ReplyRegionHandshake { message: reply, completed }).await.expect("queue handshake reply command");
     let mut response = response;
     assert!(timeout(Duration::from_millis(25), &mut response).await.is_err());
 
     advance(MAX_SEND_AGE + Duration::from_millis(1)).await;
-    tokio::task::yield_now().await;
-    std::assert_matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    yield_now().await;
+    assert_matches!(response.try_recv(), Err(TryRecvError::Empty));
     advance(MAX_SEND_AGE + Duration::from_millis(1)).await;
-    tokio::task::yield_now().await;
-    std::assert_matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    yield_now().await;
+    assert_matches!(response.try_recv(), Err(TryRecvError::Empty));
 
     pause_sends.send_replace(false);
     let mut handshake_replies = 0;
@@ -204,7 +209,7 @@ async fn primary_throttle_follows_movement_complete() {
     send_ack(&simulator, peer, use_circuit.sequence()).await;
     receive_connected(&mut received_events).await;
     let (movement_request, _) = receive_packet(&simulator).await;
-    std::assert_matches!(movement_request.message(), Message::CompleteAgentMovement(_));
+    assert_matches!(movement_request.message(), Message::CompleteAgentMovement(_));
     send_ack(&simulator, peer, movement_request.sequence()).await;
 
     let movement_sequence = 0x0102_0304;
@@ -218,7 +223,7 @@ async fn primary_throttle_follows_movement_complete() {
         .encode()
         .expect("encode movement completion");
     simulator.send_to(&bytes, peer).await.expect("send movement completion");
-    std::assert_matches!(
+    assert_matches!(
         receive_message_event(&mut received_events, movement_sequence).await,
         Event::SimulatorMessage { message: Message::AgentMovementComplete(_), .. }
     );
@@ -269,7 +274,7 @@ async fn demoted_primary_times_out() {
     send_ack(&simulator, peer, circuit.sequence()).await;
     receive_connected(&mut received).await;
     let (movement, _) = receive_packet(&simulator).await;
-    std::assert_matches!(movement.message(), Message::CompleteAgentMovement(_));
+    assert_matches!(movement.message(), Message::CompleteAgentMovement(_));
     send_ack(&simulator, peer, movement.sequence()).await;
 
     let (completed, result) = oneshot::channel();
@@ -288,13 +293,13 @@ async fn demoted_primary_times_out() {
     let ping = parse_hex_fixture(vectors::START_PING_CHECK).expect("ping fixture");
     simulator.send_to(&ping, peer).await.expect("send activity barrier");
     let (reply, _) = receive_packet(&simulator).await;
-    std::assert_matches!(reply.message(), Message::CompletePingCheck(_));
+    assert_matches!(reply.message(), Message::CompletePingCheck(_));
 
     advance(KEEPALIVE_TIMEOUT).await;
-    let started = tokio::time::Instant::now();
+    let started = Instant::now();
     let result = worker.await.expect("connection worker");
     assert!(started.elapsed() <= WAIT, "demoted connection expires");
-    std::assert_matches!(result, Err(ConnectionError::KeepaliveTimeout));
+    assert_matches!(result, Err(ConnectionError::KeepaliveTimeout));
 }
 
 #[tokio::test]
@@ -320,7 +325,7 @@ async fn stale_role_cancels_handoff_movement() {
         endpoint: simulator.local_addr().expect("simulator address"),
         seed_capability: connection.session.seed_capability.clone(),
     };
-    crate::circuit::test_values::set_handoff(&mut connection, handoff);
+    test_values::set_handoff(&mut connection, handoff);
     connection.region_handshake_reply_sent = true;
     let mut outbound = OutboundQueue::new();
     let mut pending_send = None;
@@ -389,7 +394,7 @@ async fn promoted_logout_bypasses_full_queue() {
         .expect("queue a send after promotion");
     assert!(ready_response.await.expect("promoted send completion").is_ok());
     let (promoted_send, _) = receive_packet(&simulator).await;
-    std::assert_matches!(promoted_send.message(), Message::CompletePingCheck(_));
+    assert_matches!(promoted_send.message(), Message::CompletePingCheck(_));
 
     let pending_response = fill_promoted_outbound_queue(&commands, &simulator, agent_id, session_id).await;
 
@@ -408,11 +413,11 @@ async fn promoted_logout_bypasses_full_queue() {
 
     pause_sends.send_replace(false);
     let (logout_packet, _) = receive_packet(&simulator).await;
-    std::assert_matches!(logout_packet.message(), Message::LogoutRequest(_));
+    assert_matches!(logout_packet.message(), Message::LogoutRequest(_));
     assert!(logout_response.await.expect("logout completion").is_ok(), "logout local send completes despite a full ordinary queue");
     assert!(repeated_logout_response.await.expect("repeated logout completion").is_ok());
-    std::assert_matches!(logout_receipt_response.try_recv(), Err(oneshot::error::TryRecvError::Empty));
-    std::assert_matches!(pending_response.await, Ok(Err(Error::SimulatorConnectionClosed)));
+    assert_matches!(logout_receipt_response.try_recv(), Err(TryRecvError::Empty));
+    assert_matches!(pending_response.await, Ok(Err(Error::SimulatorConnectionClosed)));
 
     shutdown.send_replace(true);
     assert!(timeout(WAIT, worker).await.expect("stop connection worker").expect("join connection worker").is_ok());
@@ -462,10 +467,10 @@ async fn saturated_channel_delivers_completion() {
             .await
             .expect("queue send that reports failures only");
         let (sent, _) = receive_packet(&simulator).await;
-        std::assert_matches!(sent.message(), Message::CompletePingCheck(_), "{case}");
+        assert_matches!(sent.message(), Message::CompletePingCheck(_), "{case}");
         assert!(response.await.expect("local send result").is_ok(), "{case}");
         assert!(
-            matches!(received_events.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            matches!(received_events.try_recv(), Err(error::TryRecvError::Empty)),
             "{case}: a successful send without a generation target must not emit a completion event"
         );
 
@@ -489,11 +494,11 @@ async fn saturated_channel_delivers_completion() {
         if expire {
             timeout(WAIT, send_entered.notified()).await.expect("send should enter the gate");
             advance(MAX_SEND_AGE).await;
-            std::assert_matches!(response.await.expect("expired local send result"), Err(Error::SimulatorSend(_)), "{case}");
+            assert_matches!(response.await.expect("expired local send result"), Err(Error::SimulatorSend(_)), "{case}");
             pause_sends.send_replace(false);
         } else {
             let (sent, _) = receive_packet(&simulator).await;
-            std::assert_matches!(sent.message(), Message::CompletePingCheck(_), "{case}");
+            assert_matches!(sent.message(), Message::CompletePingCheck(_), "{case}");
             assert!(response.await.expect("local send result").is_ok(), "{case}");
         }
 
@@ -595,7 +600,7 @@ async fn connection_survives_send_failures() {
             .expect("queue send behind the held transport operation");
     }
 
-    std::assert_matches!(first_failure.await.expect("first failed send completion"), Err(Error::SimulatorCommandQueueFull));
+    assert_matches!(first_failure.await.expect("first failed send completion"), Err(Error::SimulatorCommandQueueFull));
     assert!(matches!(received_events.try_recv(), Ok(SimulatorEvent::SendCompleted { .. })), "remove the channel filler");
     for _ in 0..failed_sends {
         let event = timeout(WAIT, received_events.recv()).await.expect("send failure notification is delivered");
@@ -604,12 +609,12 @@ async fn connection_survives_send_failures() {
             Some(SimulatorEvent::SendCompleted { simulator_id: actual, error: Some(_), report_failure: true, .. }) if actual == simulator_id
         ));
     }
-    std::assert_matches!(completion.await.expect("final send completion"), Err(Error::SimulatorCommandQueueFull));
+    assert_matches!(completion.await.expect("final send completion"), Err(Error::SimulatorCommandQueueFull));
 
     pause_sends.send_replace(false);
     for _ in 0..MAX_PENDING_SENDS {
         let (packet, _) = receive_packet(&simulator).await;
-        std::assert_matches!(packet.message(), Message::CompletePingCheck(_));
+        assert_matches!(packet.message(), Message::CompletePingCheck(_));
     }
     let (completed, completion) = oneshot::channel();
     commands
@@ -624,7 +629,7 @@ async fn connection_survives_send_failures() {
         .expect("queue a send after the backlog drains");
     assert!(completion.await.expect("send completion").is_ok());
     let (packet, _) = receive_packet(&simulator).await;
-    std::assert_matches!(packet.message(), Message::CompletePingCheck(_));
+    assert_matches!(packet.message(), Message::CompletePingCheck(_));
 
     shutdown.send_replace(true);
     assert!(timeout(WAIT, task).await.expect("join connection task").expect("connection task").is_ok());

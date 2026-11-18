@@ -4,7 +4,15 @@ mod client;
 mod retained_size;
 mod retry;
 
-use std::{io::Write, net::SocketAddr, sync, time::Duration};
+use std::{
+    assert_matches,
+    future::pending,
+    io::Write,
+    net::SocketAddr,
+    pin::pin,
+    task::{Context, Waker},
+    time::Duration,
+};
 
 use llsd::Value;
 use protocol::{
@@ -23,28 +31,30 @@ use tokio::{
 use uuid::Uuid;
 
 use super::*;
-use crate::capabilities::budget::{
-    MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS, MAX_CONCURRENT_EVENT_QUEUES, MAX_EVENT_QUEUE_RESPONSE_BYTES,
-    MAX_LLSD_XML_ELEMENTS,
-};
-use crate::capabilities::event_queue::{MAX_EVENT_QUEUE_ERRORS, MAX_QUEUED_CAPABILITY_EVENT_BYTES};
-use crate::fixtures::{
-    event_queue::{EventReceiver, decode_request_body, map_field, receive_poll_error, set_sequence, test_fixture},
-    http::{
-        ConcurrentCapabilityTestServer, EventQueueBudgetTestServer, EventQueueTestServer, EventServerResponse, LocalServer,
-        event_batch_response, hold_response, request_line, response, seed_grant, seed_response, write_response,
-    },
-    simulator::{acknowledgement, receive_message, receive_udp, test_simulator_id, test_source},
-};
 use crate::{
     AgentSession,
     Error::CapabilitySessionClosed,
     Grid,
-    capabilities::{CapabilityBudget, CapabilityUrl, Client, EventQueueExit},
+    capabilities::{
+        CapabilityBudget, CapabilityUrl, Client, EventQueueExit,
+        budget::{
+            MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS, MAX_CONCURRENT_EVENT_QUEUES, MAX_EVENT_QUEUE_RESPONSE_BYTES,
+            MAX_LLSD_XML_ELEMENTS,
+        },
+        event_queue::{MAX_EVENT_QUEUE_ERRORS, MAX_QUEUED_CAPABILITY_EVENT_BYTES},
+    },
     circuit::lludp::Delivery,
     coverage::CoverageLossLedger,
     event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY},
-    fixtures::session::run_session,
+    fixtures::{
+        event_queue::{EventReceiver, decode_request_body, map_field, receive_poll_error, set_sequence, test_fixture},
+        http::{
+            ConcurrentCapabilityTestServer, EventQueueBudgetTestServer, EventQueueTestServer, EventServerResponse, LocalServer,
+            event_batch_response, hold_response, request_line, response, seed_grant, seed_response, write_response,
+        },
+        session::run_session,
+        simulator::{acknowledgement, receive_message, receive_udp, test_simulator_id, test_source},
+    },
     http,
     session::{COMMAND_CAPACITY, Command},
 };
@@ -103,7 +113,7 @@ async fn completion_survives_cancelled_polls() {
     for exit in [Some(EventQueueExit::StoppedWithCoverageLoss), None] {
         let (completed, completion) = oneshot::channel();
         let (role, _) = EventQueueRoleHandle::channel(true);
-        let mut task = EventQueueTask::new(tokio::spawn(async {}), completion, role);
+        let mut task = EventQueueTask::new(spawn(async {}), completion, role);
         tokio::select! {
             biased;
             exit = task.completion() => panic!("completion is not ready: {exit:?}"),
@@ -124,14 +134,8 @@ async fn completion_survives_cancelled_polls() {
 
 #[tokio::test]
 async fn cancelled_wait_aborts_worker() {
-    use std::{
-        future::pending,
-        pin::pin,
-        task::{Context, Waker},
-    };
-
     let (worker_lifetime, worker_dropped) = oneshot::channel::<()>();
-    let worker = tokio::spawn(async move {
+    let worker = spawn(async move {
         let _lifetime = worker_lifetime;
         pending::<()>().await;
     });
@@ -232,7 +236,7 @@ async fn poll_limit_stops_on_close() {
         .await,
         RetryOutcome::Stopped
     );
-    std::assert_matches!(received.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(_)));
+    assert_matches!(received.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(_)));
 }
 
 #[tokio::test]
@@ -253,5 +257,5 @@ async fn seed_limit_stops_on_close() {
         .await,
         RetryOutcome::Stopped
     );
-    std::assert_matches!(received.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(_)));
+    assert_matches!(received.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(_)));
 }

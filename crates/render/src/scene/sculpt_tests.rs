@@ -2,7 +2,7 @@ use std::assert_matches;
 
 use assets::mesh::{MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh};
 use math::{Vec2, Vec3};
-use proptest::prelude::*;
+use proptest::{collection, prelude::*, sample};
 use utils::AssetId;
 use world::{SculptFlags, SculptType};
 
@@ -263,12 +263,12 @@ proptest! {
     #[test]
     fn valid_maps_stay_bounded(
         (width, height, rgba) in (1u32..=32, 1u32..=32).prop_flat_map(|(width, height)| {
-            (Just(width), Just(height), prop::collection::vec(any::<u8>(), (width * height * 4) as usize..=(width * height * 4) as usize))
+            (Just(width), Just(height), collection::vec(any::<u8>(), (width * height * 4) as usize..=(width * height * 4) as usize))
         }),
-        sculpt_type in prop::sample::select(vec![SculptType::Sphere, SculptType::Torus, SculptType::Plane, SculptType::Cylinder]),
+        sculpt_type in sample::select(vec![SculptType::Sphere, SculptType::Torus, SculptType::Plane, SculptType::Cylinder]),
         invert in any::<bool>(),
         mirror in any::<bool>(),
-        detail in prop::sample::select(vec![Detail::Lowest, Detail::Low, Detail::Medium, Detail::High]),
+        detail in sample::select(vec![Detail::Lowest, Detail::Low, Detail::Medium, Detail::High]),
     ) {
         let flags = SculptFlags { invert, mirror };
         let mesh = tessellate_sculpt([width, height], &rgba, sculpt_type, flags, detail)
@@ -288,11 +288,11 @@ proptest! {
     fn arbitrary_maps_never_panic(
         width in 0u32..=4100,
         height in 0u32..=4100,
-        rgba in prop::collection::vec(any::<u8>(), 0..=256),
-        sculpt_type in prop::sample::select(vec![SculptType::Sphere, SculptType::Torus, SculptType::Plane, SculptType::Cylinder]),
+        rgba in collection::vec(any::<u8>(), 0..=256),
+        sculpt_type in sample::select(vec![SculptType::Sphere, SculptType::Torus, SculptType::Plane, SculptType::Cylinder]),
         invert in any::<bool>(),
         mirror in any::<bool>(),
-        detail in prop::sample::select(vec![Detail::Lowest, Detail::Low, Detail::Medium, Detail::High]),
+        detail in sample::select(vec![Detail::Lowest, Detail::Low, Detail::Medium, Detail::High]),
     ) {
         let result = tessellate_sculpt([width, height], &rgba, sculpt_type, SculptFlags { invert, mirror }, detail);
         if let Ok(mesh) = result {

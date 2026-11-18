@@ -1,10 +1,11 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, iter, sync::Arc};
+
+use imbl::{HashMap, OrdSet};
 
 use crate::{
     Category, CategoryKey, FolderType, InventoryError, InventoryNodeId, InventoryOwner, InventoryRevision, Item, ItemKey,
     MAX_FOLDER_FETCH_CHILDREN, MAX_INVENTORY_CATEGORIES, MAX_INVENTORY_DESCRIPTION_BYTES, MAX_INVENTORY_ITEMS, MAX_INVENTORY_NAME_BYTES,
 };
-use imbl::{HashMap, OrdSet};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InventoryRoots {
@@ -122,12 +123,12 @@ impl Inventory {
     }
 
     pub fn invalidate_owner(&mut self, owner: InventoryOwner) -> Result<(), InventoryError> {
-        self.invalidate_owners(std::iter::once(owner))
+        self.invalidate_owners(iter::once(owner))
     }
 
     pub fn invalidate_all_owners(&mut self) -> Result<(), InventoryError> {
         let roots = self.state.roots;
-        self.invalidate_owners(std::iter::once(roots.personal().owner()).chain(roots.library().map(|root| root.owner())))
+        self.invalidate_owners(iter::once(roots.personal().owner()).chain(roots.library().map(|root| root.owner())))
     }
 
     fn invalidate_owners(&mut self, owners: impl IntoIterator<Item = InventoryOwner>) -> Result<(), InventoryError> {

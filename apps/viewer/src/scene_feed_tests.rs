@@ -2,12 +2,16 @@ use std::{
     collections::HashMap,
     future::{pending, ready},
     num::NonZeroU32,
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use futures::{Future, FutureExt, join};
 use math::{DVec3, Quat, Vec3};
-use render::scene::{EnvironmentProperty, EnvironmentPush, Status};
+use render::{
+    material::{AlphaBehavior, Resolution},
+    scene::{EnvironmentPreset, EnvironmentProperty, EnvironmentPush, LocalChoice, Status},
+};
+use test_support::texture::GRAY_4096_J2C;
 use utils::{AssetId, ExperienceId};
 use uuid::Uuid;
 use world::{
@@ -15,10 +19,13 @@ use world::{
     Shape, SurfaceAppearance, TerrainPatch, UpdateSource, World, WorldLimits,
 };
 
-use crate::asset_coordinator::AssetCoordinator;
-use crate::world_reader::{ReadRequest, WorldReadHost};
-
 use super::*;
+use crate::{
+    asset_coordinator::AssetCoordinator,
+    session::EnvironmentCommand,
+    test_helpers,
+    world_reader::{ReadRequest, WorldReadHost},
+};
 
 async fn select_read<T>(service: &mut WorldReadHost, intake: impl Future<Output = T>) -> Result<T, ReadRequest> {
     if let Some(request) = service.take_reserved() {
@@ -65,13 +72,12 @@ async fn detail_cursor_tracks_consumed_prefix() {
         for index in (0..DEPTH).rev() {
             sequence += 1;
             let local = base + index + 1;
-            let parent =
-                if index + 1 == DEPTH { ParentUpdate::Root } else { ParentUpdate::Local(std::num::NonZeroU32::new(local + 1).unwrap()) };
+            let parent = if index + 1 == DEPTH { ParentUpdate::Root } else { ParentUpdate::Local(NonZeroU32::new(local + 1).unwrap()) };
             let id = if index == 0 { u128::from(chain + 1) } else { 10_000 + u128::from(chain * DEPTH + index) };
             let observation = ObjectObservation::new(
                 UpdateSource::new(region, sequence as u32, Ordered(sequence), 0),
                 Uuid::from_u128(id),
-                std::num::NonZeroU32::new(local).unwrap(),
+                NonZeroU32::new(local).unwrap(),
                 Kind::Object,
                 parent,
             );
@@ -136,7 +142,7 @@ fn world() -> World {
 }
 
 fn motion_sample(received_at: Instant) -> (World, AgentMotionSample) {
-    let (world, region) = crate::test_helpers::registered_region();
+    let (world, region) = test_helpers::registered_region();
     (
         world,
         AgentMotionSample {
@@ -185,7 +191,7 @@ fn dead_reckoning_stops_at_edge() {
     sample.velocity = Vec3::X * 100.0;
     let mut dead_reckoning = DeadReckoning::default();
     dead_reckoning.replace(Some(sample));
-    let regions = [kinematics::RegionBounds { region_id: sample.region.get(), origin: DVec3::ZERO }];
+    let regions = [motion::RegionBounds { region_id: sample.region.get(), origin: DVec3::ZERO }];
 
     let pose = dead_reckoning.pose(received_at + Duration::from_secs(2), &regions).unwrap();
 
@@ -208,8 +214,8 @@ fn new_sample_replaces_state_immediately() {
 #[test]
 fn dead_reckoning_tapers_after_silence() {
     let received_at = Instant::now();
-    let phase_out_at = received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
-    let phase_out_duration = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
+    let phase_out_at = received_at + Duration::from_secs_f64(motion::PHASE_OUT_TIME);
+    let phase_out_duration = Duration::from_secs_f64(motion::MAX_INTERPOLATION_TIME - motion::PHASE_OUT_TIME);
     let phase_out_end = phase_out_at + phase_out_duration;
     let (_region_world, mut sample) = motion_sample(received_at);
     sample.velocity = Vec3::X;
@@ -226,8 +232,8 @@ fn dead_reckoning_tapers_after_silence() {
 #[test]
 fn disconnect_tapers_agent_early() {
     let received_at = Instant::now();
-    let disconnect_at = received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME / 4.0);
-    let phase_out_duration = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
+    let disconnect_at = received_at + Duration::from_secs_f64(motion::PHASE_OUT_TIME / 4.0);
+    let phase_out_duration = Duration::from_secs_f64(motion::MAX_INTERPOLATION_TIME - motion::PHASE_OUT_TIME);
     let phase_out_end = disconnect_at + phase_out_duration;
     let (_region_world, mut sample) = motion_sample(received_at);
     sample.velocity = Vec3::X;
@@ -248,8 +254,8 @@ fn disconnect_tapers_agent_early() {
 #[test]
 fn dead_reckoning_resumes_from_display() {
     let received_at = Instant::now();
-    let phase_out_at = received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
-    let phase_out_duration = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
+    let phase_out_at = received_at + Duration::from_secs_f64(motion::PHASE_OUT_TIME);
+    let phase_out_duration = Duration::from_secs_f64(motion::MAX_INTERPOLATION_TIME - motion::PHASE_OUT_TIME);
     let recovered_at = phase_out_at + phase_out_duration / 2;
     let (_region_world, mut sample) = motion_sample(received_at);
     sample.velocity = Vec3::X;
@@ -295,7 +301,7 @@ fn non_finite_sample_keeps_state() {
 async fn motion_seeds_camera_before_avatar() {
     let agent_id = Uuid::from_u128(1);
     let now = Instant::now();
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let sample = AgentMotionSample {
         region,
         position: DVec3::new(270.0, 520.0, 24.0),
@@ -392,7 +398,7 @@ async fn terrain_clamp_respects_parenting() {
     let assets = AssetCoordinator::new(Handle::current(), pending(), None);
     let (environment_selection, selected_environment) =
         watch::channel(EnvironmentSelection { choice: EnvironmentChoice::default(), agent_region: None, active_textures: BTreeSet::new() });
-    let choice = EnvironmentChoice::Local(render::scene::LocalChoice::Preset(render::scene::EnvironmentPreset::Midday));
+    let choice = EnvironmentChoice::Local(LocalChoice::Preset(EnvironmentPreset::Midday));
     let mut feed = SceneFeed {
         runtime: Handle::current(),
         view,
@@ -499,7 +505,7 @@ async fn terrain_clamp_respects_parenting() {
 
 #[tokio::test]
 async fn pending_size_wins_before_acquisition() {
-    let (_region_world, region) = crate::test_helpers::registered_region();
+    let (_region_world, region) = test_helpers::registered_region();
     let id = AssetId::new(Uuid::from_u128(101));
     let (mut scene, _) = Reconciler::new(Budget::default());
     scene.set_active_environment_textures(Some(region), BTreeSet::from([id]));
@@ -521,7 +527,7 @@ async fn pending_size_wins_before_acquisition() {
         store.request_with_importance(route, request.request, request.priority, request.importance, now).expect("initial texture demand");
     subscriptions.resume(ticket, false, Some(demand));
     let assets::LoadJob::Fetch(fetch) = store.next_job(now).expect("texture fetch") else { panic!("texture demand fetches") };
-    let input = fetch.complete(Ok(test_support::texture::GRAY_4096_J2C.to_vec())).expect("fixture response fits");
+    let input = fetch.complete(Ok(GRAY_4096_J2C.to_vec())).expect("fixture response fits");
     let completion = store.start_decode(input).expect("decode admission").run();
     store.complete(completion, now);
 
@@ -561,7 +567,7 @@ async fn pending_asset_preserves_scene() {
     let _ = world.observe_object(object).unwrap();
     let mut reads = WorldReadHost::new(&world, Handle::current());
     let assets = AssetCoordinator::new(Handle::current(), pending(), None);
-    let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
+    let (_pushes, environments) = EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
     let mut feed = SceneFeed::start(
         SceneSources {
@@ -585,11 +591,11 @@ async fn pending_asset_preserves_scene() {
             feed.view.apply(batch).unwrap();
             if let Some(face) = feed.view.objects().next().and_then(|object| object.materials()).and_then(|faces| faces.first())
                 && let Some(binding) = &face.base_color_texture
-                && binding.state().resolution == render::material::Resolution::Pending
+                && binding.state().resolution == Resolution::Pending
             {
                 assert_eq!(face.base_color_factor(), [1.0, 0.0, 0.0, 1.0]);
                 assert!(binding.image().is_none());
-                assert_eq!(face.alpha, render::material::AlphaBehavior::Unknown);
+                assert_eq!(face.alpha, AlphaBehavior::Unknown);
                 break;
             }
         }
@@ -625,7 +631,7 @@ async fn stalled_publication_preserves_intake() {
     let mut service = WorldReadHost::new(&world, Handle::current());
     let reader = service.reader();
     let assets = AssetCoordinator::new(Handle::current(), pending(), None);
-    let (pushes, environments) = crate::session::EnvironmentInbox::channel();
+    let (pushes, environments) = EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
     let mut feed = SceneFeed::start(
         SceneSources {
@@ -691,14 +697,14 @@ async fn stalled_publication_preserves_intake() {
     assert!(barrier.unwrap().revision > initial);
     assert!(world.revision() > initial);
     let experience = ExperienceId::new(Uuid::from_u128(44)).unwrap();
-    let received_at = std::time::Instant::now() - Duration::from_secs(2);
+    let received_at = Instant::now() - Duration::from_secs(2);
     let push = EnvironmentPush::Partial {
         experience,
         sky: vec![EnvironmentProperty { name: "gamma".into(), source: b"r1.4".as_slice().into() }],
         water: Vec::new(),
         transition: Duration::from_secs(10),
     };
-    assert!(pushes.try_send(crate::session::EnvironmentCommand { region, received_at, push }).is_ok());
+    assert!(pushes.try_send(EnvironmentCommand { region, received_at, push }).is_ok());
     feed.view.apply(batch).unwrap();
     assert_eq!(feed.view.object_count(), 1);
     {
@@ -725,8 +731,8 @@ async fn stalled_publication_preserves_intake() {
             futures::select_biased! { _ = receiving => {}, _ = serving => unreachable!() }
         }
     }
-    let mut active = render::environment::ActiveEnvironment::default();
-    assert!(active.update(&feed.view, Some((region, 0.0)), std::time::UNIX_EPOCH, received_at + Duration::from_secs(2),));
+    let mut active = ActiveEnvironment::default();
+    assert!(active.update(&feed.view, Some((region, 0.0)), UNIX_EPOCH, received_at + Duration::from_secs(2),));
     assert!((active.evaluated().unwrap().sky.gamma - 1.08).abs() < 0.00001);
 
     service.finish();

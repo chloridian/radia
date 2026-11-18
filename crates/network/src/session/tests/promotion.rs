@@ -1,9 +1,8 @@
-use std::mem::replace;
+use std::{assert_matches, mem::replace};
 
-use protocol::login::Value as LoginValue;
+use protocol::login::Value;
 
-use super::login::*;
-use super::*;
+use super::{login::*, *};
 use crate::circuit::lludp::advance_sequence;
 
 struct PromotedSession {
@@ -27,7 +26,7 @@ async fn promoted_session() -> PromotedSession {
     let (login_url, poll_started, http_task) = fake_http(primary_address.port()).await;
     let (mut session, handle, worker) = spawn_test_session(login_url);
 
-    std::assert_matches!(login_next_event(&mut session.events).await, Event::LoginAccepted { .. });
+    assert_matches!(login_next_event(&mut session.events).await, Event::LoginAccepted { .. });
     let (use_circuit, primary_peer) = receive_udp(&primary).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1));
     primary.send_to(&server_ack(20, 1), primary_peer).await.expect("ack primary UseCircuitCode");
@@ -113,7 +112,7 @@ async fn receive_logout(destination: &UdpSocket, destination_peer: SocketAddr) {
     let (logout_bytes, logout) =
         receive_client_message(destination, destination_peer, |message| matches!(message, Message::LogoutRequest(_))).await;
     assert!(logout.is_reliable());
-    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+    assert_matches!(logout.message(), Message::LogoutRequest(_));
     let mut expected_logout = expected_fixture("logout_request.hex", logout.sequence());
     if logout.appended_acks() == [34] {
         expected_logout = with_appended_ack(expected_logout, 34);
@@ -122,7 +121,7 @@ async fn receive_logout(destination: &UdpSocket, destination_peer: SocketAddr) {
     send_logout_reply(destination, destination_peer, &logout, 36).await;
 }
 
-async fn assert_destination_disconnected(events: &mut mpsc::Receiver<EventEnvelope>, destination_id: SimulatorId) {
+async fn assert_destination_disconnected(events: &mut Receiver<EventEnvelope>, destination_id: SimulatorId) {
     let mut saw_destination_disconnect = false;
     while let Some(envelope) = timeout(CLIENT_TIMEOUT, events.recv()).await.expect("session event channel should close after disconnect") {
         match envelope.into_event() {
@@ -152,7 +151,7 @@ async fn session_drop_cancels_bootstrap() {
     let (login_url, poll_started, http_task) = fake_http(simulator_address.port()).await;
     let (mut session, retained_handle, worker) = spawn_test_session(login_url);
 
-    std::assert_matches!(login_next_event(&mut session.events).await, Event::LoginAccepted { .. });
+    assert_matches!(login_next_event(&mut session.events).await, Event::LoginAccepted { .. });
     let (use_circuit, peer) = receive_udp(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1));
     simulator.send_to(&server_ack(20, 1), peer).await.expect("ack UseCircuitCode");
@@ -194,7 +193,7 @@ async fn login_handoff() {
     };
     let (mut network_session, retained_handle, client) = spawn_session_client(credentials, login_url);
 
-    std::assert_matches!(login_next_event(&mut network_session.events).await, Event::LoginAccepted { mfa_hash: Some(hash) } if hash == "returned-mfa"
+    assert_matches!(login_next_event(&mut network_session.events).await, Event::LoginAccepted { mfa_hash: Some(hash) } if hash == "returned-mfa"
     );
     let (use_circuit, peer) = receive_udp(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1));
@@ -235,14 +234,14 @@ async fn login_handoff() {
     assert_eq!(agent_session.agent_id.to_string(), AGENT_ID);
     assert_eq!(agent_session.session_id.to_string(), SESSION_ID);
     assert_eq!(agent_session.circuit_code, CIRCUIT_CODE);
-    let LoginValue::Array(folders) = login_data.get("inventory-skeleton").expect("login metadata survives handoff") else {
+    let Value::Array(folders) = login_data.get("inventory-skeleton").expect("login metadata survives handoff") else {
         panic!("expected inventory skeleton array");
     };
-    let [LoginValue::Struct(folder)] = folders.as_slice() else {
+    let [Value::Struct(folder)] = folders.as_slice() else {
         panic!("expected one inventory skeleton folder");
     };
-    assert_eq!(folder.get("folder_id"), Some(&LoginValue::String(FOLDER_ID.into())));
-    assert_eq!(folder.get("name"), Some(&LoginValue::String("Favorites".into())));
+    assert_eq!(folder.get("folder_id"), Some(&Value::String(FOLDER_ID.into())));
+    assert_eq!(folder.get("name"), Some(&Value::String("Favorites".into())));
 
     drop(network_session);
     let mut next_sequence = advance_sequence(reply_packet.sequence());
@@ -390,7 +389,7 @@ async fn mfa_continuation() {
         other => panic!("expected MFA challenge, got {other:?}"),
     };
     challenge.complete(" 123456 ").expect("complete login challenge");
-    std::assert_matches!(login_next_event(&mut events).await, Event::LoginAccepted { mfa_hash: Some(hash) } if hash == "returned-mfa");
+    assert_matches!(login_next_event(&mut events).await, Event::LoginAccepted { mfa_hash: Some(hash) } if hash == "returned-mfa");
     let event_request = timeout(Duration::from_secs(2), poll_started).await.expect("EventQueueGet should start").expect("event request");
     assert!(request_line(&event_request).starts_with("POST /events HTTP/1.1"));
 

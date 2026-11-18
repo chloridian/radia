@@ -1,4 +1,4 @@
-use std::{assert_matches, mem::size_of};
+use std::assert_matches;
 
 use llsd::{Binary, Date, Error, Map, Uri, Value, binary, notation, xml};
 use serde::{Deserialize, Deserializer};

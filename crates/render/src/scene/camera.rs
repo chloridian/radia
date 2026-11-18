@@ -1,5 +1,6 @@
 use std::{
     error::Error,
+    f32::consts,
     f64::consts::PI,
     fmt::{self, Display, Formatter},
 };
@@ -212,13 +213,13 @@ impl Camera {
             distance *= distance;
             distance *= ramp_distance;
         }
-        distance *= std::f32::consts::PI / 3.0;
+        distance *= consts::PI / 3.0;
         let distance = round_hundredth(distance);
         if distance == 0.0 {
             return Some(MeshLod::High);
         }
         let radius = round_hundredth(radius);
-        let lod_factor = lod_factor * (std::f32::consts::PI / 3.0) / self.vertical_fov as f32;
+        let lod_factor = lod_factor * (consts::PI / 3.0) / self.vertical_fov as f32;
         let tangent = lod_factor * radius / distance;
         if let Some(previous) = previous {
             const THRESHOLDS: [f32; 3] = [0.03, 0.06, 0.24];
@@ -272,6 +273,7 @@ fn detail_index(detail: Detail) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline;
 
     #[test]
     fn detail_hysteresis() {
@@ -451,7 +453,7 @@ mod tests {
 
         for direction in directions {
             let camera = Camera::new(DVec3::ZERO, direction, PI / 2.0, viewport).unwrap();
-            let projection = crate::pipeline::projection(camera, viewport);
+            let projection = pipeline::projection(camera, viewport);
             for cursor in [[23.0, 31.0], [281.0, 149.0]] {
                 let point = camera.ray(cursor, viewport).as_vec3() * 10.0;
                 let ndc = projection.project_point3(point);

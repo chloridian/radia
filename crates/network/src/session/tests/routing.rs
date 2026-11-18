@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use super::*;
 use crate::fixtures::test_simulator_id;
 
@@ -11,7 +13,7 @@ async fn run_queued_target_does_not_follow_neighbor_replacement() {
     announce_neighbor(&harness.primary, harness.primary_peer, endpoint, region_handle, 50).await;
     let (bytes, replacement_peer) = receive(&replacement).await;
     let circuit = Packet::decode(&bytes).expect("decode replacement circuit packet");
-    std::assert_matches!(circuit.message(), Message::UseCircuitCode(_));
+    assert_matches!(circuit.message(), Message::UseCircuitCode(_));
     replacement.send_to(&ack(60, circuit.sequence()), replacement_peer).await.expect("ack replacement circuit");
 
     let replacement_id = timeout(WAIT, async {
@@ -35,7 +37,7 @@ async fn run_queued_target_does_not_follow_neighbor_replacement() {
         .send(Command::SendTo { simulator_id: neighbor_id, message: object_request(), delivery: Delivery::Reliable, completed })
         .await
         .expect("queue an exact send while the replacement route is installed");
-    std::assert_matches!(
+    assert_matches!(
         timeout(WAIT, result).await.expect("stale target send should complete").expect("send reply"),
         Err(Error::SimulatorUnavailable)
     );
@@ -51,7 +53,7 @@ async fn run_queued_target_does_not_follow_neighbor_replacement() {
                     "a queued send for the retired simulator ID must not reach its replacement"
                 );
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => break,
             Err(error) => panic!("read replacement traffic: {error}"),
         }
     }
@@ -69,7 +71,7 @@ async fn run_neighbor_targets_and_replacements() {
         receive_message_with_peer(&harness.neighbor, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
     assert_eq!(sent_peer, harness.neighbor_peer);
     let mut buffer = [0; 65_535];
-    std::assert_matches!(clone_udp_socket(&harness.primary).expect("inspect primary endpoint").recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
+    assert_matches!(clone_udp_socket(&harness.primary).expect("inspect primary endpoint").recv_from(&mut buffer), Err(error) if error.kind() == ErrorKind::WouldBlock);
 
     let mut disable = test_fixture("disable_simulator.hex");
     set_sequence(&mut disable, 42);
@@ -80,12 +82,12 @@ async fn run_neighbor_targets_and_replacements() {
             break;
         }
     }
-    std::assert_matches!(send_targeted(&harness.commands, harness.neighbor_id, object_request()).await, Err(Error::SimulatorUnavailable));
+    assert_matches!(send_targeted(&harness.commands, harness.neighbor_id, object_request()).await, Err(Error::SimulatorUnavailable));
 
     let neighbor_endpoint = harness.neighbor.local_addr().expect("neighbor address");
     announce_neighbor(&harness.primary, harness.primary_peer, neighbor_endpoint, 0x1000_0000_0000_1000, 50).await;
     let (bytes, replacement_peer) = receive(&harness.neighbor).await;
-    std::assert_matches!(Packet::decode(&bytes).expect("decode replacement circuit packet").message(), Message::UseCircuitCode(_));
+    assert_matches!(Packet::decode(&bytes).expect("decode replacement circuit packet").message(), Message::UseCircuitCode(_));
     harness.neighbor.send_to(&ack(60, 1), replacement_peer).await.expect("ack replacement circuit");
     let replacement_id = loop {
         match next_event(&mut harness.events).await {
@@ -98,7 +100,7 @@ async fn run_neighbor_targets_and_replacements() {
         }
     };
     assert_ne!(replacement_id, harness.neighbor_id);
-    std::assert_matches!(send_targeted(&harness.commands, harness.neighbor_id, object_request()).await, Err(Error::SimulatorUnavailable));
+    assert_matches!(send_targeted(&harness.commands, harness.neighbor_id, object_request()).await, Err(Error::SimulatorUnavailable));
     send_targeted(&harness.commands, replacement_id, object_request()).await.expect("send to replacement");
     let (_, sent_peer) =
         receive_message_with_peer(&harness.neighbor, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
@@ -137,10 +139,7 @@ async fn run_same_endpoint_teleport_retry_promotes_replacement() {
         .commands
         .send(Command::SendTo {
             simulator_id: harness.primary_id,
-            message: Message::TeleportCancel(protocol::messages::TeleportCancel {
-                agent_id: session.agent_id,
-                session_id: session.session_id,
-            }),
+            message: Message::TeleportCancel(TeleportCancel { agent_id: session.agent_id, session_id: session.session_id }),
             delivery: Delivery::Reliable,
             completed,
         })
@@ -275,7 +274,7 @@ async fn primary_intro_precedes_udp_data() {
         Event::SimulatorConnected { simulator_id, region_handle: None, .. } => simulator_id,
         event => panic!("expected primary introduction before other events, got {event:?}"),
     };
-    std::assert_matches!(
+    assert_matches!(
         next_raw_event(&mut events).await,
         Event::SimulatorMessage { simulator_id: id, sequence: 19, message: Message::ChatFromSimulator(_), .. }
             if id == simulator_id
@@ -398,12 +397,7 @@ async fn preconnect_overflow_reports_coverage() {
         .publish_simulator_event(
             simulator_id,
             event_with_coverage_watermark(
-                Event::CapabilityEvent {
-                    simulator_id,
-                    source: neighbor_endpoint,
-                    message: "CrossedRegion".into(),
-                    body: llsd::Value::Undefined,
-                },
+                Event::CapabilityEvent { simulator_id, source: neighbor_endpoint, message: "CrossedRegion".into(), body: Value::Undefined },
                 watermark,
             ),
             &events,
@@ -417,7 +411,7 @@ async fn preconnect_overflow_reports_coverage() {
     assert_eq!(run_state.preconnect_events_len, MAX_PRECONNECT_EVENTS);
     assert_eq!(record.connection, SimulatorConnectionLifecycle::Connecting);
     assert!(received.try_recv().is_err(), "the pre-connect event remains buffered until connection ordering is established");
-    std::assert_matches!(
+    assert_matches!(
         connection.state.coverage_losses.snapshot().losses.as_slice(),
         [CoverageLoss::Source(record)]
             if record.watermark.simulator_id == simulator_id
@@ -441,7 +435,7 @@ async fn neighbor_circuits_are_independent() {
     harness.neighbor.send_to(&neighbor_handshake, neighbor_peer).await.expect("send neighbor handshake");
     let reply = receive_message(&harness.neighbor, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
     assert!(reply.appended_acks().contains(&41));
-    std::assert_matches!(
+    assert_matches!(
         next_event(&mut harness.events).await,
         Event::SimulatorMessage { simulator_id, source, sequence: 41, message: Message::RegionHandshake(_), .. }
             if simulator_id == neighbor_id && source == harness.neighbor.local_addr().expect("neighbor address")
@@ -463,7 +457,7 @@ async fn neighbor_circuits_are_independent() {
     harness.neighbor.send_to(&chat, neighbor_peer).await.expect("send after neighbor disabled");
     let mut buffer = [0; 65_535];
     match clone_udp_socket(&harness.neighbor).expect("inspect disabled neighbor endpoint").recv_from(&mut buffer) {
-        Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::ConnectionReset) => {}
+        Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::ConnectionReset) => {}
         Err(error) => panic!("read disabled neighbor traffic: {error}"),
         Ok((size, _)) => {
             panic!("disabled circuit sent another packet: {:?}", Packet::decode(&buffer[..size]).expect("decode packet").message())
@@ -486,12 +480,12 @@ async fn neighbor_delivers_data_before_terminal() {
     set_sequence(&mut disable, 42);
     harness.neighbor.send_to(&disable, harness.neighbor_peer).await.expect("close neighbor circuit");
 
-    std::assert_matches!(
+    assert_matches!(
         next_event(&mut harness.events).await,
         Event::SimulatorMessage { simulator_id, sequence: 41, message: Message::ChatFromSimulator(_), .. }
             if simulator_id == harness.neighbor_id
     );
-    std::assert_matches!(
+    assert_matches!(
         next_event(&mut harness.events).await,
         Event::SimulatorDisconnected { simulator_id, region_handle: Some(0x1000_0000_0000_1000), .. }
             if simulator_id == harness.neighbor_id
@@ -556,7 +550,7 @@ async fn old_completion_keeps_replacement_route() {
 
     announce_neighbor(&harness.primary, harness.primary_peer, replacement_endpoint, region_handle, 50).await;
     let (bytes, replacement_peer) = receive(&replacement).await;
-    std::assert_matches!(Packet::decode(&bytes).expect("decode replacement circuit packet").message(), Message::UseCircuitCode(_));
+    assert_matches!(Packet::decode(&bytes).expect("decode replacement circuit packet").message(), Message::UseCircuitCode(_));
     replacement.send_to(&ack(60, 1), replacement_peer).await.expect("ack replacement circuit");
 
     let mut replacement_id = None;
@@ -631,7 +625,7 @@ async fn duplicate_replacement_keeps_old_neighbor() {
     let other_region = 0x2000_0000_0000_2000;
     announce_neighbor(&harness.primary, harness.primary_peer, other_endpoint, other_region, 50).await;
     let (bytes, other_peer) = receive(&other).await;
-    std::assert_matches!(Packet::decode(&bytes).expect("decode other neighbor bootstrap").message(), Message::UseCircuitCode(_));
+    assert_matches!(Packet::decode(&bytes).expect("decode other neighbor bootstrap").message(), Message::UseCircuitCode(_));
     other.send_to(&ack(60, 1), other_peer).await.expect("ack other neighbor bootstrap");
     loop {
         if matches!(

@@ -1,14 +1,16 @@
 use std::{
     array,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use assets::mesh::{Face, Mesh, Vertex};
 use math::{DVec3, Vec2, Vec3};
-use world::{Region, TERRAIN_PATCH_SIZE, TERRAIN_REGION_SIZE as WORLD_TERRAIN_REGION_SIZE, TerrainPatchId, TerrainSettings};
-
 #[cfg(test)]
 use uuid::Uuid;
+use world::{Region, TERRAIN_PATCH_SIZE, TerrainPatchId, TerrainSettings};
 
 use crate::scene::{MeshBuildError, Patch, model::Mirror};
 
@@ -39,9 +41,9 @@ pub(in crate::scene) fn height_at(mirror: &Mirror, position: DVec3) -> Option<f6
     let (region, origin) = mirror.regions.values().find_map(|data| {
         let origin = data.summary().info.resolved_origin()?;
         (position.x >= origin.x
-            && position.x < origin.x + WORLD_TERRAIN_REGION_SIZE as f64
+            && position.x < origin.x + world::TERRAIN_REGION_SIZE as f64
             && position.y >= origin.y
-            && position.y < origin.y + WORLD_TERRAIN_REGION_SIZE as f64)
+            && position.y < origin.y + world::TERRAIN_REGION_SIZE as f64)
             .then_some((data.summary().region, origin))
     })?;
     let grid_x = position.x - origin.x;
@@ -272,7 +274,7 @@ fn random_mod(state: &mut u32, modulus: u32) -> u32 {
 }
 
 fn noise2(point: [f32; 2]) -> f32 {
-    static TABLE: std::sync::OnceLock<NoiseTable> = std::sync::OnceLock::new();
+    static TABLE: OnceLock<NoiseTable> = OnceLock::new();
     let table = TABLE.get_or_init(NoiseTable::new);
     let setup = |value: f32| {
         let shifted = value + 4096.0;
@@ -310,8 +312,10 @@ fn turbulence2(point: [f32; 2], mut frequency: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use world::TerrainPatch;
+
     use super::*;
-    use crate::texture::TERRAIN_ALPHA_RAMP;
+    use crate::{scene::Budget, texture::TERRAIN_ALPHA_RAMP};
 
     fn settings(textures: [Uuid; 4], start_heights: [f32; 4], height_ranges: [f32; 4]) -> TerrainSettings {
         TerrainSettings::new(textures, start_heights, height_ranges).unwrap()
@@ -381,7 +385,7 @@ mod tests {
     }
 
     fn mix(first: [f32; 3], second: [f32; 3], alpha: f32) -> [f32; 3] {
-        std::array::from_fn(|index| first[index] * (1.0 - alpha) + second[index] * alpha)
+        array::from_fn(|index| first[index] * (1.0 - alpha) + second[index] * alpha)
     }
 
     #[test]
@@ -424,9 +428,6 @@ mod tests {
     }
 
     fn terrain(center_patch_x: i32, origin_x: f64, height: impl Fn(f64, f64) -> f64) -> Terrain {
-        use crate::scene::Budget;
-        use world::TerrainPatch;
-
         let budget = Budget::default();
         let tiles = array::from_fn(|index| {
             let dx = index as i32 % 3 - 1;

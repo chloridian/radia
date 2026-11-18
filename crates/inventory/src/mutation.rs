@@ -1,18 +1,23 @@
-use std::collections::HashSet;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::HashSet,
+    fmt,
+    fmt::{Debug, Formatter},
+    mem,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use utils::FolderId;
 
-use crate::state::{
-    InventoryState, category_is_complete, insert_child, remove_category_record, remove_child, replace_category_record, validate_category,
-    validate_item,
-};
 use crate::{
     Category, CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryError, InventoryLimits, InventoryNodeId, InventoryNodeKey,
-    InventoryOwner, InventoryRevision, InventorySnapshot, Item, ItemKey, ServerVersion,
+    InventoryOwner, InventoryRevision, InventorySnapshot, Item, ItemKey, ServerVersion, state,
+    state::{
+        InventoryState, category_is_complete, insert_child, remove_category_record, remove_child, replace_category_record,
+        validate_category, validate_item,
+    },
 };
 
 pub const MAX_FOLDER_FETCH_CHILDREN: usize = 100_000;
@@ -36,8 +41,8 @@ pub struct PreparedFolderFetch {
     changes: ChangeSet,
 }
 
-impl std::fmt::Debug for PreparedFolderFetch {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for PreparedFolderFetch {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PreparedFolderFetch")
             .field("folder", &self.folder)
@@ -343,7 +348,7 @@ impl Inventory {
 
         let mut next = self.state.as_ref().clone();
         let mut changes = Vec::new();
-        let preserved = std::mem::take(&mut removal.preserved);
+        let preserved = mem::take(&mut removal.preserved);
         if !preserved.is_empty() {
             for (index, child) in children.iter().enumerate() {
                 if index.is_multiple_of(128) {
@@ -386,7 +391,7 @@ impl Inventory {
         let refresh_generation = next.owner_refresh_generations.get(&folder.owner()).copied().unwrap_or_default();
         next.folder_refresh_generations.insert(folder, refresh_generation);
         let is_incomplete = !category_is_complete(&next, folder);
-        crate::state::update_incomplete_count(&mut next, folder.owner(), was_incomplete, is_incomplete)?;
+        state::update_incomplete_count(&mut next, folder.owner(), was_incomplete, is_incomplete)?;
         changes.push(InventoryChange::FolderFetchApplied { folder, child_count: incoming.len() });
         self.publish_cancellable(next, changes, cancellation)
     }

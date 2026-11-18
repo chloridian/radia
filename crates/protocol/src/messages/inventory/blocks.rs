@@ -1,8 +1,13 @@
+use std::str;
+
 use uuid::Uuid;
 
 use crate::{
     LLUdpError,
-    lludp::codec::{Reader, Writer},
+    lludp::{
+        codec::{Reader, Writer},
+        message::allocation,
+    },
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -229,10 +234,10 @@ pub(crate) fn write_id(writer: &mut Writer<'_>, id: Uuid) -> Result<(), LLUdpErr
 pub(crate) fn read_string(reader: &mut Reader<'_>) -> Result<Option<String>, LLUdpError> {
     let bytes = reader.variable1()?;
     let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
-    Ok(std::str::from_utf8(&bytes[..end]).ok().map(str::to_owned))
+    Ok(str::from_utf8(&bytes[..end]).ok().map(str::to_owned))
 }
 
 pub(crate) fn add_item_capacity(total: &mut usize, block: &InventoryItemBlock) {
-    crate::lludp::message::allocation::add_string_capacity(total, &block.name);
-    crate::lludp::message::allocation::add_string_capacity(total, &block.description);
+    allocation::add_string_capacity(total, &block.name);
+    allocation::add_string_capacity(total, &block.description);
 }

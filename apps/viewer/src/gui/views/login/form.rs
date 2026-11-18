@@ -8,12 +8,13 @@ use gpui_component::{
 };
 use network::Grid;
 
-use crate::remembered_login;
-
 use super::{
     CredentialWarning, LoginPhase, LoginScreen,
     spawn::{SpawnChoice, spawn_options},
 };
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use crate::gui::scene;
+use crate::{gui::components::window_chrome, remembered_login};
 impl LoginScreen {
     fn render_heading(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::global(cx).colors;
@@ -221,11 +222,7 @@ impl Render for LoginScreen {
         let theme = Theme::global(cx).colors;
         let content = div().size_full().flex().flex_col().bg(theme.background).text_color(theme.foreground);
 
-        let content = if let Some(titlebar) = crate::gui::components::window_chrome::titlebar(window, None, theme) {
-            content.child(titlebar)
-        } else {
-            content
-        };
+        let content = if let Some(titlebar) = window_chrome::titlebar(window, None, theme) { content.child(titlebar) } else { content };
 
         let login_body = div().id("login-scroll").flex_1().min_h_0().overflow_y_scroll().child(
             div().w_full().flex().justify_center().px_4().py_6().child(
@@ -261,7 +258,7 @@ impl Render for LoginScreen {
         let chat_content = div().flex_1().min_h_0().child(self.chat_screen.clone()).into_any_element();
         let session_ready = self.active_session.as_ref().is_some_and(super::ActiveSession::is_ready);
         #[cfg(any(target_os = "windows", target_os = "linux"))]
-        let content = crate::gui::scene::login_content(session_ready, login_screen.into_any_element(), chat_content);
+        let content = scene::login_content(session_ready, login_screen.into_any_element(), chat_content);
         #[cfg(target_os = "macos")]
         let content = if session_ready { chat_content } else { login_screen.into_any_element() };
         content

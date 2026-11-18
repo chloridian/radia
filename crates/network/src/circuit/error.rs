@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, fmt, io, sync::Arc};
+use std::{error, fmt, io, sync::Arc};
 
 use tokio::task::JoinError;
 
@@ -55,8 +55,8 @@ impl fmt::Display for ConnectionError {
     }
 }
 
-impl StdError for ConnectionError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+impl error::Error for ConnectionError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Circuit(error) => Some(error),
             Self::Pacer(error) => Some(error),

@@ -1,4 +1,4 @@
-use std::num::NonZeroU32;
+use std::{assert_matches, num::NonZeroU32};
 
 use math::{Quat, Vec3};
 use test_support::allocation::{CountingAllocator, live_bytes, measure};
@@ -56,7 +56,7 @@ fn large_worlds_free_all_memory() {
                 );
                 observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
                 observation.scale = Some(Vec3::ONE);
-                std::assert_matches!(world.observe_object(observation).expect("insert benchmark object").outcome, Introduced(_));
+                assert_matches!(world.observe_object(observation).expect("insert benchmark object").outcome, Introduced(_));
             }
             (world, regions)
         });

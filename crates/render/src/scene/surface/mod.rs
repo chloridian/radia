@@ -9,13 +9,12 @@ use std::{
     },
 };
 
+use assets::mesh::Mesh;
 use math::DVec3;
 use world::{Region, TerrainPatchId};
 
-use assets::mesh::Mesh;
-
 use self::terrain::Terrain;
-pub(in crate::scene) use self::terrain::height_at as terrain_height_at;
+pub(in crate::scene) use self::terrain::height_at;
 use crate::scene::{Budget, MeshBuildError, PreparedMesh, SharedMesh, budget::MeshWork, mesh::retained_bytes, model::Mirror};
 
 type Key = (SurfaceKind, Region);
@@ -212,7 +211,7 @@ impl SurfaceJobs {
         self.running.remove(&completion.key);
         let (mesh, terrain_composition) = match completion.result {
             Ok(BuiltSurface { mesh, composition }) => {
-                let composition_bytes = composition.as_ref().map_or(0, |values| std::mem::size_of_val(values.as_slice()));
+                let composition_bytes = composition.as_ref().map_or(0, |values| size_of_val(values.as_slice()));
                 let retained = retained_bytes(&mesh).checked_add(composition_bytes).expect("terrain allocation size is representable");
                 let lease = completion.work.lease.split(retained).expect("terrain fits admitted work");
                 (PreparedMesh::Ready(SharedMesh::new(mesh, lease)), composition.map(Arc::from))

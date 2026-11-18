@@ -11,8 +11,9 @@ mod test_support;
 mod texture;
 
 #[doc(hidden)]
-pub use benchmark::GeometryPrepare;
-pub use geometry::{OmissionReason, PickError, Stats};
-pub use renderer::{Error, FrameInput, Overlay, Progress, Renderer, RendererInit, Retirement};
-pub use texture::CompressionQuality;
-pub use texture::{TextureCompletion, TextureJob};
+pub use self::benchmark::GeometryPrepare;
+pub use self::{
+    geometry::{OmissionReason, PickError, Stats},
+    renderer::{Error, FrameInput, Overlay, Progress, Renderer, RendererInit, Retirement},
+    texture::{CompressionQuality, TextureCompletion, TextureJob},
+};

@@ -5,24 +5,27 @@ pub(super) use std::{collections::HashSet, num::NonZeroU32};
 pub(super) use math::{Quat, Vec3};
 pub(super) use utils::AssetId;
 pub(super) use uuid::Uuid;
-pub(super) use world::ApplyError::{InvalidValue, KindMismatch};
-pub(super) use world::ApplyOutcome::{AgentHandedOff, Deferred, IgnoredStale, Introduced, Removed, TombstoneRecorded, Unchanged, Updated};
-pub(super) use world::DeferredReason::{AmbiguousOrder, UnknownObject};
-pub(super) use world::FieldGroup;
-pub(super) use world::FieldGroup::{AngularVelocity, Scale};
-pub(super) use world::FieldRejectionReason::{InvalidRotation, ParentCycle, ParentDependsOnRejectedParent, UntrustedSource};
-pub(super) use world::Kind::{Avatar, Object, Unknown};
-pub(super) use world::OrderEvidence::{Ambiguous, Degraded, Ordered};
-pub(super) use world::Parent;
-pub(super) use world::Parent::{Pending, Resolved};
-pub(super) use world::ParentUpdate::{Local, Root};
-pub(super) use world::{Appearance, Shape};
 pub(super) use world::{
-    AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance, FieldRejection,
-    FieldRejectionReason, FieldUpdate, Kind, LinearMotion, LocalAddress, MAX_AVATAR_TEXTURE_SLOTS, MAX_PBR_MATERIAL_BINDINGS, MediaEntry,
-    MotionUpdateKind, ObjectMediaUpdate, ObjectObservation, ObjectPatch, ParentUpdate, PbrMaterialAssignments, PbrMaterialAssignmentsError,
-    Pose, Region, RegionInfo, SculptFlags, SculptType, SitTarget, SurfaceAppearance, SurfaceAppearanceError, TextureAnimation,
-    TextureAnimationError, UpdateAuthority, UpdateSource, World, WorldLimits,
+    Appearance,
+    ApplyError::{InvalidValue, KindMismatch},
+    ApplyOutcome::{AgentHandedOff, Deferred, IgnoredStale, Introduced, Removed, TombstoneRecorded, Unchanged, Updated},
+    AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex,
+    DeferredReason::{AmbiguousOrder, UnknownObject},
+    FaceAppearance, FieldGroup,
+    FieldGroup::{AngularVelocity, Scale},
+    FieldRejection, FieldRejectionReason,
+    FieldRejectionReason::{InvalidRotation, ParentCycle, ParentDependsOnRejectedParent, UntrustedSource},
+    FieldUpdate, Kind,
+    Kind::{Avatar, Object, Unknown},
+    LinearMotion, LocalAddress, MAX_AVATAR_TEXTURE_SLOTS, MAX_PBR_MATERIAL_BINDINGS, MediaEntry, MotionUpdateKind, ObjectMediaUpdate,
+    ObjectObservation, ObjectPatch,
+    OrderEvidence::{Ambiguous, Degraded, Ordered},
+    Parent,
+    Parent::{Pending, Resolved},
+    ParentUpdate,
+    ParentUpdate::{Local, Root},
+    PbrMaterialAssignments, PbrMaterialAssignmentsError, Pose, Region, RegionInfo, SculptFlags, SculptType, Shape, SitTarget,
+    SurfaceAppearance, SurfaceAppearanceError, TextureAnimation, TextureAnimationError, UpdateAuthority, UpdateSource, World, WorldLimits,
 };
 
 pub(super) fn limits() -> WorldLimits {

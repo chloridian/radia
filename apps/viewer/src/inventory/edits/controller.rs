@@ -1,16 +1,16 @@
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
-use ::inventory::{
+use futures::future::{BoxFuture, Shared};
+use inventory::{
     CategoryKey, FolderType, InventoryNodeId, InventoryNodeKey, InventoryOwner, InventorySnapshot, ItemKey, MAX_INVENTORY_NAME_BYTES,
 };
-use futures::future::{BoxFuture, Shared};
 use llsd::{Map, Value};
 use network::{
     AgentSession, Delivery, SessionHandle,
-    capabilities::{CapabilityUrl, Client, HttpErrorKind},
+    capabilities::{self, CapabilityUrl, Client},
 };
 use protocol::{
-    inventory::{self, AisEditResponse},
+    inventory::{AisEditResponse, decode_ais_edit_response, decode_created_category_response},
     messages::{MoveInventoryFolder, MoveInventoryFolderBlock, MoveInventoryItem, MoveInventoryItemBlock},
 };
 use tokio::{
@@ -359,7 +359,7 @@ async fn execute_edit(
                     Ok(body) => body,
                     Err(outcome) => return outcome,
                 };
-                match inventory::decode_ais_edit_response(&response_body, owner.id()) {
+                match decode_ais_edit_response(&response_body, owner.id()) {
                     Ok(response) => response,
                     Err(_) => return InventoryEditOutcome::ServerError,
                 }
@@ -377,7 +377,7 @@ async fn execute_edit(
                     Ok(body) => body,
                     Err(outcome) => return outcome,
                 };
-                let created = match inventory::decode_created_category_response(&response_body) {
+                let created = match decode_created_category_response(&response_body) {
                     Ok(created) => created,
                     Err(_) => return InventoryEditOutcome::ServerError,
                 };
@@ -426,7 +426,7 @@ async fn execute_edit(
                     Ok(body) => body,
                     Err(outcome) => return outcome,
                 };
-            let response = match inventory::decode_ais_edit_response(&response_body, owner.id()) {
+            let response = match decode_ais_edit_response(&response_body, owner.id()) {
                 Ok(response) => response,
                 Err(_) => return InventoryEditOutcome::ServerError,
             };
@@ -453,7 +453,7 @@ async fn execute_edit(
                     Ok(body) => body,
                     Err(outcome) => return outcome,
                 };
-            let response = match inventory::decode_ais_edit_response(&response_body, owner.id()) {
+            let response = match decode_ais_edit_response(&response_body, owner.id()) {
                 Ok(response) => response,
                 Err(_) => return InventoryEditOutcome::ServerError,
             };
@@ -478,7 +478,7 @@ async fn execute_edit(
                     Ok(body) => body,
                     Err(outcome) => return outcome,
                 };
-            let response = match inventory::decode_ais_edit_response(&response_body, owner.id()) {
+            let response = match decode_ais_edit_response(&response_body, owner.id()) {
                 Ok(response) => response,
                 Err(_) => return InventoryEditOutcome::ServerError,
             };
@@ -646,7 +646,7 @@ fn request_outcome(error: network::Error) -> InventoryEditOutcome {
     if request_is_gone(&error) {
         return InventoryEditOutcome::Gone;
     }
-    if matches!(error, network::Error::CapabilityHttp(ref http) if http.kind == HttpErrorKind::Timeout) {
+    if matches!(error, network::Error::CapabilityHttp(ref http) if http.kind == capabilities::ErrorKind::Timeout) {
         return InventoryEditOutcome::TimedOut;
     }
     InventoryEditOutcome::ServerError
@@ -656,7 +656,7 @@ fn request_has_unknown_outcome(error: &network::Error) -> bool {
     matches!(
         error,
         network::Error::CapabilityHttp(http)
-            if matches!(http.kind, HttpErrorKind::Timeout | HttpErrorKind::Transport)
+            if matches!(http.kind, capabilities::ErrorKind::Timeout | capabilities::ErrorKind::Transport)
                 || http.status.is_some_and(|status| status.is_server_error())
     )
 }

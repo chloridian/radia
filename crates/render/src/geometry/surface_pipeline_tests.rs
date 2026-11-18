@@ -6,7 +6,6 @@ use wgpu::{
     RenderPassDepthStencilAttachment, RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo,
     TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
 };
-
 use world::FaceAppearance;
 
 use super::{GeometryRenderer, fixtures};

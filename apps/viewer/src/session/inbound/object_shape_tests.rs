@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use super::*;
 
 #[test]
@@ -154,7 +156,7 @@ fn full_shape_classification() {
     let region = region(&world);
     let fixture_packet = packet(vectors::OBJECT_UPDATE);
     let mut regular = fixture_packet.message().clone();
-    let Message::ObjectUpdate(update) = &mut regular else { panic!("expected full object fixture") };
+    let ObjectUpdate(update) = &mut regular else { panic!("expected full object fixture") };
     update.objects.truncate(1);
     update.objects[0].pcode = 9;
     let batch = decode_object_message(region, fixture_packet.sequence(), OrderEvidence::Ordered(18), &regular).expect("full batch");
@@ -162,7 +164,7 @@ fn full_shape_classification() {
     assert_eq!(observation.shape, FieldUpdate::Set(Shape::Prim(full_prim_shape())));
 
     let mut message = fixture_packet.message().clone();
-    let Message::ObjectUpdate(update) = &mut message else { panic!("expected full object fixture") };
+    let ObjectUpdate(update) = &mut message else { panic!("expected full object fixture") };
     update.objects.truncate(1);
     update.objects[0].pcode = 9;
     let mut data = vec![0; 17];
@@ -221,7 +223,7 @@ fn malformed_shape_params_preserve_shape() {
     assert_eq!(malformed_observation.shape, FieldUpdate::Keep);
 
     let applied = world.observe_object(malformed_observation.clone()).expect("unrelated valid fields still apply");
-    std::assert_matches!(applied.outcome, Updated(_));
+    assert_matches!(applied.outcome, Updated(_));
     assert_eq!(
         world.object(entity).expect("object remains").shape(),
         Some(Shape::Sculpt {

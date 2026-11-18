@@ -1,28 +1,29 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
-    fmt,
+    fmt, iter,
     time::Duration,
 };
 
-use ::inventory::{CategoryKey, InventoryOwner, InventorySnapshot, Item, MAX_INVENTORY_ITEMS};
 use futures::{
     FutureExt, StreamExt,
     future::{BoxFuture, Shared},
     stream::FuturesUnordered,
 };
+use inventory::{CategoryKey, InventoryOwner, InventorySnapshot, Item, MAX_INVENTORY_ITEMS};
 use network::capabilities::{CapabilityUrl, Client};
 use tokio::{
     runtime::Handle,
-    sync::{mpsc, oneshot, watch},
+    sync::{mpsc, mpsc::error::TrySendError, oneshot, watch},
+    task,
     task::JoinHandle,
     time,
 };
 
-use super::state::{BackgroundRequest, SourceKind, enqueue_background, next_background_job};
 use super::{
     FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent, MAX_AIS_DEPTH, MAX_FETCH_RETRIES, RequestFailure, ais,
     classify_request_error, legacy,
+    state::{BackgroundRequest, SourceKind, enqueue_background, next_background_job},
 };
 use crate::inventory::InventoryEditHandle;
 
@@ -104,8 +105,8 @@ impl InventoryFetchHandle {
 
     fn send_request(&self, request: ForegroundRequest) -> Result<(), InventoryFetchRequestError> {
         self.requests.sender.try_send(request).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => InventoryFetchRequestError::QueueFull,
-            mpsc::error::TrySendError::Closed(_) => InventoryFetchRequestError::SessionEnded,
+            TrySendError::Full(_) => InventoryFetchRequestError::QueueFull,
+            TrySendError::Closed(_) => InventoryFetchRequestError::SessionEnded,
         })
     }
 
@@ -253,7 +254,7 @@ async fn run_scheduler(
     mut stop: oneshot::Receiver<()>,
 ) {
     let Ok(discovered) = discover(&client, cancellation.clone(), &mut stop).await else {
-        let roots = std::iter::once(snapshot.roots().personal()).chain(snapshot.roots().library());
+        let roots = iter::once(snapshot.roots().personal()).chain(snapshot.roots().library());
         for folder in roots {
             if !emit(&events, InventoryFetchEvent::Failed { folder, error: InventoryFetchError::RequestFailed }, &cancellation, &mut stop)
                 .await
@@ -553,7 +554,7 @@ async fn enqueue_incomplete_folders(
                 biased;
                 _ = cancellation.clone() => true,
                 _ = &mut *stop => true,
-                _ = tokio::task::yield_now() => false,
+                _ = task::yield_now() => false,
             }
         {
             return false;
@@ -896,8 +897,8 @@ async fn process_completion(
                 Some(if current.is_complete(folder_key) { InventoryFetchOutcome::Succeeded } else { InventoryFetchOutcome::Failed });
         }
         for category in current.children(folder_key).filter_map(|node| match node.id() {
-            ::inventory::InventoryNodeId::Category(id) => Some(CategoryKey::new(folder_key.owner(), id)),
-            ::inventory::InventoryNodeId::Item(_) => None,
+            inventory::InventoryNodeId::Category(id) => Some(CategoryKey::new(folder_key.owner(), id)),
+            inventory::InventoryNodeId::Item(_) => None,
         }) {
             let was_queued = queued.contains(&category);
             enqueue_background(BackgroundRequest { folder: category, depth: 0 }, &current, failed, background, queued);

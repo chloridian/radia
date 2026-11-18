@@ -3,39 +3,46 @@ mod eviction;
 mod queue;
 mod support;
 
-use std::{
-    collections::{HashMap, HashSet},
-    fs::{self, File, ReadDir},
-    io::{self, Write},
-    path::PathBuf,
-    sync::{Arc, atomic::Ordering},
-    time::Instant,
-};
-
-use sha2::{Digest, Sha256};
-use tempfile::{Builder, NamedTempFile};
-use utils::{PersistBudget, Summary};
-
 #[cfg(test)]
 use std::sync::{
     Mutex,
     atomic::AtomicUsize,
     mpsc::{self, Receiver, SyncSender},
 };
+use std::{
+    collections::{HashMap, HashSet},
+    fs::{self, File, ReadDir},
+    io::{self, Write},
+    iter, mem,
+    path::PathBuf,
+    slice,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, AtomicU64, Ordering},
+    },
+    time::Instant,
+};
 
+use sha2::{Digest, Sha256};
+use tempfile::{Builder, NamedTempFile};
+use tracing::field;
+use utils::{PersistBudget, Summary};
+
+pub(in crate::cache) use self::queue::{Command, WriteQueue, writer_loop};
+use self::{
+    disk::{CLEANUP_FAILURE_INTERVAL, CleanupFailures, DATA_TEMP_PREFIX, delete_data, fail_temporary, remove_path},
+    support::{clone_error, is_index_file, is_simulated_crash, lock, mutations, read_map, simulated_crash_error, write_map},
+};
 use super::{
     DirectoryId, ENTRY_INVALID, ENTRY_REPLACING, ENTRY_VALID, Entry, Key, PendingTouch, ProtectionRegistry, ReadState, StorageError,
-    UnavailableReason, index::Index,
+    UnavailableReason,
+    index::{Index, map_sqlite_error},
 };
 use crate::{
     EvictionReason,
     cache::eviction::Lru,
     sqlite::{MAX_BATCH_ROWS, SqliteError},
 };
-use disk::{CLEANUP_FAILURE_INTERVAL, CleanupFailures, DATA_TEMP_PREFIX, delete_data, fail_temporary, remove_path};
-use support::{clone_error, is_index_file, is_simulated_crash, lock, mutations, read_map, simulated_crash_error, write_map};
-
-pub(in crate::cache) use queue::{Command, WriteQueue, writer_loop};
 
 const QUEUE_SWEEP_CHUNK: usize = 64;
 const MAX_SWEEP_DEPTH: usize = 32;
@@ -278,8 +285,8 @@ impl SweepFailures {
             read_entry = self.read_entry,
             remove_dir = self.remove_dir,
             depth_limited = self.depth_limited,
-            depth_limited_path = self.depth_limited_path.as_ref().map(|path| tracing::field::display(path.display())),
-            first_error = self.first_error.as_ref().map(tracing::field::display),
+            depth_limited_path = self.depth_limited_path.as_ref().map(|path| field::display(path.display())),
+            first_error = self.first_error.as_ref().map(field::display),
             "cache orphan sweep incomplete"
         );
     }
@@ -307,7 +314,7 @@ impl WorkerState {
             lru.insert(entry.key, entry.last_use.load(Ordering::Relaxed));
             referenced_keys.insert(entry.key);
             if let Some((prefixes, shard)) = read_state.namespaces.directories(entry.key) {
-                for directory in prefixes.iter().copied().chain(std::iter::once(shard)) {
+                for directory in prefixes.iter().copied().chain(iter::once(shard)) {
                     let count = directory_counts.entry(directory).or_default();
                     *count = count.checked_add(1).ok_or(StorageError::TooLarge)?;
                 }
@@ -351,7 +358,7 @@ impl WorkerState {
         if staged.try_reserve(total).is_err() || staged_indices.try_reserve(total).is_err() {
             return (0..total).map(|_| Err(StorageError::Unavailable(UnavailableReason::Allocation))).collect();
         }
-        let mut results = std::iter::repeat_with(|| None).take(total).collect::<Vec<Option<Result<(), StorageError>>>>();
+        let mut results = iter::repeat_with(|| None).take(total).collect::<Vec<Option<Result<(), StorageError>>>>();
         for (index, (key, bytes)) in puts.enumerate() {
             match self.single_put_fits_empty(key, bytes.len()) {
                 Ok(true) => {}
@@ -492,10 +499,10 @@ impl WorkerState {
             key,
             size,
             hash: Sha256::digest(bytes).into(),
-            last_use: std::sync::atomic::AtomicU64::new(stamp),
-            use_count: std::sync::atomic::AtomicU64::new(0),
-            persisted_use_count: std::sync::atomic::AtomicU64::new(0),
-            state: std::sync::atomic::AtomicU8::new(ENTRY_VALID),
+            last_use: AtomicU64::new(stamp),
+            use_count: AtomicU64::new(0),
+            persisted_use_count: AtomicU64::new(0),
+            state: AtomicU8::new(ENTRY_VALID),
         });
         Ok(StagedData { entry, temp })
     }
@@ -710,7 +717,7 @@ impl WorkerState {
             tracing::error!("cache directory accounting invariant failed");
             return;
         };
-        for directory in prefixes.iter().copied().chain(std::iter::once(shard)) {
+        for directory in prefixes.iter().copied().chain(iter::once(shard)) {
             if amount > 0 {
                 let count = self.directory_counts.entry(directory).or_default();
                 *count = count.saturating_add(1);
@@ -731,7 +738,7 @@ impl WorkerState {
             return Ok(false);
         };
         let change = PlannedChange { key, previous: Some(entry), next: None, eviction_reason: None };
-        self.commit_changes(std::slice::from_ref(&change), &[])?;
+        self.commit_changes(slice::from_ref(&change), &[])?;
         Ok(true)
     }
 
@@ -741,7 +748,7 @@ impl WorkerState {
             return Ok(());
         }
         let change = PlannedChange { key, previous: Some(target), next: None, eviction_reason: None };
-        self.commit_changes(std::slice::from_ref(&change), &[])
+        self.commit_changes(slice::from_ref(&change), &[])
     }
 
     fn commit_changes(&mut self, changes: &[PlannedChange], eviction_marks: &[Arc<Entry>]) -> Result<(), StorageError> {
@@ -784,7 +791,7 @@ impl WorkerState {
 
     fn index_failure(&mut self, error: SqliteError, changes: &[PlannedChange]) -> StorageError {
         let recreated = matches!(error, SqliteError::Corrupt | SqliteError::SchemaMismatch);
-        let storage_error = super::index::map_sqlite_error(error);
+        let storage_error = map_sqlite_error(error);
         if recreated {
             self.reset_after_index_recreation(changes);
         }
@@ -794,7 +801,7 @@ impl WorkerState {
     fn reset_after_index_recreation(&mut self, changes: &[PlannedChange]) {
         let old = {
             let mut entries = write_map(&self.read_state.entries);
-            std::mem::take(&mut *entries)
+            mem::take(&mut *entries)
         };
         let protection_shared = Arc::clone(&self.read_state.protection);
         let mut protection = lock(&protection_shared.state);
@@ -824,7 +831,7 @@ impl WorkerState {
         }
         let old = {
             let mut entries = write_map(&self.read_state.entries);
-            std::mem::take(&mut *entries)
+            mem::take(&mut *entries)
         };
         let protection_shared = Arc::clone(&self.read_state.protection);
         let mut protection = lock(&protection_shared.state);
@@ -860,7 +867,7 @@ impl WorkerState {
             failures.report();
         }
         self.flush()?;
-        self.index.shutdown().map_err(super::index::map_sqlite_error)
+        self.index.shutdown().map_err(map_sqlite_error)
     }
 
     fn drain_touches_best_effort(&mut self) {
@@ -882,7 +889,7 @@ impl WorkerState {
     fn drain_touches(&mut self) -> Result<(), StorageError> {
         let touches = {
             let mut pending = lock(&self.read_state.touches);
-            std::mem::take(&mut *pending)
+            mem::take(&mut *pending)
         };
         if touches.is_empty() {
             return Ok(());
@@ -954,7 +961,7 @@ impl WorkerState {
     fn drain_invalid(&mut self) {
         let invalid = {
             let mut pending = lock(&self.read_state.invalid);
-            std::mem::take(&mut *pending)
+            mem::take(&mut *pending)
         };
         let mut failures = 0usize;
         let mut first_error = None;
@@ -1061,7 +1068,7 @@ impl WorkerState {
                     }
                     if self.sweep.is_empty() {
                         self.sweep_complete = true;
-                        std::mem::take(&mut self.sweep_failures).report();
+                        mem::take(&mut self.sweep_failures).report();
                         return true;
                     }
                 }

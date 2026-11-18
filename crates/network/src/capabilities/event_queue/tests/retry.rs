@@ -1,4 +1,7 @@
+use std::{assert_matches, sync::mpsc as std_mpsc};
+
 use super::*;
+use crate::coverage::CoverageLoss;
 
 #[tokio::test(start_paused = true)]
 async fn zero_retry_after_skips_wait() {
@@ -10,7 +13,7 @@ async fn zero_retry_after_skips_wait() {
     let stop = Stop::new(shutdown_requested, session_closed);
     let mut pending_loss = pending_event_queue_loss(&events, simulator_id, source, &stop);
     let mut error_count = 0;
-    let started = tokio::time::Instant::now();
+    let started = time::Instant::now();
 
     let outcome = retry_event_queue_with_hint(
         simulator_id,
@@ -25,7 +28,7 @@ async fn zero_retry_after_skips_wait() {
     .await;
 
     assert_eq!(outcome, RetryOutcome::Retry);
-    assert_eq!(tokio::time::Instant::now() - started, Duration::ZERO);
+    assert_eq!(time::Instant::now() - started, Duration::ZERO);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -62,7 +65,7 @@ async fn retry_limit_records_coverage_first() {
     let loss = timeout(TEST_TIMEOUT, async {
         loop {
             let snapshot = coverage_losses.snapshot();
-            if let [crate::coverage::CoverageLoss::Source(loss)] = snapshot.losses.as_slice()
+            if let [CoverageLoss::Source(loss)] = snapshot.losses.as_slice()
                 && loss.watermark.generation == 1
             {
                 break *loss;
@@ -72,10 +75,10 @@ async fn retry_limit_records_coverage_first() {
     })
     .await
     .expect("retry exhaustion records coverage while the event channel is full");
-    assert_eq!(loss.reason, crate::coverage::CoverageLossReason::EventQueueAdmission);
+    assert_eq!(loss.reason, CoverageLossReason::EventQueueAdmission);
     assert_eq!(loss.watermark.simulator_id, simulator_id);
 
-    std::assert_matches!(received_events.recv().await, Some(Event::Failed(_)));
+    assert_matches!(received_events.recv().await, Some(Event::Failed(_)));
     let Some(Event::CapabilityError { capability, reason, .. }) =
         timeout(TEST_TIMEOUT, received_events.recv()).await.expect("retry error is reported")
     else {
@@ -83,18 +86,18 @@ async fn retry_limit_records_coverage_first() {
     };
     assert_eq!(capability, EVENT_QUEUE_NAME);
     assert!(reason.contains("repeated errors"));
-    std::assert_matches!(
+    assert_matches!(
         timeout(TEST_TIMEOUT, received_events.recv()).await.expect("coverage loss is reported"),
         Some(Event::EventQueueCoverageLost { simulator_id: id, source, .. })
             if id == simulator_id && source == test_source()
     );
 
     assert_eq!(timeout(TEST_TIMEOUT, task.wait()).await.expect("retry limit stops polling"), EventQueueExit::RetryLimitReached);
-    std::assert_matches!(
+    assert_matches!(
         coverage_losses.snapshot().losses.as_slice(),
-        [crate::coverage::CoverageLoss::Source(record)]
+        [CoverageLoss::Source(record)]
             if record.watermark.generation == 1
-                && record.reason == crate::coverage::CoverageLossReason::EventQueueAdmission
+                && record.reason == CoverageLossReason::EventQueueAdmission
                 && record.retired
     );
     assert!(server.finish().is_empty(), "all expected requests were observed and no extra retry should be sent");
@@ -171,7 +174,7 @@ async fn retry_after_keeps_ack() {
     assert_eq!(map_field(&decode_request_body(&after_503_poll), "ack"), Some(&Value::Undefined), "503 retry keeps the previous ACK");
 
     let batch = timeout(TEST_TIMEOUT, received_events.recv()).await.expect("admitted EventQueue batch").expect("event channel stays open");
-    std::assert_matches!(batch, Event::CapabilityEventBatch { events, .. } if events.len() == 2);
+    assert_matches!(batch, Event::CapabilityEventBatch { events, .. } if events.len() == 2);
     let next_poll = timeout(CLIENT_TEST_TIMEOUT, server.next_request_async()).await.expect("acknowledged batch should continue polling");
     assert_eq!(
         map_field(&decode_request_body(&next_poll), "ack"),
@@ -187,7 +190,7 @@ async fn retry_after_keeps_ack() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn closed_poll_recovers_without_loss() {
-    let (close_sender, close_receiver) = sync::mpsc::channel();
+    let (close_sender, close_receiver) = std_mpsc::channel();
     let mut server = EventQueueTestServer::start(move |base| {
         let mut event_url = base.clone();
         event_url.set_path("/event-queue");
@@ -247,8 +250,8 @@ async fn aged_close_resets_retries() {
         TWO_EVENT_BATCH
     )
     .into_bytes();
-    let (close_sender, close_receiver) = sync::mpsc::channel();
-    let (partial_sender, partial_receiver) = sync::mpsc::channel();
+    let (close_sender, close_receiver) = std_mpsc::channel();
+    let (partial_sender, partial_receiver) = std_mpsc::channel();
     let mut server = EventQueueTestServer::start(move |base| {
         let mut event_url = base.clone();
         event_url.set_path("/event-queue");
@@ -272,7 +275,7 @@ async fn aged_close_resets_retries() {
     context.seed = server.url("/seed");
     context.http = http::Client::new(None, false, None).expect("build HTTP client");
     context.coverage_losses = coverage_losses.clone();
-    let task = tokio::spawn(run_event_queue(context, Stop::new(shutdown_requested, session_closed), primary));
+    let task = spawn(run_event_queue(context, Stop::new(shutdown_requested, session_closed), primary));
 
     assert!(request_line(&server.next_request_async().await).starts_with("POST /seed HTTP/1.1"));
     let first_poll = server.next_request_async().await;
@@ -280,19 +283,19 @@ async fn aged_close_resets_retries() {
 
     let idle_poll = server.next_request_async().await;
     assert_eq!(map_field(&decode_request_body(&idle_poll), "ack"), Some(&Value::Undefined));
-    tokio::time::advance(MIN_EMPTY_POLL_DURATION).await;
+    time::advance(MIN_EMPTY_POLL_DURATION).await;
     close_sender.send(Vec::new()).expect("close the aged unanswered poll");
 
-    let reset_poll_at = tokio::time::Instant::now();
+    let reset_poll_at = time::Instant::now();
     let reset_poll = server.next_request_async().await;
-    assert_eq!(tokio::time::Instant::now() - reset_poll_at, Duration::ZERO, "an aged idle close must immediately re-poll");
+    assert_eq!(time::Instant::now() - reset_poll_at, Duration::ZERO, "an aged idle close must immediately re-poll");
     assert_eq!(map_field(&decode_request_body(&reset_poll), "ack"), Some(&Value::Undefined));
 
-    let backoff_started = tokio::time::Instant::now();
+    let backoff_started = time::Instant::now();
     partial_sender.send(partial_without_retry_after).expect("release the transient failure response");
     let backoff_poll = server.next_request_async().await;
     assert_eq!(
-        tokio::time::Instant::now() - backoff_started,
+        time::Instant::now() - backoff_started,
         Duration::from_secs(1),
         "the failure after an idle close starts from the first backoff step"
     );
@@ -345,17 +348,17 @@ async fn transient_transport_retries_reach_limit() {
         panic!("retry exhaustion must report a capability error");
     };
     assert!(reason.contains("repeated errors"));
-    std::assert_matches!(
+    assert_matches!(
         timeout(TEST_TIMEOUT, received_events.recv()).await.expect("coverage loss is reported"),
         Some(Event::EventQueueCoverageLost { simulator_id: id, source, reason })
             if id == simulator_id && source == test_source() && reason.contains("request failed")
     );
     assert_eq!(timeout(TEST_TIMEOUT, task.wait()).await.expect("retry limit stops a failing poll"), EventQueueExit::RetryLimitReached);
-    std::assert_matches!(
+    assert_matches!(
         coverage_losses.snapshot().losses.as_slice(),
-        [crate::coverage::CoverageLoss::Source(loss)]
+        [CoverageLoss::Source(loss)]
             if loss.watermark.simulator_id == simulator_id
-                && loss.reason == crate::coverage::CoverageLossReason::EventQueueAdmission
+                && loss.reason == CoverageLossReason::EventQueueAdmission
                 && loss.retired
     );
     assert_eq!(server.finish().len(), 1 + MAX_EVENT_QUEUE_ERRORS as usize + 1);
@@ -380,7 +383,7 @@ async fn permanent_poll_error_stops() {
         .start_event_queue(test_simulator_id(1), test_source(), event_sender, shutdown_requested, coverage_losses.clone())
         .expect("start event queue");
 
-    std::assert_matches!(
+    assert_matches!(
         timeout(TEST_TIMEOUT, received_events.recv()).await.expect("permanent failure reports coverage loss"),
         Some(Event::EventQueueCoverageLost { reason, .. }) if reason.contains("HTTP 401")
     );
@@ -406,7 +409,7 @@ async fn permanent_seed_error_stops() {
         .await
         .expect("permanent seed failure should be reported")
         .expect("event channel should remain open");
-    std::assert_matches!(event, Event::CapabilityError { reason, .. } if reason.contains("HTTP 401"));
+    assert_matches!(event, Event::CapabilityError { reason, .. } if reason.contains("HTTP 401"));
     assert_eq!(server.finish().len(), 1, "permanent errors must not be retried");
     task.wait().await;
 }

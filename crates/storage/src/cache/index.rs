@@ -2,16 +2,17 @@ use std::{error::Error, io, path::Path, str};
 
 use futures::executor::block_on;
 use rusqlite::{
-    Connection, Error as RusqliteError, Row, Transaction, TransactionBehavior, params,
+    Connection, Row, Transaction, TransactionBehavior, ffi,
+    ffi::{ErrorCode, SQLITE_SCHEMA},
+    params,
     types::{Type, ValueRef},
 };
-
-use crate::sqlite::{MAX_BATCH_ROWS, MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError};
 
 use super::{
     Key, MAX_EXTENSION_BYTES, MAX_NAMESPACE_BYTES, MAX_QUEUED_WRITES, MAX_VALUE_BYTES, NamespaceId, NamespaceTable, StorageError,
     UnavailableReason, valid_extension, valid_namespace,
 };
+use crate::sqlite::{MAX_BATCH_ROWS, MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError};
 
 const INDEX_VERSION: i64 = 1;
 pub(super) const MAX_ENTRIES: usize = 262_144;
@@ -280,7 +281,7 @@ fn migrate(connection: &mut Connection, definitions: &[(String, String)]) -> Res
         let namespace: i64 = row.get(0)?;
         let directory = namespace_value(row, 1, MAX_NAMESPACE_BYTES)?;
         let extension = namespace_value(row, 2, MAX_EXTENSION_BYTES)?;
-        if namespace != i64::try_from(previous.len()).map_err(|_| RusqliteError::InvalidQuery)?
+        if namespace != i64::try_from(previous.len()).map_err(|_| rusqlite::Error::InvalidQuery)?
             || previous.len() >= 256
             || !valid_namespace(&directory)
             || !valid_extension(&extension)
@@ -292,7 +293,7 @@ fn migrate(connection: &mut Connection, definitions: &[(String, String)]) -> Res
     }
     drop(rows);
     drop(statement);
-    let namespace_count = i64::try_from(previous.len()).map_err(|_| RusqliteError::InvalidQuery)?;
+    let namespace_count = i64::try_from(previous.len()).map_err(|_| rusqlite::Error::InvalidQuery)?;
     let invalid_rows: i64 =
         transaction
             .query_row("SELECT COUNT(*) FROM entries WHERE namespace < 0 OR namespace >= ?1", [namespace_count], |row| row.get(0))?;
@@ -302,12 +303,12 @@ fn migrate(connection: &mut Connection, definitions: &[(String, String)]) -> Res
     if previous != definitions {
         transaction.execute("UPDATE entries SET namespace = namespace + 256", [])?;
         for (old_index, (directory, extension)) in previous.iter().enumerate() {
-            let old_namespace = i64::try_from(old_index).map_err(|_| RusqliteError::InvalidQuery)? + 256;
+            let old_namespace = i64::try_from(old_index).map_err(|_| rusqlite::Error::InvalidQuery)? + 256;
             if let Some(new_index) = definitions
                 .iter()
                 .position(|candidate| candidate.0.as_str() == directory.as_str() && candidate.1.as_str() == extension.as_str())
             {
-                let new_namespace = i64::try_from(new_index).map_err(|_| RusqliteError::InvalidQuery)?;
+                let new_namespace = i64::try_from(new_index).map_err(|_| rusqlite::Error::InvalidQuery)?;
                 transaction.execute("UPDATE entries SET namespace=?1 WHERE namespace=?2", params![new_namespace, old_namespace])?;
             } else {
                 transaction.execute("DELETE FROM entries WHERE namespace=?1", [old_namespace])?;
@@ -335,7 +336,7 @@ fn map_index_migration_error(error: MigrationError) -> MigrationError {
     }
 }
 
-fn valid_schema(transaction: &Transaction<'_>) -> Result<bool, RusqliteError> {
+fn valid_schema(transaction: &Transaction<'_>) -> Result<bool, rusqlite::Error> {
     let mut tables = transaction.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
     let names = tables.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
     if names != ["entries", "namespaces"] {
@@ -369,7 +370,7 @@ fn valid_schema(transaction: &Transaction<'_>) -> Result<bool, RusqliteError> {
     Ok(indexes == 0)
 }
 
-fn valid_columns(transaction: &Transaction<'_>, table: &str, expected: &[(&str, &str, i64, i64)]) -> Result<bool, RusqliteError> {
+fn valid_columns(transaction: &Transaction<'_>, table: &str, expected: &[(&str, &str, i64, i64)]) -> Result<bool, rusqlite::Error> {
     let mut statement = transaction.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = statement
         .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(5)?)))?
@@ -380,15 +381,15 @@ fn valid_columns(transaction: &Transaction<'_>, table: &str, expected: &[(&str, 
         .eq(expected.iter().copied()))
 }
 
-fn insert_namespaces(transaction: &Transaction<'_>, definitions: &[(String, String)]) -> Result<(), RusqliteError> {
+fn insert_namespaces(transaction: &Transaction<'_>, definitions: &[(String, String)]) -> Result<(), rusqlite::Error> {
     let mut statement = transaction.prepare("INSERT INTO namespaces(namespace, directory, extension) VALUES (?1, ?2, ?3)")?;
     for (index, (directory, extension)) in definitions.iter().enumerate() {
-        statement.execute(params![i64::try_from(index).map_err(|_| RusqliteError::InvalidQuery)?, directory, extension])?;
+        statement.execute(params![i64::try_from(index).map_err(|_| rusqlite::Error::InvalidQuery)?, directory, extension])?;
     }
     Ok(())
 }
 
-fn apply_mutations(transaction: &Transaction<'_>, mutations: Vec<Mutation>) -> Result<(), RusqliteError> {
+fn apply_mutations(transaction: &Transaction<'_>, mutations: Vec<Mutation>) -> Result<(), rusqlite::Error> {
     let mut put = transaction.prepare(
         "INSERT INTO entries(namespace, name, size, hash, last_use, use_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(namespace, name) DO UPDATE SET size=excluded.size, hash=excluded.hash, last_use=excluded.last_use, use_count=excluded.use_count",
@@ -414,16 +415,16 @@ fn apply_mutations(transaction: &Transaction<'_>, mutations: Vec<Mutation>) -> R
     Ok(())
 }
 
-fn blob<const N: usize>(bytes: Vec<u8>, column: usize) -> Result<[u8; N], RusqliteError> {
+fn blob<const N: usize>(bytes: Vec<u8>, column: usize) -> Result<[u8; N], rusqlite::Error> {
     bytes.try_into().map_err(|_| conversion_error(column, Type::Blob))
 }
 
-fn unsigned(value: i64, column: usize) -> Result<u64, RusqliteError> {
+fn unsigned(value: i64, column: usize) -> Result<u64, rusqlite::Error> {
     u64::try_from(value).map_err(|_| conversion_error(column, Type::Integer))
 }
 
-fn conversion_error(column: usize, kind: Type) -> RusqliteError {
-    RusqliteError::FromSqlConversionFailure(
+fn conversion_error(column: usize, kind: Type) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
         column,
         kind,
         Box::new(io::Error::new(io::ErrorKind::InvalidData, "invalid asset cache index row")) as Box<dyn Error + Send + Sync>,
@@ -434,13 +435,10 @@ fn sql_integer(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-fn map_index_constraint_error(error: RusqliteError) -> RusqliteError {
+fn map_index_constraint_error(error: rusqlite::Error) -> rusqlite::Error {
     match error {
-        RusqliteError::SqliteFailure(details, _) if details.code == rusqlite::ffi::ErrorCode::ConstraintViolation => {
-            RusqliteError::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_SCHEMA),
-                Some("asset cache index constraint mismatch".to_owned()),
-            )
+        rusqlite::Error::SqliteFailure(details, _) if details.code == ErrorCode::ConstraintViolation => {
+            rusqlite::Error::SqliteFailure(ffi::Error::new(SQLITE_SCHEMA), Some("asset cache index constraint mismatch".to_owned()))
         }
         error => error,
     }
@@ -456,25 +454,23 @@ pub(super) fn map_sqlite_error(error: SqliteError) -> StorageError {
             StorageError::Io(io::Error::new(io::ErrorKind::InvalidData, "asset cache index was recreated"))
         }
         SqliteError::Unavailable(error) => StorageError::Io(error),
-        SqliteError::Sqlite(RusqliteError::SqliteFailure(details, _)) if details.code == rusqlite::ffi::ErrorCode::OutOfMemory => {
+        SqliteError::Sqlite(rusqlite::Error::SqliteFailure(details, _)) if details.code == ErrorCode::OutOfMemory => {
             StorageError::Unavailable(UnavailableReason::Allocation)
         }
         SqliteError::Sqlite(error) => StorageError::Io(io::Error::other(error)),
     }
 }
 
-fn allocation_error() -> RusqliteError {
-    RusqliteError::SqliteFailure(
-        rusqlite::ffi::Error::new(rusqlite::ffi::ErrorCode::OutOfMemory as i32),
-        Some("asset cache index allocation failed".to_owned()),
-    )
+fn allocation_error() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(ffi::Error::new(ErrorCode::OutOfMemory as i32), Some("asset cache index allocation failed".to_owned()))
 }
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
     use crate::cache::{Namespace, NamespaceTable};
-    use tempfile::tempdir;
 
     #[test]
     fn oversized_namespace_recreates_index() {

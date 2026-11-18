@@ -1,4 +1,4 @@
-use std::{fmt, mem::size_of};
+use std::fmt;
 
 use llsd::{Limits, Value, xml};
 use serde::{
@@ -7,11 +7,13 @@ use serde::{
 };
 use tokio::{sync::OwnedSemaphorePermit, task::JoinError};
 
-use crate::capabilities::budget::{
-    MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_EVENT_QUEUE_RESPONSE_BYTES, MAX_LLSD_NESTING_DEPTH, MAX_LLSD_XML_ELEMENTS,
-    capability_llsd_limits, spawn_blocking_with_permit,
+use crate::{
+    capabilities::budget::{
+        MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_EVENT_QUEUE_RESPONSE_BYTES, MAX_LLSD_NESTING_DEPTH, MAX_LLSD_XML_ELEMENTS,
+        capability_llsd_limits, spawn_blocking_with_permit,
+    },
+    event::{CapabilityEvent, EventEnvelope},
 };
-use crate::event::{CapabilityEvent, EventEnvelope};
 
 const MAX_EVENT_QUEUE_BATCH_EVENTS: usize = 1024;
 const MAX_EVENT_QUEUE_CONTAINER_ITEMS: usize = super::MAX_QUEUED_CAPABILITY_EVENT_BYTES / size_of::<Value>();

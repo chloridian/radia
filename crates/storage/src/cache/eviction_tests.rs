@@ -73,7 +73,7 @@ fn size_limit_evicts_lru() {
     for id in [11, 12, 13] {
         cache.put(key(id), vec![1; 64 * 1024]).expect("store entry");
     }
-    std::assert_matches!(cache.lookup(key(12)), Lookup::Hit(_));
+    assert_matches!(cache.lookup(key(12)), Lookup::Hit(_));
     cache.set_size_limit(one_entry_limit).expect("shrink cache");
     assert_eq!(cache.entry_count(), 1);
     let Lookup::Hit(value) = cache.lookup(key(12)) else {
@@ -120,7 +120,7 @@ fn limits_enforce_once_per_batch() {
         resume_data.send(()).expect("resume blocker write");
         assert_matches!(
             blocker.join().expect("blocker thread"),
-            Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull
+            Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::StorageFull
         );
         first_limit.join().expect("first limit thread").expect("set first cache limit");
         final_limit.join().expect("final limit thread").expect("set final cache limit");
@@ -249,7 +249,7 @@ fn over_budget_put_keeps_siblings() {
     limit_thread.join().expect("limit thread").expect("set current cache limit");
     assert_matches!(
         blocker.join().expect("blocker thread"),
-        Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull
+        Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::StorageFull
     );
     commit.recv_timeout(Duration::from_secs(3)).expect("feasible puts committed");
     assert_eq!(cache.entry_count(), usize::from(ENTRIES) + 2 - 32);
@@ -417,7 +417,7 @@ fn failed_limit_keeps_previous() {
 
     assert_matches!(
         cache.set_size_limit(one_entry_limit),
-        Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull
+        Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::StorageFull
     );
     assert_eq!(cache.size_limit(), old_limit);
     assert_eq!(cache.entry_count(), 3);
@@ -460,7 +460,7 @@ fn failure_backs_off_until_command() {
     let (deferred_cycle, resume_deferred_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
     resume_failed_cycle.send(()).expect("resume after maintenance failure");
     deferred_cycle.recv_timeout(Duration::from_secs(3)).expect("idle maintenance deferred before deadline");
-    assert_matches!(retry_started.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+    assert_matches!(retry_started.try_recv(), Err(mpsc::TryRecvError::Empty));
     let (limit_queued, resume_limit_queued) = cache.pause_at(WritePoint::SetLimitQueued);
     let command = {
         let cache = Arc::clone(&cache);
@@ -577,7 +577,7 @@ fn protected_scan_stops_after_cycle() {
     cache.set_size_limit(cache.accounted_size()).expect("set current size limit");
 
     let writing_cache = Arc::clone(&cache);
-    let (reply, receiver) = std::sync::mpsc::channel();
+    let (reply, receiver) = mpsc::channel();
     let writer = thread::spawn(move || {
         let result = writing_cache.put(key(256), vec![2; 16]);
         reply.send(result).expect("report put result");
@@ -702,15 +702,15 @@ fn staged_writes_apply_in_order() {
         started.recv_timeout(Duration::from_secs(3)).expect("blocker reached its data write");
         let mut replies = Vec::new();
         for (key, value) in [(key(70), 1), (key(71), 2), (key(70), 3)] {
-            let (reply, receiver) = std::sync::mpsc::sync_channel(0);
+            let (reply, receiver) = mpsc::sync_channel(0);
             let bytes = vec![value; ENTRY_BYTES];
-            cache.queue.try_send(writer::Command::Put { key, bytes, reply }, ENTRY_BYTES).expect("queue staged put");
+            cache.queue.try_send(Command::Put { key, bytes, reply }, ENTRY_BYTES).expect("queue staged put");
             replies.push(receiver);
         }
         resume.send(()).expect("resume blocker write");
         assert_matches!(
             blocker.join().expect("blocker thread"),
-            Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull
+            Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::StorageFull
         );
         for receiver in replies {
             receiver.recv_timeout(Duration::from_secs(3)).expect("staged put reply").expect("commit staged put");

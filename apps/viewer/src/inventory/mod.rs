@@ -7,8 +7,12 @@ mod fetch;
 #[cfg(test)]
 mod test_support;
 
-pub(crate) use edits::{AisDelta, InventoryEditController, InventoryEditEvent, MoveExpectation};
-pub use edits::{InventoryEditHandle, InventoryEditOutcome, InventoryEditRejection};
-pub use favorites::FavoriteLocation;
-pub(crate) use fetch::{FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryFetchController, InventoryFetchEvent};
-pub use fetch::{InventoryFetchError, InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequestError, InventoryLoadingStatus};
+pub(crate) use self::{
+    edits::{AisDelta, InventoryEditController, InventoryEditEvent, MoveExpectation},
+    fetch::{FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryFetchController, InventoryFetchEvent},
+};
+pub use self::{
+    edits::{InventoryEditHandle, InventoryEditOutcome, InventoryEditRejection},
+    favorites::FavoriteLocation,
+    fetch::{InventoryFetchError, InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequestError, InventoryLoadingStatus},
+};

@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{assert_matches, net::SocketAddr};
 
 use protocol::{
     ChatType,
@@ -9,9 +9,12 @@ use tokio::{net::UdpSocket, spawn};
 use uuid::Uuid;
 
 use super::*;
-use crate::fixtures::{
-    http::{EventQueueTestServer, EventServerResponse, llsd_response, response},
-    session::{login_xml, receive_client_message, receive_udp, server_ack, set_sequence, test_fixture},
+use crate::{
+    fixtures::{
+        http::{EventQueueTestServer, EventServerResponse, llsd_response, response},
+        session::{login_xml, receive_client_message, receive_udp, server_ack, set_sequence, test_fixture},
+    },
+    session::thread,
 };
 
 const AGENT_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
@@ -48,7 +51,7 @@ async fn handle_send_reaches_simulator() {
         start_location: StartLocation::Last,
         mfa_hash: String::new(),
     };
-    let mut session = crate::session::thread::start_at(credentials, SessionOptions::default(), login_url).expect("start network session");
+    let mut session = thread::start_at(credentials, SessionOptions::default(), login_url).expect("start network session");
     let handle = session.handle();
 
     let (use_circuit, peer) = receive_udp(&simulator).await;
@@ -76,14 +79,14 @@ async fn handle_send_reaches_simulator() {
         .send(
             ChatFromViewer {
                 agent_data: chat_from_viewer::AgentData { agent_id, session_id },
-                chat_data: chat_from_viewer::ChatData { message: "outbound test".into(), chat_type: ChatType::Normal, channel: 0 },
+                chat_data: ChatData { message: "outbound test".into(), chat_type: ChatType::Normal, channel: 0 },
             },
             Delivery::Reliable,
         )
         .expect("queue viewer chat");
 
     let (_, chat_packet) = receive_client_message(&simulator, peer, |message| matches!(message, Message::ChatFromViewer(_))).await;
-    std::assert_matches!(chat_packet.message(), Message::ChatFromViewer(message) if message.chat_data.message == "outbound test");
+    assert_matches!(chat_packet.message(), Message::ChatFromViewer(message) if message.chat_data.message == "outbound test");
     assert!(chat_packet.is_reliable());
     simulator.send_to(&server_ack(102, chat_packet.sequence()), peer).await.expect("acknowledge viewer chat");
 

@@ -1,74 +1,59 @@
-use std::mem::size_of;
-
 use super::{AllocationStrategy, TypedMessage};
 use crate::{
-    lludp::{error::LLUdpError, schema_message::SchemaMessage, types::MessageId},
-    messages::{ExtraParameter, object},
+    lludp::{BlockInstance, FieldValue, error::LLUdpError, schema_message::SchemaMessage, types::MessageId},
+    messages::{
+        ExtraParameter,
+        agent::{
+            avatar_appearance::{AppearanceData, AppearanceHover, AttachmentBlock, VisualParam},
+            logout_reply::InventoryData,
+            teleport_failed::AlertInfo,
+        },
+        circuit::packet_ack::Packets,
+        generic_message::Parameter,
+        map::map_block_reply::Data,
+        object::{
+            improved_terse_object_update, kill_object, object_extra_params, object_update, object_update_cached, object_update_compressed,
+            request_multiple_objects,
+        },
+        parcel::parcel_properties::ParcelData,
+        region::{
+            region_handshake::RegionInfo4,
+            region_info::{CombatSettings, RegionInfo3, RegionInfo5},
+        },
+    },
     schema,
 };
 
 const _: () = {
-    assert!(size_of::<crate::messages::region::region_handshake::RegionInfo4>() <= 512);
-    assert!(size_of::<crate::messages::circuit::packet_ack::Packets>() <= 512);
-    assert!(size_of::<crate::messages::agent::logout_reply::InventoryData>() <= 512);
-    assert!(size_of::<crate::messages::map::map_block_reply::Data>() <= 512);
+    assert!(size_of::<RegionInfo4>() <= 512);
+    assert!(size_of::<Packets>() <= 512);
+    assert!(size_of::<InventoryData>() <= 512);
+    assert!(size_of::<Data>() <= 512);
     assert!(size_of::<ExtraParameter>() <= 32);
-    assert!(size_of::<object::object_update::ObjectData>() <= 512);
-    assert!(size_of::<object::object_update_compressed::ObjectData>() <= 512);
-    assert!(size_of::<object::improved_terse_object_update::ObjectData>() <= 512);
-    assert!(size_of::<object::improved_terse_object_update::ObjectBlock>() <= 512);
-    assert!(size_of::<object::object_update_cached::CachedObjectReference>() <= 512);
-    assert!(size_of::<object::kill_object::ObjectData>() <= 512);
-    assert!(size_of::<object::request_multiple_objects::ObjectRequest>() <= 512);
-    assert!(size_of::<object::object_extra_params::ExtraParamUpdate>() <= 512);
-    assert!(
-        size_of::<crate::messages::circuit::packet_ack::Packets>()
-            <= size_of::<crate::lludp::BlockInstance>() + size_of::<crate::lludp::FieldValue>()
-    );
-    assert!(
-        size_of::<crate::messages::agent::logout_reply::InventoryData>()
-            <= size_of::<crate::lludp::BlockInstance>() + size_of::<crate::lludp::FieldValue>()
-    );
-    assert!(
-        size_of::<crate::messages::map::map_block_reply::Data>()
-            <= size_of::<crate::lludp::BlockInstance>() + 9 * size_of::<crate::lludp::FieldValue>()
-    );
-    assert!(
-        size_of::<object::object_update_cached::CachedObjectReference>()
-            <= size_of::<crate::lludp::BlockInstance>() + 3 * size_of::<crate::lludp::FieldValue>()
-    );
-    assert!(
-        size_of::<object::kill_object::ObjectData>() <= size_of::<crate::lludp::BlockInstance>() + size_of::<crate::lludp::FieldValue>()
-    );
-    assert!(
-        size_of::<object::request_multiple_objects::ObjectRequest>()
-            <= size_of::<crate::lludp::BlockInstance>() + 2 * size_of::<crate::lludp::FieldValue>()
-    );
-    assert!(
-        size_of::<crate::messages::agent::avatar_appearance::VisualParam>()
-            <= size_of::<crate::lludp::BlockInstance>() + size_of::<crate::lludp::FieldValue>()
-    );
-    assert!(
-        size_of::<crate::messages::agent::avatar_appearance::AppearanceData>()
-            <= size_of::<crate::lludp::BlockInstance>() + 3 * size_of::<crate::lludp::FieldValue>()
-    );
-    assert!(
-        size_of::<crate::messages::agent::avatar_appearance::AppearanceHover>()
-            <= size_of::<crate::lludp::BlockInstance>() + size_of::<crate::lludp::FieldValue>()
-    );
-    assert!(
-        size_of::<crate::messages::agent::avatar_appearance::AttachmentBlock>()
-            <= size_of::<crate::lludp::BlockInstance>() + 2 * size_of::<crate::lludp::FieldValue>()
-    );
-    assert!(
-        size_of::<crate::messages::generic_message::Parameter>()
-            <= size_of::<crate::lludp::BlockInstance>() + size_of::<crate::lludp::FieldValue>()
-    );
-    assert!(size_of::<crate::messages::parcel::parcel_properties::ParcelData>() <= 60 * size_of::<crate::lludp::FieldValue>());
-    assert!(size_of::<crate::messages::agent::teleport_failed::AlertInfo>() <= 2 * size_of::<crate::lludp::FieldValue>());
-    assert!(size_of::<crate::messages::region::region_info::RegionInfo3>() <= size_of::<crate::lludp::FieldValue>());
-    assert!(size_of::<crate::messages::region::region_info::RegionInfo5>() <= 7 * size_of::<crate::lludp::FieldValue>());
-    assert!(size_of::<crate::messages::region::region_info::CombatSettings>() <= 6 * size_of::<crate::lludp::FieldValue>());
+    assert!(size_of::<object_update::ObjectData>() <= 512);
+    assert!(size_of::<object_update_compressed::ObjectData>() <= 512);
+    assert!(size_of::<improved_terse_object_update::ObjectData>() <= 512);
+    assert!(size_of::<improved_terse_object_update::ObjectBlock>() <= 512);
+    assert!(size_of::<object_update_cached::CachedObjectReference>() <= 512);
+    assert!(size_of::<kill_object::ObjectData>() <= 512);
+    assert!(size_of::<request_multiple_objects::ObjectRequest>() <= 512);
+    assert!(size_of::<object_extra_params::ExtraParamUpdate>() <= 512);
+    assert!(size_of::<Packets>() <= size_of::<BlockInstance>() + size_of::<FieldValue>());
+    assert!(size_of::<InventoryData>() <= size_of::<BlockInstance>() + size_of::<FieldValue>());
+    assert!(size_of::<Data>() <= size_of::<BlockInstance>() + 9 * size_of::<FieldValue>());
+    assert!(size_of::<object_update_cached::CachedObjectReference>() <= size_of::<BlockInstance>() + 3 * size_of::<FieldValue>());
+    assert!(size_of::<kill_object::ObjectData>() <= size_of::<BlockInstance>() + size_of::<FieldValue>());
+    assert!(size_of::<request_multiple_objects::ObjectRequest>() <= size_of::<BlockInstance>() + 2 * size_of::<FieldValue>());
+    assert!(size_of::<VisualParam>() <= size_of::<BlockInstance>() + size_of::<FieldValue>());
+    assert!(size_of::<AppearanceData>() <= size_of::<BlockInstance>() + 3 * size_of::<FieldValue>());
+    assert!(size_of::<AppearanceHover>() <= size_of::<BlockInstance>() + size_of::<FieldValue>());
+    assert!(size_of::<AttachmentBlock>() <= size_of::<BlockInstance>() + 2 * size_of::<FieldValue>());
+    assert!(size_of::<Parameter>() <= size_of::<BlockInstance>() + size_of::<FieldValue>());
+    assert!(size_of::<ParcelData>() <= 60 * size_of::<FieldValue>());
+    assert!(size_of::<AlertInfo>() <= 2 * size_of::<FieldValue>());
+    assert!(size_of::<RegionInfo3>() <= size_of::<FieldValue>());
+    assert!(size_of::<RegionInfo5>() <= 7 * size_of::<FieldValue>());
+    assert!(size_of::<CombatSettings>() <= 6 * size_of::<FieldValue>());
 };
 
 pub(crate) fn typed_allocation_bound<T: TypedMessage>(payload: &[u8]) -> Result<(AllocationStrategy, usize), LLUdpError> {
@@ -114,7 +99,7 @@ pub(crate) fn add_extra_parameter_capacity(total: &mut usize, parameters: &Vec<E
     }
 }
 
-pub(crate) fn add_object_update_capacity(total: &mut usize, object: &object::object_update::ObjectData) {
+pub(crate) fn add_object_update_capacity(total: &mut usize, object: &object_update::ObjectData) {
     add_capacity(total, object.texture_entry.capacity(), size_of::<u8>());
     add_capacity(total, object.texture_anim.capacity(), size_of::<u8>());
     add_capacity(total, object.name_value.capacity(), size_of::<u8>());
@@ -125,8 +110,8 @@ pub(crate) fn add_object_update_capacity(total: &mut usize, object: &object::obj
     add_extra_parameter_capacity(total, &object.extra_parameters);
 }
 
-pub(crate) fn add_object_update_compressed_capacity(total: &mut usize, object: &object::object_update_compressed::ObjectData) {
-    if let Some(object::object_update_compressed::ObjectSpecificData::ScratchPad(bytes)) = &object.data {
+pub(crate) fn add_object_update_compressed_capacity(total: &mut usize, object: &object_update_compressed::ObjectData) {
+    if let Some(object_update_compressed::ObjectSpecificData::ScratchPad(bytes)) = &object.data {
         add_capacity(total, bytes.capacity(), size_of::<u8>());
     }
     if let Some(text) = &object.text {

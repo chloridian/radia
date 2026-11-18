@@ -3,12 +3,14 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use futures::lock;
+
 use crate::inventory::favorite_store;
 
-pub(crate) type WriteLock = Arc<futures::lock::Mutex<()>>;
+pub(crate) type WriteLock = Arc<lock::Mutex<()>>;
 
 pub(crate) fn write_lock() -> WriteLock {
-    Arc::new(futures::lock::Mutex::new(()))
+    Arc::new(lock::Mutex::new(()))
 }
 
 pub(crate) async fn save_favorite_store(
@@ -41,13 +43,13 @@ mod tests {
         },
     };
 
+    use futures::executor;
     use network::Grid;
     use tempfile::tempdir;
     use uuid::Uuid;
 
-    use crate::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
-
     use super::*;
+    use crate::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
 
     #[test]
     fn stale_favorite_snapshot_is_ignored() {
@@ -74,7 +76,7 @@ mod tests {
             )
             .expect("replace new favorites");
 
-        let (old_result, new_result) = futures::executor::block_on(async {
+        let (old_result, new_result) = executor::block_on(async {
             let lock = write_lock();
             let guard = lock.lock().await;
             let generation = Arc::new(AtomicU64::new(1));

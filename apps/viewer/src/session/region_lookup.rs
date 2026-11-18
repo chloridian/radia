@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    error,
     fmt::{self, Display, Formatter},
     future::Future,
     net::SocketAddr,
@@ -14,8 +15,10 @@ use protocol::{
     lludp::Message,
     messages::{
         MapBlockRequest, RegionHandleRequest,
-        map::map_block_reply,
-        map::map_block_request::{self, PositionData},
+        map::{
+            map_block_reply,
+            map_block_request::{self, PositionData},
+        },
         region::region_handle_request::RequestBlock,
     },
 };
@@ -55,8 +58,8 @@ impl Display for RegionLookupError {
     }
 }
 
-impl std::error::Error for RegionLookupError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for RegionLookupError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Send(error) => Some(error.as_ref()),
             _ => None,
@@ -463,7 +466,7 @@ mod tests {
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
-        task::Poll,
+        task::{Context, Poll},
     };
 
     use protocol::{
@@ -472,7 +475,7 @@ mod tests {
     };
     use tokio::{
         spawn,
-        sync::mpsc::{UnboundedReceiver, unbounded_channel},
+        sync::mpsc::{UnboundedReceiver, error::TryRecvError, unbounded_channel},
         task::yield_now,
         time::advance,
     };
@@ -522,7 +525,7 @@ mod tests {
         })
     }
 
-    fn poll_pending<F: Future>(future: Pin<&mut F>, context: &mut std::task::Context<'_>)
+    fn poll_pending<F: Future>(future: Pin<&mut F>, context: &mut Context<'_>)
     where
         F::Output: fmt::Debug,
     {
@@ -616,7 +619,7 @@ mod tests {
             }),
         );
         yield_now().await;
-        assert_matches!(sent.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty));
+        assert_matches!(sent.try_recv(), Err(TryRecvError::Empty));
         lookup.handle_message(SIMULATOR, &map_reply(AGENT_ID, 42, 73, "Merged Region"));
         let (cell_name, id_name) = tokio::join!(cell_lookup, id_lookup);
         assert_matches!(cell_name, Ok(name) if name == "Merged Region");
@@ -689,7 +692,7 @@ mod tests {
         let mut delay = INITIAL_SEND_RETRY_DELAY;
         for attempt in 1..SEND_RETRY_LIMIT {
             advance(delay - Duration::from_millis(1)).await;
-            assert_matches!(attempt_receiver.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty));
+            assert_matches!(attempt_receiver.try_recv(), Err(TryRecvError::Empty));
             advance(Duration::from_millis(1)).await;
             assert_eq!(attempt_receiver.recv().await, Some(attempt));
             delay = delay.saturating_mul(2);
@@ -745,7 +748,7 @@ mod tests {
         assert_matches!(first.await, Err(error) if error.is_cancelled());
         advance(Duration::from_secs(1)).await;
         yield_now().await;
-        assert_matches!(attempt_receiver.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty));
+        assert_matches!(attempt_receiver.try_recv(), Err(TryRecvError::Empty));
         assert_eq!(send_attempts.load(Ordering::SeqCst), 1);
 
         let replacement_lookup = lookup.clone();
@@ -811,14 +814,14 @@ mod tests {
             }),
         );
         assert_matches!(request.await, Err(RegionLookupError::InvalidHandle));
-        assert_matches!(sent.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty));
+        assert_matches!(sent.try_recv(), Err(TryRecvError::Empty));
     }
 
     #[tokio::test]
     async fn rejects_out_of_range_cells() {
         let (lookup, mut sent) = lookup();
         assert_matches!(lookup.lookup_region_at(RegionGridCell::new(u32::from(u16::MAX) + 1, 0)).await, Err(RegionLookupError::OutOfRange));
-        assert_matches!(sent.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty));
+        assert_matches!(sent.try_recv(), Err(TryRecvError::Empty));
     }
 
     #[tokio::test(start_paused = true)]
@@ -837,6 +840,6 @@ mod tests {
         let (lookup, mut sent) = lookup();
         lookup.lock_state().next_generation = u64::MAX;
         assert_matches!(lookup.lookup_region_by_id(REGION_ID).await, Err(RegionLookupError::GenerationExhausted));
-        assert_matches!(sent.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty));
+        assert_matches!(sent.try_recv(), Err(TryRecvError::Empty));
     }
 }

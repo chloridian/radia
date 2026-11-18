@@ -1,4 +1,4 @@
-use std::{collections::HashMap, num::NonZeroU32};
+use std::{assert_matches, collections::HashMap, mem, num::NonZeroU32, time::Instant};
 
 use math::{Quat, Vec3};
 use network::{
@@ -6,9 +6,11 @@ use network::{
     PacketOrder::{Ambiguous, Ordered},
 };
 use protocol::{
-    lludp::Message,
-    lludp::Message::{ImprovedTerseObjectUpdate, KillObject, ObjectUpdate, ObjectUpdateCached, ObjectUpdateCompressed},
-    messages::{CacheMissType::Full, CachedObjectReference, ObjectUpdateCached as CachedUpdate, RequestAgentData, object::kill_object},
+    lludp::{
+        Message,
+        Message::{ImprovedTerseObjectUpdate, KillObject, ObjectUpdate, ObjectUpdateCached, ObjectUpdateCompressed},
+    },
+    messages::{self, CacheMissType, CacheMissType::Full, CachedObjectReference, RequestAgentData, object::kill_object},
 };
 use test_support::lludp::vectors;
 use tokio::runtime::Handle;
@@ -20,18 +22,23 @@ use world::{
     LocalAddress, ObjectObservation, Parent, Pose, Region, RegionHandle, UpdateSource,
 };
 
-use crate::session::coordinator::events::{MovementCompleteOutcome, PendingWorldHandoff, WorldHandoff};
-use crate::session::coordinator::tests::apply_world_event;
-use crate::session::coordinator::tests::{
-    agent_observation, agent_update, fixture_packet, region_handshake, simulator_message, simulator_message_at_order,
+use crate::{
+    session::{
+        coordinator::{
+            events::{MovementCompleteOutcome, PendingWorldHandoff, WorldHandoff},
+            tests::{
+                agent_observation, agent_update, apply_world_event, fixture_packet, region_handshake, simulator_message,
+                simulator_message_at_order,
+            },
+        },
+        inbound::{ObjectBatch, ObjectMediaRequest, ObjectOperation},
+        object_cache,
+        object_cache::{ObjectCacheEvent, ObjectCacheSession},
+        recovery::recovery_request,
+        world::{IngestStatus, SessionWorld, viewer_world_limits},
+    },
+    test_helpers::simulator_id,
 };
-use crate::session::inbound::{ObjectBatch, ObjectMediaRequest, ObjectOperation};
-use crate::session::{
-    object_cache::{ObjectCacheEvent, ObjectCacheSession},
-    recovery::recovery_request,
-    world::{IngestStatus, SessionWorld, viewer_world_limits},
-};
-use crate::test_helpers::simulator_id;
 
 fn apply_world_event_with_handoff(
     world: &mut SessionWorld,
@@ -44,7 +51,7 @@ fn apply_world_event_with_handoff(
     let mut handoff = WorldHandoff {
         world_primary: *world_primary,
         promoted_target: *promoted_target,
-        observations: std::mem::take(observations),
+        observations: mem::take(observations),
         pending_movement_completes: HashMap::new(),
     };
     let result = handoff.apply_event(world, event, agent_id);
@@ -94,7 +101,7 @@ async fn apply_with_cache(
     simulator: network::SimulatorId,
     sequence: u32,
     message: &Message,
-) -> (Vec<(Option<network::SimulatorId>, LocalAddress, protocol::messages::CacheMissType)>, Vec<ObjectMediaRequest>) {
+) -> (Vec<(Option<network::SimulatorId>, LocalAddress, CacheMissType)>, Vec<ObjectMediaRequest>) {
     let mut recovery = Vec::new();
     let mut media_requests = Vec::new();
     let _ = handoff
@@ -103,7 +110,7 @@ async fn apply_with_cache(
             simulator,
             sequence,
             Ordered(u64::from(sequence)),
-            std::time::Instant::now(),
+            Instant::now(),
             None,
             message,
             None,
@@ -143,7 +150,7 @@ async fn await_cache_write(cache: &mut ObjectCacheSession) {
 async fn interleaved_updates_preserve_indexes() {
     let directory = tempfile::tempdir().expect("create isolated cache directory");
     let simulator = simulator_id();
-    let mut cache = crate::session::object_cache::open_for_test(directory.path().join("objects.sqlite"), network::Grid::Agni);
+    let mut cache = object_cache::open_for_test(directory.path().join("objects.sqlite"), network::Grid::Agni);
     let Message::RegionHandshake(mut handshake) = fixture_packet(vectors::REGION_HANDSHAKE).into_message() else {
         panic!("region handshake fixture should decode as a handshake");
     };
@@ -168,8 +175,8 @@ async fn interleaved_updates_preserve_indexes() {
     assert_public_world_invariants(&world, region);
 
     let make_cached = |message: &Message| {
-        let Message::ObjectUpdate(update) = message else { panic!("cached source is a full update") };
-        Message::ObjectUpdateCached(CachedUpdate {
+        let ObjectUpdate(update) = message else { panic!("cached source is a full update") };
+        ObjectUpdateCached(messages::ObjectUpdateCached {
             region_data: update.region_data,
             objects: update
                 .objects
@@ -185,11 +192,11 @@ async fn interleaved_updates_preserve_indexes() {
     assert_public_world_invariants(&world, region);
 
     let parent_local_id = match &full {
-        Message::ObjectUpdate(update) => update.objects[0].local_id,
+        ObjectUpdate(update) => update.objects[0].local_id,
         _ => unreachable!(),
     };
     let parent_id = match &full {
-        Message::ObjectUpdate(update) => update.objects[0].id,
+        ObjectUpdate(update) => update.objects[0].id,
         _ => unreachable!(),
     };
     let mut terse = fixture_packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).into_message();
@@ -209,7 +216,7 @@ async fn interleaved_updates_preserve_indexes() {
     let parent = world.world().object(world.world().entity(parent_id).expect("parent object remains live")).expect("parent object exists");
     assert_eq!(parent.transform().position(), Some(Vec3::new(31.0, 42.0, 53.0)));
 
-    let Message::ObjectUpdate(update) = &mut full else { unreachable!() };
+    let ObjectUpdate(update) = &mut full else { unreachable!() };
     update.objects[0].crc = update.objects[0].crc.wrapping_add(1);
     apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 5, &full).await;
     cache.record_update(simulator, full.clone());
@@ -221,7 +228,7 @@ async fn interleaved_updates_preserve_indexes() {
     assert_public_world_invariants(&world, region);
 
     let child_local_id = match &full {
-        Message::ObjectUpdate(update) => update.objects[1].local_id,
+        ObjectUpdate(update) => update.objects[1].local_id,
         _ => unreachable!(),
     };
     let mut terse = fixture_packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).into_message();
@@ -241,7 +248,7 @@ async fn interleaved_updates_preserve_indexes() {
 async fn different_cached_identity_requests_full() {
     let directory = tempfile::tempdir().expect("create isolated cache directory");
     let simulator = simulator_id();
-    let mut cache = crate::session::object_cache::open_for_test(directory.path().join("objects.sqlite"), network::Grid::Agni);
+    let mut cache = object_cache::open_for_test(directory.path().join("objects.sqlite"), network::Grid::Agni);
     let Message::RegionHandshake(mut handshake) = fixture_packet(vectors::REGION_HANDSHAKE).into_message() else {
         panic!("region handshake fixture should decode as a handshake");
     };
@@ -283,7 +290,7 @@ async fn different_cached_identity_requests_full() {
     load_object_cache(&mut cache, simulator).await;
 
     let ObjectUpdate(update) = &full_b else { unreachable!() };
-    let cached = Message::ObjectUpdateCached(CachedUpdate {
+    let cached = ObjectUpdateCached(messages::ObjectUpdateCached {
         region_data: update.region_data,
         objects: update
             .objects
@@ -318,7 +325,7 @@ async fn different_cached_identity_requests_full() {
 async fn recovered_media_reaches_handoff() {
     let directory = tempfile::tempdir().expect("create isolated cache directory");
     let simulator = simulator_id();
-    let mut cache = crate::session::object_cache::open_for_test(directory.path().join("objects.sqlite"), network::Grid::Agni);
+    let mut cache = object_cache::open_for_test(directory.path().join("objects.sqlite"), network::Grid::Agni);
     let Message::RegionHandshake(mut handshake) = fixture_packet(vectors::REGION_HANDSHAKE).into_message() else {
         panic!("region handshake fixture should decode as a handshake");
     };
@@ -347,7 +354,7 @@ async fn recovered_media_reaches_handoff() {
     load_object_cache(&mut cache, simulator).await;
 
     let ObjectUpdate(update) = &full else { unreachable!() };
-    let cached = Message::ObjectUpdateCached(CachedUpdate {
+    let cached = ObjectUpdateCached(messages::ObjectUpdateCached {
         region_data: update.region_data,
         objects: update
             .objects
@@ -439,7 +446,7 @@ fn primary_movement_resolves_origin() {
     handoff.session_ready(&mut intake, primary_simulator, agent_id);
 
     assert_eq!(intake.world().region(region).and_then(|info| info.resolved_origin()), None);
-    let received_at = std::time::Instant::now();
+    let received_at = Instant::now();
     assert_eq!(
         handoff.movement_complete(&mut intake, primary_simulator, Some((agent_id, Uuid::nil())), &movement, received_at),
         MovementCompleteOutcome::Rejected
@@ -472,7 +479,7 @@ fn destination_movement_awaits_promotion() {
     let destination_region = world.register_simulator(destination, None).expect("destination region");
     let mut handoff = WorldHandoff::default();
     handoff.session_ready(&mut world, source, agent_id);
-    let received_at = std::time::Instant::now();
+    let received_at = Instant::now();
 
     assert_eq!(
         handoff.movement_complete(&mut world, destination, Some((agent_id, session_id)), &movement, received_at),
@@ -543,7 +550,7 @@ fn agent_waits_for_primary_promotion() {
         Some(agent_id),
     )
     .expect("ingest ambiguous destination packet");
-    assert_eq!(observations.get(&destination_id).unwrap().source.order(), ::world::OrderEvidence::Ordered(20));
+    assert_eq!(observations.get(&destination_id).unwrap().source.order(), world::OrderEvidence::Ordered(20));
 
     let state = intake.world();
     let agent = state.object(state.entity(agent_id).expect("source agent remains present")).expect("agent object");
@@ -596,7 +603,7 @@ fn promoted_handoff_preserves_field_rejections() {
     let source_region = intake.register_simulator(source_id, None).expect("register source region");
     let destination_region = intake.register_simulator(destination_id, None).expect("register destination region");
     let source_observation =
-        agent_observation(UpdateSource::new(source_region, 1, ::world::OrderEvidence::Ordered(1), 0), 10, agent_id, None);
+        agent_observation(UpdateSource::new(source_region, 1, world::OrderEvidence::Ordered(1), 0), 10, agent_id, None);
     intake
         .apply_object_batch(
             source_id,
@@ -614,7 +621,7 @@ fn promoted_handoff_preserves_field_rejections() {
     let mut pending = None;
     assert!(begin_world_handoff(&mut world_primary, &mut pending, source_id, destination_id));
     let observation = agent_observation(
-        UpdateSource::new(destination_region, 2, ::world::OrderEvidence::Ordered(2), 0),
+        UpdateSource::new(destination_region, 2, world::OrderEvidence::Ordered(2), 0),
         20,
         agent_id,
         Some(Pose { position: None, rotation: Some(Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0)) }),
@@ -625,7 +632,7 @@ fn promoted_handoff_preserves_field_rejections() {
     assert!(completed);
     let summary = summary.expect("promoted handoff produces an ingest summary");
     let applied = summary.blocks[0].applied().expect("handoff applies");
-    assert!(applied.rejections.iter().any(|rejection| matches!(rejection.reason, ::world::FieldRejectionReason::InvalidRotation)));
+    assert!(applied.rejections.iter().any(|rejection| matches!(rejection.reason, world::FieldRejectionReason::InvalidRotation)));
 }
 
 #[test]
@@ -664,7 +671,7 @@ fn newer_handoff_conflicts_invalidate_observation() {
     .expect("buffer destination agent");
 
     let removed_address = LocalAddress::new(destination_region, NonZeroU32::new(20).expect("nonzero local ID"));
-    let removal = Message::KillObject(kill_object::KillObject { object_data: vec![kill_object::ObjectData { local_id: 20 }] });
+    let removal = KillObject(kill_object::KillObject { object_data: vec![kill_object::ObjectData { local_id: 20 }] });
     let (_, summary) = apply_world_event_with_handoff(
         &mut intake,
         &simulator_message_at_order(destination_id, 3, Ordered(19), removal.clone()),
@@ -675,7 +682,7 @@ fn newer_handoff_conflicts_invalidate_observation() {
     )
     .expect("apply stale kill");
     let result = summary.blocks[0].applied().expect("recorded kill");
-    std::assert_matches!(&result.outcome, TombstoneRecorded(address) if *address == removed_address);
+    assert_matches!(&result.outcome, TombstoneRecorded(address) if *address == removed_address);
     assert!(observations.contains_key(&destination_id));
 
     apply_world_event_with_handoff(
@@ -874,7 +881,7 @@ fn unknown_removal_cancels_recovery() {
     for (block, address) in summary.blocks.iter().zip(&addresses) {
         let result = block.applied().expect("recorded tombstone");
         assert_eq!(result.revision, None);
-        std::assert_matches!(&result.outcome, TombstoneRecorded(recorded) if recorded == address);
+        assert_matches!(&result.outcome, TombstoneRecorded(recorded) if recorded == address);
     }
     assert_eq!(summary.recovery_cancellation_addresses().collect::<Vec<_>>(), addresses);
 }
@@ -889,13 +896,13 @@ fn repeated_removal_keeps_recovery() {
 
     let (_, first) = apply_world_event(&mut intake, &simulator_message(simulator_id, 1, message.clone())).expect("registered simulator");
     let first_result = first.blocks[0].applied().expect("recorded tombstone");
-    std::assert_matches!(&first_result.outcome, TombstoneRecorded(_));
+    assert_matches!(&first_result.outcome, TombstoneRecorded(_));
 
     let (_, repeated) = apply_world_event(&mut intake, &simulator_message(simulator_id, 1, message)).expect("registered simulator");
     let repeated_result = repeated.blocks[0].applied().expect("unchanged removal");
 
     assert_eq!(repeated_result.revision, None);
-    std::assert_matches!(&repeated_result.outcome, Unchanged);
+    assert_matches!(&repeated_result.outcome, Unchanged);
     assert_eq!(repeated.recovery_cancellation_addresses().count(), 0);
 }
 
@@ -924,7 +931,7 @@ fn object_update_order_schedules_recovery() {
     {
         let state = intake.world();
         let child = state.object(state.entity(child_id).unwrap()).unwrap();
-        std::assert_matches!(
+        assert_matches!(
             child.parent(),
             Parent::Resolved(parent) if state.object(parent).unwrap().id() == parent_id
         );

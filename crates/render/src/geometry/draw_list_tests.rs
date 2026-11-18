@@ -1,13 +1,16 @@
 use std::{
-    assert_matches,
+    assert_matches, cmp,
     collections::{HashMap, HashSet},
+    f64::consts::TAU,
+    iter,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use assets::{Budget, Content, LoadJob, Priority, Request, Resource, Sampler, Status, Store};
 use math::{DVec3, Frustum, Mat4, Quat, Vec3};
-use proptest::{prelude::*, test_runner::RngSeed};
+use proptest::{collection, prelude::*, test_runner::RngSeed};
+use test_support::texture::GRAY_ALPHA_J2C;
 use utils::AssetId;
 use uuid::Uuid;
 use world::Region;
@@ -24,8 +27,11 @@ use crate::{
         visibility::WorldSphere,
     },
     material::FaceParams,
+    pipeline,
     pipeline::{INSTANCE_BYTES, Pipeline},
-    scene::{Camera, SharedMesh},
+    scene,
+    scene::{Camera, SceneView, SharedMesh},
+    test_support::registered_region,
     texture::TextureKey,
 };
 
@@ -109,7 +115,7 @@ fn stale_layout_retires_whole_build() {
 
 #[test]
 fn canceled_build_keeps_committed_patches() {
-    let (_region_world, region) = crate::test_support::registered_region();
+    let (_region_world, region) = registered_region();
     let (_scene, view, _) = fixtures::scene(255);
     let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
     let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
@@ -217,7 +223,7 @@ fn draw_changes_match_fresh_layout() {
 
 #[test]
 fn hiding_slot_preserves_others() {
-    let (_region_world, region) = crate::test_support::registered_region();
+    let (_region_world, region) = registered_region();
     let (_scene, view, _) = fixtures::scene(255);
     let object = view.objects().next().expect("fixture object");
     let (_, mesh) = object.mesh().expect("fixture mesh");
@@ -246,7 +252,7 @@ fn hiding_slot_preserves_others() {
 
 #[test]
 fn overflow_omits_until_in_budget() {
-    let (_region_world, region) = crate::test_support::registered_region();
+    let (_region_world, region) = registered_region();
     let (_scene, view, _) = fixtures::scene(255);
     let object = view.objects().next().expect("fixture object");
     let (_, mesh) = object.mesh().expect("fixture mesh");
@@ -314,7 +320,7 @@ fn overflow_omits_until_in_budget() {
 
 #[test]
 fn moved_faces_cull_by_their_pose() {
-    let (_region_world, region) = crate::test_support::registered_region();
+    let (_region_world, region) = registered_region();
     let (_scene, view, _) = fixtures::scene(255);
     let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
     let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
@@ -334,7 +340,7 @@ fn moved_faces_cull_by_their_pose() {
     };
     let target_emitted = |items: &FrameCache, list: &DrawList, camera: Camera| {
         let mut view = ViewDraws::default();
-        list.select(&items.items, camera, &Frustum::from_clip_matrix(crate::pipeline::projection(camera, [128, 128])), &mut view);
+        list.select(&items.items, camera, &Frustum::from_clip_matrix(pipeline::projection(camera, [128, 128])), &mut view);
         let face = &items.items.get(target).expect("target item").faces[0];
         face_command(list, &view, face).1
     };
@@ -360,13 +366,13 @@ fn moved_faces_cull_by_their_pose() {
 
 #[test]
 fn evicted_mesh_never_draws() {
-    let (_region_world, region) = crate::test_support::registered_region();
-    let meshes = crate::scene::distinct_meshes_for_test(2);
+    let (_region_world, region) = registered_region();
+    let meshes = scene::distinct_meshes_for_test(2);
     let (evicted, kept) = (meshes[0].id(), meshes[1].id());
     let textures = [loaded_texture(9_200_001), loaded_texture(9_200_002)];
     let camera = camera(0.0);
     let origin = scene_origin(camera.position());
-    let frustum = Frustum::from_clip_matrix(crate::pipeline::projection(camera, [128, 128]));
+    let frustum = Frustum::from_clip_matrix(pipeline::projection(camera, [128, 128]));
     let drawn = |list: &DrawList, items: &FrameCache| {
         let mut view = ViewDraws::default();
         list.select(&items.items, camera, &frustum, &mut view);
@@ -418,9 +424,9 @@ proptest! {
 
     #[test]
     fn culling_matches_face_visibility(
-        placements in prop::collection::vec((-100.0f64..100.0, -100.0f64..100.0, -12.0f64..12.0, 0.25f32..12.0, 0u8..6), 1..160),
+        placements in collection::vec((-100.0f64..100.0, -100.0f64..100.0, -12.0f64..12.0, 0.25f32..12.0, 0u8..6), 1..160),
         eye in (-50.0f64..50.0, -50.0f64..50.0, -8.0f64..8.0),
-        yaw in 0.0f64..std::f64::consts::TAU,
+        yaw in 0.0f64..TAU,
         pitch in -0.6f64..0.6,
         draw_distance in 32.0f64..160.0,
     ) {
@@ -429,7 +435,7 @@ proptest! {
 }
 
 fn assert_cull_matches_faces(placements: &[(f64, f64, f64, f32, u8)], eye: DVec3, yaw: f64, pitch: f64, draw_distance: f64) {
-    let (_region_world, region) = crate::test_support::registered_region();
+    let (_region_world, region) = registered_region();
     let (_scene, view, _) = fixtures::scene(255);
     let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
     let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
@@ -451,7 +457,7 @@ fn assert_cull_matches_faces(placements: &[(f64, f64, f64, f32, u8)], eye: DVec3
     visible.sort_unstable_by_key(|index| items.items.get(*index).map(|item| item.id));
     layout(&mut list, &visible, &mut items.items, camera);
 
-    let frustum = Frustum::from_clip_matrix(crate::pipeline::projection(camera, viewport));
+    let frustum = Frustum::from_clip_matrix(pipeline::projection(camera, viewport));
     let mut view = ViewDraws::default();
     list.select(&items.items, camera, &frustum, &mut view);
     for index in &visible {
@@ -494,7 +500,7 @@ proptest! {
 
     #[test]
     fn randomized_updates_match_fresh_layouts(
-        operations in prop::collection::vec((0u8..6, 0u8..8, 0u8..9, -3i8..4, -3i8..4), 1..80)
+        operations in collection::vec((0u8..6, 0u8..8, 0u8..9, -3i8..4, -3i8..4), 1..80)
     ) {
         let generated = operations;
         let mut operations = vec![
@@ -512,8 +518,8 @@ proptest! {
     }
 
     #[test]
-    fn fullbright_draws_follow_lit(styles in prop::collection::vec(0u8..9, 1..24)) {
-        let (_region_world, region) = crate::test_support::registered_region();
+    fn fullbright_draws_follow_lit(styles in collection::vec(0u8..9, 1..24)) {
+        let (_region_world, region) = registered_region();
         let (_scene, view, _) = fixtures::scene(255);
         let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
         let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
@@ -524,7 +530,7 @@ proptest! {
         let visible = styles
             .iter()
             .copied()
-            .chain(std::iter::repeat_n(0, 1_100))
+            .chain(iter::repeat_n(0, 1_100))
             .zip(1u128..)
             .map(|(style, id)| {
                 items.insert_item(new_item((2, id, 0), style, 0.0, origin, &mesh, region, &textures, &mut list)).expect("test item index")
@@ -543,7 +549,7 @@ proptest! {
         prop_assert_eq!(ranks.contains(&1), has_fullbright);
 
         let mut view = ViewDraws::default();
-        list.select(&items.items, camera, &Frustum::from_clip_matrix(crate::pipeline::projection(camera, [128, 128])), &mut view);
+        list.select(&items.items, camera, &Frustum::from_clip_matrix(pipeline::projection(camera, [128, 128])), &mut view);
         let culled = view.opaque.iter().map(|index| ranks[*index as usize]).collect::<Vec<_>>();
         prop_assert!(!culled.is_empty() && culled.is_sorted(), "culled opaque classes out of order: {culled:?}");
 
@@ -563,7 +569,7 @@ proptest! {
 }
 
 fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
-    let (_region_world, region) = crate::test_support::registered_region();
+    let (_region_world, region) = registered_region();
     let (_scene, view, _) = fixtures::scene(255);
     let first_object = view.objects().next().expect("fixture object");
     let (_, mesh) = first_object.mesh().expect("fixture mesh");
@@ -655,8 +661,8 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
     }
 }
 
-fn active_layout() -> (world::World, crate::scene::SceneView, Camera, FrameCache, DrawList, ItemIndex) {
-    let (_region_world, region) = crate::test_support::registered_region();
+fn active_layout() -> (world::World, SceneView, Camera, FrameCache, DrawList, ItemIndex) {
+    let (_region_world, region) = registered_region();
     let (_scene, view, _) = fixtures::scene(255);
     let object = view.objects().next().expect("fixture object");
     let (_, mesh) = object.mesh().expect("fixture mesh");
@@ -718,15 +724,15 @@ fn staged_entry_count(build: &super::LayoutBuild) -> usize {
 
 fn staged_allocation_bytes(build: &super::LayoutBuild) -> usize {
     fn vec_bytes<T>(values: &Vec<T>) -> usize {
-        values.capacity().saturating_mul(std::mem::size_of::<T>())
+        values.capacity().saturating_mul(size_of::<T>())
     }
 
     fn set_bytes<T>(values: &HashSet<T>) -> usize {
-        values.capacity().saturating_mul(std::mem::size_of::<T>())
+        values.capacity().saturating_mul(size_of::<T>())
     }
 
     fn map_bytes<K, V>(values: &HashMap<K, V>) -> usize {
-        values.capacity().saturating_mul(std::mem::size_of::<(K, V)>())
+        values.capacity().saturating_mul(size_of::<(K, V)>())
     }
 
     let state = &build.state;
@@ -740,7 +746,7 @@ fn staged_allocation_bytes(build: &super::LayoutBuild) -> usize {
         vec_bytes(&build.command_keys),
         map_bytes(&build.cells),
         vec_bytes(&build.item_cells),
-        build.priority.capacity().saturating_mul(std::mem::size_of::<super::PriorityItem>()),
+        build.priority.capacity().saturating_mul(size_of::<super::PriorityItem>()),
         vec_bytes(&build.blended),
         vec_bytes(&state.draws),
         vec_bytes(&state.cells),
@@ -986,7 +992,7 @@ fn visible_items(items: &ItemSlab, camera_x: f64) -> Vec<ItemIndex> {
 
 fn contains_item(visible: &[ItemIndex], items: &ItemSlab, index: ItemIndex) -> bool {
     let Some(id) = items.get(index).map(|item| item.id) else { return false };
-    visible.binary_search_by(|visible| items.get(*visible).map_or(std::cmp::Ordering::Less, |item| item.id.cmp(&id))).is_ok()
+    visible.binary_search_by(|visible| items.get(*visible).map_or(cmp::Ordering::Less, |item| item.id.cmp(&id))).is_ok()
 }
 
 fn camera(camera_x: f64) -> Camera {
@@ -1006,7 +1012,7 @@ fn loaded_texture(id: u128) -> assets::TextureHandle {
     let LoadJob::Fetch(fetch) = store.next_job(now).expect("fresh test texture fetch") else {
         panic!("fresh test texture used a cache entry")
     };
-    let input = fetch.complete(Ok(test_support::texture::GRAY_ALPHA_J2C.to_vec())).expect("test texture response");
+    let input = fetch.complete(Ok(GRAY_ALPHA_J2C.to_vec())).expect("test texture response");
     let completion = store.start_decode(input).expect("test decode admission").run();
     store.complete(completion, now);
     let Status::Ready(Content::Texture(texture)) = demand.status() else { panic!("test texture did not decode") };

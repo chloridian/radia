@@ -9,9 +9,12 @@ use futures::{
     pin_mut,
     stream::FuturesUnordered,
 };
-use math::motion as kinematics;
+use math::motion;
 use network::CircuitMotionStatus;
-use tokio::sync::watch;
+use tokio::{
+    sync::{watch, watch::error::RecvError},
+    task, time,
+};
 use world::Region;
 
 #[derive(Default)]
@@ -29,7 +32,7 @@ impl MotionCircuitLiveness {
     fn update(&mut self, now: Instant) -> bool {
         let mut changed = false;
         for (&region, status) in &self.statuses {
-            let active = kinematics::circuit_active(now, status.last_packet_received_at, status.connected);
+            let active = motion::circuit_active(now, status.last_packet_received_at, status.connected);
             changed |= self.active.insert(region, active).unwrap_or(false) != active;
         }
         self.active.retain(|region, active| {
@@ -50,7 +53,7 @@ impl MotionCircuitLiveness {
             .filter_map(|(_, status)| {
                 status
                     .last_packet_received_at
-                    .checked_add(Duration::from_secs_f64(kinematics::PHASE_OUT_TIME))?
+                    .checked_add(Duration::from_secs_f64(motion::PHASE_OUT_TIME))?
                     .checked_add(Duration::from_nanos(1))
             })
             .min()
@@ -75,7 +78,7 @@ impl MotionCircuitWake {
             list_closed: false,
         };
         let circuits = state.receiver.borrow_and_update().clone();
-        let _ = state.replace(circuits, tokio::time::Instant::now().into_std());
+        let _ = state.replace(circuits, time::Instant::now().into_std());
         state
     }
 
@@ -112,7 +115,7 @@ impl MotionCircuitWake {
     pub(super) async fn wait_for_transition(&mut self) -> bool {
         loop {
             enum Event {
-                List(Result<(), watch::error::RecvError>),
+                List(Result<(), RecvError>),
                 Circuit(Option<(Region, watch::Receiver<CircuitMotionStatus>, bool)>),
                 Timer,
             }
@@ -122,10 +125,8 @@ impl MotionCircuitWake {
                 let circuit = async { if self.watchers.is_empty() { pending().await } else { self.watchers.next().await } }.fuse();
                 let timer = async {
                     match deadline {
-                        Some(deadline) if tokio::time::Instant::from_std(deadline) <= tokio::time::Instant::now() => {
-                            tokio::task::yield_now().await
-                        }
-                        Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
+                        Some(deadline) if time::Instant::from_std(deadline) <= time::Instant::now() => task::yield_now().await,
+                        Some(deadline) => time::sleep_until(time::Instant::from_std(deadline)).await,
                         None => pending().await,
                     }
                 }
@@ -137,7 +138,7 @@ impl MotionCircuitWake {
                     _ = timer => Event::Timer,
                 }
             };
-            let now = tokio::time::Instant::now().into_std();
+            let now = time::Instant::now().into_std();
             match event {
                 Event::List(Ok(())) => {
                     let circuits = self.receiver.borrow_and_update().clone();
@@ -178,17 +179,20 @@ impl MotionCircuitWake {
 
 #[cfg(test)]
 mod tests {
-    use std::task::Poll;
+    use std::{assert_matches, task::Poll};
+
+    use tokio::time;
 
     use super::*;
+    use crate::test_helpers;
 
     #[test]
     fn liveness_wakes_on_transitions() {
         let started_at = Instant::now();
-        let silence = Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
-        let taper = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
+        let silence = Duration::from_secs_f64(motion::PHASE_OUT_TIME);
+        let taper = Duration::from_secs_f64(motion::MAX_INTERPOLATION_TIME - motion::PHASE_OUT_TIME);
         let maximum_interpolation = silence + taper;
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         let mut liveness = MotionCircuitLiveness::default();
         let status = |last_packet_received_at| CircuitMotionStatus { last_packet_received_at, measured_ping_delay: None, connected: true };
 
@@ -208,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn watcher_ignores_active_packets() {
-        let (_region_world, region) = crate::test_helpers::registered_region();
+        let (_region_world, region) = test_helpers::registered_region();
         let status = CircuitMotionStatus { last_packet_received_at: Instant::now(), measured_ping_delay: None, connected: false };
         let (status_sender, status_receiver) = watch::channel(status);
         let (_circuits_sender, circuits_receiver) = watch::channel(vec![(region, status_receiver)]);
@@ -222,7 +226,7 @@ mod tests {
 
         status_sender.send_modify(|status| status.last_packet_received_at = Instant::now());
         let mut wait = Box::pin(wake.wait_for_transition());
-        std::assert_matches!(futures::poll!(wait.as_mut()), Poll::Pending);
+        assert_matches!(futures::poll!(wait.as_mut()), Poll::Pending);
         drop(wait);
 
         status_sender.send_modify(|status| status.connected = false);
@@ -237,27 +241,27 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn silence_wakes_once() {
-        let (_region_world, region) = crate::test_helpers::registered_region();
-        let last_packet_received_at = tokio::time::Instant::now().into_std();
+        let (_region_world, region) = test_helpers::registered_region();
+        let last_packet_received_at = time::Instant::now().into_std();
         let status = CircuitMotionStatus { last_packet_received_at, measured_ping_delay: None, connected: true };
         let (status_sender, status_receiver) = watch::channel(status);
         let (_circuits_sender, circuits_receiver) = watch::channel(vec![(region, status_receiver)]);
         let mut wake = MotionCircuitWake::new(circuits_receiver);
         let mut transition = Box::pin(wake.wait_for_transition());
-        let silence = Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
-        let later = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME);
+        let silence = Duration::from_secs_f64(motion::PHASE_OUT_TIME);
+        let later = Duration::from_secs_f64(motion::MAX_INTERPOLATION_TIME);
 
-        std::assert_matches!(futures::poll!(transition.as_mut()), Poll::Pending);
-        tokio::time::advance(silence).await;
-        std::assert_matches!(futures::poll!(transition.as_mut()), Poll::Pending);
-        tokio::time::advance(Duration::from_millis(1)).await;
-        std::assert_matches!(futures::poll!(transition.as_mut()), Poll::Ready(true));
+        assert_matches!(futures::poll!(transition.as_mut()), Poll::Pending);
+        time::advance(silence).await;
+        assert_matches!(futures::poll!(transition.as_mut()), Poll::Pending);
+        time::advance(Duration::from_millis(1)).await;
+        assert_matches!(futures::poll!(transition.as_mut()), Poll::Ready(true));
         drop(transition);
 
         let mut pending = Box::pin(wake.wait_for_transition());
-        std::assert_matches!(futures::poll!(pending.as_mut()), Poll::Pending);
-        tokio::time::advance(later).await;
-        std::assert_matches!(futures::poll!(pending.as_mut()), Poll::Pending);
+        assert_matches!(futures::poll!(pending.as_mut()), Poll::Pending);
+        time::advance(later).await;
+        assert_matches!(futures::poll!(pending.as_mut()), Poll::Pending);
         drop(pending);
         drop(status_sender);
     }

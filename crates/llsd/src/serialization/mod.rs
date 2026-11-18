@@ -3,21 +3,19 @@ mod key;
 mod output;
 mod text;
 
-pub(crate) use self::output::Output;
-
 use std::{fmt, io::Write, marker::PhantomData};
 
 use serde::ser::{self, Serialize, SerializeMap};
 use uuid::Uuid;
 
-use crate::{
-    Date, Error, Limits, Result,
-    value::{DATE_NEWTYPE, URI_NEWTYPE, UUID_NEWTYPE},
-};
-
+pub(crate) use self::output::Output;
 use self::{
     compound::Compound,
     text::{TextKind, TextSerializer},
+};
+use crate::{
+    Date, Error, Limits, Result,
+    value::{DATE_NEWTYPE, URI_NEWTYPE, UUID_NEWTYPE},
 };
 
 #[derive(Clone, Copy)]

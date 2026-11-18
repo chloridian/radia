@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    array,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use storage::{EvictionCandidate, EvictionPolicy, EvictionReason, EvictionScore, NamespaceId};
@@ -20,7 +23,7 @@ pub(crate) struct DecodeCosts {
 
 impl Default for DecodeCosts {
     fn default() -> Self {
-        Self { micros: std::array::from_fn(|_| AtomicU64::new(0)) }
+        Self { micros: array::from_fn(|_| AtomicU64::new(0)) }
     }
 }
 

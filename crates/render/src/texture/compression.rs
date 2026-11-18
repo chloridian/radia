@@ -182,8 +182,7 @@ fn downsample_even(source: &[u8], size: [u32; 2], next: [u32; 2], cancelled: imp
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches;
-    use std::cell::Cell;
+    use std::{assert_matches, cell::Cell};
 
     use block_compression::decode::{decode_block_bc1, decode_block_bc3, decode_block_bc7};
 

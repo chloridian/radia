@@ -1,14 +1,14 @@
 use std::{
     collections::btree_map::Entry,
     fmt,
-    mem::{self, size_of},
+    mem::{self},
 };
 
-use ::uuid::Uuid;
 use serde::{
     Deserialize, Deserializer,
-    de::{DeserializeSeed, EnumAccess, Error as DeError, MapAccess, SeqAccess, VariantAccess, Visitor},
+    de::{DeserializeSeed, EnumAccess, Error, MapAccess, SeqAccess, VariantAccess, Visitor},
 };
+use uuid::Uuid;
 
 use super::{Binary, Map, Uri, VALUE_ENUM, Value, map_heap_bytes};
 
@@ -24,7 +24,7 @@ impl HeapBudget {
         Self { max_bytes, used_bytes: 0 }
     }
 
-    fn charge<E: DeError>(&mut self, bytes: usize) -> std::result::Result<(), E> {
+    fn charge<E: Error>(&mut self, bytes: usize) -> Result<(), E> {
         let Some(used_bytes) = self.used_bytes.checked_add(bytes) else {
             return Err(heap_limit_error());
         };
@@ -51,7 +51,7 @@ struct ValueBuilder<'a> {
 impl<'de> DeserializeSeed<'de> for ValueBuilder<'_> {
     type Value = Value;
 
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         deserializer.deserialize_enum(VALUE_ENUM, &[], self)
     }
 }
@@ -63,7 +63,7 @@ impl<'de> Visitor<'de> for ValueBuilder<'_> {
         formatter.write_str("an LLSD value")
     }
 
-    fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> std::result::Result<Self::Value, A::Error> {
+    fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
         let (kind, variant) = data.variant::<ValueKind>()?;
         match kind {
             ValueKind::Undefined => {
@@ -124,7 +124,7 @@ struct ArrayBuilder<'a> {
 impl<'de> DeserializeSeed<'de> for ArrayBuilder<'_> {
     type Value = Value;
 
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         deserializer.deserialize_seq(self)
     }
 }
@@ -136,7 +136,7 @@ impl<'de> Visitor<'de> for ArrayBuilder<'_> {
         formatter.write_str("an LLSD array")
     }
 
-    fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> std::result::Result<Self::Value, A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
         let mut values = Vec::new();
         let initial_capacity = access.size_hint().unwrap_or(4).clamp(1, 4);
         while let Some(value) =
@@ -157,7 +157,7 @@ struct ArrayElementBuilder<'a> {
 impl<'de> DeserializeSeed<'de> for ArrayElementBuilder<'_> {
     type Value = Value;
 
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         let Self { budget, values, initial_capacity } = self;
         reserve_array::<D::Error>(values, budget, initial_capacity)?;
         ValueBuilder { budget }.deserialize(deserializer)
@@ -171,7 +171,7 @@ struct MapBuilder<'a> {
 impl<'de> DeserializeSeed<'de> for MapBuilder<'_> {
     type Value = Value;
 
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         deserializer.deserialize_map(self)
     }
 }
@@ -183,7 +183,7 @@ impl<'de> Visitor<'de> for MapBuilder<'_> {
         formatter.write_str("an LLSD map")
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> std::result::Result<Self::Value, A::Error> {
+    fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
         let mut values = Map::new();
         while let Some(key) = access.next_key::<String>()? {
             let len = values.len();
@@ -207,7 +207,7 @@ impl<'de> Visitor<'de> for MapBuilder<'_> {
     }
 }
 
-fn reserve_array<E: DeError>(values: &mut Vec<Value>, budget: &mut HeapBudget, initial_capacity: usize) -> std::result::Result<(), E> {
+fn reserve_array<E: Error>(values: &mut Vec<Value>, budget: &mut HeapBudget, initial_capacity: usize) -> Result<(), E> {
     if values.len() < values.capacity() {
         return Ok(());
     }
@@ -240,14 +240,11 @@ fn reserve_array<E: DeError>(values: &mut Vec<Value>, budget: &mut HeapBudget, i
     Ok(())
 }
 
-pub(super) fn deserialize_with_heap_limit<'de, D: Deserializer<'de>>(
-    deserializer: D,
-    max_heap_bytes: usize,
-) -> std::result::Result<Value, D::Error> {
+pub(super) fn deserialize_with_heap_limit<'de, D: Deserializer<'de>>(deserializer: D, max_heap_bytes: usize) -> Result<Value, D::Error> {
     let mut budget = HeapBudget::new(max_heap_bytes);
     ValueBuilder { budget: &mut budget }.deserialize(deserializer)
 }
 
-fn heap_limit_error<E: DeError>() -> E {
+fn heap_limit_error<E: Error>() -> E {
     E::custom(HEAP_LIMIT_ERROR)
 }

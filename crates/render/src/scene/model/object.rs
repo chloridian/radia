@@ -1,15 +1,18 @@
 use std::{sync::Arc, time::Instant};
 
-use math::Vec3;
+use math::{Vec3, motion::RegionBounds};
 use world::{Kind, MotionUpdateKind, ObjectDetail, PrimShape, SculptFlags, Shape, WorldTransform, WorldTransformState};
 
-use crate::material::FaceMaterial;
-use crate::scene::{
-    DrawnMeshKey, MeshKey, PreparedMesh, SharedMesh,
-    asset_demand::Materials,
-    budget::Lease,
-    motion::{MotionSample, MotionState},
-    texture_animation,
+use crate::{
+    material::FaceMaterial,
+    scene::{
+        DrawnMeshKey, MeshKey, PreparedMesh, SharedMesh,
+        asset_demand::Materials,
+        budget::Lease,
+        motion,
+        motion::{MotionSample, MotionState},
+        texture_animation,
+    },
 };
 
 #[derive(Clone)]
@@ -161,7 +164,7 @@ impl Object {
 
     pub(crate) fn motion_changed_from(&self, previous: &Self) -> bool {
         match (previous.motion_sample(), self.motion_sample()) {
-            (Some(previous), Some(next)) => crate::scene::motion::motion_changed(previous, next),
+            (Some(previous), Some(next)) => motion::motion_changed(previous, next),
             (None, None) => false,
             _ => true,
         }
@@ -173,7 +176,7 @@ impl Object {
         }
     }
 
-    pub(in crate::scene) fn resume_motion_at(&mut self, now: Instant, regions: &[math::motion::RegionBounds]) {
+    pub(in crate::scene) fn resume_motion_at(&mut self, now: Instant, regions: &[RegionBounds]) {
         if let Some(sample) = self.motion_sample() {
             self.motion.resume_linear_at(sample, now, regions);
         }
@@ -246,10 +249,9 @@ pub enum Geometry {
 #[cfg(test)]
 mod tests {
     use math::{DVec3, Quat};
-    use world::{WorldPose, WorldTransform};
+    use world::{WorldPose, WorldTransform, WorldTransformState};
 
     use super::placeholder_avatar_transform;
-    use world::WorldTransformState;
 
     #[test]
     fn placeholder_avatar_pose_and_size() {

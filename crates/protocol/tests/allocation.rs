@@ -1,4 +1,4 @@
-use std::{hint::black_box, mem::size_of};
+use std::hint::black_box;
 
 use protocol::lludp::{FieldValue, Message, Packet};
 use test_support::{

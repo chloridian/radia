@@ -2,7 +2,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::GENERIC_STREAMING_MESSAGE,
@@ -22,19 +22,19 @@ impl TypedMessage for GenericStreamingMessage {
     const INBOUND_ONLY: bool = false;
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
-        self::decode(reader)
+        decode(reader)
     }
 
     fn encode(&self, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
-        self::encode(self, writer)
+        encode(self, writer)
     }
 
     fn preflight_allocation_bound(payload: &[u8]) -> Result<usize, LLUdpError> {
-        crate::lludp::message::allocation::with_payload(payload, preflight_allocation_bytes(payload)?)
+        allocation::with_payload(payload, preflight_allocation_bytes(payload)?)
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        crate::lludp::message::allocation::capacity_bytes(self.data.capacity(), std::mem::size_of::<u8>())
+        allocation::capacity_bytes(self.data.capacity(), size_of::<u8>())
     }
 }
 

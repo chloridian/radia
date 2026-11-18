@@ -3,12 +3,14 @@ mod generate;
 #[path = "../../build/template.rs"]
 mod template;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+};
 
-use protocol::lludp::{Message, MessageId, Packet};
 use protocol::{
     BlockValues, FieldValue, LLUdpError, SchemaMessage,
+    lludp::{Message, MessageId, Packet},
     schema::{
         MESSAGES, MessageFlag,
         ids::{AGENT_UPDATE, COMPLETE_PING_CHECK, PACKET_ACK, USE_CIRCUIT_CODE},

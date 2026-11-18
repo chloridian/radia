@@ -1,5 +1,7 @@
 use std::{
+    assert_matches,
     hint::black_box,
+    mem,
     time::{Duration, Instant},
 };
 
@@ -8,8 +10,10 @@ use assets::{
     TextureSize,
 };
 use criterion::{BatchSize, BenchmarkId, Criterion};
-use test_support::allocation::{self, CountingAllocator};
-use test_support::texture::GRAY_4096_J2C;
+use test_support::{
+    allocation::{self, CountingAllocator},
+    texture::GRAY_4096_J2C,
+};
 use utils::AssetId;
 use uuid::Uuid;
 
@@ -178,7 +182,7 @@ fn demand_reconcile(c: &mut Criterion) {
                         }
                         assert!(turns < 8, "bounded turns admit work during sustained dirty churn");
                     };
-                    std::assert_matches!(&job, LoadJob::Fetch(_), "admission includes a network fetch");
+                    assert_matches!(&job, LoadJob::Fetch(_), "admission includes a network fetch");
                     assert!(store.maintain(*now), "dirty work remains after useful admission");
                     black_box((turns, eligible.len()));
                 },
@@ -194,8 +198,8 @@ fn demand_reconcile(c: &mut Criterion) {
                     fixture
                 },
                 |(store, demands, _, now, decodes)| {
-                    drop(std::mem::take(demands));
-                    drop(std::mem::take(decodes));
+                    drop(mem::take(demands));
+                    drop(mem::take(decodes));
                     black_box(maintain_until_idle(store, *now, count.div_ceil(128).saturating_add(2)));
                 },
                 BatchSize::PerIteration,
@@ -207,8 +211,8 @@ fn demand_reconcile(c: &mut Criterion) {
                 || {
                     let mut fixture = fixture(count);
                     settle(&mut fixture, count);
-                    drop(std::mem::take(&mut fixture.1));
-                    drop(std::mem::take(&mut fixture.4));
+                    drop(mem::take(&mut fixture.1));
+                    drop(mem::take(&mut fixture.4));
                     fixture
                 },
                 |(store, _, _, now, _)| black_box(store.maintain(*now)),
@@ -272,7 +276,7 @@ pub(crate) fn bench(c: &mut Criterion) {
                             break;
                         }
                     }
-                    for decode in std::mem::take(decodes) {
+                    for decode in mem::take(decodes) {
                         store.complete(decode.fail(Failure::NotFound), *now);
                     }
                     let completed = jobs.len();

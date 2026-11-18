@@ -1,12 +1,13 @@
 use std::{
+    assert_matches,
     future::Future,
+    iter,
     pin::pin,
     task::{Context, Waker},
 };
 
 use super::*;
-use crate::coverage::CoverageLoss;
-use crate::fixtures::test_simulator_id;
+use crate::{coverage::CoverageLoss, fixtures::test_simulator_id};
 
 fn reserve_batch(budget: &Arc<Semaphore>) -> OwnedSemaphorePermit {
     budget.clone().try_acquire_many_owned(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES as u32).expect("reserve one EventQueue batch")
@@ -107,9 +108,9 @@ fn event_body_decodes_message_blocks() {
     assert_eq!(id, 9);
     assert_eq!(events.len(), 1);
     let Value::Map(fields) = &events[0].body else { panic!("EventQueue body is a block map") };
-    std::assert_matches!(fields.get("AgentData"), Some(Value::Array(_)));
-    std::assert_matches!(fields.get("RegionData"), Some(Value::Array(_)));
-    std::assert_matches!(fields.get("Info"), Some(Value::Array(_)));
+    assert_matches!(fields.get("AgentData"), Some(Value::Array(_)));
+    assert_matches!(fields.get("RegionData"), Some(Value::Array(_)));
+    assert_matches!(fields.get("Info"), Some(Value::Array(_)));
     assert!(!fields.contains_key("CrossedRegion"), "message name is carried beside body, not nested inside it");
 }
 
@@ -128,7 +129,7 @@ fn scalar_boundary_stops_oversized_values() {
 #[test]
 fn accepts_event_at_retained_limit() {
     let message_bytes = "Limit123".len();
-    let body_bytes = MAX_QUEUED_CAPABILITY_EVENT_BYTES - std::mem::size_of::<CapabilityEvent>() - message_bytes;
+    let body_bytes = MAX_QUEUED_CAPABILITY_EVENT_BYTES - size_of::<CapabilityEvent>() - message_bytes;
     let body = string_event_response(body_bytes);
     let (_, events) = decode_event_batch(&body).expect("event at retained limit should be accepted");
     assert_eq!(events.len(), 1);
@@ -147,7 +148,7 @@ fn accepts_batch_at_retained_limit() {
     for index in 0..event_count {
         input.push_str("<map><key>message</key><string>Limit123</string><key>body</key><string>");
         let bytes = if index + 1 == event_count { last_bytes } else { regular_bytes };
-        input.extend(std::iter::repeat_n('x', bytes));
+        input.extend(iter::repeat_n('x', bytes));
         input.push_str("</string></map>");
     }
     input.push_str("</array></map></llsd>");
@@ -190,7 +191,7 @@ fn accepts_array_near_retained_limit() {
     let Value::Array(arrays) = &events[0].body else { panic!("event body is an array") };
     assert_eq!(arrays.len(), item_counts.len());
     for (array, expected_len) in arrays.iter().zip(&item_counts) {
-        std::assert_matches!(array, Value::Array(values) if values.len() == *expected_len);
+        assert_matches!(array, Value::Array(values) if values.len() == *expected_len);
     }
     assert!(events[0].retained_bytes >= MAX_QUEUED_CAPABILITY_EVENT_BYTES * 95 / 100, "retained={}", events[0].retained_bytes);
     assert!(events[0].retained_bytes <= MAX_QUEUED_CAPABILITY_EVENT_BYTES, "retained={}", events[0].retained_bytes);
@@ -232,13 +233,13 @@ async fn recorded_loss_survives_commit() {
     pending.commit();
     drop(pending);
 
-    std::assert_matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::Failed(_)));
-    std::assert_matches!(
+    assert_matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::Failed(_)));
+    assert_matches!(
         received.recv().await.map(EventEnvelope::into_event),
         Some(Event::EventQueueCoverageLost { simulator_id: id, reason, .. }) if id == simulator_id && reason == "admission failed"
     );
     assert!(received.recv().await.is_none(), "one recorded loss emits one notification");
-    std::assert_matches!(
+    assert_matches!(
         ledger.snapshot().losses.as_slice(),
         [CoverageLoss::Source(loss)] if loss.watermark.generation == 1 && loss.reason == CoverageLossReason::EventQueueAdmission
     );
@@ -264,15 +265,15 @@ async fn cancelled_batch_records_loss() {
     ));
     assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
     shutdown.send_replace(true);
-    std::assert_matches!(admission.await, EventSendOutcome::Shutdown);
+    assert_matches!(admission.await, EventSendOutcome::Shutdown);
     let mut changed = changed;
     changed.changed().await.expect("durable loss wakes ledger subscribers");
-    std::assert_matches!(
+    assert_matches!(
         ledger.snapshot().losses.as_slice(),
         [CoverageLoss::Source(loss)]
             if loss.watermark.source == source() && loss.reason == CoverageLossReason::EventQueueAdmission
     );
-    std::assert_matches!(received.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(_)));
+    assert_matches!(received.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(_)));
     assert!(received.try_recv().is_err(), "no event from a partial batch may escape");
     assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES);
 }
@@ -297,11 +298,11 @@ async fn dropped_admission_records_loss() {
         ));
         assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
     }
-    std::assert_matches!(
+    assert_matches!(
         ledger.snapshot().losses.as_slice(),
         [CoverageLoss::Source(loss)] if loss.reason == CoverageLossReason::EventQueueAdmission
     );
-    std::assert_matches!(received.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(_)));
+    assert_matches!(received.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(_)));
     assert!(received.try_recv().is_err(), "cancellation cannot expose a batch prefix");
     assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES);
 }
@@ -317,7 +318,7 @@ async fn size_limit_event_stays_single() {
     at_limit.retained_bytes = MAX_QUEUED_CAPABILITY_EVENT_BYTES;
     let expected_bytes = capability_event_batch_retained_size(from_ref(&at_limit), 1);
 
-    std::assert_matches!(
+    assert_matches!(
         send_batch(
             &events,
             test_simulator_id(1),
@@ -331,7 +332,7 @@ async fn size_limit_event_stays_single() {
         EventSendOutcome::Sent
     );
     let envelope = received.recv().await.expect("one batch envelope");
-    std::assert_matches!(
+    assert_matches!(
         &envelope.event,
         Event::CapabilityEventBatch { order: EventQueueBatchOrder { incarnation: 42, ordinal: 0 }, events, .. } if events.len() == 1
     );
@@ -354,8 +355,8 @@ async fn event_batch_admission_is_atomic() {
         pin!(send_batch(&events, test_simulator_id(1), batch, &shutdown_receiver, &session_closed_receiver, &queued_event_bytes, &ledger,));
     assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
     assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES - expected_bytes);
-    std::assert_matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::Failed(_)));
-    std::assert_matches!(admission.await, EventSendOutcome::Sent);
+    assert_matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::Failed(_)));
+    assert_matches!(admission.await, EventSendOutcome::Sent);
     let envelope = received.recv().await.expect("one complete batch envelope");
     let Event::CapabilityEventBatch { events: batch, .. } = &envelope.event else {
         panic!("the EventQueue response must be one application event")
@@ -417,8 +418,8 @@ async fn receiver_close_records_loss() {
     ));
     assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
     drop(received);
-    std::assert_matches!(admission.await, EventSendOutcome::ReceiverClosed);
-    std::assert_matches!(
+    assert_matches!(admission.await, EventSendOutcome::ReceiverClosed);
+    assert_matches!(
         ledger.snapshot().losses.as_slice(),
         [CoverageLoss::Source(loss)] if loss.reason == CoverageLossReason::EventQueueAdmission
     );

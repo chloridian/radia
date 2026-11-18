@@ -1,16 +1,19 @@
 use std::str;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use serde::de::{
-    self, DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor,
-    value::{BytesDeserializer, StringDeserializer},
+use serde::{
+    de::{
+        self, DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor,
+        value::{BytesDeserializer, StringDeserializer},
+    },
+    forward_to_deserialize_any,
 };
-use serde::forward_to_deserialize_any;
 use uuid::Uuid;
 
 use crate::{
     Date, Error, Limits, Result,
     decode::{Budget, Cursor, VariantAccess, VariantEnumAccess, Wrapper, no_finish},
+    encoding,
     encoding::{base64_decoded_len, strip_header},
     value::VALUE_ENUM,
 };
@@ -238,7 +241,7 @@ impl<'de> Deserializer<'de> {
     }
 
     fn parse_real(&mut self) -> Result<f64> {
-        crate::encoding::parse_real(self.number_token(b'r')?)
+        encoding::parse_real(self.number_token(b'r')?)
     }
 
     fn parse_binary(&mut self) -> Result<Vec<u8>> {

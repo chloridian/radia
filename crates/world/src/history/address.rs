@@ -5,9 +5,7 @@ use std::{
 
 use uuid::Uuid;
 
-use crate::World;
-use crate::update::Stamp;
-use crate::{Applied, ApplyOutcome, DeferredReason, LocalAddress, Region, WorldLimits};
+use crate::{Applied, ApplyOutcome, DeferredReason, LocalAddress, Region, World, WorldLimits, removal::RemovalCause, update::Stamp};
 
 #[derive(Debug, Default)]
 pub(crate) struct Tombstones {
@@ -142,7 +140,7 @@ impl World {
             let record = self.store.object_record(entity).expect("address index contains a live entity");
             return (record.id != id && stamp <= record.state.binding.fence()).then(|| Applied::new(ApplyOutcome::IgnoredStale));
         }
-        if self.removal_cause_at(address).and_then(crate::removal::RemovalCause::stamp).is_some_and(|fence| stamp <= fence) {
+        if self.removal_cause_at(address).and_then(RemovalCause::stamp).is_some_and(|fence| stamp <= fence) {
             return Some(Applied::new(ApplyOutcome::IgnoredStale));
         }
         if let Some(tombstone) = self.tombstones.get(&address) {

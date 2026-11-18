@@ -1,13 +1,14 @@
 use std::{
+    assert_matches, env,
     error::Error,
-    fs,
+    fs, io,
     io::Write,
     process::{Command, Stdio},
     sync::mpsc,
 };
 
 use futures::executor::block_on;
-use rusqlite::{Connection, Error as RusqliteError, Transaction};
+use rusqlite::{Connection, Transaction};
 use tempfile::tempdir;
 use test_support::process::TestProcess;
 
@@ -42,11 +43,11 @@ fn insert(value: i64) -> Result<SqliteBatch, SqliteError> {
 
 #[test]
 fn batch_bounds_are_enforced() {
-    std::assert_matches!(
+    assert_matches!(
         SqliteBatch::new(MAX_BATCH_ROWS + 1, 1, |_: &Transaction<'_>| Ok(())),
         Err(SqliteError::BatchTooLarge { rows, bytes: 1 }) if rows == MAX_BATCH_ROWS + 1
     );
-    std::assert_matches!(
+    assert_matches!(
         SqliteBatch::new(1, MAX_BATCH_BYTES + 1, |_: &Transaction<'_>| Ok(())),
         Err(SqliteError::BatchTooLarge { rows: 1, bytes }) if bytes == MAX_BATCH_BYTES + 1
     );
@@ -107,8 +108,8 @@ fn full_queue_admits_control_work() -> Result<(), Box<dyn Error>> {
     let (release, release_rx) = mpsc::channel();
     let blocker = SqliteBatch::new(1, 8, move |transaction| {
         transaction.execute("INSERT INTO values_table(value) VALUES (0)", [])?;
-        started.send(()).map_err(|_| RusqliteError::InvalidQuery)?;
-        release_rx.recv().map_err(|_| RusqliteError::InvalidQuery)?;
+        started.send(()).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        release_rx.recv().map_err(|_| rusqlite::Error::InvalidQuery)?;
         Ok(())
     })?;
     let blocker_receipt = db.submit_batches(vec![blocker])?;
@@ -118,14 +119,14 @@ fn full_queue_admits_control_work() -> Result<(), Box<dyn Error>> {
     for value in 1..MAX_QUEUED_BATCHES {
         queued.push(db.submit_batches(vec![insert(value as i64)?])?);
     }
-    std::assert_matches!(db.submit_batches(vec![insert(1000)?]), Err(SqliteError::QueueFull));
+    assert_matches!(db.submit_batches(vec![insert(1000)?]), Err(SqliteError::QueueFull));
 
     let control = SqliteBatch::new(1, 8, |transaction| {
         transaction.execute("UPDATE values_table SET value=10000 WHERE value=0", [])?;
         Ok(())
     })?;
     let control_receipt = db.submit_control_batch(control)?;
-    std::assert_matches!(db.submit_batches(vec![insert(1001)?]), Err(SqliteError::QueueFull));
+    assert_matches!(db.submit_batches(vec![insert(1001)?]), Err(SqliteError::QueueFull));
 
     release.send(())?;
     block_on(blocker_receipt.wait())?;
@@ -147,8 +148,8 @@ fn panic_resolves_queued_receipt() -> Result<(), Box<dyn Error>> {
     let (started, started_rx) = mpsc::channel();
     let (release, release_rx) = mpsc::channel();
     let panicking = SqliteBatch::new(1, 8, move |_transaction| {
-        started.send(()).map_err(|_| RusqliteError::InvalidQuery)?;
-        release_rx.recv().map_err(|_| RusqliteError::InvalidQuery)?;
+        started.send(()).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        release_rx.recv().map_err(|_| rusqlite::Error::InvalidQuery)?;
         panic!("test batch panic");
     })?;
     let panicking_receipt = db.submit_batches(vec![panicking])?;
@@ -157,10 +158,10 @@ fn panic_resolves_queued_receipt() -> Result<(), Box<dyn Error>> {
     let queued_receipt = db.submit_batches(vec![insert(1)?])?;
     release.send(())?;
 
-    std::assert_matches!(block_on(panicking_receipt.wait()), Err(SqliteError::WorkerStopped));
-    std::assert_matches!(db.shutdown(), Err(SqliteError::WorkerStopped));
-    std::assert_matches!(futures::FutureExt::now_or_never(queued_receipt.wait()), Some(Err(SqliteError::WorkerStopped)));
-    std::assert_matches!(control.submit_control_batch(insert(2)?), Err(SqliteError::WorkerStopped));
+    assert_matches!(block_on(panicking_receipt.wait()), Err(SqliteError::WorkerStopped));
+    assert_matches!(db.shutdown(), Err(SqliteError::WorkerStopped));
+    assert_matches!(futures::FutureExt::now_or_never(queued_receipt.wait()), Some(Err(SqliteError::WorkerStopped)));
+    assert_matches!(control.submit_control_batch(insert(2)?), Err(SqliteError::WorkerStopped));
     Ok(())
 }
 
@@ -169,7 +170,7 @@ fn second_process_write_is_busy() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let path = directory.path().join("inventory.sqlite");
     let (db, _) = SqliteDb::open(&path, migrate)?;
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(env::current_exe()?);
     command
         .arg("--exact")
         .arg("sqlite::tests::busy_process_helper")
@@ -180,7 +181,7 @@ fn second_process_write_is_busy() -> Result<(), Box<dyn Error>> {
     child.wait_for_stdout("sqlite write locked")?;
 
     let receipt = db.submit_batches(vec![insert(55)?])?;
-    std::assert_matches!(block_on(receipt.wait()), Err(SqliteError::Busy));
+    assert_matches!(block_on(receipt.wait()), Err(SqliteError::Busy));
 
     child.write_stdin(b"continue\n")?;
     assert!(child.wait()?.success(), "child process failed; stdout: {}", child.stdout());
@@ -194,7 +195,7 @@ fn repair_waits_for_other_process() -> Result<(), Box<dyn Error>> {
     let path = directory.path().join("inventory.sqlite");
     let (initial, _) = SqliteDb::open(&path, versioned_migration(1))?;
     initial.shutdown()?;
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(env::current_exe()?);
     command
         .arg("--exact")
         .arg("sqlite::tests::maintenance_process_helper")
@@ -204,7 +205,7 @@ fn repair_waits_for_other_process() -> Result<(), Box<dyn Error>> {
     let mut child = TestProcess::spawn(&mut command)?;
     child.wait_for_stdout("sqlite maintenance held")?;
 
-    std::assert_matches!(SqliteDb::open(&path, versioned_migration(2)), Err(SqliteError::Busy));
+    assert_matches!(SqliteDb::open(&path, versioned_migration(2)), Err(SqliteError::Busy));
     assert!(path.exists(), "failed repair removed a database another process holds open");
 
     child.write_stdin(b"continue\n")?;
@@ -217,17 +218,17 @@ fn repair_waits_for_other_process() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn busy_process_helper() -> Result<(), Box<dyn Error>> {
-    let Some(path) = std::env::var_os("RADIA_SQLITE_BUSY_PATH") else {
+    let Some(path) = env::var_os("RADIA_SQLITE_BUSY_PATH") else {
         return Ok(());
     };
-    let path = std::path::PathBuf::from(path);
+    let path = PathBuf::from(path);
     let (db, _) = SqliteDb::open(path, migrate)?;
     let batch = SqliteBatch::new(1, 8, |transaction: &Transaction<'_>| {
         transaction.execute("INSERT INTO values_table(value) VALUES (99)", [])?;
         println!("sqlite write locked");
-        std::io::stdout().flush().map_err(|_| RusqliteError::InvalidQuery)?;
+        io::stdout().flush().map_err(|_| rusqlite::Error::InvalidQuery)?;
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input).map_err(|_| RusqliteError::InvalidQuery)?;
+        io::stdin().read_line(&mut input).map_err(|_| rusqlite::Error::InvalidQuery)?;
         Ok(())
     });
     let receipt = db.submit_batches(vec![batch?])?;
@@ -238,16 +239,16 @@ fn busy_process_helper() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn maintenance_process_helper() -> Result<(), Box<dyn Error>> {
-    let Some(path) = std::env::var_os("RADIA_SQLITE_MAINTENANCE_PATH") else {
+    let Some(path) = env::var_os("RADIA_SQLITE_MAINTENANCE_PATH") else {
         return Ok(());
     };
     let (db, _) = SqliteDb::open(path, versioned_migration(1))?;
     let batch = SqliteBatch::new(1, 8, |transaction: &Transaction<'_>| {
         transaction.execute("INSERT INTO versioned(value) VALUES (1)", [])?;
         println!("sqlite maintenance held");
-        std::io::stdout().flush().map_err(|_| RusqliteError::InvalidQuery)?;
+        io::stdout().flush().map_err(|_| rusqlite::Error::InvalidQuery)?;
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input).map_err(|_| RusqliteError::InvalidQuery)?;
+        io::stdin().read_line(&mut input).map_err(|_| rusqlite::Error::InvalidQuery)?;
         Ok(())
     });
     let receipt = db.submit_batches(vec![batch?])?;

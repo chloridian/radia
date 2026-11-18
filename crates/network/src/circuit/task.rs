@@ -1,12 +1,14 @@
 use std::{
     collections::{HashMap, VecDeque},
     future::pending,
+    io,
     sync::Arc,
 };
 
 use protocol::lludp::Message;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{mpsc, mpsc::error::SendError, watch, watch::error::RecvError},
+    task,
     time::{self, Instant},
 };
 
@@ -37,13 +39,13 @@ enum SelectedEvent {
     Logout(Option<LogoutCommand>),
     TeardownDeadline,
     KeepaliveTimeout,
-    PrimaryStateChanged(Result<(), watch::error::RecvError>),
+    PrimaryStateChanged(Result<(), RecvError>),
     AckTick,
-    EventDelivery(Result<mpsc::OwnedPermit<SimulatorEvent>, mpsc::error::SendError<()>>),
+    EventDelivery(Result<mpsc::OwnedPermit<SimulatorEvent>, SendError<()>>),
     PingTick,
     SendAgeDeadline,
     Command(Option<SimulatorCommand>),
-    Datagram(std::io::Result<usize>),
+    Datagram(io::Result<usize>),
     Yield,
 }
 
@@ -128,7 +130,7 @@ impl ConnectionTask {
                         && (self.connection.initial_role == ConnectionRole::Neighbor || self.connection.initial_movement_sent) => SelectedEvent::PingTick,
                 command = self.commands.recv(), if !self.commands.is_closed() && self.pending_notifications.is_empty() => SelectedEvent::Command(command),
                 received = self.connection.socket.recv(&mut receive_buffer) => SelectedEvent::Datagram(received),
-                _ = tokio::task::yield_now(),
+                _ = task::yield_now(),
                     if !self.event_delivery_turn && (!self.pending_notifications.is_empty() || !self.pending_events.is_empty()) => SelectedEvent::Yield
             };
             let control = match selected {
@@ -429,7 +431,7 @@ impl ConnectionTask {
         Err(ConnectionError::KeepaliveTimeout)
     }
 
-    async fn primary_state_changed(&mut self, changed: Result<(), watch::error::RecvError>) -> Result<RunControl, ConnectionError> {
+    async fn primary_state_changed(&mut self, changed: Result<(), RecvError>) -> Result<RunControl, ConnectionError> {
         match changed {
             Ok(()) => {
                 let receiver = self.connection.primary_state_receiver.as_mut().expect("primary-state branch is guarded");
@@ -455,7 +457,7 @@ impl ConnectionTask {
     }
 
     fn deliver_event(
-        permit: Result<mpsc::OwnedPermit<SimulatorEvent>, mpsc::error::SendError<()>>,
+        permit: Result<mpsc::OwnedPermit<SimulatorEvent>, SendError<()>>,
         pending_notifications: &mut VecDeque<SimulatorEvent>,
         pending_events: &mut VecDeque<EventEnvelope>,
         event_delivery_turn: &mut bool,

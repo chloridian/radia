@@ -10,6 +10,7 @@ use gpui::Context;
 use network::Grid;
 use uuid::Uuid;
 
+use super::{LoginScreen, spawn::favorites_for_username};
 use crate::{
     inventory::{
         FavoriteLocation,
@@ -17,8 +18,6 @@ use crate::{
     },
     session::{FavoritesUpdate, PresentationMailbox, ViewerUpdate, WriteLock, save_favorite_store, write_lock},
 };
-
-use super::{LoginScreen, spawn::favorites_for_username};
 
 #[derive(Clone, Debug)]
 enum FavoriteWarning {

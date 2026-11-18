@@ -3,10 +3,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     ops::{Bound, Range},
-    sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, AtomicUsize, Ordering},
+        mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     },
     time::{Duration, Instant},
 };
@@ -18,8 +18,9 @@ use crate::{
     Blob, Budget, Content, TextureEvents, TextureHandle, TextureSize, WeakTexture,
     budget::{Reservation, TEXTURE_WORK_BYTES, WORK_BYTES},
     cache::{AssetCache, AssetCacheError, AssetLookup, CacheWrite, read_work_bytes_for_request},
+    content,
     content::{Finished, Prepared, StoredContent},
-    mesh::{MeshLod, MeshLodRequest},
+    mesh::{MAX_MESH_HEADER_BYTES, MeshLod, MeshLodRequest},
 };
 
 pub const MAX_ASSET_ROUTES: usize = 33;
@@ -837,16 +838,13 @@ impl DecodeJob {
         let started = Instant::now();
         let (result, origin) = match source {
             DecodeSource::Response(response) => (
-                crate::content::prepare_cancellable(job.request, job.size, response, &mut job.reservation, || *cancelled.borrow()),
+                content::prepare_cancellable(job.request, job.size, response, &mut job.reservation, || *cancelled.borrow()),
                 DecodeOrigin::Network,
             ),
-            DecodeSource::Disk(bytes) => (
-                crate::content::prepare_disk(job.request, job.size, bytes, &mut job.reservation, || *cancelled.borrow()),
-                DecodeOrigin::Disk,
-            ),
-            DecodeSource::Cached(source) => {
-                (crate::content::prepare_cached(job.size, &source, || *cancelled.borrow()), DecodeOrigin::Memory)
+            DecodeSource::Disk(bytes) => {
+                (content::prepare_disk(job.request, job.size, bytes, &mut job.reservation, || *cancelled.borrow()), DecodeOrigin::Disk)
             }
+            DecodeSource::Cached(source) => (content::prepare_cached(job.size, &source, || *cancelled.borrow()), DecodeOrigin::Memory),
         };
         LoadCompletion { job, result, origin, decode_duration: Some(started.elapsed()) }
     }
@@ -2171,7 +2169,7 @@ fn finish_decode(kind: Kind, texture: &mut usize, other: &mut usize) {
 
 fn fetch_work_bytes(request: Request) -> Option<usize> {
     match request {
-        Request::MeshHeader(_) => Some(crate::mesh::MAX_MESH_HEADER_BYTES),
+        Request::MeshHeader(_) => Some(MAX_MESH_HEADER_BYTES),
         Request::MeshLod(block) => usize::try_from(block.range().end.checked_sub(block.range().start)?).ok(),
         _ => Some(request.resource().kind.max_response_bytes()),
     }

@@ -4,7 +4,7 @@ use crate::{
     LLUdpError,
     lludp::{
         codec::{Reader, Writer},
-        message::{AllocationStrategy, TypedMessage},
+        message::{AllocationStrategy, TypedMessage, allocation},
         types::MessageId,
     },
     schema::ids::TELEPORT_FINISH,
@@ -55,6 +55,6 @@ impl TypedMessage for TeleportFinish {
     }
 
     fn retained_capacity_bytes(&self) -> usize {
-        crate::lludp::message::allocation::capacity_bytes(self.seed_capability.capacity(), std::mem::size_of::<u8>())
+        allocation::capacity_bytes(self.seed_capability.capacity(), size_of::<u8>())
     }
 }
