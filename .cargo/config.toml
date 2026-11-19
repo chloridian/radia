@@ -1,2 +1,10 @@
+[alias]
+xtest = "nextest run --all-features"
+lint = "clippy --workspace --all-targets --all-features -- -D warnings"
+xfmt = "fmt --all -- --config group_imports=StdExternalCrate,imports_granularity=Crate"
+profile = "run --profile profiling --features tracy"
+perf = "bench --workspace --benches -- --sample-size 200 --warm-up-time 5 --measurement-time 15"
+perf-quick = "bench --workspace --benches -- --sample-size 30 --warm-up-time 1 --measurement-time 3 --noplot"
+
 [env]
 TRACY_CLIENT_SYS_CXXFLAGS = { value = "-DTRACY_NO_CALLSTACK", force = false }

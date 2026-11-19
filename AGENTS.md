@@ -71,7 +71,7 @@ The legacy viewer is a reference for protocol behavior, content compatibility, a
 - Put `use` only at module scope, never inside a function or block. An import needed only under a `#[cfg(..)]` carries the same attribute.
 - Start every `use` path with `std`, `core`, `alloc`, a crate name, `crate`, `self` or `super`: write `use self::child::Item`, not `use child::Item`. Use `super` at most once; use `crate::` for anything above the parent module. Never start a path with `::`. When a local module shares a crate's name, rename the module.
 - Use `as` only for a name collision that importing a module cannot resolve. `use Trait as _` is allowed. Import enum variants by name only if distinctive and not a prelude name. Keep imports explicit, except established `prelude::*` imports and `use super::*` in tests.
-- Format with `just fmt`, not plain `cargo fmt`: it merges imports per crate and groups them as std, external and workspace crates, then `crate`/`self`/`super`. Clippy denies `absolute_paths` and `unused_qualifications`.
+- Format with `cargo xfmt`, not plain `cargo fmt`: it merges imports per crate and groups them as std, external and workspace crates, then `crate`/`self`/`super`. Clippy denies `absolute_paths` and `unused_qualifications`.
 - `Udp` is the generic transport; `LLUdp` is Second Life's protocol. Keep wire-template and external spellings exact.
 
 ## Comments
