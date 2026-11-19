@@ -61,6 +61,15 @@ codspeed-build *flags:
 codspeed-run *flags:
     cargo codspeed run {{ flags }}
 
+[doc('Run a crate benchmark with Criterion wall-time measurement')]
+bench package filter="":
+    cargo bench -p {{ package }} -- {{ filter }}
+
+[doc('Build and run a crate benchmark with CodSpeed CPU simulation')]
+codspeed package filter="":
+    just codspeed-build -p {{ package }}
+    codspeed run -m simulation -- just codspeed-run -p {{ package }} {{ filter }}
+
 [doc('Run the viewer profiling build with Tracy')]
 profile:
     cargo profile
