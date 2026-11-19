@@ -33,3 +33,6 @@ test-support.workspace = true
 [[bench]]
 name = "main"
 harness = false
+
+[package.metadata.cargo-machete]
+ignored = ["md-5"]
