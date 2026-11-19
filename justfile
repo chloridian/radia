@@ -53,6 +53,14 @@ perf:
 perf-quick:
     cargo bench-quick
 
+[doc('Build benchmarks for CodSpeed simulation; pass packages such as -p world')]
+codspeed-build *flags:
+    cargo codspeed build -m simulation {{ flags }}
+
+[doc('Run the benchmarks built by codspeed-build; pass the same packages and an optional filter')]
+codspeed-run *flags:
+    cargo codspeed run {{ flags }}
+
 [doc('Run the viewer profiling build with Tracy')]
 profile:
     cargo profile

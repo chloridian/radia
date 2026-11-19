@@ -1,3 +1,5 @@
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/hymenaei/Radia?utm_source=badge)
+
 Radia is a new viewer for Second Life, written in Rust. It aims to keep familiar content and everyday activities working while rethinking how residents use the viewer. Its interface and interactions are open to broad redesign wherever a clearer, easier, more enjoyable experience is possible. Right now, Radia is focused on a close visual match to the official viewer, with simpler, safer, faster software underneath.
 
 Once familiar content and everyday activities work well in Radia, it can explore new visual ideas for existing Second Life content without asking creators to redo their work, a longer-term direction is described in [the project vision](docs/vision.md).
