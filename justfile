@@ -8,11 +8,11 @@ default:
 
 [doc('Format the workspace with the import grouping rustfmt accepts only on the command line')]
 fmt:
-    cargo xfmt
+    cargo fmt-all
 
 [doc('Check formatting')]
 fmt-check:
-    cargo xfmt --check
+    cargo ci-fmt
 
 [doc('Clippy on all targets and features, warnings denied')]
 lint *flags:
@@ -28,7 +28,7 @@ build *flags:
 
 [doc('Run the workspace suite through Nextest')]
 test *flags:
-    cargo xtest --workspace --no-fail-fast {{ ci_nextest }} {{ flags }}
+    cargo test-all {{ ci_nextest }} {{ flags }}
 
 [doc('Run the render GPU tests; they need a Vulkan adapter')]
 render-gpu-tests:
@@ -47,11 +47,11 @@ hooks:
 
 [doc('Run workspace benchmarks with the thorough settings')]
 perf:
-    cargo perf
+    cargo bench-all
 
 [doc('Run workspace benchmarks with the quick settings')]
 perf-quick:
-    cargo perf-quick
+    cargo bench-quick
 
 [doc('Run the viewer profiling build with Tracy')]
 profile:

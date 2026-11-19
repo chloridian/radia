@@ -23,8 +23,8 @@ cargo run -p <package-with-binary> -- <args>
 cargo build --workspace --timings
 
 # Format
-cargo xfmt
-cargo xfmt --check
+cargo fmt-all
+cargo ci-fmt
 
 # Lint
 cargo lint
@@ -32,8 +32,8 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo clippy -p <crate> --all-targets -- -D warnings
 
 # Test
-cargo xtest --workspace
-cargo xtest -p <crate>
+cargo test-all
+cargo nextest run -p <crate> --all-features
 cargo nextest list --workspace
 
 # Run specific tests
@@ -55,13 +55,13 @@ cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target
 
 - `cargo lint` checks all targets and features with warnings denied. `just lint` runs the same check and accepts extra Clippy arguments.
 - With `RADIA_CI=true`, which CI sets, `just lint`, `just build`, and `just test` also pass `--locked` and the `ci` Cargo profile.
-- `cargo xfmt` runs rustfmt with the import grouping and merging options, which stable rustfmt accepts only on the command line. Plain `cargo fmt` leaves imports ungrouped, and the hook and CI reject the result.
-- `cargo xtest` runs Nextest with all features, but does not explicitly select the workspace. Add `--workspace` when needed. `just test` selects the workspace and runs the same command.
+- `cargo fmt-all` runs rustfmt with the import grouping and merging options, which stable rustfmt accepts only on the command line. Plain `cargo fmt` leaves imports ungrouped, and the hook and CI reject the result. `cargo ci-fmt` is the check-only form.
+- `cargo test-all` runs Nextest on the whole workspace with all features and without stopping at the first failure. `just test` runs the same command. Scope a run with `cargo nextest run -p <crate>`.
 - `just ci` runs the formatting, Clippy, cargo-machete, build, and test checks in order and stops at the first failure.
 - `just security` runs `cargo deny check`, which also covers RustSec advisories. CI does not run it. CodeQL scans the Rust code on pull requests, on pushes to main, and weekly. Dependabot opens grouped weekly updates for Cargo and GitHub Actions.
 - Replace `<crate>`, `<name>`, and `<args>` with the relevant values.
 - Optional features may require platform-specific dependencies.
-- Ignored tests do not run in `cargo xtest`. The `render` GPU tests need a Vulkan adapter; run them with the command above on render changes.
+- Ignored tests do not run in `cargo test-all`. The `render` GPU tests need a Vulkan adapter; run them with the command above on render changes.
 - Stress runs use the same production constants as ordinary tests. Keep the workspace load running throughout the focused repetition and record both commands and their results.
 - Build the archive after edits are complete and use fresh extraction directories for each validation run. Both runs use the archived executables, so subsequent Cargo builds cannot overwrite running test binaries on Windows.
 
@@ -122,7 +122,7 @@ cargo bench -p <crate> -- <filter> --sample-size 200 --warm-up-time 5 --measurem
 
 Each crate has one `main` benchmark target. Replace the package and Criterion filter as needed. The inventory package name is version-qualified (`-p inventory@0.0.1`) because a dependency also uses `inventory`. For example, `cargo bench -p render -- reconcile` selects reconciliation benchmarks. Run timing baselines without concurrent tests or builds; the parallel workspace load above is for flakiness validation.
 
-- `cargo perf` runs workspace benchmarks with 200 samples, a 5-second warm-up, and a 15-second measurement. `cargo perf-quick` uses 30 samples, a 1-second warm-up, a 3-second measurement, and no plot. Use `cargo bench -p <crate> -- <filter> ...` for a focused run.
+- `cargo bench-all` runs workspace benchmarks with 200 samples, a 5-second warm-up, and a 15-second measurement. `cargo bench-quick` uses 30 samples, a 1-second warm-up, a 3-second measurement, and no plot. Use `cargo bench -p <crate> -- <filter> ...` for a focused run.
 - `cargo profile`: viewer profiling build with Tracy.
 - `cargo flamegraph`: requires a configured profiler backend; WSL2 may restrict Linux `perf`.
 
