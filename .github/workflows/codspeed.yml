@@ -1,4 +1,4 @@
-name: CodSpeed
+name: Bench
 
 on:
     pull_request:
@@ -18,8 +18,8 @@ env:
     CARGO_TERM_COLOR: always
 
 jobs:
-    benchmarks:
-        name: benchmarks-${{ matrix.name }}
+    benches:
+        name: ${{ matrix.name }}
         runs-on: ubuntu-latest
         timeout-minutes: 120
         strategy:
@@ -27,19 +27,13 @@ jobs:
             matrix:
                 include:
                     - name: core
-                      packages: -p llsd -p network -p protocol -p storage
+                      packages: -p llsd -p network -p protocol -p storage -p assets
                     - name: inventory
                       packages: -p inventory
                     - name: world
                       packages: -p world
-                    - name: assets
-                      packages: -p assets
-                    - name: render-scene
+                    - name: render
                       packages: -p render
-                      filter: scene/
-                    - name: render-texture
-                      packages: -p render
-                      filter: texture/
         steps:
             - uses: actions/checkout@v7
             - uses: actions-rust-lang/setup-rust-toolchain@v2
@@ -68,4 +62,4 @@ jobs:
             - uses: CodSpeedHQ/action@v5
               with:
                   mode: simulation
-                  run: just codspeed-run ${{ matrix.packages }} ${{ matrix.filter }}
+                  run: just codspeed-run ${{ matrix.packages }}
