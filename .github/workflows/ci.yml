@@ -1,0 +1,143 @@
+name: CI
+
+on:
+    pull_request:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+env:
+    CARGO_TERM_COLOR: always
+    RUST_BACKTRACE: 1
+    RADIA_CI: "true"
+
+jobs:
+    orchestrate:
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        outputs:
+            run_tests: ${{ steps.filter.outputs.run_tests }}
+            run_style: ${{ steps.filter.outputs.run_style }}
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: ${{ github.ref == 'refs/heads/main' && 2 || 350 }}
+
+            - id: filter
+              run: |
+                  if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+                    echo "run_tests=true" >> "$GITHUB_OUTPUT"
+                    echo "run_style=true" >> "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
+
+                  if [ -z "$GITHUB_BASE_REF" ]; then
+                    COMPARE_REV="$(git rev-parse HEAD~1)"
+                  else
+                    git fetch --update-head-ok origin "$GITHUB_BASE_REF" --depth=350 || true
+                    COMPARE_REV="$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD)"
+                  fi
+                  CHANGED_FILES="$(git diff --name-only "$COMPARE_REV" "$GITHUB_SHA")"
+
+                  check_pattern() {
+                    local name="$1" pattern="$2" invert="${3:-false}"
+                    if [ "$invert" = "true" ]; then
+                      echo "$CHANGED_FILES" | grep -qvE "$pattern" && echo "${name}=true" >> "$GITHUB_OUTPUT" || echo "${name}=false" >> "$GITHUB_OUTPUT"
+                    else
+                      echo "$CHANGED_FILES" | grep -qE "$pattern" && echo "${name}=true" >> "$GITHUB_OUTPUT" || echo "${name}=false" >> "$GITHUB_OUTPUT"
+                    fi
+                  }
+
+                  check_pattern "run_tests" '^(docs/|plans/|\.github/FUNDING\.yml$|LICENSE$|.*\.md$)' true
+                  check_pattern "run_style" '\.(rs|toml)$|^Cargo\.lock$|^\.cargo/|^\.github/workflows/ci\.yml$'
+
+    fmt:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: [orchestrate]
+        if: needs.orchestrate.outputs.run_style == 'true'
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+              with:
+                  cache: false
+            - uses: extractions/setup-just@v2
+            - run: just fmt-check
+
+    clippy:
+        runs-on: ubuntu-latest
+        timeout-minutes: 60
+        needs: [orchestrate]
+        if: needs.orchestrate.outputs.run_style == 'true'
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+            - name: Install Linux system dependencies
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install --yes --no-install-recommends                     build-essential                     cmake                     libfontconfig1-dev                     libvulkan-dev                     libwayland-dev                     libx11-xcb-dev                     libxkbcommon-x11-dev                     pkg-config
+
+            - uses: extractions/setup-just@v2
+            - run: just lint
+
+    machete:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: [orchestrate]
+        if: needs.orchestrate.outputs.run_style == 'true'
+        steps:
+            - uses: actions/checkout@v7
+            - uses: taiki-e/install-action@cargo-machete
+            - uses: extractions/setup-just@v2
+            - run: just machete
+
+    test:
+        name: test-${{ matrix.name }}
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 60
+        needs: [orchestrate]
+        if: needs.orchestrate.outputs.run_tests == 'true'
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: windows-latest
+                      name: windows
+                    - os: macos-latest
+                      name: mac
+                    - os: ubuntu-latest
+                      name: linux
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+            - name: Install Linux system dependencies
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install --yes --no-install-recommends \
+                    build-essential \
+                    cmake \
+                    libfontconfig1-dev \
+                    libvulkan-dev \
+                    libwayland-dev \
+                    libx11-xcb-dev \
+                    libxkbcommon-x11-dev \
+                    pkg-config
+
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: nextest@0.9
+
+            - uses: extractions/setup-just@v2
+
+            - run: just build
+            - run: just test

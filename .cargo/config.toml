@@ -1,11 +1,11 @@
 [alias]
-xtest = "nextest run --all-features"
+fmt-all = "fmt --all -- --config group_imports=StdExternalCrate,imports_granularity=Crate"
+ci-fmt = "fmt --all -- --check --config group_imports=StdExternalCrate,imports_granularity=Crate"
 lint = "clippy --workspace --all-targets --all-features -- -D warnings"
-xfmt = "fmt --all -- --config group_imports=StdExternalCrate,imports_granularity=Crate"
+test-all = "nextest run --workspace --all-features --no-fail-fast"
+bench-all = "bench --workspace --benches -- --sample-size 200 --warm-up-time 5 --measurement-time 15"
+bench-quick = "bench --workspace --benches -- --sample-size 30 --warm-up-time 1 --measurement-time 3 --noplot"
 profile = "run --profile profiling --features tracy"
-perf = "bench --workspace --benches -- --sample-size 200 --warm-up-time 5 --measurement-time 15"
-perf-quick = "bench --workspace --benches -- --sample-size 30 --warm-up-time 1 --measurement-time 3 --noplot"
 
 [env]
-# Tracy spans do not need native callstacks, which repeat Rust's DbgHelp initialization on Windows.
 TRACY_CLIENT_SYS_CXXFLAGS = { value = "-DTRACY_NO_CALLSTACK", force = false }
