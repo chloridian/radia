@@ -101,6 +101,7 @@ winit = { version = "=0.30.13", default-features = false, features = [
 ] }
 
 [workspace.lints.rust]
+linker_messages = "allow"
 unused_qualifications = "deny"
 
 [workspace.lints.clippy]
