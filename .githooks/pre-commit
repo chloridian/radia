@@ -1,4 +1,4 @@
 #!/bin/sh
 set -eu
 
-cargo xfmt --check
+just fmt-check

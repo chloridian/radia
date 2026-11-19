@@ -1,0 +1,192 @@
+name: Release
+
+# Disabled until the RELEASE_ENABLED repository variable is set to "true".
+# Every job is gated on it, so scheduled and tag runs end as skipped.
+#
+# schedule          build nightly packages -> verify -> publish the rolling nightly prerelease
+# push tag v*       build release packages -> verify -> await approval -> publish the release
+# workflow_dispatch optionally build packages for testing; never publishes
+
+on:
+    schedule:
+        - cron: "0 5 * * *"
+    push:
+        tags: ["v*"]
+    workflow_dispatch:
+        inputs:
+            package:
+                description: Build packages
+                type: boolean
+                default: true
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: false
+
+permissions:
+    contents: read
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    plan:
+        if: vars.RELEASE_ENABLED == 'true' && (github.event_name != 'workflow_dispatch' || inputs.package)
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        outputs:
+            channel: ${{ steps.plan.outputs.channel }}
+            version: ${{ steps.plan.outputs.version }}
+        steps:
+            - uses: actions/checkout@v7
+            - id: plan
+              run: |
+                  base="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "viewer") | .version')"
+                  case "$GITHUB_EVENT_NAME" in
+                    schedule)
+                      channel=nightly
+                      version="${base}-nightly.$(date -u +%Y%m%d)"
+                      ;;
+                    push)
+                      channel=release
+                      version="${GITHUB_REF_NAME#v}"
+                      if [ "$version" != "$base" ]; then
+                        echo "::error::Tag $GITHUB_REF_NAME does not match workspace version $base"
+                        exit 1
+                      fi
+                      ;;
+                    *)
+                      channel=test
+                      version="${base}-test.${GITHUB_SHA::8}"
+                      ;;
+                  esac
+                  echo "channel=$channel" >> "$GITHUB_OUTPUT"
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    package:
+        name: package-${{ matrix.name }}
+        needs: [plan]
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 90
+        strategy:
+            fail-fast: true
+            matrix:
+                include:
+                    - os: windows-latest
+                      name: windows
+                      exe: viewer.exe
+                    - os: macos-latest
+                      name: mac
+                      exe: viewer
+                    - os: ubuntu-latest
+                      name: linux
+                      exe: viewer
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+            - name: Install Linux system dependencies
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install --yes --no-install-recommends \
+                    build-essential \
+                    cmake \
+                    libfontconfig1-dev \
+                    libvulkan-dev \
+                    libwayland-dev \
+                    libx11-xcb-dev \
+                    libxkbcommon-x11-dev \
+                    pkg-config
+
+            - run: cargo build -p viewer --bin viewer --release --locked
+
+            - name: Package
+              shell: bash
+              run: |
+                  name="radia-${{ needs.plan.outputs.version }}-${{ matrix.name }}"
+                  mkdir "$name"
+                  cp "target/release/${{ matrix.exe }}" LICENSE "$name/"
+                  tar -czf "$name.tar.gz" "$name"
+                  echo "ARCHIVE=$name.tar.gz" >> "$GITHUB_ENV"
+
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: package-${{ matrix.name }}
+                  path: ${{ env.ARCHIVE }}
+                  if-no-files-found: error
+
+    verify:
+        needs: [plan, package]
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  path: packages
+                  pattern: package-*
+                  merge-multiple: true
+
+            - name: Verify archives
+              working-directory: packages
+              run: |
+                  [ "$(ls *.tar.gz | wc -l)" -eq 3 ]
+                  for a in *.tar.gz; do
+                    tar -tzf "$a" | grep -Eq '/(viewer|viewer\.exe)$'
+                    tar -tzf "$a" | grep -q '/LICENSE$'
+                  done
+                  sha256sum *.tar.gz > SHA256SUMS
+                  sha256sum --check SHA256SUMS
+
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: verified-packages
+                  path: packages/*
+                  if-no-files-found: error
+
+    publish-nightly:
+        if: needs.plan.outputs.channel == 'nightly'
+        needs: [plan, verify]
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        permissions:
+            contents: write
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  name: verified-packages
+                  path: packages
+
+            - env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  gh release delete nightly --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+                  gh release create nightly packages/* \
+                    --repo "$GITHUB_REPOSITORY" \
+                    --target "$GITHUB_SHA" \
+                    --prerelease \
+                    --title "Nightly ${{ needs.plan.outputs.version }}" \
+                    --notes "Automated build of $GITHUB_SHA."
+
+    publish-release:
+        if: needs.plan.outputs.channel == 'release'
+        needs: [plan, verify]
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        environment: release
+        permissions:
+            contents: write
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  name: verified-packages
+                  path: packages
+
+            - env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  gh release create "$GITHUB_REF_NAME" packages/* \
+                    --repo "$GITHUB_REPOSITORY" \
+                    --verify-tag \
+                    --title "$GITHUB_REF_NAME" \
+                    --generate-notes
