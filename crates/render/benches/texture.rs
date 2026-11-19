@@ -10,9 +10,14 @@ mod texture_compression;
 
 use self::texture_compression::{CompressionFormat, CompressionQuality};
 
+#[cfg(not(codspeed))]
+const EDGES: [u32; 3] = [512, 1024, 2048];
+#[cfg(codspeed)]
+const EDGES: [u32; 2] = [512, 1024];
+
 pub(crate) fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("texture/compression");
-    for edge in [512u32, 1024, 2048] {
+    for edge in EDGES {
         let mut pixels = Vec::with_capacity(edge as usize * edge as usize * 4);
         for y in 0..edge {
             for x in 0..edge {
