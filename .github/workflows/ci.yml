@@ -65,10 +65,10 @@ jobs:
         if: needs.orchestrate.outputs.run_style == 'true'
         steps:
             - uses: actions/checkout@v7
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - uses: actions-rust-lang/setup-rust-toolchain@v2
               with:
                   cache: false
-            - uses: extractions/setup-just@v2
+            - uses: extractions/setup-just@v4
             - run: just fmt-check
 
     clippy:
@@ -78,14 +78,14 @@ jobs:
         if: needs.orchestrate.outputs.run_style == 'true'
         steps:
             - uses: actions/checkout@v7
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - uses: actions-rust-lang/setup-rust-toolchain@v2
 
             - name: Install Linux system dependencies
               run: |
                   sudo apt-get update
                   sudo apt-get install --yes --no-install-recommends                     build-essential                     cmake                     libfontconfig1-dev                     libvulkan-dev                     libwayland-dev                     libx11-xcb-dev                     libxkbcommon-x11-dev                     pkg-config
 
-            - uses: extractions/setup-just@v2
+            - uses: extractions/setup-just@v4
             - run: just lint
 
     machete:
@@ -96,7 +96,7 @@ jobs:
         steps:
             - uses: actions/checkout@v7
             - uses: taiki-e/install-action@cargo-machete
-            - uses: extractions/setup-just@v2
+            - uses: extractions/setup-just@v4
             - run: just machete
 
     test:
@@ -117,7 +117,7 @@ jobs:
                       name: linux
         steps:
             - uses: actions/checkout@v7
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - uses: actions-rust-lang/setup-rust-toolchain@v2
 
             - name: Install Linux system dependencies
               if: runner.os == 'Linux'
@@ -137,7 +137,7 @@ jobs:
               with:
                   tool: nextest@0.9
 
-            - uses: extractions/setup-just@v2
+            - uses: extractions/setup-just@v4
 
             - run: just build
             - run: just test
