@@ -58,7 +58,7 @@ cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target
 - `just fmt` runs rustfmt with the import grouping and merging options, which stable rustfmt accepts only on the command line. Plain `cargo fmt` leaves imports ungrouped, and the hook and CI reject the result.
 - `just test` runs Nextest on the whole workspace with all features. Use `cargo nextest run -p <crate>` to scope it; extra `just test` arguments cannot narrow the workspace selection.
 - `just ci` runs the formatting, Clippy, cargo-machete, build, and test checks in order and stops at the first failure.
-- `just security` runs `cargo deny check`, which also covers RustSec advisories. CI runs it weekly and on dependency changes. Dependabot opens grouped weekly updates for Cargo and GitHub Actions.
+- `just security` runs `cargo deny check`, which also covers RustSec advisories. CI does not run it. CodeQL scans the Rust code on pull requests, on pushes to main, and weekly. Dependabot opens grouped weekly updates for Cargo and GitHub Actions.
 - Replace `<crate>`, `<name>`, and `<args>` with the relevant values.
 - Optional features may require platform-specific dependencies.
 - Ignored tests do not run in `just test`. The `render` GPU tests need a Vulkan adapter; run them with the command above on render changes.
