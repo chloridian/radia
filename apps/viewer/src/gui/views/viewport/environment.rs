@@ -1,125 +1,84 @@
-use std::{
-    sync::{Arc, Weak},
-    time::Instant,
-};
+use std::{sync::Arc, time::Instant};
 
-use inventory::{InventoryOwner, ItemKey};
-use render::scene;
-use utils::ItemId;
+use gpui::SharedString;
+use gpui_component::select::SelectItem;
+use render::scene::{self, EnvironmentPreset, LocalChoice};
 
 use super::FRAME_INTERVAL;
-use crate::{
-    inventory::environments::{EnvironmentItems, EnvironmentMenu},
-    scene_feed::SceneFeed,
-};
+use crate::inventory::environments::{EnvironmentItems, EnvironmentMenu, EnvironmentSettingKind};
 
-#[derive(Default)]
-pub(super) struct EnvironmentControls {
-    label: Option<(scene::EnvironmentChoice, Weak<EnvironmentMenu>, String)>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct EnvOption {
+    pub(super) title: SharedString,
+    pub(super) choice: Option<LocalChoice>,
 }
 
-impl EnvironmentControls {
-    pub(super) fn draw(&mut self, ui: &mut egui::Ui, feed: Option<&SceneFeed>) {
-        let current_environment = feed.map_or_else(scene::EnvironmentChoice::default, SceneFeed::environment_choice);
-        let mut selected_environment = current_environment.clone();
-        let selected_text = match &selected_environment {
-            scene::EnvironmentChoice::Shared => "Shared environment".to_owned(),
-            scene::EnvironmentChoice::Local(scene::LocalChoice::Preset(preset)) => preset.label().to_owned(),
-            scene::EnvironmentChoice::Local(scene::LocalChoice::Inventory { owner_id, item_id, .. }) => feed
-                .and_then(|feed| {
-                    let EnvironmentItems::Ready(items) = feed.environment_items() else {
-                        return None;
-                    };
-                    if let Some((choice, previous, label)) = &self.label
-                        && choice == &selected_environment
-                        && previous.upgrade().is_some_and(|previous| Arc::ptr_eq(&previous, &items))
-                    {
-                        return Some(label.clone());
-                    }
-                    let key = ItemKey::new(InventoryOwner::new(*owner_id), ItemId::new(*item_id));
-                    let label = items.label(key)?;
-                    self.label = Some((selected_environment.clone(), Arc::downgrade(&items), label.clone()));
-                    Some(label)
-                })
-                .unwrap_or_else(|| "Saved environment".into()),
-        };
-        let environment_items = feed.map(SceneFeed::environment_items);
-        let can_select_environment = feed.is_some_and(|feed| feed.agent().is_some());
-        ui.add_enabled_ui(can_select_environment, |ui| {
-            egui::ComboBox::from_label("Environment").selected_text(selected_text).show_ui(ui, |ui| {
-                ui.selectable_value(&mut selected_environment, scene::EnvironmentChoice::Shared, "Shared environment");
-                for preset in scene::EnvironmentPreset::ALL {
-                    ui.selectable_value(
-                        &mut selected_environment,
-                        scene::EnvironmentChoice::Local(scene::LocalChoice::Preset(preset)),
-                        preset.label(),
-                    );
-                }
-                ui.separator();
-                match environment_items {
-                    Some(EnvironmentItems::Ready(items)) => {
-                        if items.items().is_empty() {
-                            ui.label("No saved environments");
-                        } else {
-                            let rows = items.items();
-                            let row_height = ui.text_style_height(&egui::TextStyle::Button);
-                            egui::ScrollArea::vertical().max_height(320.0).show_rows(ui, row_height, rows.len(), |ui, visible| {
-                                for index in visible {
-                                    let Some(item) = rows.get(index) else { continue };
-                                    let choice = scene::EnvironmentChoice::Local(scene::LocalChoice::Inventory {
-                                        owner_id: item.key.owner().id(),
-                                        item_id: item.key.id().uuid(),
-                                        asset_id: item.asset_id,
-                                    });
-                                    ui.add_enabled_ui(!item.asset_id.uuid().is_nil(), |ui| {
-                                        let label = item.label();
-                                        ui.selectable_value(&mut selected_environment, choice, &label);
-                                    });
-                                }
-                            });
-                        }
-                    }
-                    Some(EnvironmentItems::Failed) => {
-                        ui.label("Saved environments unavailable");
-                    }
-                    Some(EnvironmentItems::Loading) | None => {
-                        ui.label("Loading saved environments…");
-                    }
-                }
-            });
-        });
-        if selected_environment != current_environment
-            && let Some(feed) = feed
-        {
-            feed.set_environment_choice(selected_environment);
-        }
-        if let Some(failure) = feed.and_then(|feed| feed.view.viewer_environment()).and_then(|environment| environment.local_error()) {
-            ui.colored_label(egui::Color32::LIGHT_RED, local_environment_failure(failure));
-        }
+impl SelectItem for EnvOption {
+    type Value = Option<LocalChoice>;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.choice
     }
 }
 
-fn local_environment_failure(failure: assets::Failure) -> String {
-    match failure {
-        assets::Failure::MissingCapability => "The environment asset capability is unavailable.".into(),
-        assets::Failure::NotFound => "The environment asset was not found.".into(),
-        assets::Failure::Denied => "Access to the environment asset was denied.".into(),
-        assets::Failure::HttpStatus { status } => format!("The environment request failed with HTTP status {status}."),
-        assets::Failure::Network => "The environment server could not be reached.".into(),
-        assets::Failure::MemoryPressure => "The viewer has insufficient memory to load the environment.".into(),
-        assets::Failure::TooLarge => "The environment asset is too large.".into(),
-        assets::Failure::Malformed => "The environment settings could not be decoded.".into(),
-        assets::Failure::Unsupported => "The environment settings type is unsupported.".into(),
-        assets::Failure::RouteClosed | assets::Failure::SessionClosed | assets::Failure::Cancelled => {
-            "The environment request ended before it completed.".into()
-        }
-        assets::Failure::Deadline => "The environment request timed out.".into(),
-        assets::Failure::Transient { .. } => "The environment request failed temporarily.".into(),
-        assets::Failure::MissingLod(_) | assets::Failure::MalformedBlock | assets::Failure::UnsupportedVersion(_) => {
-            "The environment asset is malformed or unsupported.".into()
-        }
-        assets::Failure::FullAssetRequired => "The environment asset could not be loaded.".into(),
+pub(super) fn sky_options(items: Option<&EnvironmentMenu>) -> Vec<EnvOption> {
+    let mut options = vec![EnvOption { title: "Shared".into(), choice: None }];
+    for preset in EnvironmentPreset::ALL {
+        options.push(EnvOption { title: preset.label().into(), choice: Some(LocalChoice::Preset(preset)) });
     }
+    if let Some(menu) = items {
+        for item in menu.items() {
+            if item.kind() == EnvironmentSettingKind::Sky && !item.asset_id.uuid().is_nil() {
+                options.push(EnvOption {
+                    title: item.label().into(),
+                    choice: Some(LocalChoice::Inventory {
+                        owner_id: item.key.owner().id(),
+                        item_id: item.key.id().uuid(),
+                        asset_id: item.asset_id,
+                    }),
+                });
+            }
+        }
+    }
+    options
+}
+
+pub(super) fn water_options(items: Option<&EnvironmentMenu>) -> Vec<EnvOption> {
+    let mut options = vec![EnvOption { title: "Shared".into(), choice: None }];
+    if let Some(menu) = items {
+        for item in menu.items() {
+            if item.kind() == EnvironmentSettingKind::Water && !item.asset_id.uuid().is_nil() {
+                options.push(EnvOption {
+                    title: item.label().into(),
+                    choice: Some(LocalChoice::Inventory {
+                        owner_id: item.key.owner().id(),
+                        item_id: item.key.id().uuid(),
+                        asset_id: item.asset_id,
+                    }),
+                });
+            }
+        }
+    }
+    options
+}
+
+pub(super) fn menu_from_items(items: &EnvironmentItems) -> Option<&Arc<EnvironmentMenu>> {
+    match items {
+        EnvironmentItems::Ready(menu) => Some(menu),
+        EnvironmentItems::Loading | EnvironmentItems::Failed => None,
+    }
+}
+
+pub(super) fn step_index(current: usize, len: usize, delta: isize) -> Option<usize> {
+    if len <= 1 {
+        return None;
+    }
+    let current = current.min(len - 1);
+    Some((current as isize + delta).rem_euclid(len as isize) as usize)
 }
 
 pub(super) fn sky_frame_deadline(camera: Option<scene::Camera>, animating: bool, now: Instant) -> Option<Instant> {
@@ -156,7 +115,16 @@ mod tests {
     use math::{DVec3, Vec3};
     use render::scene::Camera;
 
-    use super::{FRAME_INTERVAL, sky_frame_deadline, water_frame_deadline};
+    use super::{FRAME_INTERVAL, sky_frame_deadline, step_index, water_frame_deadline};
+
+    #[test]
+    fn step_wraps_through_options() {
+        assert_eq!(step_index(0, 0, 1), None);
+        assert_eq!(step_index(0, 1, 1), None);
+        assert_eq!(step_index(0, 3, -1), Some(2));
+        assert_eq!(step_index(2, 3, 1), Some(0));
+        assert_eq!(step_index(1, 3, 1), Some(2));
+    }
 
     #[test]
     fn sky_redraw_needs_visible_animation() {

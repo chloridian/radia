@@ -1,14 +1,13 @@
-mod logging;
-
 use std::{env::consts::OS, io, sync::Arc};
 
 use assets::cache::AssetCache;
-use gpui_component_assets::Assets;
+use gpui_kit_assets::Assets;
+use gpui_wgpu::WgpuDeviceRequirements;
 use tokio::runtime::Builder;
-use viewer::gui;
+use viewer::{gui, logging};
 
 fn main() -> io::Result<()> {
-    let _logging = logging::init();
+    let (_logging, log_control) = logging::init();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), os = OS, "viewer started");
     let runtime = Builder::new_multi_thread().enable_all().thread_name("radia-service").build()?;
     let services = runtime.handle().clone();
@@ -24,7 +23,14 @@ fn main() -> io::Result<()> {
         }
     };
     let gui_cache = asset_cache.clone();
-    gpui_platform::application().with_assets(Assets).run(move |cx| gui::init(cx, services, gui_cache));
+    gpui_platform::application().with_assets(Assets).run(move |cx| {
+        cx.set_gpu_requirements(Box::new(WgpuDeviceRequirements {
+            features: render::required_features(),
+            limits: Some(render::required_limits()),
+            backends: None,
+        }));
+        gui::init(cx, services, gui_cache, log_control);
+    });
     let cache_shutdown = if let Some(cache) = asset_cache {
         Arc::try_unwrap(cache)
             .map_err(|cache| io::Error::other(format!("asset cache still has {} owners after viewer shutdown", Arc::strong_count(&cache))))

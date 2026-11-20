@@ -1,9 +1,8 @@
-use futures::{StreamExt, future::BoxFuture};
 use gpui::{
-    AnyElement, AnyWindowHandle, App, AppContext, BackgroundExecutor, Entity, Render, Subscription, TitlebarOptions, Window, WindowBounds,
-    WindowId, WindowOptions, div, prelude::*, px, size,
+    AnyElement, AnyWindowHandle, App, AppContext, Entity, Render, Subscription, TitlebarOptions, Window, WindowBounds, WindowId,
+    WindowOptions, div, prelude::*, px, size,
 };
-use gpui_component::{Root, Theme};
+use gpui_component::{Root, StyledExt, Theme, TitleBar};
 use render::scene::Camera;
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -12,12 +11,10 @@ use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::AssetHandle,
     gui::{
-        AppLifecycle,
-        components::window_chrome,
-        login_options, service_runtime, shutdown,
+        AppLifecycle, log_control, login_options, service_runtime,
         views::{
             chat::ChatScreen,
-            viewport::{Viewport, ViewportError, ViewportEvent},
+            viewport::{SceneView, SceneViewConfig, ViewportError},
         },
         window_geometry,
     },
@@ -28,8 +25,9 @@ use crate::{
 
 pub(super) struct State {
     main: MainWindow,
+    scene_window: Option<AnyWindowHandle>,
+    scene_view: Option<Entity<SceneView>>,
     chat_window: Option<AnyWindowHandle>,
-    viewport: Option<Viewport>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,25 +49,30 @@ impl MainWindow {
 
 impl State {
     pub(super) fn new() -> Self {
-        Self { main: MainWindow::Login, chat_window: None, viewport: None }
+        Self { main: MainWindow::Login, scene_window: None, scene_view: None, chat_window: None }
     }
 
     pub(super) fn window_closed(&mut self, closed_window_id: WindowId) -> bool {
         if self.chat_window.is_some_and(|window| window.window_id() == closed_window_id) {
             self.chat_window = None;
+            return matches!(self.main, MainWindow::Starting(_) | MainWindow::Scene(_));
         }
-        matches!(self.main, MainWindow::Scene(_))
+        if self.scene_window.is_some_and(|window| window.window_id() == closed_window_id) {
+            self.scene_window = None;
+            self.scene_view = None;
+            return !matches!(self.main, MainWindow::Starting(_) | MainWindow::Scene(_));
+        }
+        matches!(self.main, MainWindow::Starting(_) | MainWindow::Scene(_))
     }
+}
 
-    pub(super) fn shutdown(&mut self, executor: BackgroundExecutor) -> BoxFuture<'static, ()> {
-        let viewport = self.viewport.take();
-        let worker = executor.spawn(async move {
-            if let Some(viewport) = viewport {
-                viewport.shutdown();
-            }
-        });
-        Box::pin(worker)
+pub(super) fn shutdown(cx: &mut App) {
+    let view = cx.global_mut::<AppLifecycle>().scene.scene_view.take();
+    if let Some(view) = view {
+        view.update(cx, |scene, _| scene.retire());
     }
+    cx.global_mut::<AppLifecycle>().scene.scene_window = None;
+    cx.global_mut::<AppLifecycle>().scene.chat_window = None;
 }
 
 pub(crate) fn start_session(
@@ -85,16 +88,44 @@ pub(crate) fn start_session(
     motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<network::CircuitMotionStatus>)>>,
     cx: &mut App,
 ) {
-    if start_scene(generation, cx) {
-        connect_world(
-            generation,
-            SceneSources { reader: reader.clone(), environments, assets: assets.clone(), motion_circuits, inventory_updates },
-            agent_id,
-            camera,
-            movement,
-            agent_motion,
-            cx,
-        );
+    if !cx.has_global::<AppLifecycle>()
+        || cx.global::<AppLifecycle>().quitting
+        || cx.global::<AppLifecycle>().scene.main.blocks_start(generation)
+    {
+        return;
+    }
+    let login_window = cx.global::<AppLifecycle>().login_window;
+    let activate = login_window.is_some_and(|window| window.update(cx, |_, window, _| window.is_window_active()).unwrap_or(false));
+    cx.global_mut::<AppLifecycle>().scene.main = MainWindow::Starting(generation);
+
+    let sources = SceneSources { reader: reader.clone(), environments, assets: assets.clone(), motion_circuits, inventory_updates };
+    let runtime = service_runtime(cx);
+    let logs = log_control(cx);
+    let config = SceneViewConfig { generation, sources, agent_id, camera, movement, agent_motion, runtime, log_control: logs };
+
+    let minimum = size(px(460.), px(300.));
+    let options = WindowOptions {
+        titlebar: Some(TitlebarOptions { title: Some("Radia".into()), ..TitleBar::title_bar_options() }),
+        window_bounds: Some(WindowBounds::Windowed(window_geometry::restore_bounds("scene", None, size(px(1280.), px(720.)), minimum, cx))),
+        window_min_size: Some(minimum),
+        focus: activate,
+        ..TitleBar::window_options()
+    };
+
+    let mut created_view = None;
+    match cx.open_window(options, |window, cx| {
+        let view = cx.new(|cx| SceneView::new(config, window, cx));
+        created_view = Some(view.clone());
+        cx.new(|cx| Root::new(view, window, cx))
+    }) {
+        Ok(window) => {
+            let lifecycle = cx.global_mut::<AppLifecycle>();
+            lifecycle.scene.scene_window = Some(window.into());
+            lifecycle.scene.scene_view = created_view;
+        }
+        Err(error) => {
+            cx.defer(move |cx| scene_failed(generation, ViewportError::WindowOpen(error.to_string()), cx));
+        }
     }
 }
 
@@ -102,13 +133,19 @@ pub(crate) fn end_session(generation: u64, cx: &mut App) {
     if !cx.has_global::<AppLifecycle>() {
         return;
     }
-    let lifecycle = cx.global_mut::<AppLifecycle>();
-    if !lifecycle.scene.main.is_current(generation) {
-        return;
+    let (scene_window, scene_view) = {
+        let lifecycle = cx.global_mut::<AppLifecycle>();
+        if !lifecycle.scene.main.is_current(generation) {
+            return;
+        }
+        lifecycle.scene.main = MainWindow::Login;
+        (lifecycle.scene.scene_window.take(), lifecycle.scene.scene_view.take())
+    };
+    if let Some(view) = scene_view {
+        view.update(cx, |scene, _| scene.retire());
     }
-    lifecycle.scene.main = MainWindow::Login;
-    if let Some(viewport) = &lifecycle.scene.viewport {
-        viewport.clear(generation);
+    if let Some(window) = scene_window {
+        window.update(cx, |_, window, _| window.remove_window()).ok();
     }
     cx.defer(show_login);
 }
@@ -117,95 +154,32 @@ pub(crate) fn login_content(_: bool, login_body: AnyElement, _: AnyElement) -> A
     login_body
 }
 
-fn start_scene(generation: u64, cx: &mut App) -> bool {
-    if !cx.has_global::<AppLifecycle>()
-        || cx.global::<AppLifecycle>().quitting
-        || cx.global::<AppLifecycle>().scene.main.blocks_start(generation)
-    {
-        return false;
-    }
-    let login_window = cx.global::<AppLifecycle>().login_window;
-    let activate = login_window.is_some_and(|window| window.update(cx, |_, window, _| window.is_window_active()).unwrap_or(false));
-    if cx.global::<AppLifecycle>().scene.viewport.is_none() {
-        match Viewport::start() {
-            Ok((viewport, mut events)) => {
-                cx.global_mut::<AppLifecycle>().scene.viewport = Some(viewport);
-                cx.spawn(async move |cx| {
-                    while let Some(event) = events.next().await {
-                        cx.update(|cx| viewport_event(event, cx));
-                    }
-                    cx.update(|cx| {
-                        let main = cx.global::<AppLifecycle>().scene.main;
-                        if let MainWindow::Starting(generation) | MainWindow::Scene(generation) = main {
-                            scene_failed(generation, ViewportError::WorkerStopped, cx);
-                        }
-                    });
-                })
-                .detach();
-            }
-            Err(error) => {
-                cx.global_mut::<AppLifecycle>().scene.main = MainWindow::Starting(generation);
-                cx.defer(move |cx| scene_failed(generation, ViewportError::WorkerStart(error), cx));
-                return false;
-            }
-        }
-    }
-    let lifecycle = cx.global_mut::<AppLifecycle>();
-    lifecycle.scene.main = MainWindow::Starting(generation);
-    if !lifecycle.scene.viewport.as_ref().is_some_and(|viewport| viewport.show(generation, activate)) {
-        cx.defer(move |cx| scene_failed(generation, ViewportError::WorkerUnavailable, cx));
-        return false;
-    }
-    true
-}
-
-fn connect_world(
-    generation: u64,
-    sources: SceneSources,
-    agent_id: Uuid,
-    camera: watch::Sender<Option<Camera>>,
-    movement: watch::Sender<Option<MovementObservation>>,
-    agent_motion: watch::Receiver<Option<AgentMotionSample>>,
-    cx: &mut App,
-) {
-    let lifecycle = cx.global::<AppLifecycle>();
-    if !lifecycle.quitting
-        && lifecycle.scene.main.is_current(generation)
-        && let Some(viewport) = &lifecycle.scene.viewport
-    {
-        viewport.connect_world(generation, sources, agent_id, camera, movement, agent_motion, service_runtime(cx));
-    }
-}
-
-fn viewport_event(event: ViewportEvent, cx: &mut App) {
-    if cx.global::<AppLifecycle>().quitting {
+pub(crate) fn scene_ready(generation: u64, cx: &mut App) {
+    if !cx.has_global::<AppLifecycle>() || cx.global::<AppLifecycle>().quitting {
         return;
     }
-
-    let main = cx.global::<AppLifecycle>().scene.main;
-    if matches!(event, ViewportEvent::Chat(_))
-        && let Some(viewport) = &cx.global::<AppLifecycle>().scene.viewport
-    {
-        viewport.chat_received();
+    if cx.global::<AppLifecycle>().scene.main != MainWindow::Starting(generation) {
+        return;
     }
-    match event {
-        ViewportEvent::Ready(generation) if main == MainWindow::Starting(generation) => {
-            cx.global_mut::<AppLifecycle>().scene.main = MainWindow::Scene(generation);
-            show_chat(false, cx);
-            if let Some(window) = cx.global_mut::<AppLifecycle>().login_window.take() {
-                window.update(cx, |_, window, _| window.remove_window()).ok();
-            }
-        }
-        ViewportEvent::Chat(generation) if main == MainWindow::Scene(generation) => show_chat(true, cx),
-        ViewportEvent::Closed(generation) if main.is_current(generation) => {
-            shutdown(cx);
-        }
-        ViewportEvent::Failed(generation, error) => scene_failed(generation, error, cx),
-        _ => {}
+    cx.global_mut::<AppLifecycle>().scene.main = MainWindow::Scene(generation);
+    if let Some(window) = cx.global_mut::<AppLifecycle>().login_window.take() {
+        window.update(cx, |_, window, _| window.remove_window()).ok();
     }
 }
 
-fn scene_failed(generation: u64, error: ViewportError, cx: &mut App) {
+pub(crate) fn request_chat(generation: u64, cx: &mut App) {
+    if !cx.has_global::<AppLifecycle>() || cx.global::<AppLifecycle>().quitting {
+        return;
+    }
+    if cx.global::<AppLifecycle>().scene.main == MainWindow::Scene(generation) {
+        show_chat(true, cx);
+    }
+}
+
+pub(crate) fn scene_failed(generation: u64, error: ViewportError, cx: &mut App) {
+    if !cx.has_global::<AppLifecycle>() {
+        return;
+    }
     let lifecycle = cx.global::<AppLifecycle>();
     if lifecycle.quitting || !lifecycle.scene.main.is_current(generation) {
         return;
@@ -225,7 +199,7 @@ fn show_login(cx: &mut App) {
         return;
     }
     if let Some(handle) = lifecycle.login_window {
-        handle.update(cx, |_, window, _| window.activate_window()).ok();
+        handle.update(cx, |_, window, _| window.activate()).ok();
     } else {
         let Some(controller) = lifecycle.controller.clone() else {
             return;
@@ -253,7 +227,7 @@ fn show_chat(focus: bool, cx: &mut App) {
     }
     if let Some(window) = lifecycle.scene.chat_window {
         if focus {
-            window.update(cx, |_, window, _| window.activate_window()).ok();
+            window.update(cx, |_, window, _| window.activate()).ok();
         }
         return;
     }
@@ -263,15 +237,11 @@ fn show_chat(focus: bool, cx: &mut App) {
     let chat = controller.read(cx).chat_view();
     let minimum = size(px(460.), px(300.));
     let options = WindowOptions {
-        titlebar: Some(TitlebarOptions {
-            title: Some("Nearby chat".into()),
-            appears_transparent: window_chrome::appears_transparent(),
-            ..Default::default()
-        }),
+        titlebar: Some(TitlebarOptions { title: Some("Nearby chat".into()), ..TitleBar::title_bar_options() }),
         window_bounds: Some(WindowBounds::Windowed(window_geometry::restore_bounds("chat", None, size(px(640.), px(520.)), minimum, cx))),
         window_min_size: Some(minimum),
         focus,
-        ..Default::default()
+        ..TitleBar::window_options()
     };
     match cx.open_window(options, move |window, cx| {
         let view = cx.new(|cx| ChatWindow::new(chat, window, cx));
@@ -294,12 +264,17 @@ impl ChatWindow {
 }
 
 impl Render for ChatWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::global(cx).colors;
-        let titlebar = window_chrome::titlebar(window, Some("Nearby Chat"), theme);
-        let content = div().size_full().flex().flex_col().bg(theme.background).text_color(theme.foreground);
-        let content = if let Some(titlebar) = titlebar { content.child(titlebar) } else { content };
-        content.child(div().flex_1().min_h_0().child(self.chat.clone()))
+        let title = div().text_sm().font_semibold().text_color(theme.foreground).child("Nearby Chat");
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .child(TitleBar::new().child(title))
+            .child(div().flex_1().min_h_0().child(self.chat.clone()))
     }
 }
 
@@ -307,16 +282,23 @@ impl Render for ChatWindow {
 mod tests {
     use std::sync::Arc;
 
+    use gpui::App;
     use render::scene::ApplyError;
 
-    use super::{MainWindow, end_session, start_scene, viewport_event};
+    use super::{MainWindow, end_session, request_chat, scene_failed, scene_ready};
     use crate::gui::{
-        AppLifecycle, SessionLifecycle, install_lifecycle,
-        views::{
-            login::LoginScreen,
-            viewport::{ViewportError, ViewportEvent},
-        },
+        AppLifecycle, SessionLifecycle, install_lifecycle, shutdown as app_shutdown,
+        views::{login::LoginScreen, viewport::ViewportError},
     };
+
+    fn scene_closed(generation: u64, cx: &mut App) {
+        if !cx.has_global::<AppLifecycle>() || cx.global::<AppLifecycle>().quitting {
+            return;
+        }
+        if cx.global::<AppLifecycle>().scene.main.is_current(generation) {
+            app_shutdown(cx);
+        }
+    }
 
     #[gpui::test]
     fn handoff_preserves_window_lifetimes(cx: &mut gpui::TestAppContext) {
@@ -335,21 +317,19 @@ mod tests {
             window.window_handle().window_id()
         });
         cx.update(|cx| {
-            viewport_event(ViewportEvent::Ready(1), cx);
+            scene_ready(1, cx);
             assert_eq!(cx.global::<AppLifecycle>().scene.main, MainWindow::Starting(2));
-            assert!(!start_scene(2, cx), "repeated readiness must not restart a pending scene");
-            viewport_event(ViewportEvent::Ready(2), cx);
+            scene_ready(2, cx);
             let lifecycle = cx.global::<AppLifecycle>();
             assert_eq!(lifecycle.scene.main, MainWindow::Scene(2));
             assert!(lifecycle.login_window.is_none());
-            assert_ne!(lifecycle.scene.chat_window.unwrap().window_id(), login_id, "chat must have its own native window");
-            assert!(!start_scene(2, cx), "repeated readiness must not restart the active scene");
-            assert!(!start_scene(1, cx), "older readiness must not replace the active scene");
-            assert_eq!(cx.global::<AppLifecycle>().scene.main, MainWindow::Scene(2));
-            viewport_event(ViewportEvent::Closed(1), cx);
-            viewport_event(ViewportEvent::Failed(1, ViewportError::ScenePublication(ApplyError::StaleSession)), cx);
+            assert!(lifecycle.scene.chat_window.is_none(), "chat must stay closed at login");
+            scene_closed(1, cx);
+            scene_failed(1, ViewportError::ScenePublication(ApplyError::StaleSession), cx);
             assert!(!cx.global::<AppLifecycle>().quitting);
-            let chat = cx.global::<AppLifecycle>().scene.chat_window.unwrap();
+            request_chat(2, cx);
+            let chat = cx.global::<AppLifecycle>().scene.chat_window.expect("chat opens when requested");
+            assert_ne!(chat.window_id(), login_id, "chat must have its own native window");
             chat.update(cx, |_, window, _| window.remove_window()).unwrap();
         });
         cx.run_until_parked();
@@ -358,11 +338,11 @@ mod tests {
             assert!(lifecycle.login_window.is_none());
             assert!(lifecycle.scene.chat_window.is_none());
             assert_eq!(lifecycle.scene.main, MainWindow::Scene(2));
-            assert!(!lifecycle.quitting, "closing the last GPUI window must leave the scene and session alive");
-            viewport_event(ViewportEvent::Chat(2), cx);
+            assert!(!lifecycle.quitting, "closing chat must leave the scene and session alive");
+            request_chat(2, cx);
             assert!(cx.global::<AppLifecycle>().scene.chat_window.is_some(), "chat must reopen without replacing the session controller");
             assert_eq!(cx.global::<AppLifecycle>().controller.as_ref().unwrap().entity_id(), controller.entity_id());
-            viewport_event(ViewportEvent::Closed(2), cx);
+            scene_closed(2, cx);
             assert!(cx.global::<AppLifecycle>().quitting, "closing the current scene owns shutdown");
         });
         cx.run_until_parked();
@@ -380,7 +360,7 @@ mod tests {
             lifecycle.login_window = Some(login);
             lifecycle.scene.main = MainWindow::Starting(2);
             end_session(2, cx);
-            viewport_event(ViewportEvent::Ready(2), cx);
+            scene_ready(2, cx);
             let lifecycle = cx.global::<AppLifecycle>();
             assert_eq!(lifecycle.scene.main, MainWindow::Login);
             assert!(lifecycle.scene.chat_window.is_none());
@@ -400,13 +380,12 @@ mod tests {
             let lifecycle = cx.global_mut::<AppLifecycle>();
             lifecycle.login_window = Some(login);
             lifecycle.scene.main = MainWindow::Starting(2);
-            viewport_event(ViewportEvent::Closed(2), cx);
-            viewport_event(ViewportEvent::Ready(2), cx);
-            assert!(!start_scene(2, cx));
+            scene_closed(2, cx);
+            scene_ready(2, cx);
             let lifecycle = cx.global::<AppLifecycle>();
             assert!(lifecycle.quitting);
             assert_eq!(lifecycle.scene.main, MainWindow::Starting(2));
-            assert!(lifecycle.scene.viewport.is_none());
+            assert!(lifecycle.scene.scene_window.is_none());
             assert!(lifecycle.scene.chat_window.is_none());
         });
         cx.run_until_parked();

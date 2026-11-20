@@ -76,6 +76,7 @@ pub enum Local<'a> {
     Sky { sky: &'a Sky, water: &'a WaterState },
     Water { water: &'a Water, sky: &'a SkyState },
     DayCycle(&'a DayCycle),
+    Split { sky: Option<&'a Sky>, water: Option<&'a Water> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -206,6 +207,17 @@ pub fn evaluate(sources: &Sources<'_>, utc_seconds: f64, altitude: f64) -> Evalu
                 if let Some(local_water) = sample_water_track(day.water(), day_position as f32) {
                     water = local_water;
                     water_cycles = day.water().len() > 1;
+                }
+            }
+            Local::Split { sky: local_sky, water: local_water } => {
+                if let Some(source) = local_sky {
+                    sky = sky_state(source, 0.0);
+                    sky_track = None;
+                    sky_cycles = false;
+                }
+                if let Some(source) = local_water {
+                    water = water_state(source, 0.0);
+                    water_cycles = false;
                 }
             }
         }

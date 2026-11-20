@@ -27,23 +27,67 @@ enum ActiveLocal {
     Sky { choice: LocalChoice, water: WaterState },
     Water { choice: LocalChoice, sky: SkyState },
     DayCycle { choice: LocalChoice },
+    Split { sky: Option<LocalChoice>, water: Option<LocalChoice> },
 }
 
 impl ActiveLocal {
-    fn choice(&self) -> &LocalChoice {
-        match self {
-            Self::Sky { choice, .. } | Self::Water { choice, .. } | Self::DayCycle { choice } => choice,
+    fn matches(
+        &self,
+        local: Option<&LocalEnvironment>,
+        local_sky: Option<&LocalEnvironment>,
+        local_water: Option<&LocalEnvironment>,
+    ) -> bool {
+        match (self, local, local_sky, local_water) {
+            (Self::Sky { choice, .. }, Some(local), None, None) => {
+                choice == local.choice() && matches!(&local.environment().settings, EnvironmentSettings::Sky(_))
+            }
+            (Self::Water { choice, .. }, Some(local), None, None) => {
+                choice == local.choice() && matches!(&local.environment().settings, EnvironmentSettings::Water(_))
+            }
+            (Self::DayCycle { choice }, Some(local), None, None) => {
+                choice == local.choice() && matches!(&local.environment().settings, EnvironmentSettings::DayCycle(_))
+            }
+            (Self::Split { sky, water }, None, local_sky, local_water) => {
+                let sky_matches = match (sky, local_sky) {
+                    (Some(choice), Some(local)) => {
+                        choice == local.choice() && matches!(&local.environment().settings, EnvironmentSettings::Sky(_))
+                    }
+                    (None, None) => true,
+                    _ => false,
+                };
+                let water_matches = match (water, local_water) {
+                    (Some(choice), Some(local)) => {
+                        choice == local.choice() && matches!(&local.environment().settings, EnvironmentSettings::Water(_))
+                    }
+                    (None, None) => true,
+                    _ => false,
+                };
+                sky_matches && water_matches
+            }
+            _ => false,
         }
     }
 
-    fn matches(&self, local: &LocalEnvironment) -> bool {
-        self.choice() == local.choice()
-            && matches!(
-                (self, &local.environment().settings),
-                (Self::Sky { .. }, EnvironmentSettings::Sky(_))
-                    | (Self::Water { .. }, EnvironmentSettings::Water(_))
-                    | (Self::DayCycle { .. }, EnvironmentSettings::DayCycle(_))
-            )
+    fn transition_duration(&self, previous: Option<&Self>) -> Duration {
+        match self {
+            Self::Sky { choice, .. } | Self::Water { choice, .. } | Self::DayCycle { choice } => match choice {
+                LocalChoice::Preset(_) => Duration::ZERO,
+                LocalChoice::Inventory { .. } => DEFAULT_TRANSITION,
+            },
+            Self::Split { sky, water } => {
+                let (prev_sky, prev_water) = match previous {
+                    Some(Self::Split { sky, water }) => (sky.as_ref(), water.as_ref()),
+                    _ => (None, None),
+                };
+                let sky_changed = sky.as_ref() != prev_sky;
+                let water_changed = water.as_ref() != prev_water;
+                if sky_changed && matches!(sky, Some(LocalChoice::Preset(_))) && !water_changed {
+                    Duration::ZERO
+                } else {
+                    DEFAULT_TRANSITION
+                }
+            }
+        }
     }
 }
 
@@ -80,12 +124,15 @@ impl ActiveEnvironment {
         let viewer_version_changed = self.viewer_version != viewer_version;
         self.viewer_version = viewer_version;
         let local = viewer.and_then(|viewer| viewer.local());
-        let local_changed = match (&self.local, local) {
-            (None, None) => false,
-            (Some(active), Some(local)) => !active.matches(local),
+        let local_sky = viewer.and_then(|viewer| viewer.local_sky());
+        let local_water = viewer.and_then(|viewer| viewer.local_water());
+        let has_local = local.is_some() || local_sky.is_some() || local_water.is_some();
+        let local_changed = match (&self.local, has_local) {
+            (None, false) => false,
+            (Some(active), true) => !active.matches(local, local_sky, local_water),
             _ => true,
         };
-        let leaving_local = local_changed && local.is_none();
+        let leaving_local = local_changed && !has_local;
         let identity = composition_identity(view, region);
         let viewer_composition_changed =
             self.composition.is_some_and(|previous| previous.experience_settings != identity.experience_settings);
@@ -109,19 +156,27 @@ impl ActiveEnvironment {
         }
         self.altitude = Some(altitude);
         let utc = wall_time.duration_since(UNIX_EPOCH).map_or(0.0, |duration| duration.as_secs_f64());
+        let previous_local = self.local.clone();
         if local_changed {
-            self.local = local.map(|local| {
+            self.local = if let Some(local) = local {
                 let choice = local.choice().clone();
                 let shared = self.evaluated.as_ref().cloned().unwrap_or_else(|| {
                     let sources = compose_sources(view, region, viewer, None, true);
                     evaluate(&sources, utc, altitude)
                 });
-                match &local.environment().settings {
+                Some(match &local.environment().settings {
                     EnvironmentSettings::Sky(_) => ActiveLocal::Sky { choice, water: shared.water },
                     EnvironmentSettings::Water(_) => ActiveLocal::Water { choice, sky: shared.sky },
                     EnvironmentSettings::DayCycle(_) => ActiveLocal::DayCycle { choice },
-                }
-            });
+                })
+            } else if local_sky.is_some() || local_water.is_some() {
+                Some(ActiveLocal::Split {
+                    sky: local_sky.map(|local| local.choice().clone()),
+                    water: local_water.map(|local| local.choice().clone()),
+                })
+            } else {
+                None
+            };
         }
         let include_properties = self.local.is_some();
         let sources = compose_sources(view, region, viewer, self.local.as_ref(), include_properties);
@@ -145,9 +200,8 @@ impl ActiveEnvironment {
             self.altitude = Some(altitude);
             return changed;
         }
-        let duration = match self.local.as_ref().map(ActiveLocal::choice) {
-            Some(LocalChoice::Preset(_)) => Duration::ZERO,
-            Some(LocalChoice::Inventory { .. }) => DEFAULT_TRANSITION,
+        let duration = match &self.local {
+            Some(active) => active.transition_duration(previous_local.as_ref()),
             None if leaving_local => DEFAULT_TRANSITION,
             None => viewer.and_then(|viewer| viewer.transition_for_region(region)).unwrap_or_else(|| {
                 viewer
@@ -326,6 +380,17 @@ fn compose_sources<'a>(
             EnvironmentSettings::DayCycle(day) => Some(Local::DayCycle(day)),
             _ => None,
         },
+        (None, Some(ActiveLocal::Split { .. })) => {
+            let sky = viewer.and_then(|viewer| viewer.local_sky()).and_then(|local| match &local.environment().settings {
+                EnvironmentSettings::Sky(sky) => Some(sky.as_ref()),
+                _ => None,
+            });
+            let water = viewer.and_then(|viewer| viewer.local_water()).and_then(|local| match &local.environment().settings {
+                EnvironmentSettings::Water(water) => Some(water.as_ref()),
+                _ => None,
+            });
+            (sky.is_some() || water.is_some()).then_some(Local::Split { sky, water })
+        }
         _ => None,
     };
     Sources {

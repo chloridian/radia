@@ -1,4 +1,3 @@
-mod components;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod scene;
 mod views;
@@ -15,11 +14,13 @@ use gpui::{
     AnyWindowHandle, App, AppContext, ColorExt, Entity, Global, QuitMode, Subscription, TitlebarOptions, WindowBounds, WindowOptions, px,
     rgb, rgb_to_hsla, size,
 };
-use gpui_component::{Root, Theme, ThemeMode};
+use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 use tokio::{runtime::Handle, task::JoinHandle};
 
-use self::components::window_chrome;
-use crate::gui::{views::login::LoginScreen, window_geometry::restore_bounds};
+use crate::{
+    gui::{views::login::LoginScreen, window_geometry::restore_bounds},
+    logging::LogControl,
+};
 
 struct AppLifecycle {
     _window_closed: Subscription,
@@ -87,6 +88,7 @@ impl SessionLifecycle {
 struct ServiceRuntime {
     runtime: Handle,
     asset_cache: Option<Arc<AssetCache>>,
+    log_control: LogControl,
 }
 
 impl Global for ServiceRuntime {}
@@ -99,9 +101,13 @@ pub(crate) fn asset_cache(cx: &App) -> Option<Arc<AssetCache>> {
     cx.global::<ServiceRuntime>().asset_cache.clone()
 }
 
-pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>) {
+pub(crate) fn log_control(cx: &App) -> LogControl {
+    cx.try_global::<ServiceRuntime>().map_or_else(LogControl::noop, |runtime| runtime.log_control.clone())
+}
+
+pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>, log_control: LogControl) {
     let session_lifecycle = Arc::new(SessionLifecycle::default());
-    cx.set_global(ServiceRuntime { runtime: services, asset_cache });
+    cx.set_global(ServiceRuntime { runtime: services, asset_cache, log_control });
     cx.set_quit_mode(QuitMode::Explicit);
 
     gpui_component::init(cx);
@@ -151,20 +157,14 @@ fn install_lifecycle(session_lifecycle: Arc<SessionLifecycle>, cx: &mut App) {
 fn login_options(cx: &App) -> WindowOptions {
     let minimum = size(px(460.), px(420.));
     WindowOptions {
-        titlebar: Some(TitlebarOptions {
-            title: Some("Radia".into()),
-            appears_transparent: window_chrome::appears_transparent(),
-            ..Default::default()
-        }),
+        titlebar: Some(TitlebarOptions { title: Some("Radia".into()), ..TitleBar::title_bar_options() }),
         window_bounds: Some(WindowBounds::Windowed(restore_bounds("login", None, size(px(720.), px(480.)), minimum, cx))),
         window_min_size: Some(minimum),
-        ..Default::default()
+        ..TitleBar::window_options()
     }
 }
 
 fn shutdown(cx: &mut App) -> bool {
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    let background_executor = cx.background_executor().clone();
     let session_lifecycle = {
         let lifecycle = cx.global_mut::<AppLifecycle>();
         if lifecycle.quitting {
@@ -177,14 +177,12 @@ fn shutdown(cx: &mut App) -> bool {
         drop(cx.global_mut::<ServiceRuntime>().asset_cache.take());
     }
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    let scene_shutdown = cx.global_mut::<AppLifecycle>().scene.shutdown(background_executor);
+    scene::shutdown(cx);
     for window in cx.windows() {
         window.update(cx, |_, window, _| window.remove_window()).ok();
     }
     cx.spawn(async move |cx| {
         disconnect_session(&session_lifecycle).await;
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
-        scene_shutdown.await;
         session_lifecycle.wait_for_drains().await;
         cx.update(|app| app.quit());
     })

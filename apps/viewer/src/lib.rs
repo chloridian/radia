@@ -4,6 +4,7 @@ pub mod asset_coordinator;
 pub(crate) mod camera;
 pub mod gui;
 pub mod inventory;
+pub mod logging;
 mod remembered_login;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod scene_feed;

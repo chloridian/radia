@@ -18,8 +18,8 @@ use network::CircuitMotionStatus;
 use render::{
     environment::{ActiveEnvironment, Evaluated},
     scene::{
-        ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, EnvironmentChoice, MotionCircuit, Object, ReadFailure,
-        ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView, Status,
+        ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, EnvironmentChoice, LocalChoice, MotionCircuit, Object,
+        ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView, Status,
     },
 };
 use tokio::{
@@ -341,6 +341,16 @@ impl SceneFeed {
 
     pub(crate) fn environment_choice(&self) -> EnvironmentChoice {
         self.view.viewer_environment().map_or_else(EnvironmentChoice::default, |environment| environment.selected().clone())
+    }
+
+    pub(crate) fn set_sky_choice(&self, sky: Option<LocalChoice>) {
+        let next = self.environment_choice().with_sky(sky);
+        self.set_environment_choice(next);
+    }
+
+    pub(crate) fn set_water_choice(&self, water: Option<LocalChoice>) {
+        let next = self.environment_choice().with_water(water);
+        self.set_environment_choice(next);
     }
 
     pub(crate) fn set_environment_choice(&self, choice: EnvironmentChoice) {

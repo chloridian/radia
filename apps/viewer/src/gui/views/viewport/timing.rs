@@ -50,14 +50,6 @@ pub(super) fn next_frame_deadline(deadline: Instant, completed: Instant, interva
     deadline.checked_add(advance).unwrap_or(completed)
 }
 
-pub(super) fn refresh_interval(millihertz: Option<u32>, fallback: Duration) -> Duration {
-    millihertz.filter(|rate| *rate > 0).map(|rate| Duration::from_nanos(1_000_000_000_000 / u64::from(rate))).unwrap_or(fallback)
-}
-
-pub(super) fn redraw_interval(display: Duration, focused: bool, movement_pending: bool) -> Duration {
-    if focused || movement_pending { display } else { display.max(Duration::from_millis(16) + Duration::from_micros(667)) }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,24 +74,5 @@ mod tests {
         assert_eq!(next_frame_deadline(start, start + Duration::from_millis(5), interval), start + interval);
         assert_eq!(next_frame_deadline(start, start + Duration::from_millis(37), interval), start + interval * 3);
         assert_eq!(next_frame_deadline(start + interval, start, interval), start + interval);
-    }
-
-    #[test]
-    fn refresh_uses_millihertz_with_fallback() {
-        let fallback = Duration::from_micros(16_667);
-        assert_eq!(refresh_interval(Some(60_000), fallback), Duration::from_nanos(16_666_666));
-        assert_eq!(refresh_interval(Some(144_000), fallback), Duration::from_nanos(6_944_444));
-        assert_eq!(refresh_interval(Some(0), fallback), fallback);
-        assert_eq!(refresh_interval(None, fallback), fallback);
-    }
-
-    #[test]
-    fn background_cap_spares_movement() {
-        let refresh = Duration::from_nanos(6_944_444);
-        let slow_refresh = Duration::from_millis(33);
-        assert_eq!(redraw_interval(refresh, false, false), Duration::from_micros(16_667));
-        assert_eq!(redraw_interval(slow_refresh, false, false), slow_refresh);
-        assert_eq!(redraw_interval(refresh, false, true), refresh);
-        assert_eq!(redraw_interval(refresh, true, false), refresh);
     }
 }
