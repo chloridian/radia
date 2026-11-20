@@ -1,7 +1,6 @@
 use std::{hint::black_box, sync::Arc, time::Instant};
 
 use assets::{Budget, Kind, LoadJob, Priority, Request, Resource, Route, Store, cache::AssetCache};
-use criterion::Criterion;
 use tempfile::tempdir;
 use test_support::texture::RGBA_J2C;
 use utils::AssetId;
@@ -33,13 +32,22 @@ fn warm_disk_decode(cache: &Arc<AssetCache>) {
     black_box(store.complete(decode.run(), now));
 }
 
-pub fn bench(c: &mut Criterion) {
-    let directory = tempdir().expect("benchmark cache directory");
-    let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).expect("open benchmark cache"));
-    cache.put_complete(Request::new(resource()), RGBA_J2C.to_vec()).expect("seed benchmark cache");
-    let mut group = c.benchmark_group("asset_cache_texture");
-    group.bench_function("cold_fetch_decode", |b| b.iter(cold_fetch_decode));
-    group.bench_function("warm_disk_read_decode", |b| b.iter(|| warm_disk_decode(&cache)));
-    group.finish();
-    Arc::try_unwrap(cache).expect("benchmark cache handle released").shutdown().expect("close benchmark cache");
+mod benches {
+    use super::*;
+
+    #[divan::bench]
+    fn asset_cache_texture_cold_fetch_decode() {
+        cold_fetch_decode();
+    }
+
+    #[divan::bench]
+    fn asset_cache_texture_warm_disk_read_decode(bencher: divan::Bencher) {
+        let directory = tempdir().expect("benchmark cache directory");
+        let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).expect("open benchmark cache"));
+        cache.put_complete(Request::new(resource()), RGBA_J2C.to_vec()).expect("seed benchmark cache");
+
+        bencher.bench_local(|| warm_disk_decode(&cache));
+
+        Arc::try_unwrap(cache).expect("benchmark cache handle released").shutdown().expect("close benchmark cache");
+    }
 }

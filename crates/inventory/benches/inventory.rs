@@ -8,7 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use criterion::{BatchSize, Criterion};
 use futures::executor::block_on;
 use inventory::{
     AssetType, Category, CategoryKey, Inventory, InventoryCache, InventoryCacheLoad, InventoryChild, InventoryDelta, InventoryLimits,
@@ -23,106 +22,11 @@ const ENTRY_COUNT: usize = 100_000;
 const OWNER_ID: u128 = 77;
 const ROOT_ID: u128 = 1;
 
-pub(super) fn bench(criterion: &mut Criterion) {
+pub(crate) fn report_diagnostics() {
     report_memory();
-    bench_folder_fetch_delete(criterion);
-    bench_cache(criterion);
-    bench_folder_restore(criterion);
-    criterion.bench_function("inventory/build_100k_items_and_snapshot", |bench| {
-        bench.iter_batched(
-            item_children,
-            |children| {
-                let mut inventory = root_inventory();
-                let folder = inventory.roots().personal();
-                let changes = apply_fetch(&mut inventory, folder, ServerVersion::from_raw(1), Some(ENTRY_COUNT as u32), children)
-                    .expect("benchmark fixture should apply");
-                let snapshot = inventory.snapshot();
-                black_box((inventory, changes, snapshot))
-            },
-            BatchSize::LargeInput,
-        );
-    });
-
-    let inventory = item_inventory();
-    criterion.bench_function("inventory/snapshot_100k_items", |bench| bench.iter(|| black_box(inventory.snapshot())));
-
-    let (mut inventory, delta_a, delta_b) = one_item_deltas();
-    let mut use_a = false;
-    criterion.bench_function("inventory/apply_one_item_delta_100k", |bench| {
-        bench.iter_batched(
-            || {
-                use_a = !use_a;
-                if use_a { delta_a.clone() } else { delta_b.clone() }
-            },
-            |delta| black_box(inventory.apply_delta(delta).expect("single item delta should apply")),
-            BatchSize::SmallInput,
-        );
-    });
-    report_delta_allocations();
-}
-
-fn bench_folder_fetch_delete(criterion: &mut Criterion) {
     report_prepared_fetch("delete", false);
     report_prepared_fetch("replace", true);
-
-    criterion.bench_function("inventory/prepare_delete_100k_worker", |bench| {
-        bench.iter_batched(
-            item_inventory,
-            |inventory| {
-                let snapshot = inventory.snapshot();
-                let prepared = snapshot
-                    .prepare_folder_fetch(snapshot.roots().personal(), ServerVersion::from_raw(2), Some(0), Vec::new())
-                    .expect("delete transaction should prepare");
-                black_box((inventory, prepared))
-            },
-            BatchSize::PerIteration,
-        );
-    });
-
-    criterion.bench_function("inventory/model_only_commit_and_direct_drop_delete_100k", |bench| {
-        bench.iter_batched(
-            || prepared_fetch_fixture(false),
-            |(mut inventory, before, prepared)| {
-                let changes = inventory.commit_folder_fetch(prepared).expect("delete transaction should commit");
-                black_box(changes);
-                drop(before);
-                inventory
-            },
-            BatchSize::PerIteration,
-        );
-    });
-
-    criterion.bench_function("inventory/prepare_replace_100k_worker", |bench| {
-        bench.iter_batched(
-            item_inventory,
-            |inventory| {
-                let snapshot = inventory.snapshot();
-                let prepared = snapshot
-                    .prepare_folder_fetch(
-                        snapshot.roots().personal(),
-                        ServerVersion::from_raw(2),
-                        Some(ENTRY_COUNT as u32),
-                        replacement_item_children(),
-                    )
-                    .expect("replacement transaction should prepare");
-                black_box((inventory, prepared))
-            },
-            BatchSize::PerIteration,
-        );
-    });
-
-    criterion.bench_function("inventory/model_only_commit_and_direct_drop_replace_100k", |bench| {
-        bench.iter_batched(
-            || prepared_fetch_fixture(true),
-            |(mut inventory, before, prepared)| {
-                let changes = inventory.commit_folder_fetch(prepared).expect("replacement transaction should commit");
-                black_box(changes);
-                drop(before);
-                inventory
-            },
-            BatchSize::PerIteration,
-        );
-    });
+    report_delta_allocations();
 }
 
 fn report_prepared_fetch(label: &str, replace: bool) {
@@ -191,24 +95,6 @@ fn prepared_fetch_fixture(replace: bool) -> (Inventory, inventory::InventorySnap
     (inventory, before, prepared)
 }
 
-fn bench_cache(criterion: &mut Criterion) {
-    let directory = tempdir().expect("benchmark cache directory");
-    let path = populate_cache(directory.path());
-    report_cache_load_times(directory.path(), &path);
-    let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", owner().id(), None).expect("benchmark cache open");
-    criterion.bench_function("inventory/cache_warm_read_apply_100k", |bench| {
-        bench.iter(|| {
-            let mut inventory = cache_skeleton();
-            let skeleton = inventory.snapshot();
-            let load = block_on(cache.load(&inventory)).expect("benchmark cache read");
-            let applied = apply_restore(load, &mut inventory, &skeleton);
-            black_box((inventory, applied));
-        });
-    });
-    block_on(cache.close()).expect("benchmark cache close");
-    black_box(path);
-}
-
 fn populate_cache(root: &Path) -> PathBuf {
     let mut inventory = root_inventory();
     let before = inventory.snapshot();
@@ -222,38 +108,6 @@ fn populate_cache(root: &Path) -> PathBuf {
     let path = cache.path().to_path_buf();
     block_on(cache.close()).expect("benchmark initial cache close");
     path
-}
-
-fn bench_folder_restore(criterion: &mut Criterion) {
-    const FOLDERS: usize = 10_000;
-    let directory = tempdir().expect("folder restore cache directory");
-    let mut inventory = root_inventory();
-    let folder = inventory.roots().personal();
-    apply_fetch(&mut inventory, folder, ServerVersion::from_raw(1), Some(FOLDERS as u32), folder_children(FOLDERS))
-        .expect("folder restore skeleton");
-    let skeleton = inventory.snapshot();
-    let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", owner().id(), None).expect("folder restore cache");
-    block_on(cache.submit_bootstrap(&skeleton).expect("persist skeleton").wait()).expect("skeleton committed");
-    let load = block_on(cache.load(&inventory)).expect("verify cached folders");
-    let mut restore = load.prepare_restore(&skeleton).expect("verify restore preparation");
-    let mut verification = inventory.clone();
-    let mut units = 0;
-    loop {
-        let progress = restore.apply_next(&mut verification, &HashSet::new()).expect("verify restore units");
-        units += progress.units_processed;
-        if progress.finished {
-            break;
-        }
-    }
-    assert_eq!(units, FOLDERS + 1, "the workload includes every cached folder and its root");
-    criterion.bench_function("inventory/cache_prepare_restore_10k_folders", |bench| {
-        bench.iter_batched(
-            || block_on(cache.load(&inventory)).expect("load cached folders"),
-            |load| black_box(load.prepare_restore(&skeleton).expect("prepare folder restore")),
-            BatchSize::LargeInput,
-        );
-    });
-    block_on(cache.close()).expect("close folder restore cache");
 }
 
 fn report_cache_load_times(root: &Path, path: &Path) {
@@ -477,4 +331,148 @@ fn apply_fetch(
         panic!("single-owner fetch preparation became stale before commit");
     };
     Ok(changes)
+}
+
+mod benches {
+    use super::*;
+
+    #[divan::bench]
+    fn build_100k_items_and_snapshot(bencher: divan::Bencher) {
+        bencher.with_inputs(item_children).bench_local_values(|children| {
+            let mut inventory = root_inventory();
+            let folder = inventory.roots().personal();
+            let changes = apply_fetch(&mut inventory, folder, ServerVersion::from_raw(1), Some(ENTRY_COUNT as u32), children)
+                .expect("benchmark fixture should apply");
+            let snapshot = inventory.snapshot();
+            black_box((inventory, changes, snapshot))
+        });
+    }
+
+    #[divan::bench]
+    fn snapshot_100k_items(bencher: divan::Bencher) {
+        let inventory = item_inventory();
+        bencher.bench_local(|| black_box(inventory.snapshot()));
+    }
+
+    #[divan::bench]
+    fn apply_one_item_delta_100k(bencher: divan::Bencher) {
+        let (mut inventory, delta_a, delta_b) = one_item_deltas();
+        let mut use_a = false;
+        bencher
+            .with_inputs(|| {
+                use_a = !use_a;
+                if use_a { delta_a.clone() } else { delta_b.clone() }
+            })
+            .bench_local_values(|delta| black_box(inventory.apply_delta(delta).expect("single item delta should apply")));
+    }
+}
+
+mod folder_fetch_delete {
+    use super::*;
+
+    #[divan::bench]
+    fn folder_fetch_delete_prepare_delete_100k_worker(bencher: divan::Bencher) {
+        bencher.with_inputs(item_inventory).bench_local_values(|inventory| {
+            let snapshot = inventory.snapshot();
+            let prepared = snapshot
+                .prepare_folder_fetch(snapshot.roots().personal(), ServerVersion::from_raw(2), Some(0), Vec::new())
+                .expect("delete transaction should prepare");
+            black_box((inventory, prepared))
+        });
+    }
+
+    #[divan::bench]
+    fn folder_fetch_delete_model_only_commit_and_direct_drop_delete_100k(bencher: divan::Bencher) {
+        bencher.with_inputs(|| prepared_fetch_fixture(false)).bench_local_values(|(mut inventory, before, prepared)| {
+            let changes = inventory.commit_folder_fetch(prepared).expect("delete transaction should commit");
+            black_box(changes);
+            drop(before);
+            inventory
+        });
+    }
+
+    #[divan::bench]
+    fn folder_fetch_delete_prepare_replace_100k_worker(bencher: divan::Bencher) {
+        bencher.with_inputs(item_inventory).bench_local_values(|inventory| {
+            let snapshot = inventory.snapshot();
+            let prepared = snapshot
+                .prepare_folder_fetch(
+                    snapshot.roots().personal(),
+                    ServerVersion::from_raw(2),
+                    Some(ENTRY_COUNT as u32),
+                    replacement_item_children(),
+                )
+                .expect("replacement transaction should prepare");
+            black_box((inventory, prepared))
+        });
+    }
+
+    #[divan::bench]
+    fn folder_fetch_delete_model_only_commit_and_direct_drop_replace_100k(bencher: divan::Bencher) {
+        bencher.with_inputs(|| prepared_fetch_fixture(true)).bench_local_values(|(mut inventory, before, prepared)| {
+            let changes = inventory.commit_folder_fetch(prepared).expect("replacement transaction should commit");
+            black_box(changes);
+            drop(before);
+            inventory
+        });
+    }
+}
+
+mod cache {
+    use super::*;
+
+    #[divan::bench]
+    fn cache_warm_read_apply_100k(bencher: divan::Bencher) {
+        let directory = tempdir().expect("benchmark cache directory");
+        let path = populate_cache(directory.path());
+        report_cache_load_times(directory.path(), &path);
+        let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", owner().id(), None).expect("benchmark cache open");
+
+        bencher.bench_local(|| {
+            let mut inventory = cache_skeleton();
+            let skeleton = inventory.snapshot();
+            let load = block_on(cache.load(&inventory)).expect("benchmark cache read");
+            let applied = apply_restore(load, &mut inventory, &skeleton);
+            black_box((inventory, applied));
+        });
+
+        block_on(cache.close()).expect("benchmark cache close");
+        black_box(path);
+    }
+}
+
+mod folder_restore {
+    use super::*;
+
+    #[divan::bench]
+    fn cache_folder_restore_prepare_restore_10k_folders(bencher: divan::Bencher) {
+        const FOLDERS: usize = 10_000;
+
+        let directory = tempdir().expect("folder restore cache directory");
+        let mut inventory = root_inventory();
+        let folder = inventory.roots().personal();
+        apply_fetch(&mut inventory, folder, ServerVersion::from_raw(1), Some(FOLDERS as u32), folder_children(FOLDERS))
+            .expect("folder restore skeleton");
+        let skeleton = inventory.snapshot();
+        let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", owner().id(), None).expect("folder restore cache");
+        block_on(cache.submit_bootstrap(&skeleton).expect("persist skeleton").wait()).expect("skeleton committed");
+        let load = block_on(cache.load(&inventory)).expect("verify cached folders");
+        let mut restore = load.prepare_restore(&skeleton).expect("verify restore preparation");
+        let mut verification = inventory.clone();
+        let mut units = 0;
+        loop {
+            let progress = restore.apply_next(&mut verification, &HashSet::new()).expect("verify restore units");
+            units += progress.units_processed;
+            if progress.finished {
+                break;
+            }
+        }
+        assert_eq!(units, FOLDERS + 1, "the workload includes every cached folder and its root");
+
+        bencher
+            .with_inputs(|| block_on(cache.load(&inventory)).expect("load cached folders"))
+            .bench_local_values(|load| black_box(load.prepare_restore(&skeleton).expect("prepare folder restore")));
+
+        block_on(cache.close()).expect("close folder restore cache");
+    }
 }
