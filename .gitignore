@@ -31,3 +31,6 @@ flamegraph.svg
 **/proptest-regressions/
 
 plans/
+
+# Generated LLVM coverage report
+/lcov.info

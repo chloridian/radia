@@ -113,14 +113,33 @@ jobs:
                       name: windows
                     - os: macos-latest
                       name: mac
-                    - os: ubuntu-latest
-                      name: linux
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions-rust-lang/setup-rust-toolchain@v2
+
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: nextest@0.9
+
+            - uses: extractions/setup-just@v4
+
+            - run: just build
+            - run: just test
+
+    test-linux:
+        name: test-linux
+        runs-on: ubuntu-latest
+        timeout-minutes: 60
+        needs: [orchestrate]
+        if: needs.orchestrate.outputs.run_tests == 'true'
+        permissions:
+            contents: read
+            id-token: write
         steps:
             - uses: actions/checkout@v7
             - uses: actions-rust-lang/setup-rust-toolchain@v2
 
             - name: Install Linux system dependencies
-              if: runner.os == 'Linux'
               run: |
                   sudo apt-get update
                   sudo apt-get install --yes --no-install-recommends \
@@ -137,7 +156,20 @@ jobs:
               with:
                   tool: nextest@0.9
 
-            - uses: extractions/setup-just@v4
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: cargo-llvm-cov
 
-            - run: just build
-            - run: just test
+            - name: Install LLVM coverage tools
+              run: rustup component add llvm-tools-preview
+
+            - name: Run tests and generate LCOV report
+              run: cargo llvm-cov nextest --workspace --all-features --no-fail-fast --locked --cargo-profile ci --exclude-from-report test-support --lcov --output-path lcov.info
+
+            - name: Upload coverage to Codecov
+              if: always() && hashFiles('lcov.info') != ''
+              uses: codecov/codecov-action@v7
+              with:
+                  use_oidc: true
+                  files: lcov.info
+                  fail_ci_if_error: false

@@ -1,4 +1,4 @@
-Run commands from the repository root unless stated otherwise. Windows is the primary development platform; use WSL2 for Linux builds. CI checks Windows, macOS, and Linux. The Rust toolchain follows the stable channel rather than a fixed release. Cargo aliases in `.cargo/config.toml` cover the everyday commands, and [just](https://github.com/casey/just) recipes wrap them for CI and multi-step tasks; run `just` to list them. CI installs just, Nextest 0.9, and cargo-machete; other development tools may vary by checkout.
+Run commands from the repository root unless stated otherwise. Windows is the primary development platform; use WSL2 for Linux builds. CI checks Windows, macOS, and Linux. The Rust toolchain follows the stable channel rather than a fixed release. Cargo aliases in `.cargo/config.toml` cover the everyday commands, and [just](https://github.com/casey/just) recipes wrap them for CI and multi-step tasks; run `just` to list them. CI installs just, Nextest 0.9, cargo-llvm-cov, and cargo-machete; other development tools may vary by checkout.
 
 Network HTTPS uses Reqwest 0.13 with rustls and aws-lc. Building aws-lc requires a C/C++ compiler. Windows x86-64 assembly uses NASM when available or the crate's enabled prebuilt objects. The selected non-FIPS build does not require CMake, bindgen, or Go. See the [aws-lc-rs build guide](https://github.com/aws/aws-lc-rs#build) for supported toolchains. Certificate verification follows the operating system trust configuration.
 
@@ -95,13 +95,16 @@ cargo llvm-cov --workspace --html
 # Generate an HTML report with Nextest and all features
 cargo llvm-cov nextest --workspace --all-features --html
 
+# Generate the LCOV report uploaded by Linux CI
+cargo llvm-cov nextest --workspace --all-features --lcov --output-path lcov.info
+
 # Machine-readable per-file summary for scripts
 cargo llvm-cov --workspace --json --summary-only
 ```
 
 Report: `target/llvm-cov/html/index.html`
 
-Start with the affected package when investigating a test gap. Workspace missing-line reports can be large. Coverage reflects the features and test targets selected by the command; `--summary-only` requires an export format such as `--json`, `--lcov`, or `--cobertura`.
+Start with the affected package when investigating a test gap. Workspace missing-line reports can be large. Coverage reflects the features and test targets selected by the command; `--summary-only` requires an export format such as `--json`, `--lcov`, or `--cobertura`. Linux CI uploads an all-feature LCOV report to Codecov; project and patch statuses are informational. The `test-support` package is still tested but excluded from reported coverage because it contains test fixtures.
 
 ## Benchmarks
 
