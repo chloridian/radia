@@ -30,7 +30,7 @@ The legacy viewer is a reference for protocol behavior, content compatibility, a
 - Order Rust files as follows: module docs, inner attributes, module declarations (`mod`/`pub mod`), `use` declarations including re-exports, constants and statics, type aliases, types with their impls immediately following, free functions, then tests. Keep tests last, including test module declarations.
 - A module with submodules is a directory with `mod.rs`; never place `foo.rs` beside `foo/`.
 - Keep unit tests inline in the module they test. Move them to a sibling `<name>_tests.rs` only when they obscure the implementation.
-- Each crate has one bench target: `benches/main.rs` declares every bench as a module, with a single `[[bench]] name = "main"` entry. Select benches with criterion filters, not extra targets. Benchmarks are Criterion modules there, never ignored measurement tests or `src/` files; shared peers and fixtures go in `test-support`.
+- Each crate has one Divan bench target: `benches/main.rs` declares every bench module, with a single `[[bench]] name = "main"` entry. Let function identifiers provide benchmark names; prefix related functions when needed to keep names unique. Use Divan filters to select benches. Keep benchmark functions under `benches/`, not in `src/` or ignored tests; shared peers and fixtures go in `test-support`.
 
 ## Code
 
