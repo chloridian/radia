@@ -5,6 +5,7 @@ use std::{
     thread,
 };
 
+use divan::counter::ItemsCount;
 use storage::{Cache, DEFAULT_SIZE_LIMIT, Key, Namespace, NamespaceId, StorageError, UnavailableReason};
 use tempfile::tempdir;
 
@@ -69,12 +70,13 @@ fn populated_cache() -> (tempfile::TempDir, Cache, Key) {
 mod scale {
     use super::*;
 
-    #[divan::bench(counters = [divan::counter::ItemsCount::new(1)])]
+    #[divan::bench]
     fn scale_put_single(bencher: divan::Bencher) {
         let (_directory, cache, _) = populated_cache();
         let item_key = key(EXISTING_ENTRIES);
 
         bencher
+            .counter(ItemsCount::new(1_u64))
             .with_inputs(|| cache.remove(item_key).expect("reset single insertion"))
             .bench_local_values(|_| cache.put(item_key, vec![0x5a; PAYLOAD_BYTES]).expect("single put"));
 
@@ -83,7 +85,7 @@ mod scale {
         cache.shutdown().expect("close benchmark cache");
     }
 
-    #[divan::bench(counters = [divan::counter::ItemsCount::new(BURST_WRITES as u64)])]
+    #[divan::bench]
     fn scale_put_burst_16(bencher: divan::Bencher) {
         let (_directory, cache, _) = populated_cache();
         let cache_ref = &cache;
@@ -110,6 +112,7 @@ mod scale {
                 .collect();
 
             bencher
+                .counter(ItemsCount::new(BURST_WRITES as u64))
                 .with_inputs(|| {
                     for item_key in keys {
                         cache_ref.remove(item_key).expect("reset burst insertion");
@@ -133,10 +136,10 @@ mod scale {
         cache.shutdown().expect("close benchmark cache");
     }
 
-    #[divan::bench(counters = [divan::counter::ItemsCount::new(1)])]
+    #[divan::bench]
     fn scale_lookup_hit(bencher: divan::Bencher) {
         let (_directory, cache, hit_key) = populated_cache();
-        bencher.bench_local(|| black_box(cache.lookup(hit_key)));
+        bencher.counter(ItemsCount::new(1_u64)).bench_local(|| black_box(cache.lookup(hit_key)));
         cache.shutdown().expect("close benchmark cache");
     }
 }

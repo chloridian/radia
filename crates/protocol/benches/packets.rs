@@ -1,5 +1,9 @@
-use std::hint::black_box;
+use std::{
+    fmt::{self, Display, Formatter},
+    hint::black_box,
+};
 
+use divan::counter::{BytesCount, ItemsCount};
 use protocol::lludp::{Message, MessageId, Packet};
 use test_support::{lludp::vectors, parse_hex_fixture};
 
@@ -59,7 +63,7 @@ mod objects {
     fn lludp_objects_encode(bencher: divan::Bencher, case: PacketCase) {
         let packet = Packet::decode(&wire(case)).expect("decode object packet fixture");
         bencher
-            .counter(divan::counter::ItemsCount::new(case.objects.expect("object packet has a count")))
+            .counter(ItemsCount::new(case.objects.expect("object packet has a count")))
             .bench(|| black_box(packet.encode().expect("encode object packet")));
     }
 
@@ -67,28 +71,22 @@ mod objects {
     fn lludp_objects_decode(bencher: divan::Bencher, case: PacketCase) {
         let wire = wire(case);
         bencher
-            .counter(divan::counter::ItemsCount::new(case.objects.expect("object packet has a count")))
+            .counter(ItemsCount::new(case.objects.expect("object packet has a count")))
             .bench(|| black_box(Packet::decode(black_box(wire.as_slice())).expect("decode object packet")));
     }
 }
 
-mod packets {
-    use super::*;
+#[divan::bench(args = PACKET_CASES)]
+fn lludp_packets_encode(bencher: divan::Bencher, case: PacketCase) {
+    let packet = Packet::decode(&wire(case)).expect("decode packet fixture");
+    let byte_count = wire(case).len();
+    bencher.counter(BytesCount::new(byte_count)).bench(|| black_box(packet.encode().expect("encode packet")));
+}
 
-    #[divan::bench(args = PACKET_CASES)]
-    fn lludp_packets_encode(bencher: divan::Bencher, case: PacketCase) {
-        let packet = Packet::decode(&wire(case)).expect("decode packet fixture");
-        let byte_count = wire(case).len();
-        bencher.counter(divan::counter::BytesCount::new(byte_count)).bench(|| black_box(packet.encode().expect("encode packet")));
-    }
-
-    #[divan::bench(args = PACKET_CASES)]
-    fn lludp_packets_decode(bencher: divan::Bencher, case: PacketCase) {
-        let input = wire(case);
-        bencher
-            .counter(divan::counter::BytesCount::new(input.len()))
-            .bench(|| black_box(Packet::decode(black_box(input.as_slice())).expect("decode packet")));
-    }
+#[divan::bench(args = PACKET_CASES)]
+fn lludp_packets_decode(bencher: divan::Bencher, case: PacketCase) {
+    let input = wire(case);
+    bencher.counter(BytesCount::new(input.len())).bench(|| black_box(Packet::decode(black_box(input.as_slice())).expect("decode packet")));
 }
 
 mod rejections {
@@ -98,12 +96,12 @@ mod rejections {
     fn lludp_rejections_zerocode_over_limit(bencher: divan::Bencher) {
         let wire = wire(PacketCase { name: "oversized", data: PacketData::OversizedZeroCoded, objects: None });
         assert!(Packet::decode(&wire).is_err(), "invalid packet fixture must be rejected");
-        bencher.counter(divan::counter::BytesCount::new(wire.len())).bench(|| black_box(Packet::decode(black_box(wire.as_slice()))));
+        bencher.counter(BytesCount::new(wire.len())).bench(|| black_box(Packet::decode(black_box(wire.as_slice()))));
     }
 }
 
-impl std::fmt::Display for PacketCase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for PacketCase {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.name)
     }
 }

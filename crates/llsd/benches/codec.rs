@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::Debug};
 
 use divan::black_box;
 use llsd::{Binary, Map, Uri, Value, binary as llsd_binary, notation as llsd_notation, xml as llsd_xml};
@@ -36,7 +36,7 @@ struct InventoryBatch(Value);
 #[serde(transparent)]
 struct NestedArray(Value);
 
-trait CodecFixture: Serialize + DeserializeOwned + std::fmt::Debug + Send + Sync + 'static {
+trait CodecFixture: Serialize + DeserializeOwned + Debug + Send + Sync + 'static {
     fn fixture() -> Self;
 }
 

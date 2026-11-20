@@ -1,5 +1,6 @@
 use std::{fmt, hint::black_box, num::NonZeroU32};
 
+use divan::counter::ItemsCount;
 use uuid::Uuid;
 use world::{
     ApplyOutcome::Introduced,
@@ -128,7 +129,7 @@ mod benches {
         }
 
         bencher
-            .counter(divan::counter::ItemsCount::new((count - region_count) as u64))
+            .counter(ItemsCount::new((count - region_count) as u64))
             .with_inputs(|| child_first_scene(count, PER_REGION))
             .bench_local_values(|(mut world, roots)| {
                 for (index, root) in roots.into_iter().enumerate() {

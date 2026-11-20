@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     f64::consts::FRAC_PI_3,
+    hint::black_box,
     num::NonZeroU32,
     ops::Range,
     sync::{
@@ -176,38 +177,6 @@ enum Metric {
     Nearest,
     All,
     Textures,
-}
-
-fn measure_iterations(
-    iterations: u64,
-    runtime: &Runtime,
-    mesh_assets: &Arc<HashMap<Uuid, Vec<u8>>>,
-    mode: CacheMode,
-    metric: Metric,
-    warm_cache: Option<&Arc<AssetCache>>,
-) -> Duration {
-    let mut elapsed = Duration::ZERO;
-    for _ in 0..iterations {
-        let sample = match mode {
-            CacheMode::Cold => {
-                let directory = tempdir().expect("create cold cache directory");
-                let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cold cache"));
-                runtime.block_on(run_measurement(cache, Arc::clone(mesh_assets), false))
-            }
-            CacheMode::Warm => runtime.block_on(run_measurement(
-                Arc::clone(warm_cache.expect("warm mode has a primed cache")),
-                Arc::clone(mesh_assets),
-                false,
-            )),
-        };
-        report_counts_once(mode, &sample);
-        elapsed += match metric {
-            Metric::Nearest => sample.nearest_10_ready.expect("nearest meshes become ready"),
-            Metric::All => sample.all_ready.expect("all meshes become ready"),
-            Metric::Textures => sample.textures_ready.expect("all benchmark textures become ready"),
-        };
-    }
-    elapsed
 }
 
 fn report_counts_once(mode: CacheMode, sample: &Sample) {

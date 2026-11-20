@@ -37,7 +37,7 @@ mod benches {
 
     #[divan::bench]
     fn asset_cache_texture_cold_fetch_decode() {
-        super::cold_fetch_decode();
+        cold_fetch_decode();
     }
 
     #[divan::bench]

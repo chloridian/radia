@@ -2,8 +2,9 @@
 
 #[cfg(world_bench_detailed)]
 use std::time::Instant;
-use std::{hint::black_box, num::NonZeroU8};
+use std::{fmt, hint::black_box, num::NonZeroU8};
 
+use divan::counter::ItemsCount;
 use math::{Quat, Vec3};
 #[cfg(not(world_bench_uninstrumented))]
 use test_support::allocation;
@@ -380,8 +381,8 @@ fn content_scene() -> Scene {
 #[derive(Clone, Copy)]
 struct SceneSize(usize);
 
-impl std::fmt::Debug for SceneSize {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for SceneSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(size_name(self.0))
     }
 }
@@ -394,19 +395,19 @@ mod facets {
     #[divan::bench]
     fn facets_mixed_update_cycle(bencher: divan::Bencher) {
         let mut update = FacetWorkload::new();
-        bencher.counter(divan::counter::ItemsCount::new(update.operations_per_cycle() as u64)).bench_local(|| black_box(update.cycle()));
+        bencher.counter(ItemsCount::new(update.operations_per_cycle() as u64)).bench_local(|| black_box(update.cycle()));
     }
 
     #[divan::bench]
     fn facets_list_and_detail_read(bencher: divan::Bencher) {
         let read = FacetWorkload::new();
-        bencher.counter(divan::counter::ItemsCount::new((LAYOUT_OBJECTS * 2) as u64)).bench_local(|| black_box(read.read()));
+        bencher.counter(ItemsCount::new((LAYOUT_OBJECTS * 2) as u64)).bench_local(|| black_box(read.read()));
     }
 
     #[divan::bench]
     fn facets_bounded_cleanup(bencher: divan::Bencher) {
         bencher
-            .counter(divan::counter::ItemsCount::new(257))
+            .counter(ItemsCount::new(257_u64))
             .with_inputs(|| {
                 let mut workload = FacetWorkload::new();
                 let root = workload.scene.rows[100];
@@ -446,14 +447,14 @@ mod facets {
     }
 }
 
-mod updates {
+mod scene_updates {
     use super::*;
 
     #[divan::bench(args = SCENE_CASES)]
     fn updates_transform(bencher: divan::Bencher, size: SceneSize) {
         let count = size.0;
         bencher
-            .counter(divan::counter::ItemsCount::new(count as u64))
+            .counter(ItemsCount::new(count as u64))
             .with_inputs(|| (populated_scene(count, false, false), INITIAL_ORDER + PER_REGION as u64 + 1, false))
             .bench_local_refs(|(scene, order, alternate)| {
                 let pose = if *alternate {
@@ -474,7 +475,7 @@ mod updates {
     #[divan::bench]
     fn updates_observation_10k(bencher: divan::Bencher) {
         bencher
-            .counter(divan::counter::ItemsCount::new(10_000))
+            .counter(ItemsCount::new(10_000_u64))
             .with_inputs(|| (populated_scene(10_000, false, false), INITIAL_ORDER + PER_REGION as u64 + 1, false, Vec3::ZERO))
             .bench_local_refs(|(scene, order, alternate, expected_position)| {
                 let position = if *alternate { Vec3::ONE } else { Vec3::splat(2.0) };
@@ -504,7 +505,7 @@ mod updates {
             let _ = scene.world.patch_object(patch).expect("avatar texture table");
         }
         let mut weight = 0_u8;
-        bencher.counter(divan::counter::ItemsCount::new(10)).bench_local(|| {
+        bencher.counter(ItemsCount::new(10_u64)).bench_local(|| {
             weight = weight.wrapping_add(1);
             for row in &scene.rows[1..=10] {
                 let mut patch = ObjectPatch::new(source(row.region, order), row.local_id);
@@ -521,7 +522,7 @@ mod updates {
     fn updates_duplicate(bencher: divan::Bencher, size: SceneSize) {
         let count = size.0;
         bencher
-            .counter(divan::counter::ItemsCount::new(count as u64))
+            .counter(ItemsCount::new(count as u64))
             .with_inputs(|| {
                 let mut scene = populated_scene(count, false, false);
                 for row in &scene.rows {
@@ -540,7 +541,7 @@ mod updates {
     fn updates_stale(bencher: divan::Bencher, size: SceneSize) {
         let count = size.0;
         bencher
-            .counter(divan::counter::ItemsCount::new(count as u64))
+            .counter(ItemsCount::new(count as u64))
             .with_inputs(|| {
                 let mut scene = populated_scene(count, false, false);
                 for row in &scene.rows {
@@ -564,7 +565,7 @@ mod updates {
         let count = size.0;
         let recycle_count = count.div_ceil(16);
         bencher
-            .counter(divan::counter::ItemsCount::new((count * 5 + recycle_count * 2) as u64))
+            .counter(ItemsCount::new((count * 5 + recycle_count * 2) as u64))
             .with_inputs(|| {
                 let mut scene = populated_scene(count, false, false);
                 for row in &scene.rows {
@@ -621,7 +622,7 @@ mod updates {
 
     #[divan::bench]
     fn updates_stale_with_content_10k(bencher: divan::Bencher) {
-        bencher.counter(divan::counter::ItemsCount::new(10_000)).with_inputs(content_scene).bench_local_refs(|scene| {
+        bencher.counter(ItemsCount::new(10_000_u64)).with_inputs(content_scene).bench_local_refs(|scene| {
             for row in &scene.rows {
                 let mut patch = ObjectPatch::new(source(row.region, row.order - 1), row.local_id);
                 patch.pose = Some(Pose { position: Some(Vec3::ONE), rotation: None });
@@ -635,7 +636,7 @@ mod updates {
     #[divan::bench]
     fn updates_transform_with_content_10k(bencher: divan::Bencher) {
         bencher
-            .counter(divan::counter::ItemsCount::new(10_000))
+            .counter(ItemsCount::new(10_000_u64))
             .with_inputs(|| (content_scene(), INITIAL_ORDER + PER_REGION as u64 + 1, false))
             .bench_local_refs(|(scene, order, alternate)| {
                 let position = if *alternate { Vec3::ONE } else { Vec3::splat(2.0) };

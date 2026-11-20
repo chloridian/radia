@@ -1,5 +1,6 @@
-use std::{assert_matches, hint::black_box, num::NonZeroU32};
+use std::{assert_matches, fmt, hint::black_box, num::NonZeroU32};
 
+use divan::counter::ItemsCount;
 use math::{DVec3, Quat, Vec3};
 use uuid::Uuid;
 use world::{
@@ -27,8 +28,8 @@ const DEPTHS: &[DepthCase] = &[
     DepthCase { name: "over_limit", edge_depth: 17 },
 ];
 
-impl std::fmt::Display for DepthCase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for DepthCase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name)
     }
 }
@@ -112,7 +113,7 @@ mod benches {
         assert_chain_depth(&world, target, case.edge_depth);
         assert_pose_contract(&world, target, case.edge_depth);
         let object = world.object(target).expect("target object");
-        bencher.counter(divan::counter::ItemsCount::new(1)).bench_local(|| black_box(object.world_pose()));
+        bencher.counter(ItemsCount::new(1_u64)).bench_local(|| black_box(object.world_pose()));
     }
 
     #[divan::bench(args = DEPTHS)]
@@ -121,7 +122,7 @@ mod benches {
         assert_chain_depth(&world, target, case.edge_depth);
         assert_pose_contract(&world, target, case.edge_depth);
         let object = world.object(target).expect("target object");
-        bencher.counter(divan::counter::ItemsCount::new(1)).bench_local(|| black_box(object.coordinate_frame()));
+        bencher.counter(ItemsCount::new(1_u64)).bench_local(|| black_box(object.coordinate_frame()));
     }
 
     #[divan::bench(args = DEPTHS)]
@@ -137,7 +138,7 @@ mod benches {
         assert_eq!(probe.rejections.iter().next().copied(), Some(FieldRejection { group: FieldGroup::Parent, reason: ParentCycle }));
         order += 1;
 
-        bencher.counter(divan::counter::ItemsCount::new(1)).bench_local(|| {
+        bencher.counter(ItemsCount::new(1_u64)).bench_local(|| {
             let current_order = order;
             order += 1;
             let _ = black_box(

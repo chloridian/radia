@@ -9,6 +9,7 @@ use assets::{
     Budget, Demand, Failure, Kind, LoadJob, MAX_NON_MESH_FETCHES, MAX_TEXTURE_DECODES, Priority, Request, Resource, Route, Store,
     TextureSize,
 };
+use divan::counter::ItemsCount;
 use test_support::{
     allocation::{self, CountingAllocator},
     texture::GRAY_4096_J2C,
@@ -156,7 +157,7 @@ mod demand_reconcile {
     #[divan::bench(args = RECONCILE_COUNTS)]
     fn store_demand_reconcile_turn(bencher: divan::Bencher, count: usize) {
         bencher
-            .counter(divan::counter::ItemsCount::new(count as u64))
+            .counter(ItemsCount::new(count as u64))
             .with_inputs(|| {
                 let mut state = fixture(count);
                 settle(&mut state, count);
@@ -171,7 +172,7 @@ mod demand_reconcile {
 
     #[divan::bench(args = RECONCILE_COUNTS)]
     fn store_demand_reconcile_admission_during_churn(bencher: divan::Bencher, count: usize) {
-        bencher.counter(divan::counter::ItemsCount::new(count as u64)).with_inputs(|| dirty_progress_fixture(count)).bench_local_refs(
+        bencher.counter(ItemsCount::new(count as u64)).with_inputs(|| dirty_progress_fixture(count)).bench_local_refs(
             |((store, _, _, now, _), eligible, churn)| {
                 let mut turns = 0;
                 let job = loop {
@@ -195,7 +196,7 @@ mod demand_reconcile {
     #[divan::bench(args = RECONCILE_COUNTS)]
     fn store_demand_reconcile_zero_interest_drain(bencher: divan::Bencher, count: usize) {
         bencher
-            .counter(divan::counter::ItemsCount::new(count as u64))
+            .counter(ItemsCount::new(count as u64))
             .with_inputs(|| {
                 let mut state = fixture(count);
                 settle(&mut state, count);
@@ -211,7 +212,7 @@ mod demand_reconcile {
     #[divan::bench(args = RECONCILE_COUNTS)]
     fn store_demand_reconcile_zero_interest_turn(bencher: divan::Bencher, count: usize) {
         bencher
-            .counter(divan::counter::ItemsCount::new(count as u64))
+            .counter(ItemsCount::new(count as u64))
             .with_inputs(|| {
                 let mut state = fixture(count);
                 settle(&mut state, count);
@@ -225,7 +226,7 @@ mod demand_reconcile {
     #[divan::bench(args = RECONCILE_COUNTS)]
     fn store_demand_reconcile_priority_churn_drain(bencher: divan::Bencher, count: usize) {
         bencher
-            .counter(divan::counter::ItemsCount::new(count as u64))
+            .counter(ItemsCount::new(count as u64))
             .with_inputs(|| {
                 let (mut state, jobs) = saturated_fixture(count);
                 settle(&mut state, count);
@@ -244,7 +245,7 @@ mod demand_reconcile {
     #[divan::bench(args = RECONCILE_COUNTS)]
     fn store_demand_reconcile_priority_churn_turn(bencher: divan::Bencher, count: usize) {
         bencher
-            .counter(divan::counter::ItemsCount::new(count as u64))
+            .counter(ItemsCount::new(count as u64))
             .with_inputs(|| {
                 let (mut state, jobs) = saturated_fixture(count);
                 settle(&mut state, count);
@@ -258,66 +259,58 @@ mod demand_reconcile {
     }
 }
 
-mod store {
-    use super::*;
-
-    #[divan::bench(args = STORE_COUNTS)]
-    fn store_drain(bencher: divan::Bencher, count: usize) {
-        bencher.counter(divan::counter::ItemsCount::new(count as u64)).with_inputs(|| fixture(count)).bench_local_refs(
-            |(store, demands, _, now, decodes)| {
-                let mut jobs = Vec::with_capacity(MAX_NON_MESH_FETCHES);
-                loop {
-                    if let Some(job) = store.next_job(*now) {
-                        jobs.push(job);
-                    } else if !store.maintain(*now) {
-                        break;
-                    }
+#[divan::bench(args = STORE_COUNTS)]
+fn store_drain(bencher: divan::Bencher, count: usize) {
+    bencher.counter(ItemsCount::new(count as u64)).with_inputs(|| fixture(count)).bench_local_refs(|(store, demands, _, now, decodes)| {
+        let mut jobs = Vec::with_capacity(MAX_NON_MESH_FETCHES);
+        loop {
+            if let Some(job) = store.next_job(*now) {
+                jobs.push(job);
+            } else if !store.maintain(*now) {
+                break;
+            }
+        }
+        for decode in mem::take(decodes) {
+            store.complete(decode.fail(Failure::NotFound), *now);
+        }
+        let completed = jobs.len();
+        for job in jobs {
+            match job {
+                LoadJob::Fetch(fetch) => drop(store.complete(LoadJob::Fetch(fetch).fail(Failure::NotFound), *now)),
+                LoadJob::Decode(input) => {
+                    let decode = store.start_decode(input).expect("benchmark decode admission");
+                    drop(store.complete(decode.fail(Failure::NotFound), *now));
                 }
-                for decode in mem::take(decodes) {
-                    store.complete(decode.fail(Failure::NotFound), *now);
-                }
-                let completed = jobs.len();
-                for job in jobs {
-                    match job {
-                        LoadJob::Fetch(fetch) => drop(store.complete(LoadJob::Fetch(fetch).fail(Failure::NotFound), *now)),
-                        LoadJob::Decode(input) => {
-                            let decode = store.start_decode(input).expect("benchmark decode admission");
-                            drop(store.complete(decode.fail(Failure::NotFound), *now));
-                        }
-                        LoadJob::ReadCache(_) => unreachable!("benchmark Store has no persistent cache"),
-                    }
-                }
-                black_box((completed, demands.len()));
-            },
-        );
-    }
+                LoadJob::ReadCache(_) => unreachable!("benchmark Store has no persistent cache"),
+            }
+        }
+        black_box((completed, demands.len()));
+    });
+}
 
-    #[divan::bench(args = STORE_COUNTS)]
-    fn store_saturated_next_job(bencher: divan::Bencher, count: usize) {
-        bencher.counter(divan::counter::ItemsCount::new(count as u64)).with_inputs(|| saturated_fixture(count)).bench_local_refs(
-            |((store, demands, _, now, decodes), jobs)| {
-                let next_job = store.next_job(*now);
-                black_box((next_job, demands.len(), decodes.len(), jobs.len()));
-            },
-        );
-    }
+#[divan::bench(args = STORE_COUNTS)]
+fn store_saturated_next_job(bencher: divan::Bencher, count: usize) {
+    bencher.counter(ItemsCount::new(count as u64)).with_inputs(|| saturated_fixture(count)).bench_local_refs(
+        |((store, demands, _, now, decodes), jobs)| {
+            let next_job = store.next_job(*now);
+            black_box((next_job, demands.len(), decodes.len(), jobs.len()));
+        },
+    );
+}
 
-    #[divan::bench(args = STORE_COUNTS)]
-    fn store_maintain(bencher: divan::Bencher, count: usize) {
-        bencher.counter(divan::counter::ItemsCount::new(count as u64)).with_inputs(|| fixture(count)).bench_local_refs(
-            |(store, demands, _, now, decodes)| {
-                store.maintain(*now);
-                black_box((demands.len(), decodes.len()));
-            },
-        );
-    }
+#[divan::bench(args = STORE_COUNTS)]
+fn store_maintain(bencher: divan::Bencher, count: usize) {
+    bencher.counter(ItemsCount::new(count as u64)).with_inputs(|| fixture(count)).bench_local_refs(|(store, demands, _, now, decodes)| {
+        store.maintain(*now);
+        black_box((demands.len(), decodes.len()));
+    });
+}
 
-    #[divan::bench(args = STORE_COUNTS)]
-    fn store_request(bencher: divan::Bencher, count: usize) {
-        let (mut store, _demands, routes, now, _decodes) = fixture(count);
-        let resource = Resource { id: AssetId::new(Uuid::from_u128(1)), kind: Kind::Texture };
-        bencher.bench_local(|| {
-            black_box(store.request(routes[1], Request::new(resource), Priority::Visible, now).expect("benchmark route admission"));
-        });
-    }
+#[divan::bench(args = STORE_COUNTS)]
+fn store_request(bencher: divan::Bencher, count: usize) {
+    let (mut store, _demands, routes, now, _decodes) = fixture(count);
+    let resource = Resource { id: AssetId::new(Uuid::from_u128(1)), kind: Kind::Texture };
+    bencher.bench_local(|| {
+        black_box(store.request(routes[1], Request::new(resource), Priority::Visible, now).expect("benchmark route admission"));
+    });
 }

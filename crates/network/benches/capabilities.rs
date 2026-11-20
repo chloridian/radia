@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use divan::counter::ItemsCount;
 use llsd::Value;
 use network::capabilities::{CapabilityUrl, Client};
 use reqwest::Url;
@@ -117,7 +118,7 @@ struct CapabilityRequest {
 mod discovery {
     use super::*;
 
-    #[divan::bench(counters = [divan::counter::ItemsCount::new(1_u64)])]
+    #[divan::bench]
     fn capability_discovery_three_capabilities(bencher: divan::Bencher) {
         let server = LoopbackServer::start(|address| {
             format!(
@@ -131,7 +132,7 @@ mod discovery {
         let warmup = runtime.block_on(new_client().request_capabilities(REQUESTED_CAPABILITIES)).expect("warm up capability discovery");
         assert_eq!(warmup.len(), REQUESTED_CAPABILITIES.len());
 
-        bencher.with_inputs(new_client).bench_local_values(|client| {
+        bencher.counter(ItemsCount::new(1_u64)).with_inputs(new_client).bench_local_values(|client| {
             black_box(runtime.block_on(client.request_capabilities(REQUESTED_CAPABILITIES)).expect("discover capabilities"));
         });
     }
@@ -140,7 +141,7 @@ mod discovery {
 mod post {
     use super::*;
 
-    #[divan::bench(counters = [divan::counter::ItemsCount::new(1_u64)])]
+    #[divan::bench]
     fn capability_post_xml_request_response(bencher: divan::Bencher) {
         const RESPONSE_LIMIT_BYTES: usize = 4096;
 
@@ -161,7 +162,7 @@ mod post {
         assert_eq!(fields.get("accepted").and_then(Value::as_bool), Some(true));
         assert_eq!(fields.get("revision").and_then(Value::as_integer), Some(42));
 
-        bencher.bench_local(|| {
+        bencher.counter(ItemsCount::new(1_u64)).bench_local(|| {
             black_box(
                 runtime.block_on(client.post_with_response_limit(&capability, &request, RESPONSE_LIMIT_BYTES)).expect("post capability"),
             )

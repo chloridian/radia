@@ -13,7 +13,6 @@ use world::{
 };
 
 pub(super) const PER_REGION: usize = 10_000;
-pub(super) const SCENE_SIZES: &[usize] = &[1_000, 10_000, 65_536];
 pub(super) const LOAD_SIZES: &[usize] = &[40_000, 65_536];
 pub(super) const INITIAL_ORDER: u64 = 100_000;
 

@@ -1,5 +1,6 @@
 use std::hint::black_box;
 
+use divan::counter::ItemsCount;
 use protocol::lludp::{Message, Packet};
 use test_support::{lludp::vectors, parse_hex_fixture};
 
@@ -77,7 +78,7 @@ mod benches {
     #[divan::bench]
     fn lludp_receive_pipeline_mixed_1000(bencher: divan::Bencher) {
         let batch = mixed_batch();
-        bencher.counter(divan::counter::ItemsCount::new(RECEIVE_BATCH_LEN as u64)).bench_local(|| {
+        bencher.counter(ItemsCount::new(RECEIVE_BATCH_LEN as u64)).bench_local(|| {
             for wire in &batch {
                 decode_received(wire);
             }

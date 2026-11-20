@@ -1,6 +1,7 @@
 use std::{hint::black_box, thread, time::Instant};
 
 use assets::{Budget, DecodeJob, Demand, LoadJob, Priority, Request, Store, TextureSize};
+use divan::counter::ItemsCount;
 use test_support::texture::GRAY_4096_J2C;
 use utils::AssetId;
 use uuid::Uuid;
@@ -45,7 +46,7 @@ mod benches {
 
     fn run(bencher: divan::Bencher, case: DecodeCase) {
         bencher
-            .counter(divan::counter::ItemsCount::new(u64::from(case.edge).pow(2) * case.workers as u64))
+            .counter(ItemsCount::new(u64::from(case.edge).pow(2) * case.workers as u64))
             .with_inputs(|| decode_jobs(case.edge, case.workers))
             .bench_local_values(|(mut store, jobs, demands, now)| {
                 let completions = thread::scope(|scope| {

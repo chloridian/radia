@@ -1,5 +1,6 @@
 use std::{assert_matches, hint::black_box, num::NonZeroU32};
 
+use divan::counter::ItemsCount;
 use world::{
     ApplyOutcome::{Introduced, Updated},
     ObjectPatch, Parent,
@@ -68,18 +69,16 @@ mod benches {
         assert_eq!(verification.world.object(child_entity).unwrap().parent(), Parent::Resolved(root_entity));
         assert!(verification.world.children(root_entity).any(|object| object.id() == child.id));
 
-        bencher.counter(divan::counter::ItemsCount::new((child_count * 2) as u64)).with_inputs(|| linked_scene(count)).bench_local_refs(
-            |scene| {
-                for parent in [Root, Local(NonZeroU32::new(1).expect("root local ID"))] {
-                    for row in &scene.children {
-                        let mut patch = ObjectPatch::new(source(row.region, scene.next_order), row.local_id);
-                        scene.next_order += 1;
-                        patch.parent = Some(parent);
-                        let _ = black_box(scene.world.patch_object(patch).expect("reparent linkset child"));
-                    }
+        bencher.counter(ItemsCount::new((child_count * 2) as u64)).with_inputs(|| linked_scene(count)).bench_local_refs(|scene| {
+            for parent in [Root, Local(NonZeroU32::new(1).expect("root local ID"))] {
+                for row in &scene.children {
+                    let mut patch = ObjectPatch::new(source(row.region, scene.next_order), row.local_id);
+                    scene.next_order += 1;
+                    patch.parent = Some(parent);
+                    let _ = black_box(scene.world.patch_object(patch).expect("reparent linkset child"));
                 }
-                black_box(scene.world.object_count());
-            },
-        );
+            }
+            black_box(scene.world.object_count());
+        });
     }
 }

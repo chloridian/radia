@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use divan::counter::ItemsCount;
 use math::{Quat, Vec3};
 #[cfg(not(world_bench_uninstrumented))]
 use test_support::{allocation, allocation::CountingAllocator};
@@ -873,14 +874,12 @@ pub(crate) fn report_linked_diagnostics() {
         }
         assert_eq!(verification.world.object_count(), count);
 
-        bencher.counter(divan::counter::ItemsCount::new(count as u64)).with_inputs(|| empty_scene(count, false)).bench_local_values(
-            |mut scene| {
-                for row in &scene.rows {
-                    let _ = black_box(scene.world.observe_object(observation(*row)).expect("object introduction"));
-                }
-                black_box(scene.world.object_count());
-            },
-        );
+        bencher.counter(ItemsCount::new(count as u64)).with_inputs(|| empty_scene(count, false)).bench_local_values(|mut scene| {
+            for row in &scene.rows {
+                let _ = black_box(scene.world.observe_object(observation(*row)).expect("object introduction"));
+            }
+            black_box(scene.world.object_count());
+        });
     }
 
     #[divan::bench(args = SCENE_CASES)]
@@ -900,10 +899,8 @@ pub(crate) fn report_linked_diagnostics() {
         let _ = drain_removals(&mut verification_world);
         assert_eq!(verification_world.object_count(), 0);
 
-        bencher
-            .counter(divan::counter::ItemsCount::new(count as u64))
-            .with_inputs(|| populated_scene(count, false, false))
-            .bench_local_values(|mut scene| {
+        bencher.counter(ItemsCount::new(count as u64)).with_inputs(|| populated_scene(count, false, false)).bench_local_values(
+            |mut scene| {
                 for row in &scene.rows {
                     let _ = black_box(
                         scene
@@ -917,14 +914,15 @@ pub(crate) fn report_linked_diagnostics() {
                 }
                 let _ = black_box(drain_removals(&mut scene.world));
                 black_box(scene.world.object_count());
-            });
+            },
+        );
     }
 
     #[divan::bench(args = SCENE_CASES)]
     fn lifecycle_local_id_reuse(bencher: divan::Bencher, size: SceneSize) {
         let count = size.0;
         bencher
-            .counter(divan::counter::ItemsCount::new(2))
+            .counter(ItemsCount::new(2_u64))
             .with_inputs(|| {
                 let scene = populated_scene(count, false, false);
                 let target = scene.rows[count / 2];
@@ -951,10 +949,8 @@ pub(crate) fn report_linked_diagnostics() {
     #[divan::bench(args = SCENE_CASES)]
     fn lifecycle_region_reset(bencher: divan::Bencher, size: SceneSize) {
         let count = size.0;
-        bencher
-            .counter(divan::counter::ItemsCount::new(count as u64))
-            .with_inputs(|| populated_scene(count, false, false))
-            .bench_local_values(|mut scene| {
+        bencher.counter(ItemsCount::new(count as u64)).with_inputs(|| populated_scene(count, false, false)).bench_local_values(
+            |mut scene| {
                 let mut removed = 0;
                 for region in &scene.regions {
                     let applied = scene.world.retire_region(*region).expect("region retirement");
@@ -967,14 +963,15 @@ pub(crate) fn report_linked_diagnostics() {
                 assert_eq!(removed, count);
                 let _ = black_box(drain_removals(&mut scene.world));
                 black_box(scene.world.object_count());
-            });
+            },
+        );
     }
 
     #[divan::bench(args = SCENE_CASES)]
     fn lifecycle_agent_handoff(bencher: divan::Bencher, size: SceneSize) {
         let count = size.0;
         bencher
-            .counter(divan::counter::ItemsCount::new(1))
+            .counter(ItemsCount::new(1_u64))
             .with_inputs(|| {
                 let scene = populated_scene(count, true, true);
                 let agent = scene.rows[0];
@@ -1025,7 +1022,7 @@ pub(crate) fn report_linked_diagnostics() {
         const PROFILE_COUNT: usize = 65_536;
         const DEEP_CHAIN: usize = 4_096;
         bencher
-            .counter(divan::counter::ItemsCount::new(DEEP_CHAIN as u64))
+            .counter(ItemsCount::new(DEEP_CHAIN as u64))
             .with_inputs(|| deep_linked_scene(PROFILE_COUNT, DEEP_CHAIN))
             .bench_local_values(|mut scene| {
                 let root = scene.rows[0];
@@ -1042,21 +1039,19 @@ pub(crate) fn report_linked_diagnostics() {
 }
 
 fn run_linked_removal(bencher: divan::Bencher, count: usize, linkset_size: usize, retire: bool) {
-    bencher.counter(divan::counter::ItemsCount::new(count as u64)).with_inputs(|| linked_scene(count, linkset_size)).bench_local_values(
-        |mut scene| {
-            let root = scene.rows[0];
-            if retire {
-                let _ = black_box(scene.world.retire_region(root.region).expect("retire linked region"));
-            } else {
-                let _ = black_box(
-                    scene
-                        .world
-                        .remove_object(source(root.region, INITIAL_ORDER + 3 * count as u64), root.local_id)
-                        .expect("remove linked root"),
-                );
-            }
-            let _ = black_box(drain_removals(&mut scene.world));
-            assert_eq!(scene.world.object_count(), 0);
-        },
-    );
+    bencher.counter(ItemsCount::new(count as u64)).with_inputs(|| linked_scene(count, linkset_size)).bench_local_values(|mut scene| {
+        let root = scene.rows[0];
+        if retire {
+            let _ = black_box(scene.world.retire_region(root.region).expect("retire linked region"));
+        } else {
+            let _ = black_box(
+                scene
+                    .world
+                    .remove_object(source(root.region, INITIAL_ORDER + 3 * count as u64), root.local_id)
+                    .expect("remove linked root"),
+            );
+        }
+        let _ = black_box(drain_removals(&mut scene.world));
+        assert_eq!(scene.world.object_count(), 0);
+    });
 }
