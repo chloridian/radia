@@ -1,6 +1,5 @@
 use std::{assert_matches, hint::black_box, num::NonZeroU32};
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput};
 use world::{
     ApplyOutcome::{Introduced, Updated},
     ObjectPatch, Parent,
@@ -8,67 +7,12 @@ use world::{
     World,
 };
 
-use super::support::{INITIAL_ORDER, LOAD_SIZES, PER_REGION, Row, empty_scene, observation, size_name, source};
+use super::support::{INITIAL_ORDER, LOAD_SIZES, PER_REGION, Row, empty_scene, observation, source};
 
 struct LinkedScene {
     world: World,
     children: Vec<Row>,
     next_order: u64,
-}
-
-pub(super) fn bench(c: &mut Criterion) {
-    bench_parent_churn(c);
-}
-
-fn bench_parent_churn(c: &mut Criterion) {
-    let mut group = c.benchmark_group("world/linkset_churn");
-
-    for &count in LOAD_SIZES {
-        let child_count = count - count.div_ceil(PER_REGION);
-        group.throughput(Throughput::Elements((child_count * 2) as u64));
-        let mut verification = linked_scene(count);
-        let child = verification.children[0];
-        let child_entity = verification.world.entity(child.id).expect("linkset child");
-        let root_id = verification
-            .world
-            .objects_in_region(child.region)
-            .find(|object| object.address().local_id().get() == 1)
-            .expect("linkset root")
-            .id();
-        let root_entity = verification.world.entity(root_id).expect("root entity");
-        let mut patch = ObjectPatch::new(source(child.region, verification.next_order), child.local_id);
-        verification.next_order += 1;
-        patch.parent = Some(Root);
-        assert_eq!(verification.world.patch_object(patch).expect("detach linkset child").outcome, Updated(child_entity));
-        assert_eq!(verification.world.object(child_entity).unwrap().parent(), Parent::Root);
-        assert!(!verification.world.children(root_entity).any(|object| object.id() == child.id));
-        let mut patch = ObjectPatch::new(source(child.region, verification.next_order), child.local_id);
-        verification.next_order += 1;
-        patch.parent = Some(Local(NonZeroU32::new(1).expect("root local ID")));
-        assert_eq!(verification.world.patch_object(patch).expect("reattach linkset child").outcome, Updated(child_entity));
-        assert_eq!(verification.world.object(child_entity).unwrap().parent(), Parent::Resolved(root_entity));
-        assert!(verification.world.children(root_entity).any(|object| object.id() == child.id));
-
-        group.bench_with_input(BenchmarkId::new("reparent_children", size_name(count)), &count, |b, _| {
-            b.iter_batched_ref(
-                || linked_scene(count),
-                |scene| {
-                    for parent in [Root, Local(NonZeroU32::new(1).expect("root local ID"))] {
-                        for row in &scene.children {
-                            let mut patch = ObjectPatch::new(source(row.region, scene.next_order), row.local_id);
-                            scene.next_order += 1;
-                            patch.parent = Some(parent);
-                            let _ = black_box(scene.world.patch_object(patch).expect("reparent linkset child"));
-                        }
-                    }
-                    black_box(scene.world.object_count());
-                },
-                BatchSize::LargeInput,
-            );
-        });
-    }
-
-    group.finish();
 }
 
 fn linked_scene(count: usize) -> LinkedScene {
@@ -93,4 +37,49 @@ fn linked_scene(count: usize) -> LinkedScene {
     }
 
     LinkedScene { world: scene.world, children, next_order: INITIAL_ORDER + 1_000_000 }
+}
+
+mod benches {
+    use super::*;
+
+    #[divan::bench(args = LOAD_SIZES)]
+    fn linkset_churn_reparent_children(bencher: divan::Bencher, count: usize) {
+        let child_count = count - count.div_ceil(PER_REGION);
+        let mut verification = linked_scene(count);
+        let child = verification.children[0];
+        let child_entity = verification.world.entity(child.id).expect("linkset child");
+        let root_id = verification
+            .world
+            .objects_in_region(child.region)
+            .find(|object| object.address().local_id().get() == 1)
+            .expect("linkset root")
+            .id();
+        let root_entity = verification.world.entity(root_id).expect("root entity");
+        let mut patch = ObjectPatch::new(source(child.region, verification.next_order), child.local_id);
+        verification.next_order += 1;
+        patch.parent = Some(Root);
+        assert_eq!(verification.world.patch_object(patch).expect("detach linkset child").outcome, Updated(child_entity));
+        assert_eq!(verification.world.object(child_entity).unwrap().parent(), Parent::Root);
+        assert!(!verification.world.children(root_entity).any(|object| object.id() == child.id));
+        let mut patch = ObjectPatch::new(source(child.region, verification.next_order), child.local_id);
+        verification.next_order += 1;
+        patch.parent = Some(Local(NonZeroU32::new(1).expect("root local ID")));
+        assert_eq!(verification.world.patch_object(patch).expect("reattach linkset child").outcome, Updated(child_entity));
+        assert_eq!(verification.world.object(child_entity).unwrap().parent(), Parent::Resolved(root_entity));
+        assert!(verification.world.children(root_entity).any(|object| object.id() == child.id));
+
+        bencher.counter(divan::counter::ItemsCount::new((child_count * 2) as u64)).with_inputs(|| linked_scene(count)).bench_local_refs(
+            |scene| {
+                for parent in [Root, Local(NonZeroU32::new(1).expect("root local ID"))] {
+                    for row in &scene.children {
+                        let mut patch = ObjectPatch::new(source(row.region, scene.next_order), row.local_id);
+                        scene.next_order += 1;
+                        patch.parent = Some(parent);
+                        let _ = black_box(scene.world.patch_object(patch).expect("reparent linkset child"));
+                    }
+                }
+                black_box(scene.world.object_count());
+            },
+        );
+    }
 }

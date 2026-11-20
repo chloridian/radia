@@ -61,7 +61,7 @@ codspeed-build *flags:
 codspeed-run *flags:
     cargo codspeed run {{ flags }}
 
-[doc('Run a crate benchmark with Criterion wall-time measurement')]
+[doc('Run a crate benchmark with Divan')]
 bench package filter="":
     cargo bench -p {{ package }} -- {{ filter }}
 

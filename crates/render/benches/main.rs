@@ -7,15 +7,6 @@ mod reconcile;
 mod support;
 mod texture;
 
-use criterion::{Criterion, criterion_group, criterion_main};
-
-fn bench_render(c: &mut Criterion) {
-    prim::bench(c);
-    #[cfg(not(codspeed))]
-    prepare::bench(c);
-    reconcile::bench(c);
-    texture::bench(c);
+fn main() {
+    divan::main();
 }
-
-criterion_group!(benches, bench_render);
-criterion_main!(benches);

@@ -1,23 +1,79 @@
-use std::{collections::BTreeMap, hint::black_box};
+use std::collections::BTreeMap;
 
-use criterion::{BenchmarkId, Criterion, Throughput, measurement::WallTime};
-use llsd::{Binary, Map, Uri, Value, binary, notation, xml};
+use divan::black_box;
+use llsd::{Binary, Map, Uri, Value, binary as llsd_binary, notation as llsd_notation, xml as llsd_xml};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(transparent)]
 struct CapabilityMap(BTreeMap<String, Uri>);
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct EventBatch {
     id: i32,
     events: Vec<EventMessage>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct EventMessage {
     message: String,
     body: Value,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(transparent)]
+struct CapabilityValue(Value);
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(transparent)]
+struct EventBatchValue(Value);
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(transparent)]
+struct InventoryBatch(Value);
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(transparent)]
+struct NestedArray(Value);
+
+trait CodecFixture: Serialize + DeserializeOwned + std::fmt::Debug + Send + Sync + 'static {
+    fn fixture() -> Self;
+}
+
+impl CodecFixture for CapabilityMap {
+    fn fixture() -> Self {
+        capabilities()
+    }
+}
+
+impl CodecFixture for CapabilityValue {
+    fn fixture() -> Self {
+        Self(capability_value(&capabilities()))
+    }
+}
+
+impl CodecFixture for EventBatch {
+    fn fixture() -> Self {
+        event_batch()
+    }
+}
+
+impl CodecFixture for EventBatchValue {
+    fn fixture() -> Self {
+        Self(event_batch_value(&event_batch()))
+    }
+}
+
+impl CodecFixture for InventoryBatch {
+    fn fixture() -> Self {
+        Self(inventory_batch())
+    }
+}
+
+impl CodecFixture for NestedArray {
+    fn fixture() -> Self {
+        Self(nested_array_value(60))
+    }
 }
 
 fn capabilities() -> CapabilityMap {
@@ -106,113 +162,6 @@ fn event_batch_value(batch: &EventBatch) -> Value {
     Value::Map(Map::from([("events".to_owned(), Value::Array(events)), ("id".to_owned(), Value::Integer(batch.id))]))
 }
 
-fn bench_format<T>(
-    group: &mut criterion::BenchmarkGroup<'_, WallTime>,
-    name: &str,
-    value: &T,
-    input: &[u8],
-    encode: impl Fn(&T) -> llsd::Result<Vec<u8>>,
-    decode: impl Fn(&[u8]) -> llsd::Result<T>,
-) where
-    T: Serialize + DeserializeOwned,
-{
-    group.throughput(Throughput::Bytes(input.len() as u64));
-    group.bench_with_input(BenchmarkId::new("encode", name), value, |b, value| {
-        b.iter(|| black_box(encode(black_box(value)).expect("encode LLSD")));
-    });
-    group.bench_with_input(BenchmarkId::new("decode", name), input, |b, input| {
-        b.iter(|| black_box(decode(black_box(input)).expect("decode LLSD")));
-    });
-}
-
-fn bench_xml<T>(group: &mut criterion::BenchmarkGroup<'_, WallTime>, name: &str, value: &T, input: &[u8])
-where
-    T: Serialize + DeserializeOwned,
-{
-    bench_format(group, name, value, input, xml::to_vec, xml::from_slice::<T>);
-
-    group.throughput(Throughput::Bytes(input.len() as u64));
-    group.bench_with_input(BenchmarkId::new("bounded_encode", name), value, |b, value| {
-        b.iter(|| black_box(xml::to_vec_with_max_bytes(black_box(value), input.len()).expect("bounded LLSD XML encode")));
-    });
-}
-
-fn bench_value_formats(c: &mut Criterion, name: &str, value: &Value, xml_input: &[u8], binary_input: &[u8], notation_input: &[u8]) {
-    let mut group = c.benchmark_group(format!("{name}/xml"));
-    bench_xml(&mut group, "value", value, xml_input);
-    group.finish();
-
-    let mut group = c.benchmark_group(format!("{name}/binary"));
-    bench_format(&mut group, "value", value, binary_input, binary::to_vec, binary::from_slice::<Value>);
-    group.finish();
-
-    let mut group = c.benchmark_group(format!("{name}/notation"));
-    bench_format(&mut group, "value", value, notation_input, notation::to_vec, notation::from_slice::<Value>);
-    group.finish();
-}
-
-fn bench_codec(c: &mut Criterion) {
-    let capabilities = capabilities();
-    let capability_value = capability_value(&capabilities);
-    let typed_capability_xml = xml::to_vec(&capabilities).expect("encode capability fixture");
-    let dynamic_capability_xml = xml::to_vec(&capability_value).expect("encode dynamic capability fixture");
-    let typed_capability_binary = binary::to_vec(&capabilities).expect("encode binary capability fixture");
-    let dynamic_capability_binary = binary::to_vec(&capability_value).expect("encode dynamic binary capability fixture");
-    let typed_capability_notation = notation::to_vec(&capabilities).expect("encode notation capability fixture");
-    let dynamic_capability_notation = notation::to_vec(&capability_value).expect("encode dynamic notation capability fixture");
-
-    let mut group = c.benchmark_group("llsd/capabilities/xml");
-    bench_xml(&mut group, "typed", &capabilities, &typed_capability_xml);
-    bench_xml(&mut group, "value", &capability_value, &dynamic_capability_xml);
-    group.finish();
-
-    let mut group = c.benchmark_group("llsd/capabilities/binary");
-    bench_format(&mut group, "typed", &capabilities, &typed_capability_binary, binary::to_vec, binary::from_slice::<CapabilityMap>);
-    bench_format(&mut group, "value", &capability_value, &dynamic_capability_binary, binary::to_vec, binary::from_slice::<Value>);
-    group.finish();
-
-    let mut group = c.benchmark_group("llsd/capabilities/notation");
-    bench_format(&mut group, "typed", &capabilities, &typed_capability_notation, notation::to_vec, notation::from_slice::<CapabilityMap>);
-    bench_format(&mut group, "value", &capability_value, &dynamic_capability_notation, notation::to_vec, notation::from_slice::<Value>);
-    group.finish();
-
-    let batch = event_batch();
-    let batch_value = event_batch_value(&batch);
-    let typed_batch_xml = xml::to_vec(&batch).expect("encode event batch fixture");
-    let dynamic_batch_xml = xml::to_vec(&batch_value).expect("encode dynamic event batch fixture");
-    let typed_batch_binary = binary::to_vec(&batch).expect("encode binary event batch fixture");
-    let dynamic_batch_binary = binary::to_vec(&batch_value).expect("encode dynamic binary event batch fixture");
-    let typed_batch_notation = notation::to_vec(&batch).expect("encode notation event batch fixture");
-    let dynamic_batch_notation = notation::to_vec(&batch_value).expect("encode dynamic notation event batch fixture");
-
-    let mut group = c.benchmark_group("llsd/event_batch/xml");
-    bench_xml(&mut group, "typed", &batch, &typed_batch_xml);
-    bench_xml(&mut group, "value", &batch_value, &dynamic_batch_xml);
-    group.finish();
-
-    let mut group = c.benchmark_group("llsd/event_batch/binary");
-    bench_format(&mut group, "typed", &batch, &typed_batch_binary, binary::to_vec, binary::from_slice::<EventBatch>);
-    bench_format(&mut group, "value", &batch_value, &dynamic_batch_binary, binary::to_vec, binary::from_slice::<Value>);
-    group.finish();
-
-    let mut group = c.benchmark_group("llsd/event_batch/notation");
-    bench_format(&mut group, "typed", &batch, &typed_batch_notation, notation::to_vec, notation::from_slice::<EventBatch>);
-    bench_format(&mut group, "value", &batch_value, &dynamic_batch_notation, notation::to_vec, notation::from_slice::<Value>);
-    group.finish();
-
-    let inventory = inventory_batch();
-    let inventory_xml = xml::to_vec(&inventory).expect("encode inventory-like fixture");
-    let inventory_binary = binary::to_vec(&inventory).expect("encode binary inventory-like fixture");
-    let inventory_notation = notation::to_vec(&inventory).expect("encode notation inventory-like fixture");
-    bench_value_formats(c, "llsd/inventory_batch", &inventory, &inventory_xml, &inventory_binary, &inventory_notation);
-
-    let nested = nested_array_value(60);
-    let nested_xml = xml::to_vec(&nested).expect("encode nested fixture");
-    let nested_binary = binary::to_vec(&nested).expect("encode nested binary fixture");
-    let nested_notation = notation::to_vec(&nested).expect("encode nested notation fixture");
-    bench_value_formats(c, "llsd/nested_near_default_limit", &nested, &nested_xml, &nested_binary, &nested_notation);
-}
-
 fn inventory_batch() -> Value {
     let items = (0..96)
         .map(|index| {
@@ -224,6 +173,7 @@ fn inventory_batch() -> Value {
             ]))
         })
         .collect();
+
     Value::Map(Map::from([("items".to_owned(), Value::Array(items)), ("version".to_owned(), Value::Integer(1))]))
 }
 
@@ -231,6 +181,70 @@ fn nested_array_value(depth: usize) -> Value {
     (0..depth).fold(Value::Integer(1), |value, _| Value::Array(vec![value]))
 }
 
-pub(crate) fn bench(c: &mut Criterion) {
-    bench_codec(c);
+#[divan::bench(types = [CapabilityMap, CapabilityValue, EventBatch, EventBatchValue, InventoryBatch, NestedArray])]
+fn xml_encode<T: CodecFixture>(bencher: divan::Bencher) {
+    let value = T::fixture();
+
+    bencher.bench_local(|| {
+        black_box(llsd_xml::to_vec(black_box(&value)).expect("encode LLSD XML"));
+    });
+}
+
+#[divan::bench(types = [CapabilityMap, CapabilityValue, EventBatch, EventBatchValue, InventoryBatch, NestedArray])]
+fn xml_decode<T: CodecFixture>(bencher: divan::Bencher) {
+    let value = T::fixture();
+    let input = llsd_xml::to_vec(&value).expect("encode benchmark fixture");
+
+    bencher.bench_local(|| {
+        black_box(llsd_xml::from_slice::<T>(black_box(&input)).expect("decode LLSD XML"));
+    });
+}
+
+#[divan::bench(types = [CapabilityMap, CapabilityValue, EventBatch, EventBatchValue])]
+fn xml_bounded_encode<T: CodecFixture>(bencher: divan::Bencher) {
+    let value = T::fixture();
+    let input = llsd_xml::to_vec(&value).expect("encode benchmark fixture");
+    let max_bytes = input.len();
+
+    bencher.bench_local(|| {
+        black_box(llsd_xml::to_vec_with_max_bytes(black_box(&value), max_bytes).expect("bounded LLSD XML encode"));
+    });
+}
+
+#[divan::bench(types = [CapabilityMap, CapabilityValue, EventBatch, EventBatchValue, InventoryBatch, NestedArray])]
+fn binary_encode<T: CodecFixture>(bencher: divan::Bencher) {
+    let value = T::fixture();
+
+    bencher.bench_local(|| {
+        black_box(llsd_binary::to_vec(black_box(&value)).expect("encode LLSD binary"));
+    });
+}
+
+#[divan::bench(types = [CapabilityMap, CapabilityValue, EventBatch, EventBatchValue, InventoryBatch, NestedArray])]
+fn binary_decode<T: CodecFixture>(bencher: divan::Bencher) {
+    let value = T::fixture();
+    let input = llsd_binary::to_vec(&value).expect("encode benchmark fixture");
+
+    bencher.bench_local(|| {
+        black_box(llsd_binary::from_slice::<T>(black_box(&input)).expect("decode LLSD binary"));
+    });
+}
+
+#[divan::bench(types = [CapabilityMap, CapabilityValue, EventBatch, EventBatchValue, InventoryBatch, NestedArray])]
+fn notation_encode<T: CodecFixture>(bencher: divan::Bencher) {
+    let value = T::fixture();
+
+    bencher.bench_local(|| {
+        black_box(llsd_notation::to_vec(black_box(&value)).expect("encode LLSD notation"));
+    });
+}
+
+#[divan::bench(types = [CapabilityMap, CapabilityValue, EventBatch, EventBatchValue, InventoryBatch, NestedArray])]
+fn notation_decode<T: CodecFixture>(bencher: divan::Bencher) {
+    let value = T::fixture();
+    let input = llsd_notation::to_vec(&value).expect("encode benchmark fixture");
+
+    bencher.bench_local(|| {
+        black_box(llsd_notation::from_slice::<T>(black_box(&input)).expect("decode LLSD notation"));
+    });
 }

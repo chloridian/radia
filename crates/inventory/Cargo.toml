@@ -20,7 +20,7 @@ uuid.workspace = true
 utils.workspace = true
 
 [dev-dependencies]
-criterion.workspace = true
+divan.workspace = true
 futures.workspace = true
 proptest.workspace = true
 tempfile.workspace = true

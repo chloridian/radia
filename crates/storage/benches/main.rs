@@ -1,10 +1,5 @@
 mod cache;
 
-use criterion::{Criterion, criterion_group, criterion_main};
-
-fn bench_storage(c: &mut Criterion) {
-    cache::bench(c);
+fn main() {
+    divan::main();
 }
-
-criterion_group!(benches, bench_storage);
-criterion_main!(benches);

@@ -1,25 +1,9 @@
 use std::hint::black_box;
 
-use criterion::{Criterion, Throughput};
 use protocol::lludp::{Message, Packet};
 use test_support::{lludp::vectors, parse_hex_fixture};
 
 const RECEIVE_BATCH_LEN: usize = 1_000;
-
-pub fn bench(c: &mut Criterion) {
-    let batch = mixed_batch();
-    let mut group = c.benchmark_group("protocol/lludp/receive_pipeline");
-    group.throughput(Throughput::Elements(batch.len() as u64));
-    group.bench_function("mixed_1000", |b| {
-        b.iter(|| {
-            for wire in &batch {
-                decode_received(wire);
-            }
-        });
-    });
-
-    group.finish();
-}
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid LLUDP fixture")
@@ -85,4 +69,18 @@ fn decode_received(wire: &[u8]) {
     };
     black_box((sequence, reliable, appended_acks, message_id, preflight, packet_acks));
     black_box(packet);
+}
+
+mod benches {
+    use super::*;
+
+    #[divan::bench]
+    fn lludp_receive_pipeline_mixed_1000(bencher: divan::Bencher) {
+        let batch = mixed_batch();
+        bencher.counter(divan::counter::ItemsCount::new(RECEIVE_BATCH_LEN as u64)).bench_local(|| {
+            for wire in &batch {
+                decode_received(wire);
+            }
+        });
+    }
 }

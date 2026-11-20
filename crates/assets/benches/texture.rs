@@ -1,7 +1,6 @@
 use std::{hint::black_box, thread, time::Instant};
 
 use assets::{Budget, DecodeJob, Demand, LoadJob, Priority, Request, Store, TextureSize};
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput};
 use test_support::texture::GRAY_4096_J2C;
 use utils::AssetId;
 use uuid::Uuid;
@@ -29,35 +28,50 @@ fn decode_jobs(edge: u32, workers: usize) -> (Store, Vec<DecodeJob>, Vec<Demand>
     (store, jobs, demands, now)
 }
 
-pub(crate) fn bench(c: &mut Criterion) {
-    let mut group = c.benchmark_group("texture/assets_decode");
-    group.sample_size(10);
-    for edge in [512u32, 1024, 2048] {
-        for workers in [1usize, 2] {
-            group.throughput(Throughput::Elements(u64::from(edge).pow(2) * workers as u64));
-            group.bench_function(BenchmarkId::new(format!("gray_4096/{workers}_workers"), edge), |b| {
-                b.iter_batched(
-                    || decode_jobs(edge, workers),
-                    |(mut store, jobs, demands, now)| {
-                        let completions = thread::scope(|scope| {
-                            jobs.into_iter()
-                                .map(|job| scope.spawn(move || job.run()))
-                                .collect::<Vec<_>>()
-                                .into_iter()
-                                .map(|job| job.join().expect("decode worker completes"))
-                                .collect::<Vec<_>>()
-                        });
-                        for completion in completions {
-                            store.complete(completion, now);
-                        }
-                        for demand in demands {
-                            black_box(demand.status());
-                        }
-                    },
-                    BatchSize::SmallInput,
-                );
+#[derive(Clone, Copy, Debug)]
+struct DecodeCase {
+    edge: u32,
+    workers: usize,
+}
+
+const ONE_WORKER: &[DecodeCase] =
+    &[DecodeCase { edge: 512, workers: 1 }, DecodeCase { edge: 1024, workers: 1 }, DecodeCase { edge: 2048, workers: 1 }];
+
+const TWO_WORKERS: &[DecodeCase] =
+    &[DecodeCase { edge: 512, workers: 2 }, DecodeCase { edge: 1024, workers: 2 }, DecodeCase { edge: 2048, workers: 2 }];
+
+mod benches {
+    use super::*;
+
+    fn run(bencher: divan::Bencher, case: DecodeCase) {
+        bencher
+            .counter(divan::counter::ItemsCount::new(u64::from(case.edge).pow(2) * case.workers as u64))
+            .with_inputs(|| decode_jobs(case.edge, case.workers))
+            .bench_local_values(|(mut store, jobs, demands, now)| {
+                let completions = thread::scope(|scope| {
+                    jobs.into_iter()
+                        .map(|job| scope.spawn(move || job.run()))
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|job| job.join().expect("decode worker completes"))
+                        .collect::<Vec<_>>()
+                });
+                for completion in completions {
+                    store.complete(completion, now);
+                }
+                for demand in demands {
+                    black_box(demand.status());
+                }
             });
-        }
     }
-    group.finish();
+
+    #[divan::bench(args = ONE_WORKER)]
+    fn texture_assets_decode_gray_4096_one_worker(bencher: divan::Bencher, case: DecodeCase) {
+        run(bencher, case);
+    }
+
+    #[divan::bench(args = TWO_WORKERS)]
+    fn texture_assets_decode_gray_4096_two_workers(bencher: divan::Bencher, case: DecodeCase) {
+        run(bencher, case);
+    }
 }

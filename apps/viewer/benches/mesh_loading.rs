@@ -11,7 +11,6 @@ use std::{
 };
 
 use assets::{Content, Demand, Request, Status, cache::AssetCache};
-use criterion::Criterion;
 use futures::channel::oneshot;
 use llsd::{Value, xml};
 use math::{DVec3, Quat, Vec3};
@@ -70,57 +69,100 @@ struct Sample {
     http_bytes: u64,
 }
 
-pub fn register(c: &mut Criterion) {
-    let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
-    let mesh_assets = mesh_assets();
-    let warm_directory = tempdir().expect("create warm cache directory");
-    let warm_cache = Arc::new(AssetCache::open(warm_directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open warm cache"));
-    let mut warm_sample = Sample::default();
+fn prepare_warm_cache(runtime: &Runtime, mesh_assets: &Arc<HashMap<Uuid, Vec<u8>>>) -> (tempfile::TempDir, Arc<AssetCache>) {
+    let directory = tempdir().expect("create warm cache directory");
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open warm cache"));
     let mut previous_counts = None;
     let mut stable_counts = 0;
     for _ in 0..8 {
-        warm_sample = runtime.block_on(run_measurement(Arc::clone(&warm_cache), Arc::clone(&mesh_assets), true));
-        let counts = (warm_sample.http_requests, warm_sample.http_bytes);
+        let sample = runtime.block_on(run_measurement(Arc::clone(&cache), Arc::clone(mesh_assets), true));
+        let counts = (sample.http_requests, sample.http_bytes);
         if previous_counts == Some(counts) {
             stable_counts += 1;
         } else {
             stable_counts = 0;
         }
+        report_counts_once(CacheMode::Warm, &sample);
         if stable_counts == 1 {
             break;
         }
         previous_counts = Some(counts);
     }
-    report_counts_once(CacheMode::Warm, &warm_sample);
+    (directory, cache)
+}
 
-    let mut group = c.benchmark_group("mesh_loading");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_secs(1));
-    group.measurement_time(Duration::from_secs(2));
+fn measure_once(
+    runtime: &Runtime,
+    mesh_assets: &Arc<HashMap<Uuid, Vec<u8>>>,
+    mode: CacheMode,
+    metric: Metric,
+    warm_cache: Option<&Arc<AssetCache>>,
+) -> Duration {
+    let sample = match mode {
+        CacheMode::Cold => {
+            let directory = tempdir().expect("create cold cache directory");
+            let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cold cache"));
+            runtime.block_on(run_measurement(cache, Arc::clone(mesh_assets), false))
+        }
+        CacheMode::Warm => {
+            runtime.block_on(run_measurement(Arc::clone(warm_cache.expect("warm mode has a primed cache")), Arc::clone(mesh_assets), false))
+        }
+    };
+    report_counts_once(mode, &sample);
+    match metric {
+        Metric::Nearest => sample.nearest_10_ready.expect("nearest meshes become ready"),
+        Metric::All => sample.all_ready.expect("all meshes become ready"),
+        Metric::Textures => sample.textures_ready.expect("all benchmark textures become ready"),
+    }
+}
 
-    group.bench_function("cold/nearest_10_ready", |b| {
-        b.iter_custom(|iterations| measure_iterations(iterations, &runtime, &mesh_assets, CacheMode::Cold, Metric::Nearest, None))
-    });
-    group.bench_function("cold/all_ready", |b| {
-        b.iter_custom(|iterations| measure_iterations(iterations, &runtime, &mesh_assets, CacheMode::Cold, Metric::All, None))
-    });
-    group.bench_function("cold/textures_ready", |b| {
-        b.iter_custom(|iterations| measure_iterations(iterations, &runtime, &mesh_assets, CacheMode::Cold, Metric::Textures, None))
-    });
-    group.bench_function("warm/nearest_10_ready", |b| {
-        b.iter_custom(|iterations| {
-            measure_iterations(iterations, &runtime, &mesh_assets, CacheMode::Warm, Metric::Nearest, Some(&warm_cache))
-        })
-    });
-    group.bench_function("warm/all_ready", |b| {
-        b.iter_custom(|iterations| measure_iterations(iterations, &runtime, &mesh_assets, CacheMode::Warm, Metric::All, Some(&warm_cache)))
-    });
-    group.bench_function("warm/textures_ready", |b| {
-        b.iter_custom(|iterations| {
-            measure_iterations(iterations, &runtime, &mesh_assets, CacheMode::Warm, Metric::Textures, Some(&warm_cache))
-        })
-    });
-    group.finish();
+mod benches {
+    use super::*;
+
+    #[divan::bench]
+    fn mesh_loading_cold_nearest_10_ready(bencher: divan::Bencher) {
+        let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
+        let mesh_assets = mesh_assets();
+        bencher.bench_local(|| black_box(measure_once(&runtime, &mesh_assets, CacheMode::Cold, Metric::Nearest, None)));
+    }
+
+    #[divan::bench]
+    fn mesh_loading_cold_all_ready(bencher: divan::Bencher) {
+        let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
+        let mesh_assets = mesh_assets();
+        bencher.bench_local(|| black_box(measure_once(&runtime, &mesh_assets, CacheMode::Cold, Metric::All, None)));
+    }
+
+    #[divan::bench]
+    fn mesh_loading_cold_textures_ready(bencher: divan::Bencher) {
+        let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
+        let mesh_assets = mesh_assets();
+        bencher.bench_local(|| black_box(measure_once(&runtime, &mesh_assets, CacheMode::Cold, Metric::Textures, None)));
+    }
+
+    #[divan::bench]
+    fn mesh_loading_warm_nearest_10_ready(bencher: divan::Bencher) {
+        let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
+        let mesh_assets = mesh_assets();
+        let (_directory, cache) = prepare_warm_cache(&runtime, &mesh_assets);
+        bencher.bench_local(|| black_box(measure_once(&runtime, &mesh_assets, CacheMode::Warm, Metric::Nearest, Some(&cache))));
+    }
+
+    #[divan::bench]
+    fn mesh_loading_warm_all_ready(bencher: divan::Bencher) {
+        let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
+        let mesh_assets = mesh_assets();
+        let (_directory, cache) = prepare_warm_cache(&runtime, &mesh_assets);
+        bencher.bench_local(|| black_box(measure_once(&runtime, &mesh_assets, CacheMode::Warm, Metric::All, Some(&cache))));
+    }
+
+    #[divan::bench]
+    fn mesh_loading_warm_textures_ready(bencher: divan::Bencher) {
+        let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
+        let mesh_assets = mesh_assets();
+        let (_directory, cache) = prepare_warm_cache(&runtime, &mesh_assets);
+        bencher.bench_local(|| black_box(measure_once(&runtime, &mesh_assets, CacheMode::Warm, Metric::Textures, Some(&cache))));
+    }
 }
 
 #[derive(Clone, Copy)]

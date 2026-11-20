@@ -1,6 +1,5 @@
 use std::{assert_matches, hint::black_box, num::NonZeroU32};
 
-use criterion::{BenchmarkId, Criterion, Throughput};
 use math::{DVec3, Quat, Vec3};
 use uuid::Uuid;
 use world::{
@@ -15,14 +14,23 @@ use world::{
     Pose, PoseError, PoseState, Region, RegionInfo, UpdateSource, World, WorldLimits,
 };
 
-const DEPTHS: &[(&str, usize)] = &[("root", 0), ("typical", 8), ("limit", 16), ("over_limit", 17)];
-
-struct Scenario {
+#[derive(Clone, Copy, Debug)]
+struct DepthCase {
     name: &'static str,
     edge_depth: usize,
-    world: World,
-    region: Region,
-    target: Entity,
+}
+
+const DEPTHS: &[DepthCase] = &[
+    DepthCase { name: "root", edge_depth: 0 },
+    DepthCase { name: "typical", edge_depth: 8 },
+    DepthCase { name: "limit", edge_depth: 16 },
+    DepthCase { name: "over_limit", edge_depth: 17 },
+];
+
+impl std::fmt::Display for DepthCase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name)
+    }
 }
 
 fn world_with_chain(edge_depth: usize) -> (World, Region, Entity) {
@@ -85,68 +93,56 @@ fn assert_chain_depth(world: &World, target: Entity, edge_depth: usize) {
     assert_matches!(world.object(current).map(|object| object.parent()), Some(Parent::Root));
 }
 
-fn assert_pose_contract(scenario: &Scenario) {
-    let object = scenario.world.object(scenario.target).expect("target object");
+fn assert_pose_contract(world: &World, target: Entity, edge_depth: usize) {
+    let object = world.object(target).expect("target object");
     match (object.world_pose(), object.coordinate_frame()) {
-        (Ok(PoseState::Resolved(_)), Ok(_)) if scenario.edge_depth <= 16 => {}
+        (Ok(PoseState::Resolved(_)), Ok(_)) if edge_depth <= 16 => {}
         (Err(PoseError::TraversalLimitExceeded { max_edges: 16 }), Err(PoseError::TraversalLimitExceeded { max_edges: 16 }))
-            if scenario.edge_depth > 16 => {}
-        _ => panic!("unexpected pose result at {} edges", scenario.edge_depth),
+            if edge_depth > 16 => {}
+        _ => panic!("unexpected pose result at {edge_depth} edges"),
     }
 }
 
-pub(super) fn bench(c: &mut Criterion) {
-    let mut scenarios = DEPTHS
-        .iter()
-        .copied()
-        .map(|(name, edge_depth)| {
-            let (world, region, target) = world_with_chain(edge_depth);
-            assert_chain_depth(&world, target, edge_depth);
-            let scenario = Scenario { name, edge_depth, world, region, target };
-            assert_pose_contract(&scenario);
-            scenario
-        })
-        .collect::<Vec<_>>();
+mod benches {
+    use super::*;
 
-    let mut group = c.benchmark_group("world/pose");
-    for scenario in &scenarios {
-        let object = scenario.world.object(scenario.target).expect("target object");
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(BenchmarkId::new("resolve", scenario.name), &scenario.edge_depth, |b, _| {
-            b.iter(|| black_box(object.world_pose()));
-        });
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(BenchmarkId::new("coordinate_frame", scenario.name), &scenario.edge_depth, |b, _| {
-            b.iter(|| black_box(object.coordinate_frame()));
-        });
+    #[divan::bench(args = DEPTHS)]
+    fn pose_resolve(bencher: divan::Bencher, case: DepthCase) {
+        let (world, _region, target) = world_with_chain(case.edge_depth);
+        assert_chain_depth(&world, target, case.edge_depth);
+        assert_pose_contract(&world, target, case.edge_depth);
+        let object = world.object(target).expect("target object");
+        bencher.counter(divan::counter::ItemsCount::new(1)).bench_local(|| black_box(object.world_pose()));
     }
-    for scenario in &mut scenarios {
-        let region = scenario.region;
+
+    #[divan::bench(args = DEPTHS)]
+    fn pose_coordinate_frame(bencher: divan::Bencher, case: DepthCase) {
+        let (world, _region, target) = world_with_chain(case.edge_depth);
+        assert_chain_depth(&world, target, case.edge_depth);
+        assert_pose_contract(&world, target, case.edge_depth);
+        let object = world.object(target).expect("target object");
+        bencher.counter(divan::counter::ItemsCount::new(1)).bench_local(|| black_box(object.coordinate_frame()));
+    }
+
+    #[divan::bench(args = DEPTHS)]
+    fn pose_cycle_proposal(bencher: divan::Bencher, case: DepthCase) {
+        let (mut world, region, _target) = world_with_chain(case.edge_depth);
         let root_local_id = NonZeroU32::new(1).expect("root local ID is nonzero");
         let tail_local_id =
-            NonZeroU32::new(u32::try_from(scenario.edge_depth + 1).expect("tail local ID fits u32")).expect("tail local ID is nonzero");
-        let mut order = u64::try_from(scenario.edge_depth + 2).expect("cycle order fits u64");
-        let probe = scenario
-            .world
-            .patch_object(cycle_patch(region, order, root_local_id, tail_local_id))
-            .expect("cycle proposal is a field rejection");
+            NonZeroU32::new(u32::try_from(case.edge_depth + 1).expect("tail local ID fits u32")).expect("tail local ID is nonzero");
+        let mut order = u64::try_from(case.edge_depth + 2).expect("cycle order fits u64");
+        let probe =
+            world.patch_object(cycle_patch(region, order, root_local_id, tail_local_id)).expect("cycle proposal is a field rejection");
         assert_eq!(probe.rejections.len(), 1);
         assert_eq!(probe.rejections.iter().next().copied(), Some(FieldRejection { group: FieldGroup::Parent, reason: ParentCycle }));
         order += 1;
 
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(BenchmarkId::new("cycle_proposal", scenario.name), &scenario.edge_depth, |b, _| {
-            b.iter(|| {
-                let current_order = order;
-                order += 1;
-                let _ = black_box(
-                    scenario
-                        .world
-                        .patch_object(cycle_patch(region, current_order, root_local_id, tail_local_id))
-                        .expect("cycle proposal is rejected"),
-                );
-            });
+        bencher.counter(divan::counter::ItemsCount::new(1)).bench_local(|| {
+            let current_order = order;
+            order += 1;
+            let _ = black_box(
+                world.patch_object(cycle_patch(region, current_order, root_local_id, tail_local_id)).expect("cycle proposal is rejected"),
+            );
         });
     }
-    group.finish();
 }
