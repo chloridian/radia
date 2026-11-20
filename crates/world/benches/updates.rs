@@ -591,6 +591,9 @@ fn bench_mixed(group: &mut BenchmarkGroup<'_, WallTime>) {
                     let row = scene.rows[index];
                     let remove_order = base_order + 300_000 + index as u64 * 2;
                     let _ = black_box(scene.world.remove_object(source(row.region, remove_order), row.local_id).expect("object removal"));
+                    while scene.world.has_pending_removals() {
+                        drop(black_box(scene.world.reclaim_removals(MAX_REMOVAL_WORK_PER_TURN)));
+                    }
                     let replacement = Row { id: Uuid::from_u128(next_id), order: remove_order + 1, ..row };
                     next_id += 1;
                     let _ = black_box(scene.world.observe_object(observation_with_pose(replacement, pose)).expect("local ID reuse"));

@@ -297,16 +297,14 @@ pub(crate) fn bench(c: &mut Criterion) {
         });
 
         group.bench_function(BenchmarkId::new("saturated_next_job", count), |b| {
-            b.iter_custom(|iterations| {
-                let ((mut store, demands, _, now, decodes), jobs) = saturated_fixture(count);
-                let start = Instant::now();
-                for _ in 0..iterations {
-                    black_box(store.next_job(now));
-                }
-                let elapsed = start.elapsed();
-                black_box((demands.len(), decodes.len(), jobs.len()));
-                elapsed
-            });
+            b.iter_batched_ref(
+                || saturated_fixture(count),
+                |((store, demands, _, now, decodes), jobs)| {
+                    let next_job = store.next_job(*now);
+                    black_box((next_job, demands.len(), decodes.len(), jobs.len()));
+                },
+                BatchSize::PerIteration,
+            );
         });
 
         group.bench_function(BenchmarkId::new("maintain", count), |b| {

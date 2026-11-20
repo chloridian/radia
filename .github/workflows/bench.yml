@@ -1,0 +1,391 @@
+name: Bench
+
+on:
+    pull_request:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+env:
+    CARGO_TERM_COLOR: always
+    RUST_BACKTRACE: 1
+    RADIA_CI: "true"
+
+jobs:
+    orchestrate:
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        outputs:
+            run_benchmarks: ${{ steps.filter.outputs.run_benchmarks }}
+            bench_matrix: ${{ steps.filter.outputs.bench_matrix }}
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: 350
+            - id: filter
+              env:
+                  PUSH_BEFORE: ${{ github.event.before }}
+              run: |
+                  BENCH_NAMES=()
+                  BENCH_PACKAGES=()
+                  BENCH_FILTERS=()
+
+                  add_shard() {
+                    local name="$1" packages="$2" filter="${3:-}" index existing found
+                    local -a existing_filters
+                    for index in "${!BENCH_NAMES[@]}"; do
+                      if [ "${BENCH_NAMES[$index]}" = "$name" ]; then
+                        if [ -z "$filter" ] || [ -z "${BENCH_FILTERS[$index]}" ]; then
+                          BENCH_FILTERS[$index]=""
+                        else
+                          found=false
+                          IFS='|' read -r -a existing_filters <<< "${BENCH_FILTERS[$index]}"
+                          for existing in "${existing_filters[@]}"; do
+                            if [ "$existing" = "$filter" ]; then
+                              found=true
+                              break
+                            fi
+                          done
+                          if [ "$found" = false ]; then
+                            BENCH_FILTERS[$index]+="|$filter"
+                          fi
+                        fi
+                        return
+                      fi
+                    done
+                    BENCH_NAMES+=("$name")
+                    BENCH_PACKAGES+=("$packages")
+                    BENCH_FILTERS+=("$filter")
+                  }
+
+                  add_bench() {
+                    local package="$2" filter="$3"
+                    case "$package" in
+                      llsd|network|protocol|storage|assets|inventory)
+                        add_shard core "-p llsd -p network -p protocol -p storage -p assets -p inventory" "$filter"
+                        ;;
+                      world)
+                        add_shard world "-p world" "$filter"
+                        ;;
+                      render)
+                        add_shard render "-p render" "$filter"
+                        ;;
+                      *)
+                        echo "::error::No benchmark shard for package $package"
+                        exit 1
+                        ;;
+                    esac
+                  }
+
+                  add_all_benchmarks() {
+                    add_shard core "-p llsd -p network -p protocol -p storage -p assets -p inventory" ""
+                    add_shard world "-p world" ""
+                    add_shard render "-p render" ""
+                  }
+                  if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+                    add_all_benchmarks
+                  else
+                    if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+                      git fetch --update-head-ok origin "$GITHUB_BASE_REF" --depth=350 || true
+                      COMPARE_REV="$(git merge-base "origin/${GITHUB_BASE_REF}" "$GITHUB_SHA")"
+                    elif [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+                      git fetch --no-tags --depth=1 origin "$PUSH_BEFORE" || true
+                      if git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+                        COMPARE_REV="$PUSH_BEFORE"
+                      else
+                        COMPARE_REV="$(git rev-parse HEAD~1)"
+                      fi
+                    else
+                      COMPARE_REV="$(git rev-parse HEAD~1)"
+                    fi
+                    CHANGED_FILES="$(git diff --name-only "$COMPARE_REV" "$GITHUB_SHA")"
+
+                    while IFS= read -r file; do
+                      case "$file" in
+                        Cargo.toml|Cargo.lock|.cargo/*|rust-toolchain*|build.rs|*/build.rs|justfile|.github/workflows/bench.yml|crates/test-support/*|crates/test-support/**/*|crates/utils/*|crates/utils/**/*)
+                          add_all_benchmarks
+                          ;;
+                        crates/math/Cargo.toml|crates/math/src/*|crates/math/src/**/*)
+                          add_bench protocol-lludp protocol protocol/lludp
+                          add_bench world-pose world world/pose
+                          add_bench world-updates world world/updates
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/llsd/Cargo.toml)
+                          add_bench llsd llsd ""
+                          add_bench network-capabilities network network/capability
+                          add_bench protocol-lludp protocol protocol/lludp
+                          add_bench assets-store assets store
+                          ;;
+                        crates/llsd/benches/*)
+                          add_bench llsd llsd ""
+                          ;;
+                        crates/llsd/src/binary/*|crates/llsd/src/binary/**/*)
+                          add_bench llsd-binary llsd binary
+                          add_bench network-capabilities network network/capability
+                          add_bench protocol-lludp protocol protocol/lludp
+                          ;;
+                        crates/llsd/src/notation/*|crates/llsd/src/notation/**/*)
+                          add_bench llsd-notation llsd notation
+                          add_bench network-capabilities network network/capability
+                          add_bench protocol-lludp protocol protocol/lludp
+                          ;;
+                        crates/llsd/src/xml/*|crates/llsd/src/xml/**/*)
+                          add_bench llsd-xml llsd xml
+                          add_bench network-capabilities network network/capability
+                          add_bench protocol-lludp protocol protocol/lludp
+                          ;;
+                        crates/llsd/src/*)
+                          add_bench llsd llsd llsd/
+                          add_bench network-capabilities network network/capability
+                          add_bench protocol-lludp protocol protocol/lludp
+                          ;;
+                        crates/network/Cargo.toml|crates/network/benches/*)
+                          add_bench network network ""
+                          ;;
+                        crates/network/src/capabilities/*|crates/network/src/capabilities/**/*|crates/network/src/http.rs)
+                          add_bench network-capabilities network network/capability
+                          ;;
+                        crates/protocol/Cargo.toml)
+                          add_bench protocol protocol ""
+                          add_bench network-capabilities network network/capability
+                          ;;
+                        crates/protocol/benches/*)
+                          add_bench protocol protocol ""
+                          ;;
+                        crates/protocol/src/lludp/*|crates/protocol/src/lludp/**/*|crates/protocol/src/messages/*|crates/protocol/src/messages/**/*|crates/protocol/src/types/*|crates/protocol/src/types/**/*)
+                          add_bench protocol-lludp protocol protocol/lludp
+                          ;;
+                        crates/storage/Cargo.toml)
+                          add_bench storage storage ""
+                          add_bench inventory inventory inventory/
+                          add_bench assets-cache assets asset_cache_texture
+                          add_bench assets-store assets store
+                          ;;
+                        crates/storage/benches/*)
+                          add_bench storage storage ""
+                          ;;
+                        crates/storage/src/cache/*|crates/storage/src/cache/**/*|crates/storage/src/sqlite.rs)
+                          add_bench storage-scale storage storage/scale
+                          add_bench inventory inventory inventory/
+                          add_bench assets-cache assets asset_cache_texture
+                          add_bench assets-store assets store
+                          ;;
+                        crates/assets/Cargo.toml)
+                          add_bench assets-cache assets asset_cache_texture
+                          add_bench assets-store assets store
+                          add_bench assets-texture assets texture/assets_decode
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/assets/benches/main.rs|crates/assets/benches/support.rs)
+                          add_bench assets-cache assets asset_cache_texture
+                          add_bench assets-store assets store
+                          add_bench assets-texture assets texture/assets_decode
+                          ;;
+                        crates/assets/benches/cache.rs)
+                          add_bench assets-cache assets asset_cache_texture
+                          ;;
+                        crates/assets/benches/store.rs)
+                          add_bench assets-store assets store
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/assets/benches/texture.rs)
+                          add_bench assets-texture assets texture/assets_decode
+                          ;;
+                        crates/assets/src/cache.rs|crates/assets/src/cache_policy.rs|crates/assets/src/cache/*|crates/assets/src/cache/**/*)
+                          add_bench assets-cache assets asset_cache_texture
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/assets/src/store.rs|crates/assets/src/budget.rs|crates/assets/src/content.rs|crates/assets/src/environment.rs|crates/assets/src/envelope.rs)
+                          add_bench assets-store assets store
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/assets/src/texture/*|crates/assets/src/texture/**/*)
+                          add_bench assets-texture assets texture/assets_decode
+                          ;;
+                        crates/assets/src/mesh/*|crates/assets/src/mesh/**/*)
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/assets/src/lib.rs)
+                          add_bench assets-cache assets asset_cache_texture
+                          add_bench assets-store assets store
+                          add_bench assets-texture assets texture/assets_decode
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/inventory/Cargo.toml|crates/inventory/benches/*|crates/inventory/src/*|crates/inventory/src/**/*)
+                          add_bench inventory inventory inventory/
+                          ;;
+                        crates/world/Cargo.toml)
+                          add_bench world-lifecycle world world/lifecycle
+                          add_bench world-updates world world/updates
+                          add_bench world-facets world world/facets
+                          add_bench world-pose world world/pose
+                          add_bench world-relations world world/relations
+                          add_bench world-linkset-churn world world/linkset_churn
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/world/benches/main.rs|crates/world/benches/support.rs)
+                          add_bench world-lifecycle world world/lifecycle
+                          add_bench world-updates world world/updates
+                          add_bench world-facets world world/facets
+                          add_bench world-pose world world/pose
+                          add_bench world-relations world world/relations
+                          add_bench world-linkset-churn world world/linkset_churn
+                          ;;
+                        crates/world/benches/lifecycle.rs)
+                          add_bench world-lifecycle world world/lifecycle
+                          ;;
+                        crates/world/benches/load.rs)
+                          add_bench world-linkset-churn world world/linkset_churn
+                          ;;
+                        crates/world/benches/pose.rs)
+                          add_bench world-pose world world/pose
+                          ;;
+                        crates/world/benches/relations.rs)
+                          add_bench world-relations world world/relations
+                          ;;
+                        crates/world/benches/updates.rs)
+                          add_bench world-updates world world/updates
+                          add_bench world-facets world world/facets
+                          ;;
+                        crates/world/src/mutation/lifecycle.rs|crates/world/src/mutation/region.rs|crates/world/src/removal.rs|crates/world/src/object/storage.rs|crates/world/src/identity.rs)
+                          add_bench world-lifecycle world world/lifecycle
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/world/src/mutation/patch.rs|crates/world/src/mutation/fields.rs|crates/world/src/mutation/facet/*|crates/world/src/mutation/facet/**/*|crates/world/src/object/appearance.rs|crates/world/src/object/avatar.rs|crates/world/src/object/media.rs|crates/world/src/object/shape.rs|crates/world/src/object/components.rs|crates/world/src/read.rs)
+                          add_bench world-updates world world/updates
+                          add_bench world-facets world world/facets
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/world/src/mutation/observe.rs)
+                          add_bench world-lifecycle world world/lifecycle
+                          add_bench world-updates world world/updates
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/world/src/object/pose.rs|crates/world/src/object/transform.rs)
+                          add_bench world-pose world world/pose
+                          add_bench world-updates world world/updates
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/world/src/object/relationships.rs)
+                          add_bench world-relations world world/relations
+                          add_bench world-linkset-churn world world/linkset_churn
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/world/src/region/*|crates/world/src/region/**/*)
+                          add_bench world-lifecycle world world/lifecycle
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/world/src/history/*|crates/world/src/history/**/*|crates/world/src/update.rs|crates/world/src/invariants.rs|crates/world/src/lib.rs|crates/world/src/object/view.rs)
+                          add_bench world-lifecycle world world/lifecycle
+                          add_bench world-updates world world/updates
+                          add_bench world-facets world world/facets
+                          add_bench world-pose world world/pose
+                          add_bench world-relations world world/relations
+                          add_bench world-linkset-churn world world/linkset_churn
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/world/src/*|crates/world/src/**/*)
+                          add_bench world-lifecycle world world/lifecycle
+                          add_bench world-updates world world/updates
+                          add_bench world-facets world world/facets
+                          add_bench world-pose world world/pose
+                          add_bench world-relations world world/relations
+                          add_bench world-linkset-churn world world/linkset_churn
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/render/Cargo.toml)
+                          add_bench render-scene render scene/
+                          add_bench render-texture-compression render texture/compression
+                          ;;
+                        crates/render/benches/main.rs|crates/render/benches/support.rs)
+                          add_bench render-scene render scene/
+                          add_bench render-texture-compression render texture/compression
+                          ;;
+                        crates/render/benches/prim.rs|crates/render/src/scene/prim.rs)
+                          add_bench render-prim-mesh render scene/prim_mesh
+                          ;;
+                        crates/render/benches/reconcile.rs|crates/render/src/scene/reconcile/*|crates/render/src/scene/reconcile/**/*|crates/render/src/scene/model/*|crates/render/src/scene/model/**/*|crates/render/src/scene/planning.rs|crates/render/src/scene/dependencies.rs)
+                          add_bench render-scene render scene/
+                          ;;
+                        crates/render/src/scene/mesh.rs|crates/render/src/scene/mesh_cache.rs|crates/render/src/scene/asset_demand/mesh.rs)
+                          add_bench render-scene-mesh-lod render scene/mesh_lod_lookup
+                          ;;
+                        crates/render/benches/texture.rs|crates/render/src/texture/compression.rs)
+                          add_bench render-texture-compression render texture/compression
+                          ;;
+                        crates/render/src/lib.rs|crates/render/src/benchmark.rs)
+                          add_bench render-scene render scene/
+                          add_bench render-texture-compression render texture/compression
+                          ;;
+                      esac
+                    done <<< "$CHANGED_FILES"
+                  fi
+
+                  BENCH_MATRIX='{"include":['
+                  for index in "${!BENCH_NAMES[@]}"; do
+                    if [ "$BENCH_MATRIX" != '{"include":[' ]; then
+                      BENCH_MATRIX+=","
+                    fi
+                    printf -v item '{"name":"%s","packages":"%s","filter":"%s"}' \
+                      "${BENCH_NAMES[$index]}" "${BENCH_PACKAGES[$index]}" "${BENCH_FILTERS[$index]}"
+                    BENCH_MATRIX+="$item"
+                  done
+                  BENCH_MATRIX+=']}'
+
+                  if [ "${#BENCH_NAMES[@]}" -eq 0 ]; then
+                    echo "run_benchmarks=false" >> "$GITHUB_OUTPUT"
+                    BENCH_MATRIX='{"include":[{"name":"none","packages":"-p llsd","filter":""}]}'
+                  else
+                    echo "run_benchmarks=true" >> "$GITHUB_OUTPUT"
+                  fi
+
+                  echo "bench_matrix=${BENCH_MATRIX}" >> "$GITHUB_OUTPUT"
+
+    benchmarks:
+        name: ${{ matrix.name }}
+        runs-on: ubuntu-latest
+        needs: [orchestrate]
+        if: needs.orchestrate.outputs.run_benchmarks == 'true'
+        timeout-minutes: 120
+        permissions:
+            contents: read
+            id-token: write
+        strategy:
+            fail-fast: false
+            matrix: ${{ fromJSON(needs.orchestrate.outputs.bench_matrix) }}
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions-rust-lang/setup-rust-toolchain@v2
+
+            - name: Install Linux system dependencies
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install --yes --no-install-recommends build-essential cmake libfontconfig1-dev libvulkan-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev pkg-config
+
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: cargo-codspeed
+
+            - uses: extractions/setup-just@v4
+
+            - run: just codspeed-build ${{ matrix.packages }}
+
+            - uses: CodSpeedHQ/action@v5
+              env:
+                  BENCH_FILTER: ${{ matrix.filter }}
+              with:
+                  mode: simulation
+                  run: |
+                      if [ -n "$BENCH_FILTER" ]; then
+                        just codspeed-run ${{ matrix.packages }} "$BENCH_FILTER"
+                      else
+                        just codspeed-run ${{ matrix.packages }}
+                      fi
