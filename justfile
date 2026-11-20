@@ -30,6 +30,14 @@ build *flags:
 test *flags:
     cargo test-all {{ ci_nextest }} {{ flags }}
 
+[doc('Run the all-feature workspace suite and generate the LCOV report used by Codecov')]
+coverage:
+    cargo llvm-cov nextest --workspace --all-features --no-fail-fast {{ ci_nextest }} --exclude-from-report test-support --lcov --output-path lcov.info
+
+[doc('Run the all-feature workspace suite and generate a local HTML coverage report')]
+coverage-html:
+    cargo llvm-cov nextest --workspace --all-features --no-fail-fast {{ ci_nextest }} --exclude-from-report test-support --html
+
 [doc('Run GPU tests across the workspace; they need a Vulkan adapter')]
 test-gpu:
     cargo nextest run --workspace --all-features --release --run-ignored only -E 'not (package(network) & test(udp_burst_measurement))'

@@ -163,8 +163,10 @@ jobs:
             - name: Install LLVM coverage tools
               run: rustup component add llvm-tools-preview
 
+            - uses: extractions/setup-just@v4
+
             - name: Run tests and generate LCOV report
-              run: cargo llvm-cov nextest --workspace --all-features --no-fail-fast --locked --cargo-profile ci --exclude-from-report test-support --lcov --output-path lcov.info
+              run: just coverage
 
             - name: Upload coverage to Codecov
               if: always() && hashFiles('lcov.info') != ''

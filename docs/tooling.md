@@ -80,8 +80,11 @@ The pre-commit hook checks formatting. The commit-msg hook rejects messages with
 ## Test coverage
 
 ```bash
-# Summary across workspace crates
-cargo llvm-cov --workspace
+# Generate the same all-feature LCOV report that CI uploads to Codecov
+just coverage
+
+# Generate a local HTML report with the same test selection
+just coverage-html
 
 # Show uncovered lines across the workspace
 cargo llvm-cov --workspace --text --show-missing-lines
@@ -89,22 +92,16 @@ cargo llvm-cov --workspace --text --show-missing-lines
 # Inspect uncovered lines in one package
 cargo llvm-cov -p <crate> --text --show-missing-lines
 
-# Generate an HTML report
-cargo llvm-cov --workspace --html
-
-# Generate an HTML report with Nextest and all features
-cargo llvm-cov nextest --workspace --all-features --html
-
-# Generate the LCOV report uploaded by Linux CI
-cargo llvm-cov nextest --workspace --all-features --lcov --output-path lcov.info
-
 # Machine-readable per-file summary for scripts
 cargo llvm-cov --workspace --json --summary-only
 ```
 
-Report: `target/llvm-cov/html/index.html`
+HTML report: `target/llvm-cov/html/index.html`
+LCOV report: `lcov.info`
 
-Start with the affected package when investigating a test gap. Workspace missing-line reports can be large. Coverage reflects the features and test targets selected by the command; `--summary-only` requires an export format such as `--json`, `--lcov`, or `--cobertura`. Linux CI uploads an all-feature LCOV report to Codecov; project and patch statuses are informational. The `test-support` package is still tested but excluded from reported coverage because it contains test fixtures.
+`just coverage` runs the all-feature workspace suite through Nextest and writes the LCOV report consumed by Codecov. `just coverage-html` uses the same test selection and writes a local HTML report. Both exclude `test-support` from the report while still running its tests. CI adds the locked dependencies and `ci` Cargo profile through the existing `RADIA_CI` settings.
+
+Start with the affected package when investigating a test gap. Workspace missing-line reports can be large. Coverage reflects the features and test targets selected by the command; `--summary-only` requires an export format such as `--json`, `--lcov`, or `--cobertura`. Linux CI uploads the LCOV report to Codecov with OIDC; project and patch statuses are informational.
 
 ## Benchmarks
 
