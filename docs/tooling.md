@@ -41,8 +41,8 @@ cargo nextest run -p <crate> -E 'test(<name>)'
 cargo nextest run -p <crate> --run-ignored only
 cargo test -p <crate> <name> -- --nocapture
 
-# Render GPU tests (need a Vulkan adapter)
-just render-gpu-tests
+# GPU tests across the workspace (need a Vulkan adapter)
+just test-gpu
 
 # Repeat affected tests under parallel test load
 cargo nextest archive --workspace --all-features --archive-file target/timing-tests.tar.zst
@@ -61,7 +61,7 @@ cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target
 - `just security` runs `cargo deny check`, which also covers RustSec advisories. CI does not run it. CodeQL scans the Rust code on pull requests, on pushes to main, and weekly. Dependabot opens grouped weekly updates for Cargo and GitHub Actions.
 - Replace `<crate>`, `<name>`, and `<args>` with the relevant values.
 - Optional features may require platform-specific dependencies.
-- Ignored tests do not run in `cargo test-all`. The `render` GPU tests need a Vulkan adapter; run them with the command above on render changes.
+- Ignored tests do not run in `cargo test-all`. GPU tests need a Vulkan adapter; run them with the command above after changes to GPU code.
 - Stress runs use the same production constants as ordinary tests. Keep the workspace load running throughout the focused repetition and record both commands and their results.
 - Build the archive after edits are complete and use fresh extraction directories for each validation run. Both runs use the archived executables, so subsequent Cargo builds cannot overwrite running test binaries on Windows.
 

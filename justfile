@@ -30,9 +30,9 @@ build *flags:
 test *flags:
     cargo test-all {{ ci_nextest }} {{ flags }}
 
-[doc('Run the render GPU tests; they need a Vulkan adapter')]
-render-gpu-tests:
-    cargo nextest run -p render --release --run-ignored only
+[doc('Run GPU tests across the workspace; they need a Vulkan adapter')]
+test-gpu:
+    cargo nextest run --workspace --all-features --release --run-ignored only -E 'not (package(network) & test(udp_burst_measurement))'
 
 [doc('Check licenses, bans, sources, and RustSec advisories')]
 security:
