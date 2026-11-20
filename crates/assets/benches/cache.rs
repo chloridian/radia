@@ -32,22 +32,18 @@ fn warm_disk_decode(cache: &Arc<AssetCache>) {
     black_box(store.complete(decode.run(), now));
 }
 
-mod benches {
-    use super::*;
+#[divan::bench]
+fn asset_cache_texture_cold_fetch_decode() {
+    cold_fetch_decode();
+}
 
-    #[divan::bench]
-    fn asset_cache_texture_cold_fetch_decode() {
-        cold_fetch_decode();
-    }
+#[divan::bench]
+fn asset_cache_texture_warm_disk_read_decode(bencher: divan::Bencher) {
+    let directory = tempdir().expect("benchmark cache directory");
+    let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).expect("open benchmark cache"));
+    cache.put_complete(Request::new(resource()), RGBA_J2C.to_vec()).expect("seed benchmark cache");
 
-    #[divan::bench]
-    fn asset_cache_texture_warm_disk_read_decode(bencher: divan::Bencher) {
-        let directory = tempdir().expect("benchmark cache directory");
-        let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).expect("open benchmark cache"));
-        cache.put_complete(Request::new(resource()), RGBA_J2C.to_vec()).expect("seed benchmark cache");
+    bencher.bench_local(|| warm_disk_decode(&cache));
 
-        bencher.bench_local(|| warm_disk_decode(&cache));
-
-        Arc::try_unwrap(cache).expect("benchmark cache handle released").shutdown().expect("close benchmark cache");
-    }
+    Arc::try_unwrap(cache).expect("benchmark cache handle released").shutdown().expect("close benchmark cache");
 }

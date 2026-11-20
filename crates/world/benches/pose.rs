@@ -104,46 +104,41 @@ fn assert_pose_contract(world: &World, target: Entity, edge_depth: usize) {
     }
 }
 
-mod benches {
-    use super::*;
+#[divan::bench(args = DEPTHS)]
+fn pose_resolve(bencher: divan::Bencher, case: DepthCase) {
+    let (world, _region, target) = world_with_chain(case.edge_depth);
+    assert_chain_depth(&world, target, case.edge_depth);
+    assert_pose_contract(&world, target, case.edge_depth);
+    let object = world.object(target).expect("target object");
+    bencher.counter(ItemsCount::new(1_u64)).bench_local(|| black_box(object.world_pose()));
+}
 
-    #[divan::bench(args = DEPTHS)]
-    fn pose_resolve(bencher: divan::Bencher, case: DepthCase) {
-        let (world, _region, target) = world_with_chain(case.edge_depth);
-        assert_chain_depth(&world, target, case.edge_depth);
-        assert_pose_contract(&world, target, case.edge_depth);
-        let object = world.object(target).expect("target object");
-        bencher.counter(ItemsCount::new(1_u64)).bench_local(|| black_box(object.world_pose()));
-    }
+#[divan::bench(args = DEPTHS)]
+fn pose_coordinate_frame(bencher: divan::Bencher, case: DepthCase) {
+    let (world, _region, target) = world_with_chain(case.edge_depth);
+    assert_chain_depth(&world, target, case.edge_depth);
+    assert_pose_contract(&world, target, case.edge_depth);
+    let object = world.object(target).expect("target object");
+    bencher.counter(ItemsCount::new(1_u64)).bench_local(|| black_box(object.coordinate_frame()));
+}
 
-    #[divan::bench(args = DEPTHS)]
-    fn pose_coordinate_frame(bencher: divan::Bencher, case: DepthCase) {
-        let (world, _region, target) = world_with_chain(case.edge_depth);
-        assert_chain_depth(&world, target, case.edge_depth);
-        assert_pose_contract(&world, target, case.edge_depth);
-        let object = world.object(target).expect("target object");
-        bencher.counter(ItemsCount::new(1_u64)).bench_local(|| black_box(object.coordinate_frame()));
-    }
+#[divan::bench(args = DEPTHS)]
+fn pose_cycle_proposal(bencher: divan::Bencher, case: DepthCase) {
+    let (mut world, region, _target) = world_with_chain(case.edge_depth);
+    let root_local_id = NonZeroU32::new(1).expect("root local ID is nonzero");
+    let tail_local_id =
+        NonZeroU32::new(u32::try_from(case.edge_depth + 1).expect("tail local ID fits u32")).expect("tail local ID is nonzero");
+    let mut order = u64::try_from(case.edge_depth + 2).expect("cycle order fits u64");
+    let probe = world.patch_object(cycle_patch(region, order, root_local_id, tail_local_id)).expect("cycle proposal is a field rejection");
+    assert_eq!(probe.rejections.len(), 1);
+    assert_eq!(probe.rejections.iter().next().copied(), Some(FieldRejection { group: FieldGroup::Parent, reason: ParentCycle }));
+    order += 1;
 
-    #[divan::bench(args = DEPTHS)]
-    fn pose_cycle_proposal(bencher: divan::Bencher, case: DepthCase) {
-        let (mut world, region, _target) = world_with_chain(case.edge_depth);
-        let root_local_id = NonZeroU32::new(1).expect("root local ID is nonzero");
-        let tail_local_id =
-            NonZeroU32::new(u32::try_from(case.edge_depth + 1).expect("tail local ID fits u32")).expect("tail local ID is nonzero");
-        let mut order = u64::try_from(case.edge_depth + 2).expect("cycle order fits u64");
-        let probe =
-            world.patch_object(cycle_patch(region, order, root_local_id, tail_local_id)).expect("cycle proposal is a field rejection");
-        assert_eq!(probe.rejections.len(), 1);
-        assert_eq!(probe.rejections.iter().next().copied(), Some(FieldRejection { group: FieldGroup::Parent, reason: ParentCycle }));
+    bencher.counter(ItemsCount::new(1_u64)).bench_local(|| {
+        let current_order = order;
         order += 1;
-
-        bencher.counter(ItemsCount::new(1_u64)).bench_local(|| {
-            let current_order = order;
-            order += 1;
-            let _ = black_box(
-                world.patch_object(cycle_patch(region, current_order, root_local_id, tail_local_id)).expect("cycle proposal is rejected"),
-            );
-        });
-    }
+        let _ = black_box(
+            world.patch_object(cycle_patch(region, current_order, root_local_id, tail_local_id)).expect("cycle proposal is rejected"),
+        );
+    });
 }
