@@ -366,4 +366,4 @@ jobs:
             - uses: CodSpeedHQ/action@v5
               with:
                   mode: simulation
-                  run: just codspeed-run
+                  run: just codspeed-run ${{ matrix.packages }}
