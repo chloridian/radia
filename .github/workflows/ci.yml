@@ -165,8 +165,8 @@ jobs:
 
             - uses: extractions/setup-just@v4
 
-            - name: Run tests and generate LCOV report
-              run: just coverage
+            - run: just build
+            - run: just coverage
 
             - name: Upload coverage to Codecov
               if: always() && hashFiles('lcov.info') != ''

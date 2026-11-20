@@ -55,6 +55,7 @@ cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target
 
 - `cargo lint` checks all targets and features with warnings denied. `just lint` runs the same check and accepts extra Clippy arguments.
 - With `RADIA_CI=true`, which CI sets, `just lint`, `just build`, and `just test` also pass `--locked` and the `ci` Cargo profile.
+- Linux CI runs `just build` followed by `just coverage`. Coverage is a separate test recipe that runs the full all-feature Nextest suite under `cargo llvm-cov` and writes LCOV; it replaces `just test` on Linux rather than running the tests twice. Windows and macOS continue to use `just test`. Codecov uploads the report from the Linux test job using OIDC.
 - `cargo fmt-all` runs rustfmt with the import grouping and merging options, which stable rustfmt accepts only on the command line. Plain `cargo fmt` leaves imports ungrouped, and the hook and CI reject the result. `cargo ci-fmt` is the check-only form.
 - `cargo test-all` runs Nextest on the whole workspace with all features and without stopping at the first failure. `just test` runs the same command. Scope a run with `cargo nextest run -p <crate>`.
 - `just ci` runs the formatting, Clippy, cargo-machete, build, and test checks in order and stops at the first failure.
@@ -99,7 +100,7 @@ cargo llvm-cov --workspace --json --summary-only
 HTML report: `target/llvm-cov/html/index.html`
 LCOV report: `lcov.info`
 
-`just coverage` runs the all-feature workspace suite through Nextest and writes the LCOV report consumed by Codecov. `just coverage-html` uses the same test selection and writes a local HTML report. Both exclude `test-support` from the report while still running its tests. CI adds the locked dependencies and `ci` Cargo profile through the existing `RADIA_CI` settings.
+`just test` runs the normal all-feature workspace test suite through Nextest. `just coverage` runs that suite with LLVM coverage instrumentation and writes the LCOV report consumed by Codecov. `just coverage-html` uses the same test selection and writes a local HTML report. Coverage recipes exclude `test-support` from the report while still running its tests. Linux CI runs `just build` and then `just coverage` instead of `just test`, so the suite runs once; that same job uploads the report to Codecov.
 
 Start with the affected package when investigating a test gap. Workspace missing-line reports can be large. Coverage reflects the features and test targets selected by the command; `--summary-only` requires an export format such as `--json`, `--lcov`, or `--cobertura`. Linux CI uploads the LCOV report to Codecov with OIDC; project and patch statuses are informational.
 
