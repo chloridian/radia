@@ -24,8 +24,19 @@ concurrency:
 
 permissions:
     contents: read
+    checks: write
 
 jobs:
+    cargo-audit:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            - uses: actions/checkout@v7
+            - uses: rustsec/audit-check@v2
+              with:
+                  token: ${{ secrets.GITHUB_TOKEN }}
+                  working-directory: .
+
     cargo-deny:
         runs-on: ubuntu-latest
         timeout-minutes: 15
