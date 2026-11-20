@@ -6,12 +6,12 @@ use std::{
     path::Path,
 };
 
-use chrono::{Duration, Local};
+use time::{Duration, OffsetDateTime, UtcOffset, format_description};
 use tracing::field;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
     EnvFilter, Layer,
-    fmt::{self, time::ChronoLocal},
+    fmt::{self, time::OffsetTime},
     layer::SubscriberExt,
     util::SubscriberInitExt,
 };
@@ -20,7 +20,20 @@ const LOG_DIR: &str = "target/logs";
 const MAX_LOGS: usize = 20;
 
 pub(crate) fn init() -> Option<WorkerGuard> {
-    let (json, guard, file_error, maintenance_warning) = match create_session_log() {
+    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    let json_timer = OffsetTime::new(
+        offset,
+        format_description::parse_owned::<2>(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3][offset_hour sign:mandatory]:[offset_minute]",
+        )
+        .expect("valid json log timestamp format"),
+    );
+    let console_timer = OffsetTime::new(
+        offset,
+        format_description::parse_owned::<2>("[hour]:[minute]:[second].[subsecond digits:3]").expect("valid console log timestamp format"),
+    );
+
+    let (json, guard, file_error, maintenance_warning) = match create_session_log(offset) {
         Ok((file, warning)) => {
             let (writer, guard) = tracing_appender::non_blocking(file);
             let file_filter = EnvFilter::try_from_env("FILE_LOG")
@@ -32,7 +45,7 @@ pub(crate) fn init() -> Option<WorkerGuard> {
                 .add_directive("jpeg2k=warn".parse().expect("valid jpeg2k tracing directive"));
             let json = fmt::layer()
                 .json()
-                .with_timer(ChronoLocal::new("%Y-%m-%dT%H:%M:%S%.3f%:z".into()))
+                .with_timer(json_timer)
                 .with_file(true)
                 .with_line_number(true)
                 .with_writer(writer)
@@ -48,7 +61,7 @@ pub(crate) fn init() -> Option<WorkerGuard> {
 
     let console = fmt::layer()
         .compact()
-        .with_timer(ChronoLocal::new("%H:%M:%S%.3f".into()))
+        .with_timer(console_timer)
         .with_ansi(io::stderr().is_terminal())
         .with_writer(io::stderr)
         .with_filter(console_filter);
@@ -84,19 +97,22 @@ pub(crate) fn init() -> Option<WorkerGuard> {
     guard
 }
 
-fn create_session_log() -> io::Result<(fs::File, Option<String>)> {
+fn create_session_log(offset: UtcOffset) -> io::Result<(fs::File, Option<String>)> {
     let dir = Path::new(LOG_DIR);
     fs::create_dir_all(dir)?;
 
-    let mut time = Local::now();
+    let stamp_format = format_description::parse_owned::<2>("[year][month][day]-[hour][minute][second]")
+        .expect("valid session log filename timestamp format");
+    let mut now = OffsetDateTime::now_utc().to_offset(offset);
 
     let (file, path) = loop {
-        let path = dir.join(format!("{}.jsonl", time.format("%Y%m%d-%H%M%S")));
+        let stamp = now.format(&stamp_format).expect("valid session log timestamp");
+        let path = dir.join(format!("{stamp}.jsonl"));
 
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => break (file, path),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                time += Duration::seconds(1);
+                now += Duration::seconds(1);
             }
             Err(error) => return Err(error),
         }
