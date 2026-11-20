@@ -105,6 +105,9 @@ jobs:
         timeout-minutes: 60
         needs: [orchestrate]
         if: needs.orchestrate.outputs.run_tests == 'true'
+        permissions:
+            contents: read
+            id-token: write
         strategy:
             fail-fast: false
             matrix:
@@ -113,14 +116,43 @@ jobs:
                       name: windows
                     - os: macos-latest
                       name: mac
-                    - os: ubuntu-latest
-                      name: linux
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions-rust-lang/setup-rust-toolchain@v2
+
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: nextest@0.9
+
+            - uses: extractions/setup-just@v4
+
+            - run: just build
+            - run: just test
+
+            - name: Upload test results to Codecov
+              if: ${{ !cancelled() && hashFiles('target/nextest/default/junit.xml') != '' }}
+              uses: codecov/codecov-action@v7
+              with:
+                  report_type: test_results
+                  files: target/nextest/default/junit.xml
+                  disable_search: true
+                  use_oidc: true
+                  fail_ci_if_error: false
+
+    test-linux:
+        name: test-linux
+        runs-on: ubuntu-latest
+        timeout-minutes: 60
+        needs: [orchestrate]
+        if: needs.orchestrate.outputs.run_tests == 'true'
+        permissions:
+            contents: read
+            id-token: write
         steps:
             - uses: actions/checkout@v7
             - uses: actions-rust-lang/setup-rust-toolchain@v2
 
             - name: Install Linux system dependencies
-              if: runner.os == 'Linux'
               run: |
                   sudo apt-get update
                   sudo apt-get install --yes --no-install-recommends \
@@ -137,7 +169,32 @@ jobs:
               with:
                   tool: nextest@0.9
 
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: cargo-llvm-cov
+
+            - name: Install LLVM coverage tools
+              run: rustup component add llvm-tools-preview
+
             - uses: extractions/setup-just@v4
 
             - run: just build
-            - run: just test
+            - run: just coverage
+
+            - name: Upload coverage to Codecov
+              if: always() && hashFiles('lcov.info') != ''
+              uses: codecov/codecov-action@v7
+              with:
+                  use_oidc: true
+                  files: lcov.info
+                  fail_ci_if_error: false
+
+            - name: Upload test results to Codecov
+              if: ${{ !cancelled() && hashFiles('target/nextest/default/junit.xml') != '' }}
+              uses: codecov/codecov-action@v7
+              with:
+                  report_type: test_results
+                  files: target/nextest/default/junit.xml
+                  disable_search: true
+                  use_oidc: true
+                  fail_ci_if_error: false

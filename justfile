@@ -2,6 +2,7 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 
 ci_cargo := if env("RADIA_CI", "") == "true" { "--locked --profile ci" } else { "" }
 ci_nextest := if env("RADIA_CI", "") == "true" { "--locked --cargo-profile ci" } else { "" }
+coverage_command := "cargo llvm-cov nextest --workspace --all-features --no-fail-fast " + ci_nextest
 
 default:
     @just --list
@@ -29,6 +30,14 @@ build *flags:
 [doc('Run the workspace suite through Nextest')]
 test *flags:
     cargo test-all {{ ci_nextest }} {{ flags }}
+
+[doc('Run the all-feature workspace tests with coverage and write the LCOV report used by Codecov')]
+coverage:
+    {{ coverage_command }} --exclude-from-report test-support --lcov --output-path lcov.info
+
+[doc('Run the all-feature workspace suite and generate a local HTML coverage report')]
+coverage-html:
+    {{ coverage_command }} --exclude-from-report test-support --html
 
 [doc('Run GPU tests across the workspace; they need a Vulkan adapter')]
 test-gpu:

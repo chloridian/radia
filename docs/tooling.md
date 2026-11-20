@@ -1,4 +1,4 @@
-Run commands from the repository root unless stated otherwise. Windows is the primary development platform; use WSL2 for Linux builds. CI checks Windows, macOS, and Linux. The Rust toolchain follows the stable channel rather than a fixed release. Cargo aliases in `.cargo/config.toml` cover the everyday commands, and [just](https://github.com/casey/just) recipes wrap them for CI and multi-step tasks; run `just` to list them. CI installs just, Nextest 0.9, and cargo-machete; other development tools may vary by checkout.
+Run commands from the repository root unless stated otherwise. Windows is the primary development platform; use WSL2 for Linux builds. CI checks Windows, macOS, and Linux. The Rust toolchain follows the stable channel rather than a fixed release. Cargo aliases in `.cargo/config.toml` cover the everyday commands, and [just](https://github.com/casey/just) recipes wrap them for CI and multi-step tasks; run `just` to list them. CI installs just, Nextest 0.9, cargo-llvm-cov, and cargo-machete; other development tools may vary by checkout.
 
 Network HTTPS uses Reqwest 0.13 with rustls and aws-lc. Building aws-lc requires a C/C++ compiler. Windows x86-64 assembly uses NASM when available or the crate's enabled prebuilt objects. The selected non-FIPS build does not require CMake, bindgen, or Go. See the [aws-lc-rs build guide](https://github.com/aws/aws-lc-rs#build) for supported toolchains. Certificate verification follows the operating system trust configuration.
 
@@ -55,6 +55,7 @@ cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target
 
 - `cargo lint` checks all targets and features with warnings denied. `just lint` runs the same check and accepts extra Clippy arguments.
 - With `RADIA_CI=true`, which CI sets, `just lint`, `just build`, and `just test` also pass `--locked` and the `ci` Cargo profile.
+- Linux CI runs `just build` followed by `just coverage`. Coverage is a separate test recipe that runs the full all-feature Nextest suite under `cargo llvm-cov` and writes LCOV; it replaces `just test` on Linux rather than running the tests twice. Windows and macOS continue to use `just test`. Codecov uploads the report from the Linux test job using OIDC.
 - `cargo fmt-all` runs rustfmt with the import grouping and merging options, which stable rustfmt accepts only on the command line. Plain `cargo fmt` leaves imports ungrouped, and the hook and CI reject the result. `cargo ci-fmt` is the check-only form.
 - `cargo test-all` runs Nextest on the whole workspace with all features and without stopping at the first failure. `just test` runs the same command. Scope a run with `cargo nextest run -p <crate>`.
 - `just ci` runs the formatting, Clippy, cargo-machete, build, and test checks in order and stops at the first failure.
@@ -80,8 +81,11 @@ The pre-commit hook checks formatting. The commit-msg hook rejects messages with
 ## Test coverage
 
 ```bash
-# Summary across workspace crates
-cargo llvm-cov --workspace
+# Generate the same all-feature LCOV report that CI uploads to Codecov
+just coverage
+
+# Generate a local HTML report with the same test selection
+just coverage-html
 
 # Show uncovered lines across the workspace
 cargo llvm-cov --workspace --text --show-missing-lines
@@ -89,19 +93,20 @@ cargo llvm-cov --workspace --text --show-missing-lines
 # Inspect uncovered lines in one package
 cargo llvm-cov -p <crate> --text --show-missing-lines
 
-# Generate an HTML report
-cargo llvm-cov --workspace --html
-
-# Generate an HTML report with Nextest and all features
-cargo llvm-cov nextest --workspace --all-features --html
-
 # Machine-readable per-file summary for scripts
 cargo llvm-cov --workspace --json --summary-only
 ```
 
-Report: `target/llvm-cov/html/index.html`
+HTML report: `target/llvm-cov/html/index.html`
+LCOV report: `lcov.info`
 
-Start with the affected package when investigating a test gap. Workspace missing-line reports can be large. Coverage reflects the features and test targets selected by the command; `--summary-only` requires an export format such as `--json`, `--lcov`, or `--cobertura`.
+`just test` runs the normal all-feature workspace test suite through Nextest. `just coverage` runs that suite with LLVM coverage instrumentation and writes the LCOV report consumed by Codecov. `just coverage-html` uses the same test selection and writes a local HTML report. Coverage recipes exclude `test-support` from the report while still running its tests. Linux CI runs `just build` and then `just coverage` instead of `just test`, so the suite runs once; that same job uploads the report to Codecov.
+
+Start with the affected package when investigating a test gap. Workspace missing-line reports can be large. Coverage reflects the features and test targets selected by the command; `--summary-only` requires an export format such as `--json`, `--lcov`, or `--cobertura`. Linux CI uploads the LCOV report to Codecov with OIDC; project and patch statuses are informational.
+
+## Test results
+
+Nextest writes JUnit XML to `target/nextest/default/junit.xml` using the default profile configuration in `.config/nextest.toml`. CI uploads each platform's report to Codecov Test Analytics with OIDC. This reuses the existing test runs; it does not run tests a second time. Test Analytics tracks per-test durations and failures across branches and can surface tests failing on pull requests.
 
 ## Benchmarks
 
