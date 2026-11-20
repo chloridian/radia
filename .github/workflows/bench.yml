@@ -385,7 +385,7 @@ jobs:
                   mode: simulation
                   run: |
                       if [ -n "$BENCH_FILTER" ]; then
-                        just codspeed-run ${{ matrix.packages }} "$BENCH_FILTER"
+                        cargo codspeed run ${{ matrix.packages }} "$BENCH_FILTER"
                       else
-                        just codspeed-run ${{ matrix.packages }}
+                        cargo codspeed run ${{ matrix.packages }}
                       fi

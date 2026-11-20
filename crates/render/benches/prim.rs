@@ -56,16 +56,12 @@ impl fmt::Display for PrimCase {
     }
 }
 
-mod benches {
-    use super::*;
-
-    #[divan::bench(args = CASES)]
-    fn scene_prim_mesh_generate(bencher: divan::Bencher, case: PrimCase) {
-        let shape = shape(case.shape);
-        let detail = detail(case.detail);
-        bencher.with_inputs(|| support::prim_job(shape, detail)).bench_local_values(|(reconciler, job)| {
-            black_box(job.run());
-            black_box(reconciler);
-        });
-    }
+#[divan::bench(args = CASES)]
+fn scene_prim_mesh_generate(bencher: divan::Bencher, case: PrimCase) {
+    let shape = shape(case.shape);
+    let detail = detail(case.detail);
+    bencher.with_inputs(|| support::prim_job(shape, detail)).bench_local_values(|(reconciler, job)| {
+        black_box(job.run());
+        reconciler
+    });
 }

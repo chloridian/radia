@@ -76,71 +76,67 @@ fn bench_ispc_bc7(bencher: divan::Bencher, edge: u32, settings: bc7::EncodeSetti
     });
 }
 
-mod benches {
-    use super::*;
+#[divan::bench(args = EDGES)]
+fn texture_compression_bc1_with_mips(bencher: divan::Bencher, edge: u32) {
+    bench_mipmaps(bencher, edge, false, CompressionQuality::Fast);
+}
 
-    #[divan::bench(args = EDGES)]
-    fn texture_compression_bc1_with_mips(bencher: divan::Bencher, edge: u32) {
-        bench_mipmaps(bencher, edge, false, CompressionQuality::Fast);
-    }
+#[divan::bench(args = EDGES)]
+fn texture_compression_bc3_with_mips(bencher: divan::Bencher, edge: u32) {
+    bench_mipmaps(bencher, edge, true, CompressionQuality::Fast);
+}
 
-    #[divan::bench(args = EDGES)]
-    fn texture_compression_bc3_with_mips(bencher: divan::Bencher, edge: u32) {
-        bench_mipmaps(bencher, edge, true, CompressionQuality::Fast);
-    }
+#[divan::bench(args = EDGES)]
+fn texture_compression_bc7_opaque_with_mips(bencher: divan::Bencher, edge: u32) {
+    bench_mipmaps(bencher, edge, false, CompressionQuality::High);
+}
 
-    #[divan::bench(args = EDGES)]
-    fn texture_compression_bc7_opaque_with_mips(bencher: divan::Bencher, edge: u32) {
-        bench_mipmaps(bencher, edge, false, CompressionQuality::High);
-    }
+#[divan::bench(args = EDGES)]
+fn texture_compression_bc7_alpha_with_mips(bencher: divan::Bencher, edge: u32) {
+    bench_mipmaps(bencher, edge, true, CompressionQuality::High);
+}
 
-    #[divan::bench(args = EDGES)]
-    fn texture_compression_bc7_alpha_with_mips(bencher: divan::Bencher, edge: u32) {
-        bench_mipmaps(bencher, edge, true, CompressionQuality::High);
-    }
+#[divan::bench(args = EDGES)]
+fn texture_compression_bc1(bencher: divan::Bencher, edge: u32) {
+    bench_variant(bencher, edge, CompressionVariant::BC1, false);
+}
 
-    #[divan::bench(args = EDGES)]
-    fn texture_compression_bc1(bencher: divan::Bencher, edge: u32) {
-        bench_variant(bencher, edge, CompressionVariant::BC1, false);
-    }
+#[divan::bench(args = EDGES)]
+fn texture_compression_bc3(bencher: divan::Bencher, edge: u32) {
+    bench_variant(bencher, edge, CompressionVariant::BC3, true);
+}
 
-    #[divan::bench(args = EDGES)]
-    fn texture_compression_bc3(bencher: divan::Bencher, edge: u32) {
-        bench_variant(bencher, edge, CompressionVariant::BC3, true);
-    }
+#[divan::bench(args = EDGES)]
+fn texture_compression_bc7_opaque_ultrafast(bencher: divan::Bencher, edge: u32) {
+    bench_variant(bencher, edge, CompressionVariant::BC7(BC7Settings::opaque_ultra_fast()), false);
+}
 
-    #[divan::bench(args = EDGES)]
-    fn texture_compression_bc7_opaque_ultrafast(bencher: divan::Bencher, edge: u32) {
-        bench_variant(bencher, edge, CompressionVariant::BC7(BC7Settings::opaque_ultra_fast()), false);
-    }
+#[divan::bench(args = EDGES)]
+fn texture_compression_bc7_alpha_ultrafast(bencher: divan::Bencher, edge: u32) {
+    bench_variant(bencher, edge, CompressionVariant::BC7(BC7Settings::alpha_ultrafast()), true);
+}
 
-    #[divan::bench(args = EDGES)]
-    fn texture_compression_bc7_alpha_ultrafast(bencher: divan::Bencher, edge: u32) {
-        bench_variant(bencher, edge, CompressionVariant::BC7(BC7Settings::alpha_ultrafast()), true);
-    }
+#[divan::bench(args = EDGES)]
+fn texture_compression_bc7_alpha_fast(bencher: divan::Bencher, edge: u32) {
+    bench_variant(bencher, edge, CompressionVariant::BC7(BC7Settings::alpha_fast()), true);
+}
 
-    #[divan::bench(args = EDGES)]
-    fn texture_compression_bc7_alpha_fast(bencher: divan::Bencher, edge: u32) {
-        bench_variant(bencher, edge, CompressionVariant::BC7(BC7Settings::alpha_fast()), true);
-    }
+#[divan::bench(args = EDGES)]
+fn texture_compression_ispc_bc1(bencher: divan::Bencher, edge: u32) {
+    bench_ispc(bencher, edge, CompressionFormat::Bc1, false);
+}
 
-    #[divan::bench(args = EDGES)]
-    fn texture_compression_ispc_bc1(bencher: divan::Bencher, edge: u32) {
-        bench_ispc(bencher, edge, CompressionFormat::Bc1, false);
-    }
+#[divan::bench(args = EDGES)]
+fn texture_compression_ispc_bc3(bencher: divan::Bencher, edge: u32) {
+    bench_ispc(bencher, edge, CompressionFormat::Bc3, true);
+}
 
-    #[divan::bench(args = EDGES)]
-    fn texture_compression_ispc_bc3(bencher: divan::Bencher, edge: u32) {
-        bench_ispc(bencher, edge, CompressionFormat::Bc3, true);
-    }
+#[divan::bench(args = EDGES)]
+fn texture_compression_ispc_bc7_opaque_ultrafast(bencher: divan::Bencher, edge: u32) {
+    bench_ispc_bc7(bencher, edge, bc7::opaque_ultra_fast_settings(), false);
+}
 
-    #[divan::bench(args = EDGES)]
-    fn texture_compression_ispc_bc7_opaque_ultrafast(bencher: divan::Bencher, edge: u32) {
-        bench_ispc_bc7(bencher, edge, bc7::opaque_ultra_fast_settings(), false);
-    }
-
-    #[divan::bench(args = EDGES)]
-    fn texture_compression_ispc_bc7_alpha_ultrafast(bencher: divan::Bencher, edge: u32) {
-        bench_ispc_bc7(bencher, edge, bc7::alpha_ultra_fast_settings(), true);
-    }
+#[divan::bench(args = EDGES)]
+fn texture_compression_ispc_bc7_alpha_ultrafast(bencher: divan::Bencher, edge: u32) {
+    bench_ispc_bc7(bencher, edge, bc7::alpha_ultra_fast_settings(), true);
 }

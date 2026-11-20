@@ -72,16 +72,12 @@ fn decode_received(wire: &[u8]) {
     black_box(packet);
 }
 
-mod benches {
-    use super::*;
-
-    #[divan::bench]
-    fn lludp_receive_pipeline_mixed_1000(bencher: divan::Bencher) {
-        let batch = mixed_batch();
-        bencher.counter(ItemsCount::new(RECEIVE_BATCH_LEN as u64)).bench_local(|| {
-            for wire in &batch {
-                decode_received(wire);
-            }
-        });
-    }
+#[divan::bench]
+fn lludp_receive_pipeline_mixed_1000(bencher: divan::Bencher) {
+    let batch = mixed_batch();
+    bencher.counter(ItemsCount::new(RECEIVE_BATCH_LEN as u64)).bench_local(|| {
+        for wire in &batch {
+            decode_received(wire);
+        }
+    });
 }

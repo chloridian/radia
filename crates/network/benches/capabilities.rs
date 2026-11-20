@@ -115,57 +115,46 @@ struct CapabilityRequest {
     item_id: &'static str,
 }
 
-mod discovery {
-    use super::*;
+#[divan::bench]
+fn capability_discovery_three_capabilities(bencher: divan::Bencher) {
+    let server = LoopbackServer::start(|address| {
+        format!(
+            "<?xml version=\"1.0\"?><llsd><map><key>EventQueueGet</key><uri>http://{address}/events</uri><key>FetchInventory2</key><uri>http://{address}/inventory</uri><key>GetTexture</key><uri>http://{address}/texture</uri></map></llsd>"
+        )
+    })
+    .expect("start local seed capability server");
+    let runtime = Builder::new_current_thread().enable_all().build().expect("build Tokio runtime");
+    let seed = Url::parse(&format!("http://{}/seed", server.address)).expect("parse local seed URL");
+    let new_client = || runtime.block_on(async { Client::new(seed.clone()).expect("create capability client") });
+    let warmup = runtime.block_on(new_client().request_capabilities(REQUESTED_CAPABILITIES)).expect("warm up capability discovery");
+    assert_eq!(warmup.len(), REQUESTED_CAPABILITIES.len());
 
-    #[divan::bench]
-    fn capability_discovery_three_capabilities(bencher: divan::Bencher) {
-        let server = LoopbackServer::start(|address| {
-            format!(
-                "<?xml version=\"1.0\"?><llsd><map><key>EventQueueGet</key><uri>http://{address}/events</uri><key>FetchInventory2</key><uri>http://{address}/inventory</uri><key>GetTexture</key><uri>http://{address}/texture</uri></map></llsd>"
-            )
-        })
-        .expect("start local seed capability server");
-        let runtime = Builder::new_current_thread().enable_all().build().expect("build Tokio runtime");
-        let seed = Url::parse(&format!("http://{}/seed", server.address)).expect("parse local seed URL");
-        let new_client = || runtime.block_on(async { Client::new(seed.clone()).expect("create capability client") });
-        let warmup = runtime.block_on(new_client().request_capabilities(REQUESTED_CAPABILITIES)).expect("warm up capability discovery");
-        assert_eq!(warmup.len(), REQUESTED_CAPABILITIES.len());
-
-        bencher.counter(ItemsCount::new(1_u64)).with_inputs(new_client).bench_local_values(|client| {
-            black_box(runtime.block_on(client.request_capabilities(REQUESTED_CAPABILITIES)).expect("discover capabilities"));
-        });
-    }
+    bencher.counter(ItemsCount::new(1_u64)).with_inputs(new_client).bench_local_values(|client| {
+        black_box(runtime.block_on(client.request_capabilities(REQUESTED_CAPABILITIES)).expect("discover capabilities"));
+    });
 }
 
-mod post {
-    use super::*;
+#[divan::bench]
+fn capability_post_xml_request_response(bencher: divan::Bencher) {
+    const RESPONSE_LIMIT_BYTES: usize = 4096;
 
-    #[divan::bench]
-    fn capability_post_xml_request_response(bencher: divan::Bencher) {
-        const RESPONSE_LIMIT_BYTES: usize = 4096;
+    let server = LoopbackServer::start(|_| {
+        "<?xml version=\"1.0\"?><llsd><map><key>accepted</key><boolean>true</boolean><key>revision</key><integer>42</integer></map></llsd>"
+            .to_owned()
+    })
+    .expect("start local capability server");
+    let runtime = Builder::new_current_thread().enable_all().build().expect("build Tokio runtime");
+    let seed = Url::parse(&format!("http://{}/seed", server.address)).expect("parse local seed URL");
+    let capability = CapabilityUrl::parse(&format!("http://{}/inventory", server.address)).expect("parse local capability URL");
+    let client = runtime.block_on(async { Client::new(seed).expect("create capability client") });
+    let request = CapabilityRequest { item_id: "benchmark-item" };
+    let warmup: Value =
+        runtime.block_on(client.post_with_response_limit(&capability, &request, RESPONSE_LIMIT_BYTES)).expect("warm up capability POST");
+    let fields = warmup.as_map().expect("response LLSD map");
+    assert_eq!(fields.get("accepted").and_then(Value::as_bool), Some(true));
+    assert_eq!(fields.get("revision").and_then(Value::as_integer), Some(42));
 
-        let server = LoopbackServer::start(|_| {
-            "<?xml version=\"1.0\"?><llsd><map><key>accepted</key><boolean>true</boolean><key>revision</key><integer>42</integer></map></llsd>"
-                .to_owned()
-        })
-        .expect("start local capability server");
-        let runtime = Builder::new_current_thread().enable_all().build().expect("build Tokio runtime");
-        let seed = Url::parse(&format!("http://{}/seed", server.address)).expect("parse local seed URL");
-        let capability = CapabilityUrl::parse(&format!("http://{}/inventory", server.address)).expect("parse local capability URL");
-        let client = runtime.block_on(async { Client::new(seed).expect("create capability client") });
-        let request = CapabilityRequest { item_id: "benchmark-item" };
-        let warmup: Value = runtime
-            .block_on(client.post_with_response_limit(&capability, &request, RESPONSE_LIMIT_BYTES))
-            .expect("warm up capability POST");
-        let fields = warmup.as_map().expect("response LLSD map");
-        assert_eq!(fields.get("accepted").and_then(Value::as_bool), Some(true));
-        assert_eq!(fields.get("revision").and_then(Value::as_integer), Some(42));
-
-        bencher.counter(ItemsCount::new(1_u64)).bench_local(|| {
-            black_box(
-                runtime.block_on(client.post_with_response_limit(&capability, &request, RESPONSE_LIMIT_BYTES)).expect("post capability"),
-            )
-        });
-    }
+    bencher.counter(ItemsCount::new(1_u64)).bench_local(|| {
+        black_box(runtime.block_on(client.post_with_response_limit(&capability, &request, RESPONSE_LIMIT_BYTES)).expect("post capability"))
+    });
 }
