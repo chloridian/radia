@@ -41,38 +41,34 @@ const ONE_WORKER: &[DecodeCase] =
 const TWO_WORKERS: &[DecodeCase] =
     &[DecodeCase { edge: 512, workers: 2 }, DecodeCase { edge: 1024, workers: 2 }, DecodeCase { edge: 2048, workers: 2 }];
 
-mod benches {
-    use super::*;
-
-    fn run(bencher: divan::Bencher, case: DecodeCase) {
-        bencher
-            .counter(ItemsCount::new(u64::from(case.edge).pow(2) * case.workers as u64))
-            .with_inputs(|| decode_jobs(case.edge, case.workers))
-            .bench_local_values(|(mut store, jobs, demands, now)| {
-                let completions = thread::scope(|scope| {
-                    jobs.into_iter()
-                        .map(|job| scope.spawn(move || job.run()))
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .map(|job| job.join().expect("decode worker completes"))
-                        .collect::<Vec<_>>()
-                });
-                for completion in completions {
-                    store.complete(completion, now);
-                }
-                for demand in demands {
-                    black_box(demand.status());
-                }
+fn run(bencher: divan::Bencher, case: DecodeCase) {
+    bencher
+        .counter(ItemsCount::new(u64::from(case.edge).pow(2) * case.workers as u64))
+        .with_inputs(|| decode_jobs(case.edge, case.workers))
+        .bench_local_values(|(mut store, jobs, demands, now)| {
+            let completions = thread::scope(|scope| {
+                jobs.into_iter()
+                    .map(|job| scope.spawn(move || job.run()))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|job| job.join().expect("decode worker completes"))
+                    .collect::<Vec<_>>()
             });
-    }
+            for completion in completions {
+                store.complete(completion, now);
+            }
+            for demand in demands {
+                black_box(demand.status());
+            }
+        });
+}
 
-    #[divan::bench(args = ONE_WORKER)]
-    fn texture_assets_decode_gray_4096_one_worker(bencher: divan::Bencher, case: DecodeCase) {
-        run(bencher, case);
-    }
+#[divan::bench(args = ONE_WORKER)]
+fn texture_assets_decode_gray_4096_one_worker(bencher: divan::Bencher, case: DecodeCase) {
+    run(bencher, case);
+}
 
-    #[divan::bench(args = TWO_WORKERS)]
-    fn texture_assets_decode_gray_4096_two_workers(bencher: divan::Bencher, case: DecodeCase) {
-        run(bencher, case);
-    }
+#[divan::bench(args = TWO_WORKERS)]
+fn texture_assets_decode_gray_4096_two_workers(bencher: divan::Bencher, case: DecodeCase) {
+    run(bencher, case);
 }
