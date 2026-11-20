@@ -34,34 +34,51 @@ jobs:
                   PUSH_BEFORE: ${{ github.event.before }}
               run: |
                   BENCH_NAMES=()
-                  BENCH_ITEMS=()
+                  BENCH_PACKAGES=()
+                  BENCH_FILTERS=()
 
                   add_shard() {
-                    local name="$1" packages="$2" item
-                    for existing in "${BENCH_NAMES[@]}"; do
-                      if [ "$existing" = "$name" ]; then
+                    local name="$1" packages="$2" filter="${3:-}" index existing found
+                    local -a existing_filters
+                    for index in "${!BENCH_NAMES[@]}"; do
+                      if [ "${BENCH_NAMES[$index]}" = "$name" ]; then
+                        if [ -z "$filter" ] || [ -z "${BENCH_FILTERS[$index]}" ]; then
+                          BENCH_FILTERS[$index]=""
+                        else
+                          found=false
+                          IFS='|' read -r -a existing_filters <<< "${BENCH_FILTERS[$index]}"
+                          for existing in "${existing_filters[@]}"; do
+                            if [ "$existing" = "$filter" ]; then
+                              found=true
+                              break
+                            fi
+                          done
+                          if [ "$found" = false ]; then
+                            BENCH_FILTERS[$index]+="|$filter"
+                          fi
+                        fi
                         return
                       fi
                     done
                     BENCH_NAMES+=("$name")
-                    printf -v item '{"name":"%s","packages":"%s"}' "$name" "$packages"
-                    BENCH_ITEMS+=("$item")
+                    BENCH_PACKAGES+=("$packages")
+                    BENCH_FILTERS+=("$filter")
                   }
 
                   add_bench() {
-                    local package="$2"
+                    local package="$2" filter="$3"
                     case "$package" in
                       llsd|network|protocol|storage|assets)
-                        add_shard core "-p llsd -p network -p protocol -p storage -p assets"
+                        add_shard core "-p llsd -p network -p protocol -p storage -p assets" "$filter"
                         ;;
                       inventory)
-                        add_shard inventory "-p inventory"
+                        add_shard inventory "-p inventory" "$filter"
                         ;;
                       world)
-                        add_shard world "-p world"
+                        add_shard world "-p world" "$filter"
                         ;;
                       render)
-                        add_shard render "-p render"
+                        add_shard render "-p render" "$filter"
                         ;;
                       *)
                         echo "::error::No benchmark shard for package $package"
@@ -71,10 +88,10 @@ jobs:
                   }
 
                   add_all_benchmarks() {
-                    add_shard core "-p llsd -p network -p protocol -p storage -p assets"
-                    add_shard inventory "-p inventory"
-                    add_shard world "-p world"
-                    add_shard render "-p render"
+                    add_shard core "-p llsd -p network -p protocol -p storage -p assets" ""
+                    add_shard inventory "-p inventory" ""
+                    add_shard world "-p world" ""
+                    add_shard render "-p render" ""
                   }
                   if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
                     add_all_benchmarks
@@ -317,17 +334,19 @@ jobs:
                   fi
 
                   BENCH_MATRIX='{"include":['
-                  for item in "${BENCH_ITEMS[@]}"; do
+                  for index in "${!BENCH_NAMES[@]}"; do
                     if [ "$BENCH_MATRIX" != '{"include":[' ]; then
                       BENCH_MATRIX+=","
                     fi
+                    printf -v item '{"name":"%s","packages":"%s","filter":"%s"}' \
+                      "${BENCH_NAMES[$index]}" "${BENCH_PACKAGES[$index]}" "${BENCH_FILTERS[$index]}"
                     BENCH_MATRIX+="$item"
                   done
                   BENCH_MATRIX+=']}'
 
-                  if [ "${#BENCH_ITEMS[@]}" -eq 0 ]; then
+                  if [ "${#BENCH_NAMES[@]}" -eq 0 ]; then
                     echo "run_benchmarks=false" >> "$GITHUB_OUTPUT"
-                    BENCH_MATRIX='{"include":[{"name":"none","packages":"-p llsd"}]}'
+                    BENCH_MATRIX='{"include":[{"name":"none","packages":"-p llsd","filter":""}]}'
                   else
                     echo "run_benchmarks=true" >> "$GITHUB_OUTPUT"
                   fi
@@ -364,6 +383,13 @@ jobs:
             - run: just codspeed-build ${{ matrix.packages }}
 
             - uses: CodSpeedHQ/action@v5
+              env:
+                  BENCH_FILTER: ${{ matrix.filter }}
               with:
                   mode: simulation
-                  run: just codspeed-run ${{ matrix.packages }}
+                  run: |
+                      if [ -n "$BENCH_FILTER" ]; then
+                        just codspeed-run ${{ matrix.packages }} "$BENCH_FILTER"
+                      else
+                        just codspeed-run ${{ matrix.packages }}
+                      fi
