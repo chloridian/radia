@@ -3,7 +3,7 @@ use std::{
     hint::black_box,
     sync::{Arc, Barrier, mpsc},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput};
@@ -15,6 +15,16 @@ const BURST_WRITES: usize = 16;
 const SETUP_WRITERS: usize = 32;
 const PAYLOAD_BYTES: usize = 64;
 const NAMESPACES: [Namespace; 1] = [Namespace::new("bench", "bin")];
+
+struct CacheGuard(Option<Cache>);
+
+impl Drop for CacheGuard {
+    fn drop(&mut self) {
+        if let Some(cache) = self.0.take() {
+            cache.shutdown().expect("close replay fixture");
+        }
+    }
+}
 
 fn key(value: u64) -> Key {
     let mut name = [0; 16];
@@ -128,17 +138,15 @@ pub(crate) fn bench(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(2));
     group.bench_function(BenchmarkId::new("open_replay", EXISTING_ENTRIES), |b| {
-        b.iter_custom(|iterations| {
-            let mut measured = Duration::ZERO;
-            for _ in 0..iterations {
-                let start = Instant::now();
+        b.iter_batched_ref(
+            || (),
+            |_| {
                 let opened = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &NAMESPACES).expect("open replay fixture");
-                measured += start.elapsed();
                 assert_eq!(opened.entry_count(), EXISTING_ENTRIES as usize);
-                opened.shutdown().expect("close replay fixture");
-            }
-            measured
-        });
+                CacheGuard(Some(opened))
+            },
+            BatchSize::PerIteration,
+        );
     });
     group.finish();
 }
