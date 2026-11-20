@@ -98,9 +98,9 @@ Source has no comments or doc comments, and that includes safety comments on `un
 
 ## Commits and pull requests
 
-- Commit with one Conventional Commit subject line, `<type>(<scope>): <subject>`, and no body. Omit the scope only for repository-wide changes.
+- Commit with one Conventional Commit header and no body: `<type>: <subject>` or `<type>(<scope>): <subject>`. Scopes are optional; use one only when it adds useful context. Add `!` before the colon for breaking changes.
 - Name branches by type prefix and change (`feat/scene-environments`).
-- Title PRs with an imperative sentence in sentence case and no type prefix (`Share one inventory cache database across grids and agents`).
+- Title PRs with a Conventional Commit subject line. Use the PR title as the squash-merge commit subject. For merge commits, keep branch commits conventional and use `merge: <subject>` or `merge(<scope>): <subject>`; include a scope only when it adds useful context.
 - Open a PR body with the problem in plain prose, then the solution in a sentence or two. End with a `Verification:` paragraph that reports only checks that ran. No `## Summary` headings and no implementation inventory.
 
 ## Documentation

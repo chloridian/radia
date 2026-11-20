@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+PATH="/c/Program Files/nodejs:$HOME/AppData/Roaming/npm/:$PATH"
+line_count=$(awk 'END { print NR }' "$1")
+if [ "$line_count" -gt 1 ]; then
+    printf '%s\n' "Commit messages must contain only one line." >&2
+    exit 1
+fi
+
+npx --yes git-conventional-commits commit-msg-hook "$1"

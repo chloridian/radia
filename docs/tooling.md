@@ -75,7 +75,7 @@ git config --local core.hooksPath .githooks
 
 `just hooks` runs the same command. It changes the local Git configuration for the current checkout.
 
-The pre-commit hook checks formatting. There is no pre-push hook. CI runs formatting, cargo-machete, and Linux workspace Clippy with warnings denied as separate checks, then builds and runs the all-feature workspace suite through Nextest on each platform without stopping at the first failure. Jobs that only matter for source changes are skipped when a change touches nothing relevant. CI uses the `ci` Cargo profile.
+The pre-commit hook checks formatting. The commit-msg hook rejects messages with more than one line and validates the header with `git-conventional-commits`; Node.js and `npx` must be available. There is no pre-push hook. CI runs formatting, cargo-machete, and Linux workspace Clippy with warnings denied as separate checks, then builds and runs the all-feature workspace suite through Nextest on each platform without stopping at the first failure. Jobs that only matter for source changes are skipped when a change touches nothing relevant. CI uses the `ci` Cargo profile.
 
 ## Test coverage
 
