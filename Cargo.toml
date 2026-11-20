@@ -37,7 +37,6 @@ world = { path = "crates/world" }
 
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 block_compression = { version = "=0.11.0", default-features = false }
-chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 divan = { package = "codspeed-divan-compat", version = "6.0.0" }
 dirs = "=7.0.0"
 dxr = "=0.9.0"
@@ -69,7 +68,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { version = "0.11.1", default-features = false }
 tempfile = "3"
-time = { version = "=0.3.55", features = ["formatting", "parsing"] }
+time = { version = "=0.3.55", features = ["formatting", "local-offset", "parsing"] }
 tokio = { version = "1", features = [
     "macros",
     "net",
@@ -81,7 +80,7 @@ tracing = "0.1"
 tracing-appender = "=0.2.5"
 tracing-subscriber = { version = "0.3", features = [
     "json",
-    "chrono",
+    "time",
     "env-filter",
 ] }
 tracing-tracy = { version = "=0.12.0", default-features = false, features = [

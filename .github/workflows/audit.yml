@@ -1,0 +1,47 @@
+name: Security Audit
+
+on:
+    push:
+        branches: [main]
+        paths:
+            - "**/Cargo.toml"
+            - "**/Cargo.lock"
+            - "deny.toml"
+            - ".github/workflows/audit.yml"
+    pull_request:
+        paths:
+            - "**/Cargo.toml"
+            - "**/Cargo.lock"
+            - "deny.toml"
+            - ".github/workflows/audit.yml"
+    schedule:
+        - cron: "0 0 * * 1"
+    workflow_dispatch:
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+    checks: write
+
+jobs:
+    cargo-audit:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            - uses: actions/checkout@v7
+            - uses: rustsec/audit-check@v2
+              with:
+                  token: ${{ secrets.GITHUB_TOKEN }}
+                  working-directory: .
+
+    cargo-deny:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            - uses: actions/checkout@v7
+            - uses: EmbarkStudios/cargo-deny-action@v2
+              with:
+                  manifest-path: ./Cargo.toml
