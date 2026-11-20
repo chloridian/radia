@@ -18,6 +18,12 @@ The legacy viewer is a reference for protocol behavior, content compatibility, a
 - Do not change toolchain settings, tool-only dependencies, build, test, lint, formatting, fuzzing, benchmarking, or profiling scripts, hooks, or CI workflows without an explicit request. Commands that change these count as tooling changes.
 - When a requested change alters a documented command or workflow, update [tooling.md](docs/tooling.md). If a tool is missing or broken, report it and continue with independent work.
 
+## Issues
+
+- Put self-contained public contribution opportunities in GitHub Issues, especially bugs, documentation, examples, tests, and small improvements. Keep architecture, product roadmaps, distinctive Radia features, and substantial engineering plans private in Linear.
+- Keep GitHub issue titles and descriptions free of the repository name. Sanitize internal paths, agent notes, session data, and implementation strategy before sharing, and include only details a contributor needs.
+- Search both trackers for related work before creating an issue.
+
 ## Structure
 
 - Before writing code, determine which concept owns it. Restructure first when the existing organization would obstruct the feature.
