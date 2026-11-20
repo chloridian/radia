@@ -105,6 +105,9 @@ jobs:
         timeout-minutes: 60
         needs: [orchestrate]
         if: needs.orchestrate.outputs.run_tests == 'true'
+        permissions:
+            contents: read
+            id-token: write
         strategy:
             fail-fast: false
             matrix:
@@ -125,6 +128,16 @@ jobs:
 
             - run: just build
             - run: just test
+
+            - name: Upload test results to Codecov
+              if: ${{ !cancelled() && hashFiles('target/nextest/default/junit.xml') != '' }}
+              uses: codecov/codecov-action@v7
+              with:
+                  report_type: test_results
+                  files: target/nextest/default/junit.xml
+                  disable_search: true
+                  use_oidc: true
+                  fail_ci_if_error: false
 
     test-linux:
         name: test-linux
@@ -174,4 +187,14 @@ jobs:
               with:
                   use_oidc: true
                   files: lcov.info
+                  fail_ci_if_error: false
+
+            - name: Upload test results to Codecov
+              if: ${{ !cancelled() && hashFiles('target/nextest/default/junit.xml') != '' }}
+              uses: codecov/codecov-action@v7
+              with:
+                  report_type: test_results
+                  files: target/nextest/default/junit.xml
+                  disable_search: true
+                  use_oidc: true
                   fail_ci_if_error: false

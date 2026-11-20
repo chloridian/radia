@@ -104,6 +104,10 @@ LCOV report: `lcov.info`
 
 Start with the affected package when investigating a test gap. Workspace missing-line reports can be large. Coverage reflects the features and test targets selected by the command; `--summary-only` requires an export format such as `--json`, `--lcov`, or `--cobertura`. Linux CI uploads the LCOV report to Codecov with OIDC; project and patch statuses are informational.
 
+## Test results
+
+Nextest writes JUnit XML to `target/nextest/default/junit.xml` using the default profile configuration in `.config/nextest.toml`. CI uploads each platform's report to Codecov Test Analytics with OIDC. This reuses the existing test runs; it does not run tests a second time. Test Analytics tracks per-test durations and failures across branches and can surface tests failing on pull requests.
+
 ## Benchmarks
 
 ```bash
