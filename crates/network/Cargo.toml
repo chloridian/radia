@@ -24,7 +24,7 @@ url.workspace = true
 utils.workspace = true
 
 [dev-dependencies]
-criterion.workspace = true
+divan.workspace = true
 math.workspace = true
 test-support.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

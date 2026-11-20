@@ -3,10 +3,9 @@ use std::{
     hint::black_box,
     sync::{Arc, Barrier, mpsc},
     thread,
-    time::Duration,
 };
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput};
+use divan::counter::ItemsCount;
 use storage::{Cache, DEFAULT_SIZE_LIMIT, Key, Namespace, NamespaceId, StorageError, UnavailableReason};
 use tempfile::tempdir;
 
@@ -58,40 +57,49 @@ fn populate(cache: &Cache) {
     cache.flush().expect("compact benchmark fixture");
 }
 
-pub(crate) fn bench(c: &mut Criterion) {
+fn populated_cache() -> (tempfile::TempDir, Cache, Key) {
     let directory = tempdir().expect("create benchmark directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &NAMESPACES).expect("open benchmark cache");
     populate(&cache);
     assert_eq!(cache.entry_count(), usize::try_from(EXISTING_ENTRIES).expect("entry count fits"));
-
     let hit_key = key(EXISTING_ENTRIES / 2);
     assert_matches!(cache.lookup(hit_key), storage::Lookup::Hit(_));
-    let cache_ref = &cache;
-    let mut group = c.benchmark_group("storage/scale");
+    (directory, cache, hit_key)
+}
 
-    group.throughput(Throughput::Elements(1));
-    group.bench_function(BenchmarkId::new("put_single", EXISTING_ENTRIES), |b| {
+mod scale {
+    use super::*;
+
+    #[divan::bench]
+    fn scale_put_single(bencher: divan::Bencher) {
+        let (_directory, cache, _) = populated_cache();
         let item_key = key(EXISTING_ENTRIES);
-        b.iter_batched(
-            || cache_ref.remove(item_key).expect("reset single insertion"),
-            |_| cache_ref.put(item_key, vec![0x5a; PAYLOAD_BYTES]).expect("single put"),
-            BatchSize::PerIteration,
-        );
-        assert!(cache_ref.remove(item_key).expect("remove inserted entry"));
-        assert_eq!(cache_ref.entry_count(), EXISTING_ENTRIES as usize);
-    });
 
-    group.throughput(Throughput::Elements(BURST_WRITES as u64));
-    group.bench_function(BenchmarkId::new("put_burst_16", EXISTING_ENTRIES), |b| {
+        bencher
+            .counter(ItemsCount::new(1_u64))
+            .with_inputs(|| cache.remove(item_key).expect("reset single insertion"))
+            .bench_local_values(|_| cache.put(item_key, vec![0x5a; PAYLOAD_BYTES]).expect("single put"));
+
+        assert!(cache.remove(item_key).expect("remove inserted entry"));
+        assert_eq!(cache.entry_count(), EXISTING_ENTRIES as usize);
+        cache.shutdown().expect("close benchmark cache");
+    }
+
+    #[divan::bench]
+    fn scale_put_burst_16(bencher: divan::Bencher) {
+        let (_directory, cache, _) = populated_cache();
+        let cache_ref = &cache;
         let keys: [Key; BURST_WRITES] = array::from_fn(|index| key(EXISTING_ENTRIES + index as u64));
-        let start = Barrier::new(BURST_WRITES + 1);
+
         thread::scope(|scope| {
+            let start = Arc::new(Barrier::new(BURST_WRITES + 1));
             let producers: Vec<_> = keys
-                .into_iter()
+                .iter()
+                .copied()
                 .map(|item_key| {
                     let (sender, receiver) = mpsc::sync_channel(0);
                     let (completed, completion) = mpsc::channel();
-                    let start = &start;
+                    let start = Arc::clone(&start);
                     scope.spawn(move || {
                         while receiver.recv().is_ok() {
                             start.wait();
@@ -102,13 +110,15 @@ pub(crate) fn bench(c: &mut Criterion) {
                     (sender, completion)
                 })
                 .collect();
-            b.iter_batched(
-                || {
+
+            bencher
+                .counter(ItemsCount::new(BURST_WRITES as u64))
+                .with_inputs(|| {
                     for item_key in keys {
                         cache_ref.remove(item_key).expect("reset burst insertion");
                     }
-                },
-                |_| {
+                })
+                .bench_local_values(|_| {
                     for (producer, _) in &producers {
                         producer.send(()).expect("start burst insertion");
                     }
@@ -116,37 +126,38 @@ pub(crate) fn bench(c: &mut Criterion) {
                     for (_, completion) in &producers {
                         completion.recv().expect("burst insertion completed");
                     }
-                },
-                BatchSize::PerIteration,
-            );
+                });
         });
+
         for item_key in keys {
-            assert!(cache_ref.remove(item_key).expect("remove burst entry"));
+            assert!(cache.remove(item_key).expect("remove burst entry"));
         }
-        assert_eq!(cache_ref.entry_count(), EXISTING_ENTRIES as usize);
-    });
+        assert_eq!(cache.entry_count(), EXISTING_ENTRIES as usize);
+        cache.shutdown().expect("close benchmark cache");
+    }
 
-    group.throughput(Throughput::Elements(1));
-    group.bench_function(BenchmarkId::new("lookup_hit", EXISTING_ENTRIES), |b| {
-        assert_matches!(cache_ref.lookup(hit_key), storage::Lookup::Hit(_));
-        b.iter(|| black_box(cache_ref.lookup(hit_key)));
-    });
-    group.finish();
-    cache.shutdown().expect("close benchmark cache");
+    #[divan::bench]
+    fn scale_lookup_hit(bencher: divan::Bencher) {
+        let (_directory, cache, hit_key) = populated_cache();
+        bencher.counter(ItemsCount::new(1_u64)).bench_local(|| black_box(cache.lookup(hit_key)));
+        cache.shutdown().expect("close benchmark cache");
+    }
+}
 
-    let mut group = c.benchmark_group("storage/scale/open_replay");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(2));
-    group.bench_function(BenchmarkId::new("open_replay", EXISTING_ENTRIES), |b| {
-        b.iter_batched_ref(
-            || (),
-            |_| {
-                let opened = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &NAMESPACES).expect("open replay fixture");
-                assert_eq!(opened.entry_count(), EXISTING_ENTRIES as usize);
-                CacheGuard(Some(opened))
-            },
-            BatchSize::PerIteration,
-        );
-    });
-    group.finish();
+mod open_replay {
+    use super::*;
+
+    #[divan::bench]
+    fn scale_open_replay(bencher: divan::Bencher) {
+        let directory = tempdir().expect("create replay directory");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &NAMESPACES).expect("open initial cache");
+        populate(&cache);
+        cache.shutdown().expect("close initial cache");
+
+        bencher.bench_local(|| {
+            let opened = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &NAMESPACES).expect("open replay fixture");
+            assert_eq!(opened.entry_count(), EXISTING_ENTRIES as usize);
+            drop(CacheGuard(Some(opened)));
+        });
+    }
 }

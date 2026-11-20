@@ -21,7 +21,7 @@ tracing.workspace = true
 utils.workspace = true
 
 [dev-dependencies]
-criterion.workspace = true
+divan.workspace = true
 proptest.workspace = true
 test-support.workspace = true
 tempfile.workspace = true

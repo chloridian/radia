@@ -27,7 +27,7 @@ intel_tex_2.workspace = true
 test-support.workspace = true
 proptest.workspace = true
 futures.workspace = true
-criterion.workspace = true
+divan.workspace = true
 block_compression = { workspace = true, features = ["bc15", "bc7"] }
 
 [[bench]]

@@ -106,28 +106,29 @@ Start with the affected package when investigating a test gap. Workspace missing
 ## Benchmarks
 
 ```bash
-# Build the single benchmark target for these crates
-cargo bench -p network -p protocol --no-run
+# Build benchmark targets
+cargo bench --workspace --no-run
 
-# Smoke run each crate's benchmarks
-cargo bench -p network -- --test
-cargo bench -p protocol -- --test
+# Run a crate's benchmarks
+cargo bench -p network
 
-# Quick
-cargo bench -p <crate> -- <filter> --sample-size 30 --warm-up-time 1 --measurement-time 3 --noplot
+# Filter benchmark names with a regular expression
+cargo bench -p render -- 'scene_(reconcile|prim_mesh)'
 
-# Thorough
-cargo bench -p <crate> -- <filter> --sample-size 200 --warm-up-time 5 --measurement-time 15
+# Quick and thorough local runs
+cargo bench -p world -- --sample-count 20 --sample-size 5 --min-time 1 --max-time 3
+cargo bench -p world -- --sample-count 100 --sample-size 10 --min-time 5
 ```
 
-Each crate has one `main` benchmark target. Replace the package and Criterion filter as needed. The inventory package name is version-qualified (`-p inventory@0.0.1`) because a dependency also uses `inventory`. For example, `cargo bench -p render -- reconcile` selects reconciliation benchmarks. Run timing baselines without concurrent tests or builds; the parallel workspace load above is for flakiness validation.
+Each benchmark target uses CodSpeed's Divan compatibility package and `divan::main()`. Divan takes benchmark names from function identifiers; prefixes distinguish related operations and formats. Parameterized workloads use `args`, and `with_inputs` keeps fixture setup outside the measured operation. Throughput uses Divan's byte and item counters. CodSpeed's current compatibility package accepts these counters but does not include them in results. The inventory package name is version-qualified (`-p inventory@0.0.1`) because a dependency also uses `inventory`.
 
-- `cargo bench-all` runs workspace benchmarks with 200 samples, a 5-second warm-up, and a 15-second measurement. `cargo bench-quick` uses 30 samples, a 1-second warm-up, a 3-second measurement, and no plot. Use `cargo bench -p <crate> -- <filter> ...` for a focused run.
-- `just bench <crate> [filter]` runs a Criterion benchmark using wall-clock measurements. `just codspeed <crate> [filter]` builds and runs the same benchmark with CodSpeed CPU simulation. Install `cargo-codspeed` and the `codspeed` CLI for the latter. For example, use `just bench world updates/mixed` or `just codspeed world updates/mixed`. The underlying `just codspeed-build` and `just codspeed-run` recipes remain available for CI.
-- CodSpeed runs on pull requests and pushes to `main` when benchmark-relevant files change (`.github/workflows/ci.yml`) and reports changes against `main`. It uses `codspeed-criterion-compat`, which behaves like Criterion under plain `cargo bench`. CodSpeed skips benchmarks that use `iter_custom`, and the GPU-timed `render/geometry_prepare` benchmarks are compiled out under `cfg(codspeed)`, which also limits `texture/compression` to the 512 and 1024 sizes to keep simulation time reasonable.
 - Bench CI maps changed paths to package shards and benchmark name filters. A shard runs all its benchmarks when a change has no narrower filter.
-- `cargo profile`: viewer profiling build with Tracy.
-- `cargo flamegraph`: requires a configured profiler backend; WSL2 may restrict Linux `perf`.
+- `cargo bench-all` runs the workspace with 100 samples, 10 iterations per sample, and a 5-second minimum per benchmark. `cargo bench-quick` uses 20 samples, 5 iterations per sample, a 1-second minimum, and a 3-second maximum.
+- `just perf` and `just perf-quick` run the thorough and quick workspace configurations. Use `cargo bench -p <crate> -- <regex>` for focused runs.
+- `just codspeed-build` and `just codspeed-run` build and run the same Divan targets under CodSpeed simulation. Install `cargo-codspeed` and the `codspeed` CLI for local CodSpeed runs.
+- Larger workload benchmarks execute one complete workload operation per Divan iteration. Their scenarios and diagnostic reporting remain in the benchmark code.
+- GPU preparation benchmarks are compiled out under `cfg(codspeed)`; they require a GPU adapter and are not represented by CPU simulation. Texture compression remains limited to the 512 and 1024 sizes under CodSpeed to keep simulation time reasonable.
+- Run timing baselines without concurrent tests or builds. The parallel workspace load described above is for flakiness validation.
 
 ## Dependencies
 
