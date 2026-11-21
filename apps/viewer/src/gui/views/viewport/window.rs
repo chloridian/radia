@@ -11,10 +11,10 @@ use std::{
 
 use futures::{StreamExt, channel::mpsc as async_mpsc};
 use gpui::{
-    Anchor, AnyElement, Bounds, ColorExt, Context, DevicePixels, DispatchPhase, Entity, FocusHandle, Focusable, Hsla, IntoElement,
-    KeyDownEvent, KeyUpEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, Pixels,
-    RawMouseMotionEvent, Render, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, SurfaceSource, Window, black, canvas, div,
-    prelude::*, px, rgb, rgb_to_hsla, size, surface, white,
+    Anchor, AnyElement, Bounds, Context, DevicePixels, DispatchPhase, Entity, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent,
+    KeyUpEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, RawMouseMotionEvent,
+    Render, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, SurfaceSource, Window, canvas, div, prelude::*, px, rgb,
+    rgb_to_hsla, size, surface, white,
 };
 use gpui_component::{
     Disableable, Icon, IconName, IndexPath, Sizable, Theme, TitleBar,
@@ -1052,10 +1052,6 @@ impl SceneView {
                 .absolute()
                 .top(px(8.))
                 .right(px(12.))
-                .px_2()
-                .py_1p5()
-                .rounded(px(4.))
-                .bg(black().opacity(0.55))
                 .font_family(mono)
                 .text_xs()
                 .flex()

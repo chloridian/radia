@@ -1,10 +1,30 @@
-use std::{env::consts::OS, io, sync::Arc};
+use std::{borrow::Cow, env::consts::OS, io, sync::Arc};
 
 use assets::cache::AssetCache;
-use gpui_kit_assets::Assets;
+use gpui::{AssetSource, SharedString};
+use gpui_kit_assets::{Assets, icon_assets};
 use gpui_wgpu::WgpuDeviceRequirements;
 use tokio::runtime::Builder;
 use viewer::{gui, logging};
+
+icon_assets!(ExtraIcons, [MessageCircle]);
+
+struct ViewerAssets;
+
+impl AssetSource for ViewerAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        match Assets.load(path)? {
+            Some(data) => Ok(Some(data)),
+            None => ExtraIcons.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
+        let mut items = Assets.list(path)?;
+        items.extend(ExtraIcons.list(path)?);
+        Ok(items)
+    }
+}
 
 fn main() -> io::Result<()> {
     let (_logging, log_control) = logging::init();
@@ -23,7 +43,7 @@ fn main() -> io::Result<()> {
         }
     };
     let gui_cache = asset_cache.clone();
-    gpui_platform::application().with_assets(Assets).run(move |cx| {
+    gpui_platform::application().with_assets(ViewerAssets).run(move |cx| {
         cx.set_gpu_requirements(Box::new(WgpuDeviceRequirements {
             features: render::required_features(),
             limits: Some(render::required_limits()),
