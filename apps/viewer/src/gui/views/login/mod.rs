@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use futures::channel::oneshot;
+use futures::{channel::oneshot, future::join};
 use gpui::{AppContext, Context, Window};
 use gpui_component::{
     IndexPath,
@@ -322,10 +322,11 @@ impl LoginScreen {
     }
 
     fn load_credentials(&mut self, request: CredentialLoadRequest, load_favorites: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let login_task = remembered_login::load(request.grid, cx);
         let background = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
-            let (login, favorite_store) =
-                background.spawn(async move { (remembered_login::load(request.grid), load_favorites.then(favorite_store::load)) }).await;
+            let favorites_task = background.spawn(async move { load_favorites.then(favorite_store::load) });
+            let (login, favorite_store) = join(login_task, favorites_task).await;
             this.update_in(cx, |screen, window, cx| {
                 if let Some(favorite_store) = favorite_store {
                     screen.favorites.load(favorite_store);
@@ -515,7 +516,6 @@ impl LoginScreen {
 
         let background = gui::service_runtime(cx);
         let asset_cache = gui::asset_cache(cx);
-        let credential_write_lock = self.credential_write_lock.clone();
         let grid = self.credential_load.grid();
 
         cx.spawn(async move |this, cx| {
@@ -536,13 +536,7 @@ impl LoginScreen {
             background.clone(),
             mailbox,
             cancel_receiver,
-            CredentialPersistence {
-                grid,
-                username: remembered_username,
-                password: remembered_password,
-                remember_login,
-                write_lock: credential_write_lock,
-            },
+            CredentialPersistence { grid, username: remembered_username, password: remembered_password, remember_login },
             asset_cache,
         )));
 
@@ -566,15 +560,15 @@ impl LoginScreen {
         } = snapshot;
 
         if let Some(end) = session_end {
-            if let Some(update @ AuthenticationUpdate::CredentialsUpdated { .. }) = authentication {
-                self.apply_authentication(Some(update));
+            if let Some(update @ AuthenticationUpdate::PersistCredentials { .. }) = authentication {
+                self.apply_authentication(Some(update), cx);
             }
             self.favorites.apply_saved(favorite_store_saved);
             self.end_session(end, cx);
             return;
         }
 
-        self.apply_authentication(authentication);
+        self.apply_authentication(authentication, cx);
         if let Some(ready) = session_ready {
             self.apply_session_ready(ready, cx);
         }
@@ -596,20 +590,49 @@ impl LoginScreen {
         cx.notify();
     }
 
-    fn apply_authentication(&mut self, update: Option<AuthenticationUpdate>) {
+    fn apply_authentication(&mut self, update: Option<AuthenticationUpdate>, cx: &mut Context<Self>) {
         match update {
             Some(AuthenticationUpdate::MfaRequired(challenge)) => {
                 self.login_phase = LoginPhase::MfaRequired(challenge);
                 self.status.message = Some(LoginMessage::MfaPrompt);
             }
-            Some(AuthenticationUpdate::CredentialsUpdated { remembered_login, warning }) => {
-                if let Some(login) = remembered_login {
-                    self.remembered_login = Some(login);
-                } else if warning.is_none() {
-                    self.remembered_login = None;
-                }
-                let session_active = self.active_session.as_ref().is_some_and(ActiveSession::is_ready);
-                self.status.show_credential_warning(warning, session_active);
+            Some(AuthenticationUpdate::PersistCredentials { grid, remembered_login }) => {
+                let generation = self.session_generation;
+                let write_lock = self.credential_write_lock.clone();
+                cx.spawn(async move |this, cx| {
+                    let _guard = write_lock.lock().await;
+                    let (remembered_login, warning) = match remembered_login {
+                        Some(saved) => {
+                            let task = cx.update(|cx| remembered_login::save(grid, &saved, cx));
+                            match task.await {
+                                Ok(()) => (Some(saved), None),
+                                Err(error) => (None, Some(error)),
+                            }
+                        }
+                        None => {
+                            let task = cx.update(|cx| remembered_login::clear(grid, cx));
+                            match task.await {
+                                Ok(()) => (None, None),
+                                Err(error) => (None, Some(error)),
+                            }
+                        }
+                    };
+                    this.update(cx, |view, cx| {
+                        if view.session_generation != generation {
+                            return;
+                        }
+                        if let Some(login) = remembered_login {
+                            view.remembered_login = Some(login);
+                        } else if warning.is_none() {
+                            view.remembered_login = None;
+                        }
+                        let session_active = view.active_session.as_ref().is_some_and(ActiveSession::is_ready);
+                        view.status.show_credential_warning(warning, session_active);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
             }
             None => {}
         }
@@ -747,7 +770,7 @@ mod tests {
     };
 
     fn credential_error(detail: &str) -> CredentialStoreError {
-        CredentialStoreError::Open(detail.to_owned())
+        CredentialStoreError::Read(detail.to_owned())
     }
 
     #[test]

@@ -52,19 +52,6 @@ tokio.workspace = true
 wgpu.workspace = true
 world.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
-keyring = { workspace = true, features = [
-    "async-secret-service",
-    "tokio",
-    "crypto-rust",
-] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-keyring = { workspace = true, features = ["windows-native"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { workspace = true, features = ["apple-native"] }
-
 [dev-dependencies]
 url.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

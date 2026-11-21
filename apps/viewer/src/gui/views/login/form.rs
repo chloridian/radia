@@ -137,15 +137,10 @@ impl LoginScreen {
                             let grid = this.credential_load.grid();
                             let generation = this.session_generation;
                             let write_lock = this.credential_write_lock.clone();
-                            let background = cx.background_executor().clone();
                             cx.spawn(async move |this, cx| {
-                                let result = background
-                                    .spawn(async move {
-                                        let _guard = write_lock.lock().await;
-                                        remembered_login::clear(grid)
-                                    })
-                                    .await;
-                                if let Err(error) = result {
+                                let _guard = write_lock.lock().await;
+                                let task = cx.update(|cx| remembered_login::clear(grid, cx));
+                                if let Err(error) = task.await {
                                     this.update(cx, |view, cx| {
                                         if view.session_generation == generation {
                                             view.status.session_failure = None;
