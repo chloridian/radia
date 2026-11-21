@@ -1,11 +1,8 @@
 use std::{
     collections::HashSet,
-    fs,
     hint::black_box,
     path::{Path, PathBuf},
     sync::Arc,
-    thread,
-    time::{Duration, Instant},
 };
 
 use futures::executor::block_on;
@@ -14,71 +11,12 @@ use inventory::{
     InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
 };
 use tempfile::tempdir;
-use test_support::allocation;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
 const ENTRY_COUNT: usize = 100_000;
 const OWNER_ID: u128 = 77;
 const ROOT_ID: u128 = 1;
-
-pub(crate) fn report_diagnostics() {
-    report_memory();
-    report_prepared_fetch("delete", false);
-    report_prepared_fetch("replace", true);
-    report_delta_allocations();
-}
-
-fn report_prepared_fetch(label: &str, replace: bool) {
-    let worker_started = Instant::now();
-    let (mut inventory, before, prepared, worker_time, worker_allocations, worker_retained, worker_peak_upper_bound) =
-        thread::spawn(move || {
-            let inventory = item_inventory();
-            let children = if replace { replacement_item_children() } else { Vec::new() };
-            let before = inventory.snapshot();
-            let baseline_bytes = allocation::live_bytes();
-            let worker_started = Instant::now();
-            let (prepared, allocations) = allocation::measure(|| {
-                before.prepare_folder_fetch(
-                    before.roots().personal(),
-                    ServerVersion::from_raw(2),
-                    Some(if replace { ENTRY_COUNT as u32 } else { 0 }),
-                    children,
-                )
-            });
-            let worker_time = worker_started.elapsed();
-            let prepared = prepared.expect("benchmark transaction should prepare");
-            let worker_retained = allocation::live_bytes();
-            let worker_peak_upper_bound = baseline_bytes.saturating_add(allocations.peak_bytes);
-            (inventory, before, prepared, worker_time, allocations, worker_retained, worker_peak_upper_bound)
-        })
-        .join()
-        .expect("benchmark worker should finish");
-    let end_to_end = worker_started.elapsed();
-    let owner_started = Instant::now();
-    let (_, owner_allocations) = allocation::measure(|| {
-        let changes = inventory.commit_folder_fetch(prepared).expect("benchmark transaction should commit");
-        drop(changes);
-        drop(before);
-    });
-    let owner_time = owner_started.elapsed();
-    eprintln!(
-        "inventory model_only path=commit_plus_direct_drop_without_disposal_permit_or_cache_handoff case={label}_100k worker_ms={} model_only_commit_and_direct_drop_ms={} total_worker_plus_model_ms={} fixture_thread_wall_ms={} worker_alloc_calls={} worker_realloc_calls={} worker_retained_bytes={} worker_peak_upper_bound_bytes={} owner_alloc_calls={} owner_realloc_calls={} owner_net_bytes={} owner_peak_delta_bytes={}",
-        duration_millis(worker_time),
-        duration_millis(owner_time),
-        duration_millis(worker_time.saturating_add(owner_time)),
-        duration_millis(end_to_end),
-        worker_allocations.allocation_calls,
-        worker_allocations.reallocation_calls,
-        worker_retained,
-        worker_peak_upper_bound,
-        owner_allocations.allocation_calls,
-        owner_allocations.reallocation_calls,
-        owner_allocations.live_bytes,
-        owner_allocations.peak_bytes,
-    );
-    black_box(inventory);
-}
 
 fn prepared_fetch_fixture(replace: bool) -> (Inventory, inventory::InventorySnapshot, inventory::PreparedFolderFetch) {
     let inventory = item_inventory();
@@ -110,38 +48,6 @@ fn populate_cache(root: &Path) -> PathBuf {
     path
 }
 
-fn report_cache_load_times(root: &Path, path: &Path) {
-    let (cache, _) = InventoryCache::open_at_root(root, "agni", owner().id(), None).expect("benchmark first cache open");
-    let mut cold_inventory = cache_skeleton();
-    let cold_skeleton = cold_inventory.snapshot();
-    let started = Instant::now();
-    let cold_load = block_on(cache.load(&cold_inventory)).expect("benchmark first cache read");
-    let cold_applied = apply_restore(cold_load, &mut cold_inventory, &cold_skeleton);
-    let cold = started.elapsed();
-    block_on(cache.close()).expect("benchmark first cache close");
-
-    let (cache, _) = InventoryCache::open_at_root(root, "agni", owner().id(), None).expect("benchmark warm cache open");
-    let mut warm_times = Vec::new();
-    for _ in 0..5 {
-        let mut inventory = cache_skeleton();
-        let skeleton = inventory.snapshot();
-        let started = Instant::now();
-        let load = block_on(cache.load(&inventory)).expect("benchmark warm cache read");
-        let applied = apply_restore(load, &mut inventory, &skeleton);
-        assert_eq!(applied, 1);
-        warm_times.push(started.elapsed());
-    }
-    warm_times.sort_unstable();
-    let warm = warm_times[warm_times.len() / 2];
-    block_on(cache.close()).expect("benchmark warm cache close");
-    eprintln!(
-        "inventory cache at {ENTRY_COUNT} items: file={} bytes, first read/apply={} ms ({cold_applied} folders), warm median read/apply={} ms",
-        fs::metadata(path).expect("benchmark database metadata").len(),
-        duration_millis(cold),
-        duration_millis(warm),
-    );
-}
-
 fn apply_restore(load: InventoryCacheLoad, inventory: &mut Inventory, skeleton: &inventory::InventorySnapshot) -> usize {
     let mut restore = load.prepare_restore(skeleton).expect("benchmark cache restore preparation");
     let mut applied = 0usize;
@@ -154,10 +60,6 @@ fn apply_restore(load: InventoryCacheLoad, inventory: &mut Inventory, skeleton: 
     }
 }
 
-fn duration_millis(duration: Duration) -> f64 {
-    duration.as_secs_f64() * 1_000.0
-}
-
 fn cache_skeleton() -> Inventory {
     let root = Category {
         key: category_key(ROOT_ID),
@@ -168,43 +70,6 @@ fn cache_skeleton() -> Inventory {
         server_descendent_count: Some(ENTRY_COUNT as u32),
     };
     Inventory::new(root, None, InventoryLimits::default()).expect("benchmark skeleton should be valid")
-}
-
-fn report_memory() {
-    let (root, root_memory) = allocation::measure(root_inventory);
-    let (mut items, item_memory) = allocation::measure(item_inventory);
-    let (folders, folder_memory) = allocation::measure(folder_inventory);
-    let (snapshot, snapshot_memory) = allocation::measure(|| items.snapshot());
-    let (changed_snapshot, changed_memory) = allocation::measure(|| {
-        let mut changed_item = item(0);
-        changed_item.name = Arc::from("updated item");
-        let changes = items.upsert_item(changed_item).expect("single item update should apply");
-        drop(changes);
-        items.snapshot()
-    });
-    let item_bytes = item_memory.live_bytes.saturating_sub(root_memory.live_bytes) / ENTRY_COUNT as i128;
-    let folder_bytes = folder_memory.live_bytes.saturating_sub(root_memory.live_bytes) / ENTRY_COUNT as i128;
-
-    eprintln!(
-        "inventory memory at {ENTRY_COUNT} entries: item model={} B ({item_bytes} B/item), folder model={} B ({folder_bytes} B/folder), snapshot delta={} B, single item change with prior snapshot={} B, Item={} B, Category={} B",
-        item_memory.live_bytes,
-        folder_memory.live_bytes,
-        snapshot_memory.live_bytes,
-        changed_memory.live_bytes,
-        size_of::<Item>(),
-        size_of::<Category>(),
-    );
-    black_box((root, items, folders, snapshot, changed_snapshot));
-}
-
-fn report_delta_allocations() {
-    let (mut inventory, delta_a, _) = one_item_deltas();
-    let (changes, allocations) = allocation::measure(|| inventory.apply_delta(delta_a).expect("single item delta should apply"));
-    eprintln!(
-        "inventory apply_one_item_delta_100k allocations: alloc_calls={}, realloc_calls={}, live={} B, peak={} B",
-        allocations.allocation_calls, allocations.reallocation_calls, allocations.live_bytes, allocations.peak_bytes,
-    );
-    black_box((inventory, changes));
 }
 
 fn one_item_deltas() -> (Inventory, InventoryDelta, InventoryDelta) {
@@ -238,15 +103,6 @@ fn item_inventory() -> Inventory {
     let folder = inventory.roots().personal();
     let changes = apply_fetch(&mut inventory, folder, ServerVersion::from_raw(1), Some(ENTRY_COUNT as u32), item_children())
         .expect("benchmark items should apply");
-    drop(changes);
-    inventory
-}
-
-fn folder_inventory() -> Inventory {
-    let mut inventory = root_inventory();
-    let folder = inventory.roots().personal();
-    let changes = apply_fetch(&mut inventory, folder, ServerVersion::from_raw(1), Some(ENTRY_COUNT as u32), folder_children(ENTRY_COUNT))
-        .expect("benchmark folders should apply");
     drop(changes);
     inventory
 }
@@ -425,16 +281,19 @@ mod cache {
     fn cache_warm_read_apply_100k(bencher: divan::Bencher) {
         let directory = tempdir().expect("benchmark cache directory");
         let path = populate_cache(directory.path());
-        report_cache_load_times(directory.path(), &path);
         let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", owner().id(), None).expect("benchmark cache open");
 
-        bencher.bench_local(|| {
-            let mut inventory = cache_skeleton();
-            let skeleton = inventory.snapshot();
-            let load = block_on(cache.load(&inventory)).expect("benchmark cache read");
-            let applied = apply_restore(load, &mut inventory, &skeleton);
-            black_box((inventory, applied));
-        });
+        bencher
+            .with_inputs(|| {
+                let inventory = cache_skeleton();
+                let skeleton = inventory.snapshot();
+                (inventory, skeleton)
+            })
+            .bench_local_values(|(mut inventory, skeleton)| {
+                let load = block_on(cache.load(&inventory)).expect("benchmark cache read");
+                let applied = apply_restore(load, &mut inventory, &skeleton);
+                black_box((inventory, applied));
+            });
 
         block_on(cache.close()).expect("benchmark cache close");
         black_box(path);

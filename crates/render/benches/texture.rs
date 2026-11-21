@@ -1,14 +1,12 @@
 use std::hint::black_box;
 
-use block_compression::{BC7Settings, CompressionVariant, encode::compress_rgba8};
 use divan::counter::ItemsCount;
-use intel_tex_2::{RgbaSurface, bc1, bc3, bc7};
 
 #[path = "../src/texture/compression.rs"]
 #[allow(unused_imports)]
 mod texture_compression;
 
-use self::texture_compression::{CompressionFormat, CompressionQuality};
+use self::texture_compression::CompressionQuality;
 
 #[cfg(not(codspeed))]
 const EDGES: [u32; 3] = [512, 1024, 2048];
@@ -43,39 +41,6 @@ fn bench_mipmaps(bencher: divan::Bencher, edge: u32, alpha: bool, quality: Compr
     });
 }
 
-fn bench_variant(bencher: divan::Bencher, edge: u32, variant: CompressionVariant, alpha: bool) {
-    let pixels = pixels(edge, alpha);
-    let mut blocks = vec![0; variant.blocks_byte_size(edge, edge)];
-    bencher.counter(ItemsCount::new(u64::from(edge).pow(2))).bench_local(|| {
-        compress_rgba8(variant, black_box(&pixels), black_box(&mut blocks), edge, edge, edge * 4);
-        black_box(&blocks);
-    });
-}
-
-fn bench_ispc(bencher: divan::Bencher, edge: u32, format: CompressionFormat, alpha: bool) {
-    let pixels = pixels(edge, alpha);
-    let surface = RgbaSurface { data: &pixels, width: edge, height: edge, stride: edge * 4 };
-    let mut blocks = vec![0; (edge / 4) as usize * (edge / 4) as usize * format.block_bytes()];
-    bencher.counter(ItemsCount::new(u64::from(edge).pow(2))).bench_local(|| {
-        match format {
-            CompressionFormat::Bc1 => bc1::compress_blocks_into(black_box(&surface), black_box(&mut blocks)),
-            CompressionFormat::Bc3 => bc3::compress_blocks_into(black_box(&surface), black_box(&mut blocks)),
-            CompressionFormat::Bc7 => unreachable!(),
-        }
-        black_box(&blocks);
-    });
-}
-
-fn bench_ispc_bc7(bencher: divan::Bencher, edge: u32, settings: bc7::EncodeSettings, alpha: bool) {
-    let pixels = pixels(edge, alpha);
-    let surface = RgbaSurface { data: &pixels, width: edge, height: edge, stride: edge * 4 };
-    let mut blocks = vec![0; bc7::calc_output_size(edge, edge)];
-    bencher.counter(ItemsCount::new(u64::from(edge).pow(2))).bench_local(|| {
-        bc7::compress_blocks_into(&settings, black_box(&surface), black_box(&mut blocks));
-        black_box(&blocks);
-    });
-}
-
 #[divan::bench(args = EDGES)]
 fn texture_compression_bc1_with_mips(bencher: divan::Bencher, edge: u32) {
     bench_mipmaps(bencher, edge, false, CompressionQuality::Fast);
@@ -94,49 +59,4 @@ fn texture_compression_bc7_opaque_with_mips(bencher: divan::Bencher, edge: u32) 
 #[divan::bench(args = EDGES)]
 fn texture_compression_bc7_alpha_with_mips(bencher: divan::Bencher, edge: u32) {
     bench_mipmaps(bencher, edge, true, CompressionQuality::High);
-}
-
-#[divan::bench(args = EDGES)]
-fn texture_compression_bc1(bencher: divan::Bencher, edge: u32) {
-    bench_variant(bencher, edge, CompressionVariant::BC1, false);
-}
-
-#[divan::bench(args = EDGES)]
-fn texture_compression_bc3(bencher: divan::Bencher, edge: u32) {
-    bench_variant(bencher, edge, CompressionVariant::BC3, true);
-}
-
-#[divan::bench(args = EDGES)]
-fn texture_compression_bc7_opaque_ultrafast(bencher: divan::Bencher, edge: u32) {
-    bench_variant(bencher, edge, CompressionVariant::BC7(BC7Settings::opaque_ultra_fast()), false);
-}
-
-#[divan::bench(args = EDGES)]
-fn texture_compression_bc7_alpha_ultrafast(bencher: divan::Bencher, edge: u32) {
-    bench_variant(bencher, edge, CompressionVariant::BC7(BC7Settings::alpha_ultrafast()), true);
-}
-
-#[divan::bench(args = EDGES)]
-fn texture_compression_bc7_alpha_fast(bencher: divan::Bencher, edge: u32) {
-    bench_variant(bencher, edge, CompressionVariant::BC7(BC7Settings::alpha_fast()), true);
-}
-
-#[divan::bench(args = EDGES)]
-fn texture_compression_ispc_bc1(bencher: divan::Bencher, edge: u32) {
-    bench_ispc(bencher, edge, CompressionFormat::Bc1, false);
-}
-
-#[divan::bench(args = EDGES)]
-fn texture_compression_ispc_bc3(bencher: divan::Bencher, edge: u32) {
-    bench_ispc(bencher, edge, CompressionFormat::Bc3, true);
-}
-
-#[divan::bench(args = EDGES)]
-fn texture_compression_ispc_bc7_opaque_ultrafast(bencher: divan::Bencher, edge: u32) {
-    bench_ispc_bc7(bencher, edge, bc7::opaque_ultra_fast_settings(), false);
-}
-
-#[divan::bench(args = EDGES)]
-fn texture_compression_ispc_bc7_alpha_ultrafast(bencher: divan::Bencher, edge: u32) {
-    bench_ispc_bc7(bencher, edge, bc7::alpha_ultra_fast_settings(), true);
 }
