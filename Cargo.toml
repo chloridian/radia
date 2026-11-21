@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "apps/viewer",
+    "crates/cvars",
     "crates/llsd",
     "crates/math",
     "crates/utils",
@@ -23,6 +24,7 @@ license = "LGPL-2.1-only"
 
 [workspace.dependencies]
 assets = { path = "crates/assets" }
+cvars = { path = "crates/cvars" }
 inventory = { path = "crates/inventory" }
 imbl = { version = "7.0.2", default-features = false }
 llsd = { path = "crates/llsd" }

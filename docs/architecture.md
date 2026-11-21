@@ -46,6 +46,10 @@ Unfinished network requests depend on their selected region route and cancel whe
 
 Assets declares cache namespaces and payload contracts, protects demanded entries with leases, and supplies eviction policy. Storage owns files, indexing, hashing, quotas, locking, and recovery. Generated prim geometry remains in Render's memory cache.
 
+### `crates/cvars`
+
+Owns typed configuration variables (`CvarDescriptor`, `CvarKey<T>`, `CvarRegistry`, `CvarSnapshot`) compiled and validated at build time from `config/cvars/*.toml` so embedded defaults require no runtime I/O. It resolves values across five precedence layers (`Default`, `Preset`, `Global`, `StartupDeveloper`, `Session`), validates bounds and layer permissions atomically in batches, tracks provenance including pending restart-required changes, and publishes revisioned immutable snapshots. It has no workspace dependencies.
+
 ### `crates/llsd`
 
 Owns LLSD values, Serde integration, and XML, binary, and notation codecs. Decode limits bound input size, depth, value counts, and scalar/container sizes, including skipped values. Callers can tighten those limits for their admission budgets.

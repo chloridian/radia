@@ -1,0 +1,14 @@
+[log.level]
+type = "enum"
+default = "info"
+values = ["error", "warn", "info", "debug", "trace"]
+persistent = true
+apply = "live"
+help = "Minimum log level to output."
+
+[log.noisy_network]
+type = "bool"
+default = false
+persistent = true
+apply = "live"
+help = "Include verbose network subsystem logs."

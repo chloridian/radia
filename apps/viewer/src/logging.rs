@@ -44,7 +44,7 @@ impl LogLevel {
         }
     }
 
-    fn directive(self) -> &'static str {
+    pub(crate) fn directive(self) -> &'static str {
         match self {
             Self::Error => "error",
             Self::Warn => "warn",
