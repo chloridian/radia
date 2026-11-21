@@ -296,7 +296,6 @@ fn non_finite_sample_keeps_state() {
     assert_eq!(dead_reckoning.pose(received_at, &[]).unwrap().position, valid.position);
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[tokio::test]
 async fn motion_seeds_camera_before_avatar() {
     let agent_id = Uuid::from_u128(1);

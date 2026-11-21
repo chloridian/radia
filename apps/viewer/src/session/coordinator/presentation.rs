@@ -7,22 +7,17 @@ use std::{
 use futures::{channel::mpsc, stream::StreamExt};
 use inventory::InventorySnapshot;
 use network::{AgentSession, Grid, MfaChallenge};
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 use render::scene::Camera;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::AssetHandle,
-    session::{AgentMotionSample, experience_environment::EnvironmentInbox},
-    world_reader::WorldReader,
-};
-use crate::{
     inventory::{FavoriteLocation, InventoryFetchHandle, favorite_store::FavoriteStoreError, favorites::FavoritesError},
     remembered_login::RememberedLogin,
-    session::ChatMessage,
+    session::{AgentMotionSample, ChatMessage, experience_environment::EnvironmentInbox},
+    world_reader::WorldReader,
 };
 
 const MAX_PENDING_CHAT_MESSAGES: usize = 64;
@@ -156,23 +151,16 @@ pub(crate) enum SessionEnd {
 }
 
 pub(crate) struct SessionReadyUpdate {
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) environments: EnvironmentInbox,
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) camera: watch::Sender<Option<Camera>>,
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) movement: watch::Sender<Option<MovementObservation>>,
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) agent_motion: watch::Receiver<Option<AgentMotionSample>>,
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<network::CircuitMotionStatus>)>>,
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) assets: AssetHandle,
     pub(crate) session: AgentSession,
     pub(crate) region_name: Option<String>,
     pub(crate) inventory_updates: watch::Receiver<Option<InventorySnapshot>>,
     pub(crate) inventory_fetch: Option<InventoryFetchHandle>,
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) world_reader: WorldReader,
 }
 
