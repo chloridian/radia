@@ -764,7 +764,6 @@ mod tests {
 
     use futures::executor;
     use network::Grid;
-    use prism as gpui;
 
     use super::{CredentialLoad, CredentialLoadCompletion, LoginMessage, LoginPhase, LoginScreen, LoginStatus};
     use crate::{

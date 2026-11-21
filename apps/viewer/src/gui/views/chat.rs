@@ -270,7 +270,7 @@ fn retain_message(messages: &mut VecDeque<ChatMessage>, message_bytes: &mut usiz
 mod tests {
     use std::collections::VecDeque;
 
-    use prism::{self as gpui, Modifiers, TestAppContext, VisualTestContext, point, px, size};
+    use prism::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
 
     use super::{ChatMessage, ChatScreen, MAX_CHAT_HISTORY_BYTES, MAX_CHAT_HISTORY_MESSAGES, retain_message, send_error_copy};
 

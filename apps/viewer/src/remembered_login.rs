@@ -82,7 +82,7 @@ mod tests {
     use std::assert_matches;
 
     use network::Grid;
-    use prism::{self as gpui, TestAppContext};
+    use prism::TestAppContext;
 
     use super::{CredentialStoreError, RememberedLogin, clear, decode, encode, grid_url, load, save};
 

@@ -278,7 +278,7 @@ impl Render for ChatWindow {
 mod tests {
     use std::sync::Arc;
 
-    use prism::{self as gpui, App};
+    use prism::App;
     use render::scene::ApplyError;
 
     use super::{MainWindow, end_session, request_chat, scene_failed, scene_ready};

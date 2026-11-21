@@ -873,8 +873,40 @@ impl SceneView {
                         .p_3()
                         .text_sm()
                         .text_color(theme.foreground)
-                        .child(field().label(format!("LOD factor ({lod_factor:.2})")).child(Slider::new(&lod_slider)))
-                        .child(field().label(format!("Draw distance ({draw_distance:.0} m)")).child(Slider::new(&draw_distance_slider)))
+                        .child(
+                            field().label_indent(false).child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child("LOD factor")
+                                            .child(div().text_color(theme.muted_foreground).child(format!("{lod_factor:.2}"))),
+                                    )
+                                    .child(Slider::new(&lod_slider)),
+                            ),
+                        )
+                        .child(
+                            field().label_indent(false).child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child("Draw distance")
+                                            .child(div().text_color(theme.muted_foreground).child(format!("{draw_distance:.0} m"))),
+                                    )
+                                    .child(Slider::new(&draw_distance_slider)),
+                            ),
+                        )
                         .child(
                             field().label("Sky").child(
                                 div()
@@ -929,25 +961,29 @@ impl SceneView {
                                     ),
                             ),
                         )
-                        .child(field().label("Show stats").child(Switch::new("show-stats-toggle").checked(show_stats).on_click(
-                            move |checked, _, cx| {
-                                let checked = *checked;
-                                view_for_stats.update(cx, |view, cx| {
-                                    view.show_stats = checked;
-                                    cx.notify();
-                                });
-                            },
-                        )))
+                        .child(field().label_indent(false).child(
+                            div().w_full().flex().items_center().justify_between().child("Show stats").child(
+                                Switch::new("show-stats-toggle").checked(show_stats).on_click(move |checked, _, cx| {
+                                    let checked = *checked;
+                                    view_for_stats.update(cx, |view, cx| {
+                                        view.show_stats = checked;
+                                        cx.notify();
+                                    });
+                                }),
+                            ),
+                        ))
                         .child(field().label("Log level").child(Select::new(&log_level_select).small()))
-                        .child(field().label("Noisy logs").child(Switch::new("noisy-logs-toggle").checked(noisy_network).on_click(
-                            move |checked, _, cx| {
-                                let checked = *checked;
-                                view_for_noisy.update(cx, |view, cx| {
-                                    view.log_control.set_noisy_network(checked);
-                                    cx.notify();
-                                });
-                            },
-                        )))
+                        .child(field().label_indent(false).child(
+                            div().w_full().flex().items_center().justify_between().child("Noisy logs").child(
+                                Switch::new("noisy-logs-toggle").checked(noisy_network).on_click(move |checked, _, cx| {
+                                    let checked = *checked;
+                                    view_for_noisy.update(cx, |view, cx| {
+                                        view.log_control.set_noisy_network(checked);
+                                        cx.notify();
+                                    });
+                                }),
+                            ),
+                        ))
                 }),
         );
 

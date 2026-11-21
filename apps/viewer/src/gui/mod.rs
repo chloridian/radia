@@ -31,6 +31,7 @@ struct AppLifecycle {
     quitting: bool,
     session_lifecycle: Arc<SessionLifecycle>,
     asset_cache: Option<Arc<AssetCache>>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     log_control: LogControl,
 }
 
@@ -91,11 +92,14 @@ pub(crate) fn asset_cache(cx: &App) -> Option<Arc<AssetCache>> {
     cx.global::<AppLifecycle>().asset_cache.clone()
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) fn log_control(cx: &App) -> LogControl {
     cx.try_global::<AppLifecycle>().map_or_else(LogControl::noop, |lifecycle| lifecycle.log_control.clone())
 }
 
 pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>, log_control: LogControl) {
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let _ = log_control;
     let session_lifecycle = Arc::new(SessionLifecycle::default());
     cx.set_app_identity("org.radia.viewer", "Radia");
     cx.set_keyring_label("Radia");
@@ -109,7 +113,10 @@ pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>
     {
         let lifecycle = cx.global_mut::<AppLifecycle>();
         lifecycle.asset_cache = asset_cache;
-        lifecycle.log_control = log_control;
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            lifecycle.log_control = log_control;
+        }
     }
 
     let (main_window, login) =
@@ -145,6 +152,7 @@ fn install_lifecycle(session_lifecycle: Arc<SessionLifecycle>, cx: &mut App) {
         quitting: false,
         session_lifecycle,
         asset_cache: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         log_control: LogControl::noop(),
     });
 }
@@ -243,6 +251,7 @@ fn set_dark_theme(cx: &mut App) {
     theme.table_active = rgb_to_hsla(rgb(0x666666)).opacity(0.35);
     theme.table_active_border = theme.table_active.opacity(0.0);
     theme.tokens.table_active = theme.table_active.into();
+    theme.icon_stroke_width = Some(1.33);
     Theme::sync_base(cx);
 }
 
@@ -250,7 +259,6 @@ fn set_dark_theme(cx: &mut App) {
 mod tests {
     use std::sync::Arc;
 
-    use prism as gpui;
     use tokio::sync::oneshot;
 
     use super::{AppLifecycle, SessionLifecycle, install_lifecycle, shutdown};
