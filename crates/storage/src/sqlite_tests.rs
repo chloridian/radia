@@ -217,6 +217,77 @@ fn repair_waits_for_other_process() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn connection_settings_applied_on_create_reopen_recreate_and_discard() -> Result<(), Box<dyn Error>> {
+    const TEST_MAX_PAGES: i64 = 4096;
+    fn migrate_with_settings(connection: &mut Connection) -> Result<(), MigrationError> {
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS values_table (value INTEGER PRIMARY KEY)")?;
+        connection.pragma_update(None, "max_page_count", TEST_MAX_PAGES)?;
+        Ok(())
+    }
+    fn assert_settings(db: &SqliteDb) -> Result<(), Box<dyn Error>> {
+        let receipt = db.read(0, |transaction| {
+            let journal_mode: String = transaction.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+            let synchronous: i64 = transaction.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+            let busy_timeout: i64 = transaction.pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
+            let max_page_count: i64 = transaction.pragma_query_value(None, "max_page_count", |row| row.get(0))?;
+            Ok((journal_mode, synchronous, busy_timeout, max_page_count))
+        })?;
+        let (journal_mode, synchronous, busy_timeout, max_page_count) = block_on(receipt.wait())?;
+        assert!(journal_mode.eq_ignore_ascii_case("wal"));
+        assert_eq!(synchronous, 1);
+        assert_eq!(busy_timeout, BUSY_TIMEOUT.as_millis() as i64);
+        assert_eq!(max_page_count, TEST_MAX_PAGES);
+        Ok(())
+    }
+
+    let directory = tempdir()?;
+    let path = directory.path().join("settings.sqlite");
+
+    let (db, status) = SqliteDb::open(&path, migrate_with_settings)?;
+    assert_eq!(status, OpenStatus::Created);
+    assert_settings(&db)?;
+    db.shutdown()?;
+
+    let (db, status) = SqliteDb::open(&path, migrate_with_settings)?;
+    assert_eq!(status, OpenStatus::Existing);
+    assert_settings(&db)?;
+    db.shutdown()?;
+
+    fs::write(&path, b"not sqlite data")?;
+    let (db, status) = SqliteDb::open(&path, migrate_with_settings)?;
+    assert_eq!(status, OpenStatus::Recreated(RecoveryReason::Corrupt));
+    assert_settings(&db)?;
+
+    block_on(db.discard()?.wait())?;
+    assert_settings(&db)?;
+    db.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn newer_schema_version_fails_safely_and_preserves_contents() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let path = directory.path().join("future.sqlite");
+    let connection = Connection::open(&path)?;
+    connection.execute_batch("CREATE TABLE future_data (value INTEGER PRIMARY KEY); INSERT INTO future_data (value) VALUES (42);")?;
+    connection.pragma_update(None, "user_version", 2_i64)?;
+    drop(connection);
+
+    let result = SqliteDb::open(&path, |connection| {
+        let current: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if current > 1 { Err(MigrationError::UnsupportedSchemaVersion) } else { Ok(()) }
+    });
+    assert_matches!(result, Err(SqliteError::UnsupportedSchemaVersion));
+
+    let connection = Connection::open(&path)?;
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let value: i64 = connection.query_row("SELECT value FROM future_data", [], |row| row.get(0))?;
+    assert_eq!(version, 2);
+    assert_eq!(value, 42);
+    Ok(())
+}
+
+#[test]
 fn busy_process_helper() -> Result<(), Box<dyn Error>> {
     let Some(path) = env::var_os("RADIA_SQLITE_BUSY_PATH") else {
         return Ok(());
