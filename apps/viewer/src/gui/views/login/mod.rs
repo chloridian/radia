@@ -12,12 +12,15 @@ use std::{
 use futures::{channel::oneshot, future::join};
 use inventory::{CategoryKey, FolderType, InventorySnapshot};
 use network::{AgentSession, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
-use prism::{AppContext, Context, Window};
-use prism_component::{
-    IndexPath,
-    input::{InputEvent, InputState},
-    select::{SelectEvent, SelectState},
+use prism::{
+    AppContext, Context, Window,
+    component::{
+        IndexPath,
+        input::{InputEvent, InputState},
+        select::{SelectEvent, SelectState},
+    },
 };
+use prism_tokio::Tokio;
 use tokio::sync::watch;
 
 use self::{
@@ -514,7 +517,7 @@ impl LoginScreen {
         self.active_session = Some(active);
         self.chat_screen.update(cx, |chat, cx| chat.set_session_handle(session_handle.clone(), cx));
 
-        let background = gui::service_runtime(cx);
+        let background = Tokio::handle(cx);
         let asset_cache = gui::asset_cache(cx);
         let grid = self.credential_load.grid();
 
@@ -800,7 +803,7 @@ mod tests {
 
     #[prism::test]
     fn stale_presentation_cannot_end_relogin(cx: &mut prism::TestAppContext) {
-        cx.update(prism_component::init);
+        cx.update(prism::init);
         let session_lifecycle = Arc::new(SessionLifecycle::default());
         let (screen, visual) = cx.add_window_view(|window, cx| LoginScreen::new(window, cx, session_lifecycle));
         let snapshot = PresentationSnapshot {

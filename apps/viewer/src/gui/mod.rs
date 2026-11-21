@@ -11,10 +11,10 @@ use std::{
 use assets::cache::AssetCache;
 use futures::FutureExt;
 use prism::{
-    AnyWindowHandle, App, AppContext, ColorExt, Entity, Global, QuitMode, Subscription, TitlebarOptions, WindowBounds, WindowOptions, px,
-    rgb, rgb_to_hsla, size,
+    AnyWindowHandle, App, AppContext, ColorExt, Entity, Global, QuitMode, Subscription, TitlebarOptions, WindowBounds, WindowOptions,
+    component::{Theme, ThemeMode, TitleBar},
+    px, rgb, rgb_to_hsla, size,
 };
-use prism_component::{Root, Theme, ThemeMode, TitleBar};
 use tokio::{runtime::Handle, task::JoinHandle};
 
 use crate::{
@@ -30,6 +30,8 @@ struct AppLifecycle {
     scene: scene::State,
     quitting: bool,
     session_lifecycle: Arc<SessionLifecycle>,
+    asset_cache: Option<Arc<AssetCache>>,
+    log_control: LogControl,
 }
 
 impl Global for AppLifecycle {}
@@ -85,46 +87,37 @@ impl SessionLifecycle {
     }
 }
 
-struct ServiceRuntime {
-    runtime: Handle,
-    asset_cache: Option<Arc<AssetCache>>,
-    log_control: LogControl,
-}
-
-impl Global for ServiceRuntime {}
-
-pub(crate) fn service_runtime(cx: &App) -> Handle {
-    cx.global::<ServiceRuntime>().runtime.clone()
-}
-
 pub(crate) fn asset_cache(cx: &App) -> Option<Arc<AssetCache>> {
-    cx.global::<ServiceRuntime>().asset_cache.clone()
+    cx.global::<AppLifecycle>().asset_cache.clone()
 }
 
 pub(crate) fn log_control(cx: &App) -> LogControl {
-    cx.try_global::<ServiceRuntime>().map_or_else(LogControl::noop, |runtime| runtime.log_control.clone())
+    cx.try_global::<AppLifecycle>().map_or_else(LogControl::noop, |lifecycle| lifecycle.log_control.clone())
 }
 
 pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>, log_control: LogControl) {
     let session_lifecycle = Arc::new(SessionLifecycle::default());
-    cx.set_global(ServiceRuntime { runtime: services, asset_cache, log_control });
+    cx.set_app_identity("org.radia.viewer", "Radia");
+    cx.set_keyring_label("Radia");
+    prism_tokio::init_from_handle(cx, services);
     cx.set_quit_mode(QuitMode::Explicit);
 
-    prism_component::init(cx);
+    prism::init(cx);
     set_dark_theme(cx);
 
     install_lifecycle(Arc::clone(&session_lifecycle), cx);
+    {
+        let lifecycle = cx.global_mut::<AppLifecycle>();
+        lifecycle.asset_cache = asset_cache;
+        lifecycle.log_control = log_control;
+    }
 
-    let main_window = cx
-        .open_window(login_options(cx), move |window, cx| {
-            cx.new(|cx| {
-                let login = cx.new(|cx| LoginScreen::new(window, cx, session_lifecycle));
-                cx.global_mut::<AppLifecycle>().controller = Some(login.clone());
-                Root::new(login, window, cx)
-            })
-        })
-        .expect("failed to open the main window");
-    cx.global_mut::<AppLifecycle>().login_window = Some(main_window.into());
+    let (main_window, login) =
+        prism::open_window(login_options(cx), cx, move |window, cx| cx.new(|cx| LoginScreen::new(window, cx, session_lifecycle)))
+            .expect("failed to open the main window");
+    let lifecycle = cx.global_mut::<AppLifecycle>();
+    lifecycle.controller = Some(login);
+    lifecycle.login_window = Some(main_window);
     cx.activate(true);
 }
 
@@ -151,6 +144,8 @@ fn install_lifecycle(session_lifecycle: Arc<SessionLifecycle>, cx: &mut App) {
         scene: scene::State::new(),
         quitting: false,
         session_lifecycle,
+        asset_cache: None,
+        log_control: LogControl::noop(),
     });
 }
 
@@ -171,11 +166,9 @@ fn shutdown(cx: &mut App) -> bool {
             return false;
         }
         lifecycle.quitting = true;
+        drop(lifecycle.asset_cache.take());
         Arc::clone(&lifecycle.session_lifecycle)
     };
-    if cx.has_global::<ServiceRuntime>() {
-        drop(cx.global_mut::<ServiceRuntime>().asset_cache.take());
-    }
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     scene::shutdown(cx);
     for window in cx.windows() {

@@ -1,8 +1,10 @@
 use std::{borrow::Cow, env::consts::OS, io, sync::Arc};
 
 use assets::cache::AssetCache;
-use prism::{AssetSource, SharedString};
-use prism_assets::{Assets, icon_assets};
+use prism::{
+    AssetSource, SharedString,
+    assets::{Assets, icon_assets},
+};
 use prism_wgpu::WgpuDeviceRequirements;
 use tokio::runtime::Builder;
 use viewer::{gui, logging};
@@ -43,7 +45,7 @@ fn main() -> io::Result<()> {
         }
     };
     let gui_cache = asset_cache.clone();
-    prism_platform::application().with_assets(ViewerAssets).run(move |cx| {
+    prism::application().with_assets(ViewerAssets).run(move |cx| {
         cx.set_gpu_requirements(Box::new(WgpuDeviceRequirements {
             features: render::required_features(),
             limits: Some(render::required_limits()),

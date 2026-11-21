@@ -1,7 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
-use prism::SharedString;
-use prism_component::select::SelectItem;
+use prism::{SharedString, component::select};
 use render::scene::{self, EnvironmentPreset, LocalChoice};
 
 use super::FRAME_INTERVAL;
@@ -13,7 +12,7 @@ pub(super) struct EnvOption {
     pub(super) choice: Option<LocalChoice>,
 }
 
-impl SelectItem for EnvOption {
+impl select::SelectItem for EnvOption {
     type Value = Option<LocalChoice>;
 
     fn title(&self) -> SharedString {

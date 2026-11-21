@@ -1,6 +1,5 @@
 use network::Grid;
-use prism::SharedString;
-use prism_component::select::SelectItem;
+use prism::{SharedString, component::select};
 
 use crate::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
 
@@ -18,7 +17,7 @@ pub(super) struct SpawnOption {
     choice: SpawnChoice,
 }
 
-impl SelectItem for SpawnOption {
+impl select::SelectItem for SpawnOption {
     type Value = SpawnChoice;
 
     fn title(&self) -> SharedString {

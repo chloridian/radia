@@ -13,17 +13,21 @@ use futures::{StreamExt, channel::mpsc as async_mpsc};
 use prism::{
     Anchor, AnyElement, Bounds, Context, DevicePixels, DispatchPhase, Entity, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent,
     KeyUpEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, RawMouseMotionEvent,
-    Render, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, SurfaceSource, Window, canvas, div, prelude::*, px, rgb,
-    rgb_to_hsla, size, surface, white,
-};
-use prism_assets::IconName as AssetIconName;
-use prism_component::{
-    Disableable, Icon, IconName, IndexPath, Sizable, Theme, TitleBar,
-    button::{Button, ButtonVariants as _},
-    popover::Popover,
-    select::{Select, SelectEvent, SelectItem, SelectState},
-    slider::{Slider, SliderEvent, SliderState},
-    switch::Switch,
+    Render, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, SurfaceSource, Window,
+    assets::IconName as AssetIconName,
+    canvas,
+    component::{
+        Disableable, Icon, IconName, IndexPath, Sizable, Theme, TitleBar,
+        button::{Button, ButtonVariants as _},
+        form::{field, v_form},
+        popover::Popover,
+        select::{Select, SelectEvent, SelectItem, SelectState},
+        slider::{Slider, SliderEvent, SliderState},
+        switch::Switch,
+    },
+    div,
+    prelude::*,
+    px, rgb, rgb_to_hsla, size, surface, white,
 };
 use prism_wgpu::WgpuContextHandle;
 use render::{CompressionQuality, FrameInput, Renderer, TextureCompletion, scene};
@@ -847,7 +851,7 @@ impl SceneView {
                 .small()
                 .icon(Icon::new(AssetIconName::MessageCircle))
                 .tooltip("Nearby chat")
-                .on_click(move |_, _, cx| gui_scene::request_chat(generation, cx)),
+                .on_click(move |_, _, cx| cx.defer(move |cx| gui_scene::request_chat(generation, cx))),
         );
 
         let right = div().flex().items_center().gap_1().pr_2().child(
@@ -863,46 +867,16 @@ impl SceneView {
                     let view_for_stats = view_entity.clone();
                     let view_for_noisy = view_entity.clone();
 
-                    div()
+                    v_form()
+                        .small()
                         .w(px(300.))
-                        .flex()
-                        .flex_col()
-                        .gap_3()
                         .p_3()
                         .text_sm()
                         .text_color(theme.foreground)
+                        .child(field().label(format!("LOD factor ({lod_factor:.2})")).child(Slider::new(&lod_slider)))
+                        .child(field().label(format!("Draw distance ({draw_distance:.0} m)")).child(Slider::new(&draw_distance_slider)))
                         .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .child("LOD factor")
-                                        .child(div().text_color(theme.muted_foreground).child(format!("{lod_factor:.2}"))),
-                                )
-                                .child(Slider::new(&lod_slider)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .child("Draw distance")
-                                        .child(div().text_color(theme.muted_foreground).child(format!("{draw_distance:.0} m"))),
-                                )
-                                .child(Slider::new(&draw_distance_slider)),
-                        )
-                        .child(
-                            div().flex().flex_col().gap_1().child("Sky").child(
+                            field().label("Sky").child(
                                 div()
                                     .flex()
                                     .items_center()
@@ -929,7 +903,7 @@ impl SceneView {
                             ),
                         )
                         .child(
-                            div().flex().flex_col().gap_1().child("Water").child(
+                            field().label("Water").child(
                                 div()
                                     .flex()
                                     .items_center()
@@ -955,25 +929,25 @@ impl SceneView {
                                     ),
                             ),
                         )
-                        .child(div().flex().items_center().justify_between().child("Show stats").child(
-                            Switch::new("show-stats-toggle").checked(show_stats).on_click(move |checked, _, cx| {
+                        .child(field().label("Show stats").child(Switch::new("show-stats-toggle").checked(show_stats).on_click(
+                            move |checked, _, cx| {
                                 let checked = *checked;
                                 view_for_stats.update(cx, |view, cx| {
                                     view.show_stats = checked;
                                     cx.notify();
                                 });
-                            }),
-                        ))
-                        .child(div().flex().flex_col().gap_1().child("Log level").child(Select::new(&log_level_select).small()))
-                        .child(div().flex().items_center().justify_between().child("Noisy logs").child(
-                            Switch::new("noisy-logs-toggle").checked(noisy_network).on_click(move |checked, _, cx| {
+                            },
+                        )))
+                        .child(field().label("Log level").child(Select::new(&log_level_select).small()))
+                        .child(field().label("Noisy logs").child(Switch::new("noisy-logs-toggle").checked(noisy_network).on_click(
+                            move |checked, _, cx| {
                                 let checked = *checked;
                                 view_for_noisy.update(cx, |view, cx| {
                                     view.log_control.set_noisy_network(checked);
                                     cx.notify();
                                 });
-                            }),
-                        ))
+                            },
+                        )))
                 }),
         );
 

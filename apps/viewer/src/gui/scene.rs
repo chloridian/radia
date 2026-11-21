@@ -1,8 +1,12 @@
 use prism::{
     AnyElement, AnyWindowHandle, App, AppContext, Entity, Render, Subscription, TitlebarOptions, Window, WindowBounds, WindowId,
-    WindowOptions, div, prelude::*, px, size,
+    WindowOptions,
+    component::{StyledExt, Theme, TitleBar},
+    div,
+    prelude::*,
+    px, size,
 };
-use prism_component::{Root, StyledExt, Theme, TitleBar};
+use prism_tokio::Tokio;
 use render::scene::Camera;
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -11,7 +15,7 @@ use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::AssetHandle,
     gui::{
-        AppLifecycle, log_control, login_options, service_runtime,
+        AppLifecycle, log_control, login_options,
         views::{
             chat::ChatScreen,
             viewport::{SceneView, SceneViewConfig, ViewportError},
@@ -99,7 +103,7 @@ pub(crate) fn start_session(
     cx.global_mut::<AppLifecycle>().scene.main = MainWindow::Starting(generation);
 
     let sources = SceneSources { reader: reader.clone(), environments, assets: assets.clone(), motion_circuits, inventory_updates };
-    let runtime = service_runtime(cx);
+    let runtime = Tokio::handle(cx);
     let logs = log_control(cx);
     let config = SceneViewConfig { generation, sources, agent_id, camera, movement, agent_motion, runtime, log_control: logs };
 
@@ -112,16 +116,11 @@ pub(crate) fn start_session(
         ..TitleBar::window_options()
     };
 
-    let mut created_view = None;
-    match cx.open_window(options, |window, cx| {
-        let view = cx.new(|cx| SceneView::new(config, window, cx));
-        created_view = Some(view.clone());
-        cx.new(|cx| Root::new(view, window, cx))
-    }) {
-        Ok(window) => {
+    match prism::open_window(options, cx, |window, cx| cx.new(|cx| SceneView::new(config, window, cx))) {
+        Ok((window, view)) => {
             let lifecycle = cx.global_mut::<AppLifecycle>();
-            lifecycle.scene.scene_window = Some(window.into());
-            lifecycle.scene.scene_view = created_view;
+            lifecycle.scene.scene_window = Some(window);
+            lifecycle.scene.scene_view = Some(view);
         }
         Err(error) => {
             cx.defer(move |cx| scene_failed(generation, ViewportError::WindowOpen(error.to_string()), cx));
@@ -204,11 +203,11 @@ fn show_login(cx: &mut App) {
         let Some(controller) = lifecycle.controller.clone() else {
             return;
         };
-        match cx.open_window(login_options(cx), move |window, cx| {
+        match prism::open_window(login_options(cx), cx, move |window, cx| {
             controller.update(cx, |login, cx| login.attach_window(window, cx));
-            cx.new(|cx| Root::new(controller, window, cx))
+            controller
         }) {
-            Ok(handle) => cx.global_mut::<AppLifecycle>().login_window = Some(handle.into()),
+            Ok((handle, _)) => cx.global_mut::<AppLifecycle>().login_window = Some(handle),
             Err(error) => {
                 tracing::error!(%error, "could not reopen login window");
                 return;
@@ -243,11 +242,8 @@ fn show_chat(focus: bool, cx: &mut App) {
         focus,
         ..TitleBar::window_options()
     };
-    match cx.open_window(options, move |window, cx| {
-        let view = cx.new(|cx| ChatWindow::new(chat, window, cx));
-        cx.new(|cx| Root::new(view, window, cx))
-    }) {
-        Ok(window) => cx.global_mut::<AppLifecycle>().scene.chat_window = Some(window.into()),
+    match prism::open_window(options, cx, move |window, cx| cx.new(|cx| ChatWindow::new(chat, window, cx))) {
+        Ok((window, _)) => cx.global_mut::<AppLifecycle>().scene.chat_window = Some(window),
         Err(error) => tracing::warn!(%error, "could not open nearby chat window"),
     }
 }
@@ -304,7 +300,7 @@ mod tests {
     fn handoff_preserves_window_lifetimes(cx: &mut prism::TestAppContext) {
         let session = Arc::new(SessionLifecycle::default());
         cx.update(|cx| {
-            prism_component::init(cx);
+            prism::init(cx);
             cx.set_quit_mode(prism::QuitMode::Explicit);
             install_lifecycle(Arc::clone(&session), cx);
         });
