@@ -5,13 +5,15 @@ use std::{
 };
 
 use crate::{
-    Blob, EnvironmentDescription, Failure, Image, Kind, MaterialDescription, Request, Resource, TextureHandle, TextureSize, WeakTexture,
+    Blob, EnvironmentDescription, Failure, Image, Kind, MaterialDescription, PreparedTextureKey, Request, Resource, TextureHandle,
+    TextureSize, WeakTexture,
     budget::{Reservation, Resident},
-    cache,
-    cache::{MESH_HEADER_FRAME_BYTES, MESH_LOD_FRAME_BYTES},
+    cache::{self, AssetCache, MESH_HEADER_FRAME_BYTES, MESH_LOD_FRAME_BYTES},
     envelope, environment,
     material::{legacy, pbr},
-    mesh, texture,
+    mesh,
+    prepared_texture::encode_prepared_texture,
+    texture,
 };
 
 #[derive(Clone)]
@@ -185,28 +187,52 @@ enum Data {
     Mesh { lod: mesh::MeshLod, geometry: mesh::LodGeometry },
 }
 
+pub(crate) struct FinishedPrepared {
+    pub(crate) content: Finished,
+    pub(crate) source: Option<Blob>,
+    pub(crate) persisted: Option<Blob>,
+    pub(crate) prepared_texture: Option<(PreparedTextureKey, Blob)>,
+}
+
 pub(crate) struct Prepared {
     kind: Kind,
     data: Data,
     source: Option<CacheSource>,
     mesh_prefix: Option<Vec<u8>>,
+    prepared_texture: Option<(PreparedTextureKey, Vec<u8>)>,
 }
 
 impl Prepared {
-    pub(crate) fn finish(self, mut reservation: Reservation, persist: bool) -> Result<(Finished, Option<Blob>, Option<Blob>), Failure> {
-        let Prepared { kind, data, source: source_bytes, mesh_prefix } = self;
+    pub(crate) fn finish(
+        self,
+        mut reservation: Reservation,
+        persist_encoded: bool,
+        persist_prepared: bool,
+    ) -> Result<FinishedPrepared, Failure> {
+        let Prepared { kind, data, source: source_bytes, mesh_prefix, prepared_texture } = self;
         let (source, persisted) = match source_bytes {
-            Some(CacheSource::Payload(bytes)) if kind == Kind::Texture || persist => {
+            Some(CacheSource::Payload(bytes)) if kind == Kind::Texture || persist_encoded => {
                 let blob = reservation.split(bytes.capacity()).and_then(|part| part.finish(bytes)).map_err(|_| Failure::MemoryPressure)?;
                 let source = (kind == Kind::Texture).then(|| blob.clone());
-                let persisted = persist.then_some(blob);
+                let persisted = persist_encoded.then_some(blob);
                 (source, persisted)
             }
-            Some(source @ (CacheSource::MeshHeader { .. } | CacheSource::MeshLod { .. })) if persist => {
+            Some(source @ (CacheSource::MeshHeader { .. } | CacheSource::MeshLod { .. })) if persist_encoded => {
                 let persisted = persist_mesh_source(source, &data, &mut reservation);
                 (None, persisted)
             }
             _ => (None, None),
+        };
+        let prepared_texture = if persist_prepared {
+            prepared_texture.and_then(|(key, bytes)| {
+                let capacity = bytes.capacity();
+                reserve_cache_payload(&mut reservation, capacity)?;
+                let part = reservation.split(capacity).ok()?;
+                let blob = part.finish(bytes).ok()?;
+                Some((key, blob))
+            })
+        } else {
+            None
         };
         let content = match data {
             Data::Texture(image) => image.finish(reservation).map(Finished::Texture),
@@ -244,7 +270,7 @@ impl Prepared {
                 Ok(Finished::Other(Content::Mesh(MeshAsset(Arc::new(MeshInner { lod, geometry, _reservation: reservation })))))
             }
         }?;
-        Ok((content, source, persisted))
+        Ok(FinishedPrepared { content, source, persisted, prepared_texture })
     }
 }
 
@@ -293,6 +319,7 @@ pub(crate) fn prepare_cancellable(
     request: Request,
     size: TextureSize,
     response: crate::FetchResponse,
+    persist_prepared: bool,
     reservation: &mut Reservation,
     cancelled: impl Fn() -> bool,
 ) -> Result<Prepared, Failure> {
@@ -336,18 +363,31 @@ pub(crate) fn prepare_cancellable(
         (Data::MeshHeader { id, header }, Some(CacheSource::MeshHeader { bytes, .. })) => mesh_lod_prefix(*id, *header, bytes),
         _ => None,
     };
-    Ok(Prepared { kind: resource.kind, data, source, mesh_prefix })
+    let prepared_texture = if persist_prepared {
+        match (&data, &source) {
+            (Data::Texture(decoded), Some(CacheSource::Payload(bytes))) => {
+                let key = PreparedTextureKey::new(storage::sha256(bytes), size);
+                encode_prepared_texture(key, decoded).map(|encoded| (key, encoded))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    Ok(Prepared { kind: resource.kind, data, source, mesh_prefix, prepared_texture })
 }
 
 pub(crate) fn prepare_cached(size: TextureSize, source: &Blob, cancelled: impl Fn() -> bool) -> Result<Prepared, Failure> {
     let data = Data::Texture(texture::decode(source, size, cancelled)?);
-    Ok(Prepared { kind: Kind::Texture, data, source: None, mesh_prefix: None })
+    Ok(Prepared { kind: Kind::Texture, data, source: None, mesh_prefix: None, prepared_texture: None })
 }
 
 pub(crate) fn prepare_disk(
     request: Request,
     size: TextureSize,
     bytes: Vec<u8>,
+    source_sha256: [u8; 32],
+    cache: Option<&AssetCache>,
     reservation: &mut Reservation,
     cancelled: impl Fn() -> bool,
 ) -> Result<Prepared, Failure> {
@@ -355,6 +395,30 @@ pub(crate) fn prepare_disk(
         return Err(Failure::Cancelled);
     }
     let resource = request.resource();
+    if resource.kind == Kind::Texture {
+        let key = PreparedTextureKey::new(source_sha256, size);
+        if let Some(decoded) = cache.and_then(|cache| cache.lookup_prepared_texture(key)) {
+            return Ok(Prepared {
+                kind: Kind::Texture,
+                data: Data::Texture(decoded),
+                source: Some(CacheSource::Payload(bytes)),
+                mesh_prefix: None,
+                prepared_texture: None,
+            });
+        }
+        let decoded = texture::decode(&bytes, size, &cancelled)?;
+        if cancelled() {
+            return Err(Failure::Cancelled);
+        }
+        let prepared_texture = cache.and_then(|_| encode_prepared_texture(key, &decoded).map(|encoded| (key, encoded)));
+        return Ok(Prepared {
+            kind: Kind::Texture,
+            data: Data::Texture(decoded),
+            source: Some(CacheSource::Payload(bytes)),
+            mesh_prefix: None,
+            prepared_texture,
+        });
+    }
     let data = if resource.kind == Kind::Mesh {
         match request {
             Request::MeshHeader(_) => {
@@ -380,8 +444,7 @@ pub(crate) fn prepare_disk(
     if cancelled() {
         return Err(Failure::Cancelled);
     }
-    let source = (resource.kind == Kind::Texture).then_some(CacheSource::Payload(bytes));
-    Ok(Prepared { kind: resource.kind, data, source, mesh_prefix: None })
+    Ok(Prepared { kind: resource.kind, data, source: None, mesh_prefix: None, prepared_texture: None })
 }
 
 fn mesh_lod_prefix(id: utils::AssetId, header: mesh::MeshHeader, bytes: &[u8]) -> Option<Vec<u8>> {

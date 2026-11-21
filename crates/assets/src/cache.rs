@@ -16,6 +16,8 @@ use crate::{
     budget::Reservation,
     cache_policy::{AssetEvictionPolicy, DecodeCosts},
     mesh::{MAX_MESH_ASSET_BYTES, MAX_MESH_BLOCK_BYTES, MAX_MESH_HEADER_BYTES, MeshLod, MeshLodRequest},
+    prepared_texture::{MAX_PREPARED_TEXTURE_BYTES, PreparedTextureKey, decode_prepared_texture},
+    texture::Decoded,
 };
 
 const MAX_IN_FLIGHT_WRITES: usize = 2;
@@ -28,6 +30,7 @@ const MESH_LOD_LOWEST: NamespaceId = NamespaceId::new(5);
 const MESH_LOD_LOW: NamespaceId = NamespaceId::new(6);
 const MESH_LOD_MEDIUM: NamespaceId = NamespaceId::new(7);
 const MESH_LOD_HIGH: NamespaceId = NamespaceId::new(8);
+const PREPARED_TEXTURES: NamespaceId = NamespaceId::new(0);
 pub(crate) const MESH_NAMESPACE_IDS: [NamespaceId; 5] = [MESH_HEADER, MESH_LOD_LOWEST, MESH_LOD_LOW, MESH_LOD_MEDIUM, MESH_LOD_HIGH];
 pub(super) const MESH_HEADER_FRAME_BYTES: usize = size_of::<u64>();
 pub(super) const MESH_LOD_FRAME_BYTES: usize = 3 * size_of::<u64>();
@@ -42,6 +45,7 @@ const NAMESPACES: [Namespace; 9] = [
     Namespace::new("meshes/lod/medium", "llmesh"),
     Namespace::new("meshes/lod/high", "llmesh"),
 ];
+const PREPARED_NAMESPACES: [Namespace; 1] = [Namespace::new("textures", "prep")];
 
 pub(crate) fn mesh_header_frame(total_length: u64, header: &[u8]) -> Option<Vec<u8>> {
     if total_length == 0 || total_length > MAX_MESH_ASSET_BYTES as u64 || header.is_empty() || header.len() > MAX_MESH_HEADER_BYTES {
@@ -135,6 +139,14 @@ pub struct AssetCacheStats {
     pub entries_by_kind: AssetCacheEntriesByKind,
     pub protected_bytes: u64,
     pub recent_evictions: [Option<EvictionReason>; 8],
+    pub prepared_hits: u64,
+    pub prepared_misses: u64,
+    pub prepared_corrupt_entries: u64,
+    pub prepared_bytes_read: u64,
+    pub prepared_bytes_written: u64,
+    pub prepared_size_bytes: u64,
+    pub prepared_size_limit_bytes: u64,
+    pub prepared_entries: usize,
 }
 
 #[derive(Default)]
@@ -146,6 +158,11 @@ struct Counters {
     bytes_written: AtomicU64,
     dropped_writes: AtomicU64,
     in_flight_writes: AtomicUsize,
+    prepared_hits: AtomicU64,
+    prepared_misses: AtomicU64,
+    prepared_corrupt_entries: AtomicU64,
+    prepared_bytes_read: AtomicU64,
+    prepared_bytes_written: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -180,13 +197,19 @@ pub(crate) fn read_work_bytes_for_request(request: Request) -> Option<usize> {
 
 pub struct AssetCache {
     storage: storage::Cache,
+    prepared: storage::Cache,
     counters: Counters,
     decode_costs: Arc<DecodeCosts>,
 }
 
+enum CacheWriteTarget {
+    Encoded { request: Request, prepared: Option<(PreparedTextureKey, Blob)> },
+    PreparedTexture(PreparedTextureKey),
+}
+
 pub struct CacheWrite {
     cache: Arc<AssetCache>,
-    request: Request,
+    target: CacheWriteTarget,
     payload: Blob,
     _reservation: Reservation,
     finished: bool,
@@ -200,13 +223,24 @@ impl fmt::Debug for AssetCache {
 
 impl AssetCache {
     pub fn open(directory: impl AsRef<Path>, size_limit: u64) -> Result<Self, AssetCacheError> {
+        let prepared_size_limit = (size_limit / 4).max(storage::MIN_SIZE_LIMIT);
+        Self::open_with_prepared_limit(directory, size_limit, prepared_size_limit)
+    }
+
+    pub fn open_with_prepared_limit(
+        directory: impl AsRef<Path>,
+        size_limit: u64,
+        prepared_size_limit: u64,
+    ) -> Result<Self, AssetCacheError> {
         let directory = directory.as_ref();
         storage::discard_legacy_layout(directory).map_err(AssetCacheError::Storage)?;
         let decode_costs = Arc::new(DecodeCosts::default());
         let policy = AssetEvictionPolicy::new(Arc::clone(&decode_costs));
         let storage = storage::Cache::open_with_policy(directory.join("assets"), size_limit, &NAMESPACES, policy)
             .map_err(AssetCacheError::Storage)?;
-        Ok(Self { storage, counters: Counters::default(), decode_costs })
+        let prepared = storage::Cache::open(directory.join("prepared"), prepared_size_limit, &PREPARED_NAMESPACES)
+            .map_err(AssetCacheError::Storage)?;
+        Ok(Self { storage, prepared, counters: Counters::default(), decode_costs })
     }
 
     pub fn open_default() -> Result<Self, AssetCacheError> {
@@ -297,12 +331,85 @@ impl AssetCache {
         self.discard(request)
     }
 
+    pub(crate) fn lookup_prepared_texture(&self, key: PreparedTextureKey) -> Option<Decoded> {
+        let storage_key = prepared_storage_key(key);
+        match self.prepared.lookup_bounded(storage_key, MAX_PREPARED_TEXTURE_BYTES) {
+            storage::Lookup::Hit(value) => {
+                let bytes_read = u64::try_from(value.bytes.len()).unwrap_or(u64::MAX);
+                if let Some(decoded) = decode_prepared_texture(&value.bytes, key) {
+                    self.counters.prepared_bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
+                    self.counters.prepared_hits.fetch_add(1, Ordering::Relaxed);
+                    Some(decoded)
+                } else {
+                    self.counters.prepared_corrupt_entries.fetch_add(1, Ordering::Relaxed);
+                    if let Err(error) = self.prepared.discard(storage_key) {
+                        tracing::warn!(%error, "corrupt prepared texture cache entry could not be discarded");
+                    }
+                    None
+                }
+            }
+            storage::Lookup::Corrupt => {
+                self.counters.prepared_corrupt_entries.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+            storage::Lookup::Miss | storage::Lookup::Unavailable(_) => {
+                self.counters.prepared_misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    pub fn put_prepared_texture_bytes(&self, key: PreparedTextureKey, bytes: Vec<u8>) -> Result<(), AssetCacheError> {
+        if bytes.len() > MAX_PREPARED_TEXTURE_BYTES {
+            return Err(AssetCacheError::TooLarge);
+        }
+        let written = u64::try_from(bytes.len()).map_err(|_| AssetCacheError::TooLarge)?;
+        self.prepared.put(prepared_storage_key(key), bytes).map_err(map_storage_error)?;
+        self.counters.prepared_bytes_written.fetch_add(written, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn discard_prepared_texture(&self, key: PreparedTextureKey) -> Result<(), AssetCacheError> {
+        self.prepared.discard(prepared_storage_key(key)).map_err(map_storage_error)
+    }
+
+    #[cfg(test)]
     pub(crate) fn queue_write(self: &Arc<Self>, request: Request, payload: Blob, budget: &Budget) -> Option<CacheWrite> {
+        self.queue_write_with_prepared(request, payload, None, budget)
+    }
+
+    pub(crate) fn queue_write_with_prepared(
+        self: &Arc<Self>,
+        request: Request,
+        payload: Blob,
+        prepared: Option<(PreparedTextureKey, Blob)>,
+        budget: &Budget,
+    ) -> Option<CacheWrite> {
         let payload_bytes = payload.len();
         if payload_bytes > cache_limit(request) {
             self.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
             return None;
         }
+        let prepared = prepared.filter(|(_, bytes)| bytes.len() <= MAX_PREPARED_TEXTURE_BYTES);
+        self.queue_target_write(CacheWriteTarget::Encoded { request, prepared }, payload, budget)
+    }
+
+    pub(crate) fn queue_prepared_texture_write(
+        self: &Arc<Self>,
+        key: PreparedTextureKey,
+        payload: Blob,
+        budget: &Budget,
+    ) -> Option<CacheWrite> {
+        let payload_bytes = payload.len();
+        if payload_bytes > MAX_PREPARED_TEXTURE_BYTES {
+            self.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        self.queue_target_write(CacheWriteTarget::PreparedTexture(key), payload, budget)
+    }
+
+    fn queue_target_write(self: &Arc<Self>, target: CacheWriteTarget, payload: Blob, budget: &Budget) -> Option<CacheWrite> {
+        let payload_bytes = payload.len();
         if self
             .counters
             .in_flight_writes
@@ -317,7 +424,7 @@ impl AssetCache {
             self.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
             return None;
         };
-        Some(CacheWrite { cache: Arc::clone(self), request, payload, _reservation: reservation, finished: false })
+        Some(CacheWrite { cache: Arc::clone(self), target, payload, _reservation: reservation, finished: false })
     }
 
     pub fn stats(&self) -> AssetCacheStats {
@@ -339,15 +446,28 @@ impl AssetCache {
             },
             protected_bytes: self.storage.protected_bytes(),
             recent_evictions: self.storage.recent_evictions(),
+            prepared_hits: self.counters.prepared_hits.load(Ordering::Relaxed),
+            prepared_misses: self.counters.prepared_misses.load(Ordering::Relaxed),
+            prepared_corrupt_entries: self.counters.prepared_corrupt_entries.load(Ordering::Relaxed),
+            prepared_bytes_read: self.counters.prepared_bytes_read.load(Ordering::Relaxed),
+            prepared_bytes_written: self.counters.prepared_bytes_written.load(Ordering::Relaxed),
+            prepared_size_bytes: self.prepared.accounted_size(),
+            prepared_size_limit_bytes: self.prepared.size_limit(),
+            prepared_entries: self.prepared.namespace_entry_count(PREPARED_TEXTURES),
         }
     }
 
     pub fn clear(&self) -> Result<(), AssetCacheError> {
-        self.storage.clear().map_err(AssetCacheError::Storage)
+        self.storage.clear().map_err(AssetCacheError::Storage)?;
+        self.prepared.clear().map_err(AssetCacheError::Storage)
     }
 
     pub fn set_size_limit(&self, limit: u64) -> Result<(), AssetCacheError> {
         self.storage.set_size_limit(limit).map_err(AssetCacheError::Storage)
+    }
+
+    pub fn set_prepared_size_limit(&self, limit: u64) -> Result<(), AssetCacheError> {
+        self.prepared.set_size_limit(limit).map_err(AssetCacheError::Storage)
     }
 
     pub fn accounted_size(&self) -> u64 {
@@ -358,14 +478,38 @@ impl AssetCache {
         self.storage.size_limit()
     }
 
+    pub fn prepared_accounted_size(&self) -> u64 {
+        self.prepared.accounted_size()
+    }
+
+    pub fn prepared_size_limit(&self) -> u64 {
+        self.prepared.size_limit()
+    }
+
     pub fn shutdown(self) -> Result<(), AssetCacheError> {
-        self.storage.shutdown().map_err(AssetCacheError::Storage)
+        let storage_result = self.storage.shutdown().map_err(AssetCacheError::Storage);
+        let prepared_result = self.prepared.shutdown().map_err(AssetCacheError::Storage);
+        storage_result?;
+        prepared_result
     }
 }
 
 impl CacheWrite {
     pub fn run(mut self) {
-        if self.cache.put_complete(self.request, self.payload.to_vec()).is_err() {
+        let result = match &self.target {
+            CacheWriteTarget::Encoded { request, prepared } => {
+                let encoded = self.cache.put_complete(*request, self.payload.to_vec());
+                if encoded.is_ok()
+                    && let Some((key, bytes)) = prepared
+                    && self.cache.put_prepared_texture_bytes(*key, bytes.to_vec()).is_err()
+                {
+                    self.cache.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
+                }
+                encoded
+            }
+            CacheWriteTarget::PreparedTexture(key) => self.cache.put_prepared_texture_bytes(*key, self.payload.to_vec()),
+        };
+        if result.is_err() {
             self.cache.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
         }
         self.finished = true;
@@ -410,6 +554,10 @@ fn storage_key(request: Request) -> storage::Key {
         }
     };
     storage::Key::new(namespace, *id.uuid().as_bytes())
+}
+
+fn prepared_storage_key(key: PreparedTextureKey) -> storage::Key {
+    storage::Key::new(PREPARED_TEXTURES, key.storage_name())
 }
 
 fn map_storage_error(error: StorageError) -> AssetCacheError {

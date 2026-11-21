@@ -359,9 +359,14 @@ impl From<io::Error> for StorageError {
     }
 }
 
+pub fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CacheValue {
     pub bytes: Vec<u8>,
+    pub sha256: [u8; 32],
     pub last_use: u64,
     pub use_count: u64,
 }
@@ -591,7 +596,7 @@ impl Cache {
                 }
             }
             drop(entries);
-            return Lookup::Hit(CacheValue { bytes, last_use: stamp, use_count });
+            return Lookup::Hit(CacheValue { bytes, sha256: entry.hash, last_use: stamp, use_count });
         }
         Lookup::Miss
     }

@@ -117,6 +117,30 @@ pub(crate) struct Decoded {
 }
 
 impl Decoded {
+    pub(crate) fn from_prepared(source_size: [u32; 2], discard: u8, size: [u32; 2], format: PixelFormat, pixels: Vec<u8>) -> Self {
+        Self { source_size, discard, size, format, pixels }
+    }
+
+    pub(crate) const fn source_size(&self) -> [u32; 2] {
+        self.source_size
+    }
+
+    pub(crate) const fn discard(&self) -> u8 {
+        self.discard
+    }
+
+    pub(crate) const fn size(&self) -> [u32; 2] {
+        self.size
+    }
+
+    pub(crate) const fn format(&self) -> PixelFormat {
+        self.format
+    }
+
+    pub(crate) fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
     pub(crate) fn finish(self, reservation: Reservation) -> Result<Image, Failure> {
         let pixels = reservation.finish(self.pixels).map_err(|_| Failure::MemoryPressure)?;
         Ok(Image { source_size: self.source_size, discard: self.discard, size: self.size, format: self.format, pixels })

@@ -273,7 +273,9 @@ fn disk_hit_skips_fetch_attempt() {
         Some(0)
     );
     let decode = store.start_decode(input).expect("decode admission");
-    assert!(store.complete(decode.run(), now).is_empty());
+    for write in store.complete(decode.run(), now) {
+        write.run();
+    }
     assert_matches!(demand.status(), Status::Ready(Content::Texture(_)));
     assert_eq!(cache.stats().hits, 1);
     assert_eq!(cache.stats().bytes_read, u64::try_from(RGBA_J2C.len()).expect("raw fixture size"));
@@ -577,7 +579,9 @@ fn cancelled_read_allows_retry() {
     let LoadJob::ReadCache(read) = store.next_job(now).expect("later demand reads cache") else { panic!("retry begins with disk read") };
     let Some(LoadJob::Decode(input)) = store.complete_cache_read(read.run(), now) else { panic!("cache hit supplies decode input") };
     let decode = store.start_decode(input).expect("admit retry decode");
-    assert!(store.complete(decode.run(), now).is_empty());
+    for write in store.complete(decode.run(), now) {
+        write.run();
+    }
     assert_matches!(retry.status(), Status::Ready(Content::Texture(_)));
     assert_eq!(store.running_fetches.iter().sum::<usize>(), 0);
     assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);

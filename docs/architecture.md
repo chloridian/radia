@@ -46,7 +46,7 @@ Visible content takes priority over background work, with mesh importance reflec
 
 Unfinished network requests depend on their selected region route and cancel when that route retires. Cache reads and acquired bytes can remain useful while any shared demand survives; a cache miss resumes scheduling through an eligible route. Only successfully decoded network units enter the asynchronous cache writer. Missing or corrupt cached data falls back to network retrieval, while temporary admission pressure defers work.
 
-Assets declares cache namespaces and payload contracts, protects demanded entries with leases, and supplies eviction policy. Storage owns files, indexing, hashing, quotas, locking, and recovery. Generated prim geometry remains in Render's memory cache.
+Assets declares cache namespaces and payload contracts, protects demanded entries with leases, and supplies eviction policy. Encoded asset payloads live under `assets/`, while prepared texture representations live under a separate `prepared/` storage cache with an independent quota so prepared entries never displace encoded payloads; prepared entries are keyed by `(source_sha256, format_version, target_edge)`, validated before use, and discarded with transparent fallback to JPEG 2000 decoding on corruption or version mismatch. Storage owns files, indexing, hashing, quotas, locking, and recovery. Generated prim geometry remains in Render's memory cache.
 
 ### `crates/cvars`
 

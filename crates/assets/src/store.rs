@@ -778,7 +778,7 @@ impl LoadJob {
 
 enum DecodeSource {
     Response(FetchResponse),
-    Disk(Vec<u8>),
+    Disk { bytes: Vec<u8>, source_sha256: [u8; 32], cache: Option<Arc<AssetCache>> },
     Cached(Blob),
 }
 
@@ -791,7 +791,7 @@ impl fmt::Debug for DecodeInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let source = match &self.source {
             DecodeSource::Response(_) => "response",
-            DecodeSource::Disk(_) => "disk",
+            DecodeSource::Disk { .. } => "disk",
             DecodeSource::Cached(_) => "cached",
         };
         f.debug_struct("DecodeInput")
@@ -806,7 +806,7 @@ impl DecodeInput {
     fn origin(&self) -> DecodeOrigin {
         match &self.source {
             DecodeSource::Response(_) => DecodeOrigin::Network,
-            DecodeSource::Disk(_) => DecodeOrigin::Disk,
+            DecodeSource::Disk { .. } => DecodeOrigin::Disk,
             DecodeSource::Cached(_) => DecodeOrigin::Memory,
         }
     }
@@ -825,36 +825,44 @@ impl DecodeInput {
 }
 
 #[derive(Debug)]
-pub struct DecodeJob(DecodeInput);
+pub struct DecodeJob {
+    input: DecodeInput,
+    persist_prepared: bool,
+}
 
 impl DecodeJob {
     pub fn fail(self, failure: Failure) -> LoadCompletion {
-        self.0.fail(failure)
+        self.input.fail(failure)
     }
 
     pub fn run(self) -> LoadCompletion {
-        let DecodeInput { mut job, source, .. } = self.0;
+        let DecodeJob { input: DecodeInput { mut job, source, .. }, persist_prepared } = self;
         let cancelled = &job.cancelled;
         let started = Instant::now();
         let (result, origin) = match source {
             DecodeSource::Response(response) => (
-                content::prepare_cancellable(job.request, job.size, response, &mut job.reservation, || *cancelled.borrow()),
+                content::prepare_cancellable(job.request, job.size, response, persist_prepared, &mut job.reservation, || {
+                    *cancelled.borrow()
+                }),
                 DecodeOrigin::Network,
             ),
-            DecodeSource::Disk(bytes) => {
-                (content::prepare_disk(job.request, job.size, bytes, &mut job.reservation, || *cancelled.borrow()), DecodeOrigin::Disk)
-            }
+            DecodeSource::Disk { bytes, source_sha256, cache } => (
+                content::prepare_disk(job.request, job.size, bytes, source_sha256, cache.as_deref(), &mut job.reservation, || {
+                    *cancelled.borrow()
+                }),
+                DecodeOrigin::Disk,
+            ),
             DecodeSource::Cached(source) => (content::prepare_cached(job.size, &source, || *cancelled.borrow()), DecodeOrigin::Memory),
         };
         LoadCompletion { job, result, origin, decode_duration: Some(started.elapsed()) }
     }
 
     pub fn resource(&self) -> Resource {
-        self.0.resource()
+        self.input.resource()
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.is_cancelled()
+        self.input.is_cancelled()
     }
 }
 
@@ -1592,7 +1600,7 @@ impl Store {
         }
         start_decode(input.job.resource.kind, &mut self.running_texture_decodes, &mut self.running_other_decodes);
         entry.broadcast_status(Status::Decoding);
-        Ok(DecodeJob(input))
+        Ok(DecodeJob { input, persist_prepared: self.cache.is_some() })
     }
 
     pub fn complete_cache_read(&mut self, completion: CacheReadCompletion, now: Instant) -> Option<LoadJob> {
@@ -1628,7 +1636,10 @@ impl Store {
                 if let LoadPhase::Running { stage, .. } = &mut entry.phase {
                     *stage = Stage::Cached;
                 }
-                Some(LoadJob::Decode(DecodeInput { source: DecodeSource::Disk(asset.bytes), job }))
+                Some(LoadJob::Decode(DecodeInput {
+                    source: DecodeSource::Disk { bytes: asset.bytes, source_sha256: asset.sha256, cache: self.cache.clone() },
+                    job,
+                }))
             }
             Ok(AssetLookup::Unavailable(storage::UnavailableReason::ReadLimit)) => {
                 entry.phase = LoadPhase::Queued;
@@ -1736,14 +1747,25 @@ impl Store {
             }
             return writes;
         }
-        let persist = self.cache.is_some() && origin == DecodeOrigin::Network;
-        match result.and_then(|prepared| prepared.finish(job.reservation, persist)) {
-            Ok((content, source, persisted)) => {
+        let persist_encoded = self.cache.is_some() && origin == DecodeOrigin::Network;
+        let persist_prepared = self.cache.is_some();
+        match result.and_then(|prepared| prepared.finish(job.reservation, persist_encoded, persist_prepared)) {
+            Ok(content::FinishedPrepared { content, source, persisted, prepared_texture }) => {
                 entry.used = now;
-                if let (Some(cache), Some(payload)) = (&self.cache, persisted)
-                    && let Some(write) = cache.queue_write(job.request, payload, &self.budget)
-                {
-                    writes.push(write);
+                if let Some(cache) = &self.cache {
+                    match (persisted, prepared_texture) {
+                        (Some(payload), prepared) => {
+                            if let Some(write) = cache.queue_write_with_prepared(job.request, payload, prepared, &self.budget) {
+                                writes.push(write);
+                            }
+                        }
+                        (None, Some((key, payload))) => {
+                            if let Some(write) = cache.queue_prepared_texture_write(key, payload, &self.budget) {
+                                writes.push(write);
+                            }
+                        }
+                        (None, None) => {}
+                    }
                 }
                 if job.resource.kind == Kind::Texture
                     && entry.requested_size().is_some_and(|size| size != job.size)
