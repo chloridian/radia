@@ -304,6 +304,16 @@ impl SceneFeed {
         self.motion_active.retain(|region, _| regions.contains(region));
     }
 
+    pub(crate) fn ping_delay(&self) -> Option<Duration> {
+        let circuits = self.motion_circuits.borrow();
+        let target_region = self.dead_reckoning.sample.map(|sample| sample.region);
+        let status = target_region
+            .and_then(|region| circuits.iter().find(|(candidate, _)| *candidate == region))
+            .or_else(|| circuits.first())
+            .map(|(_, receiver)| *receiver.borrow())?;
+        status.connected.then_some(status.measured_ping_delay).flatten()
+    }
+
     pub(crate) fn set_camera(&self, camera: Option<Camera>) {
         self.camera.send_if_modified(|previous| {
             if *previous == camera {

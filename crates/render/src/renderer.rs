@@ -173,6 +173,10 @@ impl Renderer {
         self.geometry.texture_soft_cap_mib()
     }
 
+    pub fn vram_budget_bytes(&self) -> usize {
+        self.geometry.vram_budget_bytes()
+    }
+
     pub fn set_texture_soft_cap(&mut self, mib: u32) {
         self.geometry.set_texture_soft_cap(mib);
     }

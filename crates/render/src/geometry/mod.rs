@@ -59,6 +59,7 @@ pub struct Stats {
     pub instance_buffer_growths: usize,
     pub draw_calls: usize,
     pub draw_commands: usize,
+    pub triangles: u64,
     pub pending_meshes: usize,
     pub uploaded_bytes: usize,
     pub mesh_bytes: usize,
@@ -126,6 +127,12 @@ pub struct Stats {
     pub gpu_mesh_retirements: usize,
     pub gpu_mesh_retired_bytes: usize,
     pub rebuild_pending: bool,
+}
+
+impl Stats {
+    pub fn vram_bytes(&self) -> usize {
+        self.mesh_bytes.saturating_add(self.texture_bytes).saturating_add(self.depth_bytes).saturating_add(self.instance_buffer_bytes)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -408,6 +415,13 @@ impl GeometryRenderer {
     pub(crate) fn admit(&self) -> Option<FrameLease> {
         self.memory.frames.try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 3).then_some(n + 1)).ok()?;
         Some(FrameLease(self.memory.clone()))
+    }
+
+    pub(crate) fn vram_budget_bytes(&self) -> usize {
+        MESH_BYTES
+            .saturating_add(DEPTH_BYTES)
+            .saturating_add(INSTANCE_BUFFER_BYTES)
+            .saturating_add((self.texture_soft_cap_mib() as usize).saturating_mul(1024 * 1024))
     }
 
     pub(crate) fn depth(&mut self, device: &Device, size: [u32; 2]) -> Option<TextureView> {

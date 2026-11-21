@@ -11,18 +11,20 @@ use std::{
 
 use futures::{StreamExt, channel::mpsc as async_mpsc};
 use gpui::{
-    Anchor, AnyElement, Bounds, ColorExt, Context, DevicePixels, DispatchPhase, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent,
-    KeyUpEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, RawMouseMotionEvent,
-    Render, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, SurfaceSource, Window, canvas, div, prelude::*, px, size, surface,
+    Anchor, AnyElement, Bounds, ColorExt, Context, DevicePixels, DispatchPhase, Entity, FocusHandle, Focusable, Hsla, IntoElement,
+    KeyDownEvent, KeyUpEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, Pixels,
+    RawMouseMotionEvent, Render, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, SurfaceSource, Window, black, canvas, div,
+    prelude::*, px, rgb, rgb_to_hsla, size, surface, white,
 };
 use gpui_component::{
-    Disableable, IconName, IndexPath, Sizable, Theme, TitleBar,
+    Disableable, Icon, IconName, IndexPath, Sizable, Theme, TitleBar,
     button::{Button, ButtonVariants as _},
     popover::Popover,
     select::{Select, SelectEvent, SelectItem, SelectState},
     slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
 };
+use gpui_kit_assets::IconName as AssetIconName;
 use gpui_wgpu::WgpuContextHandle;
 use render::{CompressionQuality, FrameInput, Renderer, TextureCompletion, scene};
 use tokio::{runtime::Handle, sync::watch};
@@ -34,7 +36,9 @@ use wgpu::{Device, Queue};
 use super::{
     FRAME_INTERVAL, ViewportError,
     environment::{EnvOption, menu_from_items, sky_frame_deadline, sky_options, step_index, water_frame_deadline, water_options},
-    timing::{FrameTimes, next_frame_deadline},
+    timing::{
+        FrameTimes, MetricStatus, format_bytes, format_count, fps_status, frame_time_status, next_frame_deadline, ping_status, vram_status,
+    },
 };
 use crate::{
     agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
@@ -742,10 +746,12 @@ impl SceneView {
                 animation_time: feed.animation_time(),
                 water_scroll: feed.water_scroll(),
             });
+            let draw_started = Instant::now();
+            let game_work = draw_started.saturating_duration_since(now);
             let result = self.renderer.as_mut().map(|renderer| renderer.draw(scene, avatar_pose, frame_input));
             self.dispatch_texture_jobs();
             let completed = Instant::now();
-            let frame_work = completed.saturating_duration_since(now);
+            let render_work = completed.saturating_duration_since(draw_started);
             match result {
                 Some(Ok(presented)) => {
                     let active_motion = self.controls.active() || self.stop_clear_pending;
@@ -756,7 +762,7 @@ impl SceneView {
                             && agent_pose.is_some_and(|agent_pose| self.follow_camera.moving(agent_pose, completed)))
                         || (self.camera_mode == CameraMode::Free && self.camera.as_ref().is_some_and(|camera| camera.moving(completed)));
                     if presented {
-                        self.frame_times.record(frame_work);
+                        self.frame_times.record(completed, game_work, render_work);
                         self.last_camera = observation;
                         self.next_frame =
                             if self.dirty { next_frame_deadline(scheduled_deadline, completed, FRAME_INTERVAL) } else { completed };
@@ -836,10 +842,15 @@ impl SceneView {
         let can_select_env = self.feed.as_ref().is_some_and(|feed| feed.agent().is_some());
 
         let left = div().flex().items_center().gap_1().child(
-            Button::new("open-nearby-chat").ghost().small().label("Chat").on_click(move |_, _, cx| gui_scene::request_chat(generation, cx)),
+            Button::new("open-nearby-chat")
+                .ghost()
+                .small()
+                .icon(Icon::new(AssetIconName::MessageCircle))
+                .tooltip("Nearby chat")
+                .on_click(move |_, _, cx| gui_scene::request_chat(generation, cx)),
         );
 
-        let right = div().flex().items_center().gap_1().child(
+        let right = div().flex().items_center().gap_1().pr_2().child(
             Popover::new("scene-settings-popover")
                 .anchor(Anchor::TopRight)
                 .trigger(Button::new("scene-settings-button").ghost().small().icon(IconName::Settings).tooltip("Settings"))
@@ -974,82 +985,90 @@ impl SceneView {
             return None;
         }
         let renderer = self.renderer.as_ref()?;
-        let theme = Theme::global(cx).colors;
         let stats = renderer.stats();
-        let gpu_timings = renderer.gpu_timings();
-        let gpu_timing_supported = renderer.gpu_timing_supported();
-        let frame_times = self.frame_times.summary();
+        let gpu_ms = renderer.gpu_timings().map(|(scene_ms, post_ms)| scene_ms + post_ms);
+        let metrics = self.frame_times.metrics();
+        let vram_bytes = stats.vram_bytes();
+        let vram_budget = renderer.vram_budget_bytes();
+        let ram_bytes = self.feed.as_ref().map(|feed| {
+            let cache_bytes = feed.assets.cache_stats().map_or(0, |cache| usize::try_from(cache.size_bytes).unwrap_or(usize::MAX));
+            feed.budget.charged_bytes().saturating_add(cache_bytes)
+        });
+        let ping_ms = self.feed.as_ref().and_then(SceneFeed::ping_delay).map(|delay| delay.as_secs_f64() * 1000.0);
 
-        let mut lines = Vec::with_capacity(10);
-        if let Some(times) = &frame_times {
-            lines.push(format!(
-                "Frametime: p50 {:.2} ms, p95 {:.2} ms",
-                times.p50.as_secs_f64() * 1000.0,
-                times.p95.as_secs_f64() * 1000.0
-            ));
-        } else {
-            lines.push("Frametime: no samples".into());
-        }
-        lines.push(format!("Draws: {} calls, {} commands, {} instances", stats.draw_calls, stats.draw_commands, stats.instances));
-        lines.push(format!("CPU prepare: {:.2} ms", stats.prepare_ms));
-        if let Some((scene_ms, _)) = gpu_timings {
-            lines.push(format!("GPU pass: scene {:.2} ms", scene_ms));
-        } else if gpu_timing_supported {
-            lines.push("GPU pass: collecting".into());
-        }
-        lines.push(format!(
-            "GPU meshes: {:.1} MiB ({} pending) | textures: {} ({:.1} MiB, {} pending) | depth: {:.1} MiB",
-            stats.mesh_bytes as f64 / 1_048_576.0,
-            stats.pending_meshes,
-            stats.texture_count,
-            stats.texture_bytes as f64 / 1_048_576.0,
-            stats.pending_textures,
-            stats.depth_bytes as f64 / 1_048_576.0,
-        ));
-        if let Some(feed) = &self.feed {
-            lines.push(format!(
-                "Scene: {} records, {} regions, {} terrain patches | {:.1} MiB (peak {:.1} MiB)",
-                feed.view.tracked_object_count(),
-                feed.view.region_count(),
-                feed.view.patch_count(),
-                feed.budget.charged_bytes() as f64 / 1_048_576.0,
-                feed.budget.high_water_bytes() as f64 / 1_048_576.0,
-            ));
-            if let Some(cache) = feed.assets.cache_stats() {
-                lines.push(format!(
-                    "Asset cache: {:.1}/{:.1} MiB (protected {:.1} MiB)",
-                    cache.size_bytes as f64 / 1_048_576.0,
-                    cache.size_limit_bytes as f64 / 1_048_576.0,
-                    cache.protected_bytes as f64 / 1_048_576.0,
-                ));
-                lines.push(format!(
-                    "Cached: {} tex, {} PBR, {} legacy, {} env, {} mesh",
-                    cache.entries_by_kind.textures,
-                    cache.entries_by_kind.pbr_materials,
-                    cache.entries_by_kind.legacy_materials,
-                    cache.entries_by_kind.environments,
-                    cache.entries_by_kind.meshes,
-                ));
-            }
-        }
+        let unavailable = rgb_to_hsla(rgb(0x9CA3AF));
+        let info = white();
 
+        let (fps_text, fps_color) = match metrics {
+            Some(metrics) => (format!("{:.2} FPS", metrics.fps), status_color(fps_status(metrics.fps))),
+            None => ("N/A".into(), unavailable),
+        };
+        let (frametime_text, frametime_color) = match metrics {
+            Some(metrics) => (format!("{:.2} ms", metrics.frametime_ms), status_color(frame_time_status(metrics.frametime_ms))),
+            None => ("N/A".into(), unavailable),
+        };
+        let (game_text, game_color) = match metrics {
+            Some(metrics) => (format!("{:.2} ms", metrics.game_ms), status_color(frame_time_status(metrics.game_ms))),
+            None => ("N/A".into(), unavailable),
+        };
+        let (render_text, render_color) = match metrics {
+            Some(metrics) => (format!("{:.2} ms", metrics.render_ms), status_color(frame_time_status(metrics.render_ms))),
+            None => ("N/A".into(), unavailable),
+        };
+        let (gpu_text, gpu_color) = match gpu_ms {
+            Some(ms) => (format!("{ms:.2} ms"), status_color(frame_time_status(ms))),
+            None => ("N/A".into(), unavailable),
+        };
+        let vram_text = format_bytes(vram_bytes);
+        let vram_color = status_color(vram_status(vram_bytes, vram_budget));
+        let (ram_text, ram_color) = match ram_bytes {
+            Some(bytes) => (format_bytes(bytes), info),
+            None => ("N/A".into(), unavailable),
+        };
+        let draws_text = stats.draw_calls.to_string();
+        let tris_text = format_count(stats.triangles);
+        let (ping_text, ping_color) = match ping_ms {
+            Some(ms) => (format!("{ms:.0} ms"), status_color(ping_status(ms))),
+            None => ("N/A".into(), unavailable),
+        };
+
+        let rows = [
+            ("", fps_text, fps_color),
+            ("", frametime_text, frametime_color),
+            ("Game:", game_text, game_color),
+            ("Render:", render_text, render_color),
+            ("GPU:", gpu_text, gpu_color),
+            ("VRAM:", vram_text, vram_color),
+            ("RAM:", ram_text, ram_color),
+            ("Draws:", draws_text, info),
+            ("Tris:", tris_text, info),
+            ("Ping:", ping_text, ping_color),
+            ("Packet Loss:", "N/A".into(), unavailable),
+        ];
+
+        let mono = Theme::global(cx).mono_font_family.clone();
         Some(
             div()
                 .absolute()
                 .top(px(8.))
-                .left(px(8.))
-                .px_3()
-                .py_2()
-                .rounded(px(6.))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.background.opacity(0.82))
+                .right(px(12.))
+                .px_2()
+                .py_1p5()
+                .rounded(px(4.))
+                .bg(black().opacity(0.55))
+                .font_family(mono)
                 .text_xs()
-                .text_color(theme.foreground)
                 .flex()
                 .flex_col()
                 .gap_0p5()
-                .children(lines.into_iter().map(|line| div().child(line)))
+                .children(rows.into_iter().map(|(label, value, color)| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().w(px(84.)).text_right().text_color(info).child(label))
+                        .child(div().min_w(px(72.)).text_color(color).child(value))
+                }))
                 .into_any_element(),
         )
     }
@@ -1070,6 +1089,7 @@ impl Render for SceneView {
         let surface_element = self.renderer.as_ref().and_then(Renderer::output_texture).map(|(texture, [width, height])| {
             surface(SurfaceSource::Texture { texture, size: size(DevicePixels(width as i32), DevicePixels(height as i32)) })
                 .object_fit(ObjectFit::Fill)
+                .rounded(px(VIEWPORT_CORNER_RADIUS))
                 .size_full()
                 .into_any_element()
         });
@@ -1148,6 +1168,14 @@ impl Render for SceneView {
                             .children(stats_overlay),
                     ),
             )
+    }
+}
+
+fn status_color(status: MetricStatus) -> Hsla {
+    match status {
+        MetricStatus::Green => rgb_to_hsla(rgb(0x4ADE80)),
+        MetricStatus::Yellow => rgb_to_hsla(rgb(0xFACC15)),
+        MetricStatus::Red => rgb_to_hsla(rgb(0xF87171)),
     }
 }
 
