@@ -15,7 +15,7 @@ use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::AssetHandle,
     gui::{
-        AppLifecycle, log_control, login_options,
+        AppLifecycle, log_control, login_options, settings,
         views::{
             chat::ChatScreen,
             viewport::{SceneView, SceneViewConfig, ViewportError},
@@ -105,7 +105,8 @@ pub(crate) fn start_session(
     let sources = SceneSources { reader: reader.clone(), environments, assets: assets.clone(), motion_circuits, inventory_updates };
     let runtime = Tokio::handle(cx);
     let logs = log_control(cx);
-    let config = SceneViewConfig { generation, sources, agent_id, camera, movement, agent_motion, runtime, log_control: logs };
+    let settings = settings(cx);
+    let config = SceneViewConfig { generation, sources, agent_id, camera, movement, agent_motion, runtime, log_control: logs, settings };
 
     let minimum = size(px(460.), px(300.));
     let options = WindowOptions {

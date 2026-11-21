@@ -9,6 +9,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use cvars::{
+    CAMERA_TURN_RATE_DEG_PER_SEC, LOG_LEVEL, LOG_NOISY_NETWORK, RENDER_DRAW_DISTANCE, RENDER_MAX_FPS, RENDER_SHOW_STATS, SCENE_LOD_FACTOR,
+    ValueDomain,
+};
 use futures::{StreamExt, channel::mpsc as async_mpsc};
 use prism::{
     Anchor, AnyElement, Bounds, Context, DevicePixels, DispatchPhase, Entity, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent,
@@ -46,12 +50,13 @@ use super::{
 };
 use crate::{
     agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
-    camera::{CameraMode, DEFAULT_DRAW_DISTANCE, FollowCamera, OrbitCamera, handle_keyboard_input},
+    camera::{CameraConfig, CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input},
     gui::{scene as gui_scene, window_geometry},
     inventory::environments::EnvironmentMenu,
     logging::{LogControl, LogLevel},
     scene_feed::{SceneFeed, SceneSources},
     session::AgentMotionSample,
+    settings::SettingsStore,
 };
 
 const TEXTURE_DROP_REPORT_INTERVAL: Duration = Duration::from_secs(10);
@@ -70,6 +75,7 @@ pub(crate) struct SceneViewConfig {
     pub(crate) agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     pub(crate) runtime: Handle,
     pub(crate) log_control: LogControl,
+    pub(crate) settings: Arc<SettingsStore>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,6 +120,7 @@ pub(crate) struct SceneView {
     dirty: bool,
     ready: bool,
     failed: bool,
+    settings: Arc<SettingsStore>,
     lod_factor: f32,
     draw_distance: f32,
     camera: Option<OrbitCamera>,
@@ -157,11 +164,17 @@ impl SceneView {
         );
 
         let (texture_sender, texture_receiver) = mpsc::sync_channel(2);
-        let lod_factor = 1.0;
-        let draw_distance = DEFAULT_DRAW_DISTANCE;
+        let settings = config.settings;
+        let snapshot = settings.snapshot();
+        let lod_factor = snapshot.get(SCENE_LOD_FACTOR);
+        let draw_distance = snapshot.get(RENDER_DRAW_DISTANCE);
+        let show_stats = snapshot.get(RENDER_SHOW_STATS);
+        let camera_config = CameraConfig::from_snapshot(&snapshot);
+        let (lod_min, lod_max, lod_step) = f32_slider_bounds(SCENE_LOD_FACTOR.descriptor().domain);
+        let (draw_min, draw_max, draw_step) = f32_slider_bounds(RENDER_DRAW_DISTANCE.descriptor().domain);
 
-        let lod_slider = cx.new(|_| SliderState::new().min(0.25).max(4.0).step(0.05).default_value(lod_factor));
-        let draw_distance_slider = cx.new(|_| SliderState::new().min(32.0).max(1024.0).step(8.0).default_value(draw_distance));
+        let lod_slider = cx.new(|_| SliderState::new().min(lod_min).max(lod_max).step(lod_step).default_value(lod_factor));
+        let draw_distance_slider = cx.new(|_| SliderState::new().min(draw_min).max(draw_max).step(draw_step).default_value(draw_distance));
 
         let initial_sky = sky_options(None);
         let initial_water = water_options(None);
@@ -180,10 +193,14 @@ impl SceneView {
                 this.handle_focus_lost(window, cx);
             }
         }));
-        subscriptions.push(cx.subscribe(&lod_slider, |this, _, event: &SliderEvent, cx| {
+        subscriptions.push(cx.subscribe(&lod_slider, move |this, _, event: &SliderEvent, cx| {
             let SliderEvent::Change(value) = event else { return };
-            let next = value.end().clamp(0.25, 4.0);
+            let next = value.end().clamp(lod_min, lod_max);
             if (this.lod_factor - next).abs() > f32::EPSILON {
+                if let Err(error) = this.settings.set_global(SCENE_LOD_FACTOR, next) {
+                    tracing::warn!(%error, "failed to update scene.lod_factor CVar");
+                    return;
+                }
                 this.lod_factor = next;
                 if let Some(camera) = &mut this.camera {
                     camera.lod_factor = next;
@@ -192,10 +209,14 @@ impl SceneView {
                 cx.notify();
             }
         }));
-        subscriptions.push(cx.subscribe(&draw_distance_slider, |this, _, event: &SliderEvent, cx| {
+        subscriptions.push(cx.subscribe(&draw_distance_slider, move |this, _, event: &SliderEvent, cx| {
             let SliderEvent::Change(value) = event else { return };
-            let next = value.end().clamp(32.0, 1024.0);
+            let next = value.end().clamp(draw_min, draw_max);
             if (this.draw_distance - next).abs() > f32::EPSILON {
+                if let Err(error) = this.settings.set_global(RENDER_DRAW_DISTANCE, next) {
+                    tracing::warn!(%error, "failed to update render.draw_distance CVar");
+                    return;
+                }
                 this.draw_distance = next;
                 if let Some(camera) = &mut this.camera {
                     camera.draw_distance = next;
@@ -224,6 +245,10 @@ impl SceneView {
         }));
         subscriptions.push(cx.subscribe(&log_level_select, |this, _, event: &SelectEvent<Vec<LogLevelOption>>, cx| {
             if let SelectEvent::Confirm(Some(level)) = event {
+                if let Err(error) = this.settings.set_global(LOG_LEVEL, level.directive()) {
+                    tracing::warn!(%error, "failed to update log.level CVar");
+                    return;
+                }
                 this.log_control.set_level(*level);
                 cx.notify();
             }
@@ -246,6 +271,8 @@ impl SceneView {
 
         let scale_factor = window.scale_factor();
         let initial_size = estimate_viewport_size(window);
+        let mut follow_camera = FollowCamera::default();
+        follow_camera.config = camera_config;
 
         let mut view = Self {
             generation: config.generation,
@@ -270,10 +297,11 @@ impl SceneView {
             dirty: true,
             ready: false,
             failed: false,
+            settings,
             lod_factor,
             draw_distance,
             camera: None,
-            follow_camera: FollowCamera::default(),
+            follow_camera,
             camera_mode: CameraMode::Follow,
             controls: HeldControls::default(),
             body_rotation: BodyRotation::default(),
@@ -288,7 +316,7 @@ impl SceneView {
             sky_options_cache: initial_sky,
             water_options_cache: initial_water,
             environment_menu: None,
-            show_stats: false,
+            show_stats,
             log_level_select,
             log_control: config.log_control,
             _subscriptions: subscriptions,
@@ -687,9 +715,17 @@ impl SceneView {
         self.complete_texture_jobs();
 
         let now = Instant::now();
+        let snapshot = self.settings.snapshot();
+        let camera_config = CameraConfig::from_snapshot(&snapshot);
+        self.follow_camera.config = camera_config;
+        if let Some(camera) = &mut self.camera {
+            camera.config = camera_config;
+        }
+        let turn_rate = snapshot.get(CAMERA_TURN_RATE_DEG_PER_SEC).to_radians();
+        let frame_interval = frame_interval_for_fps(snapshot.get(RENDER_MAX_FPS));
         let (pose, seed) = self.agent_pose_and_seed_at(now);
         self.ensure_camera(pose);
-        let rotation = self.body_rotation.update(seed, self.controls.yaw(self.modifiers.shift), now);
+        let rotation = self.body_rotation.update_with_turn_rate(seed, self.controls.yaw(self.modifiers.shift), turn_rate, now);
         let movement: MovementObservation = self.controls.observation(self.modifiers.shift, rotation);
         self.stop_clear_pending = movement.control_flags & STOP != 0;
         let observation = self.camera_observation(pose, rotation, now);
@@ -769,7 +805,7 @@ impl SceneView {
                         self.frame_times.record(completed, game_work, render_work);
                         self.last_camera = observation;
                         self.next_frame =
-                            if self.dirty { next_frame_deadline(scheduled_deadline, completed, FRAME_INTERVAL) } else { completed };
+                            if self.dirty { next_frame_deadline(scheduled_deadline, completed, frame_interval) } else { completed };
                         self.next_sky = sky_frame_deadline(
                             observation,
                             self.feed.as_ref().is_some_and(|feed| feed.clouds_animate() || feed.stars_animate()),
@@ -787,7 +823,7 @@ impl SceneView {
                             cx.defer(move |cx| gui_scene::scene_ready(generation, cx));
                         }
                     } else {
-                        self.next_frame = next_frame_deadline(scheduled_deadline, completed, FRAME_INTERVAL);
+                        self.next_frame = next_frame_deadline(scheduled_deadline, completed, frame_interval);
                         self.next_sky = None;
                         self.next_water = None;
                     }
@@ -966,6 +1002,10 @@ impl SceneView {
                                 Switch::new("show-stats-toggle").checked(show_stats).on_click(move |checked, _, cx| {
                                     let checked = *checked;
                                     view_for_stats.update(cx, |view, cx| {
+                                        if let Err(error) = view.settings.set_session(RENDER_SHOW_STATS, checked) {
+                                            tracing::warn!(%error, "failed to update render.show_stats CVar");
+                                            return;
+                                        }
                                         view.show_stats = checked;
                                         cx.notify();
                                     });
@@ -978,6 +1018,10 @@ impl SceneView {
                                 Switch::new("noisy-logs-toggle").checked(noisy_network).on_click(move |checked, _, cx| {
                                     let checked = *checked;
                                     view_for_noisy.update(cx, |view, cx| {
+                                        if let Err(error) = view.settings.set_global(LOG_NOISY_NETWORK, checked) {
+                                            tracing::warn!(%error, "failed to update log.noisy_network CVar");
+                                            return;
+                                        }
                                         view.log_control.set_noisy_network(checked);
                                         cx.notify();
                                     });
@@ -1195,4 +1239,15 @@ fn estimate_viewport_size(window: &Window) -> [u32; 2] {
 
 fn deadline_passed(deadline: Option<Instant>, now: Instant) -> bool {
     deadline.is_some_and(|deadline| now >= deadline)
+}
+
+fn f32_slider_bounds(domain: ValueDomain) -> (f32, f32, f32) {
+    match domain {
+        ValueDomain::F32 { min, max, step } => (min, max, step.unwrap_or(1.0)),
+        _ => unreachable!("slider CVar must use f32 domain"),
+    }
+}
+
+fn frame_interval_for_fps(max_fps: i64) -> Duration {
+    u64::try_from(max_fps).ok().filter(|fps| *fps > 0).map_or(FRAME_INTERVAL, |fps| Duration::from_secs_f64(1.0 / fps as f64))
 }

@@ -19,6 +19,7 @@ use tokio::{runtime::Handle, task::JoinHandle};
 use crate::{
     gui::{views::login::LoginScreen, window_geometry::restore_bounds},
     logging::LogControl,
+    settings::SettingsStore,
 };
 
 struct AppLifecycle {
@@ -30,6 +31,7 @@ struct AppLifecycle {
     session_lifecycle: Arc<SessionLifecycle>,
     asset_cache: Option<Arc<AssetCache>>,
     log_control: LogControl,
+    settings: Arc<SettingsStore>,
 }
 
 impl Global for AppLifecycle {}
@@ -93,7 +95,11 @@ pub(crate) fn log_control(cx: &App) -> LogControl {
     cx.try_global::<AppLifecycle>().map_or_else(LogControl::noop, |lifecycle| lifecycle.log_control.clone())
 }
 
-pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>, log_control: LogControl) {
+pub(crate) fn settings(cx: &App) -> Arc<SettingsStore> {
+    cx.try_global::<AppLifecycle>().map_or_else(|| Arc::new(SettingsStore::in_memory()), |lifecycle| Arc::clone(&lifecycle.settings))
+}
+
+pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>, log_control: LogControl, settings: Arc<SettingsStore>) {
     let session_lifecycle = Arc::new(SessionLifecycle::default());
     cx.set_app_identity("org.radia.viewer", "Radia");
     cx.set_keyring_label("Radia");
@@ -108,6 +114,7 @@ pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>
         let lifecycle = cx.global_mut::<AppLifecycle>();
         lifecycle.asset_cache = asset_cache;
         lifecycle.log_control = log_control;
+        lifecycle.settings = settings;
     }
 
     let (main_window, login) =
@@ -142,6 +149,7 @@ fn install_lifecycle(session_lifecycle: Arc<SessionLifecycle>, cx: &mut App) {
         session_lifecycle,
         asset_cache: None,
         log_control: LogControl::noop(),
+        settings: Arc::new(SettingsStore::in_memory()),
     });
 }
 

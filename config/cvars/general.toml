@@ -1,0 +1,22 @@
+[log.level]
+type = "enum"
+default = "info"
+values = ["error", "warn", "info", "debug", "trace"]
+persistent = true
+apply = "live"
+help = "Minimum log level to output."
+
+[log.noisy_network]
+type = "bool"
+default = false
+persistent = true
+apply = "live"
+help = "Include verbose network subsystem logs."
+
+[chat.max_history_messages]
+type = "i64"
+default = 500
+range = [50, 5000]
+persistent = true
+apply = "live"
+help = "Maximum number of nearby chat messages retained in history."
