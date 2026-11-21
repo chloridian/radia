@@ -8,14 +8,14 @@ use std::{
 };
 
 use cvars::{
-    ApplyScope, CvarDescriptor, CvarError, CvarId, CvarKey, CvarRegistry, CvarRevision, CvarSnapshot, CvarTyped, CvarValue, Layer,
-    PersistenceScope,
+    ApplyScope, CvarDescriptor, CvarError, CvarId, CvarKey, CvarRegistry, CvarRevision, CvarSnapshot, CvarTyped, CvarValue,
+    GRAPHICS_PRESETS, Layer, PersistenceScope, lookup_by_name,
 };
 use tokio::runtime::Handle;
 use toml_edit::DocumentMut;
 use utils::write_atomic;
 
-use self::document::{FileFingerprint, fingerprint_on_disk, parse_document, read_bounded, set_document_value};
+use self::document::{FileFingerprint, fingerprint_on_disk, parse_document, read_bounded, set_document_preset, set_document_value};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SettingsError {
@@ -74,6 +74,7 @@ pub struct ResetOutcome {
 struct SettingsState {
     registry: CvarRegistry,
     document: DocumentMut,
+    active_preset: Option<String>,
     fingerprint: FileFingerprint,
 }
 
@@ -92,10 +93,11 @@ impl SettingsStore {
         Self {
             path: None,
             runtime: None,
-            presets: Vec::new(),
+            presets: bundled_presets(),
             state: Mutex::new(SettingsState {
                 registry: CvarRegistry::new(),
                 document: DocumentMut::new(),
+                active_preset: None,
                 fingerprint: FileFingerprint::ABSENT,
             }),
             io_lock: Mutex::new(()),
@@ -103,7 +105,7 @@ impl SettingsStore {
     }
 
     pub fn load_or_default(path: PathBuf, runtime: Option<Handle>) -> (Self, Result<LoadReport, SettingsError>) {
-        Self::load_or_default_with_presets(path, runtime, Vec::new())
+        Self::load_or_default_with_presets(path, runtime, bundled_presets())
     }
 
     pub fn load_or_default_with_presets(
@@ -118,6 +120,7 @@ impl SettingsStore {
             state: Mutex::new(SettingsState {
                 registry: CvarRegistry::new(),
                 document: DocumentMut::new(),
+                active_preset: None,
                 fingerprint: FileFingerprint::ABSENT,
             }),
             io_lock: Mutex::new(()),
@@ -156,6 +159,7 @@ impl SettingsStore {
             state.registry.apply_preset(None, &[]).map_err(SettingsError::InvalidValue)?;
             state.registry.replace_layer(Layer::Global, &[]).map_err(SettingsError::InvalidValue)?;
             state.document = DocumentMut::new();
+            state.active_preset = None;
             state.fingerprint = FileFingerprint::ABSENT;
             return Ok(LoadReport::default());
         };
@@ -177,6 +181,7 @@ impl SettingsStore {
         state.registry.apply_preset(parsed.preset.as_deref(), &preset_refs).map_err(SettingsError::InvalidValue)?;
         state.registry.replace_layer(Layer::Global, &borrowed).map_err(SettingsError::InvalidValue)?;
         state.document = parsed.document;
+        state.active_preset = parsed.preset.clone();
         state.fingerprint = fingerprint;
 
         Ok(LoadReport { unknown_keys: parsed.unknown_keys, preset: parsed.preset, loaded_from_disk: true })
@@ -219,6 +224,62 @@ impl SettingsStore {
 
     pub fn reset_global_and_save(&self, id: CvarId) -> Result<ResetOutcome, SettingsError> {
         let outcome = self.reset_global_in_memory(id)?;
+        self.save_sync()?;
+        Ok(outcome)
+    }
+
+    pub fn set_graphics_preset(&self, preset: Option<&str>) -> Result<MutationOutcome, SettingsError> {
+        let preset_slices = self
+            .presets
+            .iter()
+            .map(|(name, entries)| (name.as_str(), entries.iter().map(|(key, val)| (key.as_str(), val.clone())).collect::<Vec<_>>()))
+            .collect::<Vec<_>>();
+        let preset_refs = preset_slices.iter().map(|(name, entries)| (*name, entries.as_slice())).collect::<Vec<_>>();
+
+        let outcome = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let revision = state.registry.apply_preset(preset, &preset_refs).map_err(SettingsError::InvalidValue)?;
+            state.active_preset = preset.map(str::to_owned);
+            set_document_preset(&mut state.document, preset);
+            let pending_restart = !state.registry.snapshot().pending_restarts().is_empty();
+            MutationOutcome { revision, pending_restart }
+        };
+        self.save_sync()?;
+        Ok(outcome)
+    }
+
+    pub fn is_custom_preset(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(active) = state.active_preset.as_deref() else {
+            return false;
+        };
+        let Some((_, entries)) = self.presets.iter().find(|(name, _)| name == active) else {
+            return false;
+        };
+        entries.iter().any(|(key, preset_value)| {
+            lookup_by_name(key)
+                .and_then(|descriptor| state.registry.layer_value(descriptor.id, Layer::Global))
+                .is_some_and(|global_value| global_value != preset_value)
+        })
+    }
+
+    pub fn clear_preset_overrides(&self) -> Result<MutationOutcome, SettingsError> {
+        let outcome = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(active) = state.active_preset.clone()
+                && let Some((_, entries)) = self.presets.iter().find(|(name, _)| name == &active)
+            {
+                for (key, _) in entries {
+                    if let Some(descriptor) = lookup_by_name(key) {
+                        state.registry.clear_layer(descriptor.id, Layer::Global).map_err(SettingsError::InvalidValue)?;
+                        set_document_value(&mut state.document, descriptor, None);
+                    }
+                }
+            }
+            let revision = state.registry.revision();
+            let pending_restart = !state.registry.snapshot().pending_restarts().is_empty();
+            MutationOutcome { revision, pending_restart }
+        };
         self.save_sync()?;
         Ok(outcome)
     }
@@ -284,6 +345,13 @@ impl SettingsStore {
             }
         }));
     }
+}
+
+fn bundled_presets() -> NamedPresets {
+    GRAPHICS_PRESETS
+        .iter()
+        .map(|preset| (preset.name.to_owned(), preset.entries.iter().map(|(key, val)| ((*key).to_owned(), val.clone())).collect()))
+        .collect()
 }
 
 pub fn default_settings_path() -> io::Result<PathBuf> {
@@ -485,5 +553,43 @@ lod_factor = 999.0
         store.set_startup_developer(RENDER_DRAW_DISTANCE, 640.0).expect("startup developer override");
         assert_eq!(store.get(RENDER_DRAW_DISTANCE), 640.0);
         assert_eq!(store.snapshot().provenance(RENDER_DRAW_DISTANCE.id()).source, Layer::StartupDeveloper);
+    }
+
+    #[test]
+    fn bundled_presets_track_custom_overrides_and_clear_cleanly() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        fs::write(&path, "graphics_preset = \"medium\"\n[render]\ndraw_distance = 384.0\n").expect("write preset and override");
+
+        let (store, report) = SettingsStore::load_or_default(path.clone(), None);
+        let report = report.expect("bundled preset load");
+        assert_eq!(report.preset.as_deref(), Some("medium"));
+        assert_eq!(store.get(RENDER_DRAW_DISTANCE), 384.0);
+        assert_eq!(store.snapshot().provenance(RENDER_DRAW_DISTANCE.id()).source, Layer::Global);
+        assert!(store.is_custom_preset());
+
+        store.reset_global_and_save(RENDER_DRAW_DISTANCE.id()).expect("reset global override");
+        assert_eq!(store.get(RENDER_DRAW_DISTANCE), 256.0);
+        assert_eq!(store.snapshot().provenance(RENDER_DRAW_DISTANCE.id()).source, Layer::Preset);
+        assert!(!store.is_custom_preset());
+
+        store.set_global_and_save(RENDER_DRAW_DISTANCE, 384.0).expect("re-apply explicit override");
+        assert!(store.is_custom_preset());
+
+        store.set_graphics_preset(Some("low")).expect("switch to low preset");
+        assert_eq!(store.get(RENDER_DRAW_DISTANCE), 384.0);
+        assert_eq!(store.get(SCENE_LOD_FACTOR), 0.75);
+        assert!(store.is_custom_preset());
+        let saved = fs::read_to_string(&path).expect("read saved settings");
+        assert!(saved.contains("graphics_preset = \"low\""));
+        assert!(saved.contains("draw_distance = 384.0"));
+
+        store.clear_preset_overrides().expect("clear preset overrides");
+        assert_eq!(store.get(RENDER_DRAW_DISTANCE), 128.0);
+        assert_eq!(store.snapshot().provenance(RENDER_DRAW_DISTANCE.id()).source, Layer::Preset);
+        assert!(!store.is_custom_preset());
+        let cleared = fs::read_to_string(&path).expect("read cleared settings");
+        assert!(cleared.contains("graphics_preset = \"low\""));
+        assert!(!cleared.contains("draw_distance"));
     }
 }

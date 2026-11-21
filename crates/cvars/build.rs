@@ -32,6 +32,11 @@ struct Declaration {
     help: String,
 }
 
+struct Preset {
+    name: String,
+    entries: Vec<(String, String)>,
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));
     let config_dir = manifest_dir.join("../../config/cvars");
@@ -55,7 +60,30 @@ fn main() {
     }
 
     validate_declarations(&declarations);
-    let generated = render_generated(&declarations);
+
+    let presets_dir = manifest_dir.join("../../config/presets/graphics");
+    println!("cargo::rerun-if-changed={}", presets_dir.display());
+    let mut preset_files = fs::read_dir(&presets_dir)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", presets_dir.display()))
+        .filter_map(|entry| {
+            let path = entry.expect("valid dir entry").path();
+            (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
+        })
+        .collect::<Vec<_>>();
+    preset_files.sort();
+    assert!(!preset_files.is_empty(), "expected at least one TOML preset in {}", presets_dir.display());
+
+    let mut presets = Vec::with_capacity(preset_files.len());
+    let mut preset_names = BTreeSet::new();
+    for path in &preset_files {
+        println!("cargo::rerun-if-changed={}", path.display());
+        let contents = fs::read_to_string(path).unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let preset = parse_preset_file(path, &contents, &declarations);
+        assert!(preset_names.insert(preset.name.clone()), "duplicate graphics preset `{}`", preset.name);
+        presets.push(preset);
+    }
+
+    let generated = render_generated(&declarations, &presets);
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set"));
     fs::write(out_dir.join("generated_cvars.rs"), generated).expect("write generated_cvars.rs");
 }
@@ -302,7 +330,127 @@ fn validate_declarations(declarations: &[Declaration]) {
     }
 }
 
-fn render_generated(declarations: &[Declaration]) -> String {
+fn parse_preset_file(path: &Path, contents: &str, declarations: &[Declaration]) -> Preset {
+    let name =
+        path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_else(|| panic!("{}: invalid preset filename", path.display())).to_owned();
+    assert!(
+        !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+        "{}: invalid preset name `{name}`",
+        path.display()
+    );
+
+    let mut namespace: Option<String> = None;
+    let mut seen_keys = BTreeSet::new();
+    let mut entries = Vec::new();
+
+    for (line_index, raw_line) in contents.lines().enumerate() {
+        let line_no = line_index + 1;
+        let line = strip_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+            assert!(
+                !header.starts_with('[') && !header.ends_with(']'),
+                "{}:{line_no}: expected `[<namespace>]` table header, got `{line}`",
+                path.display()
+            );
+            let table = header.trim();
+            assert!(!table.is_empty(), "{}:{line_no}: empty table header", path.display());
+            namespace = Some(table.to_owned());
+            continue;
+        }
+        let Some(table) = namespace.as_deref() else {
+            panic!("{}:{line_no}: top-level keys are not allowed in graphics presets", path.display());
+        };
+        let Some((key, raw_value)) = line.split_once('=') else {
+            panic!("{}:{line_no}: expected key = value", path.display());
+        };
+        let key = key.trim();
+        let raw_value = raw_value.trim();
+        let full_name = format!("{table}.{key}");
+        assert!(seen_keys.insert(full_name.clone()), "{}:{line_no}: duplicate preset key `{full_name}`", path.display());
+        let decl = declarations
+            .iter()
+            .find(|decl| decl.name == full_name)
+            .unwrap_or_else(|| panic!("{}:{line_no}: unknown CVar `{full_name}` in preset `{name}`", path.display()));
+        assert!(decl.persistent, "{}:{line_no}: non-persistent CVar `{full_name}` is not allowed in graphics presets", path.display());
+        assert!(
+            full_name != "render.max_fps" && !full_name.starts_with("log."),
+            "{}:{line_no}: CVar `{full_name}` is excluded from graphics presets",
+            path.display()
+        );
+        let value_expr = validate_preset_value(path, line_no, decl, raw_value);
+        entries.push((full_name, value_expr));
+    }
+
+    assert!(!entries.is_empty(), "{}: graphics preset `{name}` must declare at least one entry", path.display());
+    Preset { name, entries }
+}
+
+fn validate_preset_value(path: &Path, line_no: usize, decl: &Declaration, raw: &str) -> String {
+    match decl.value_type {
+        ValueType::Bool => {
+            let flag = parse_bool(path, &decl.name, &decl.name, raw);
+            format!("CvarValue::Bool({flag})")
+        }
+        ValueType::I64 => {
+            let value: i64 =
+                raw.parse().unwrap_or_else(|_| panic!("{}:{line_no}: `{}` expects i64, got `{raw}`", path.display(), decl.name));
+            let (min_raw, max_raw) = decl.range_raw.as_ref().expect("validated i64 range");
+            let min: i64 = min_raw.parse().expect("validated i64 min");
+            let max: i64 = max_raw.parse().expect("validated i64 max");
+            assert!(
+                (min..=max).contains(&value),
+                "{}:{line_no}: `{}` value {value} out of bounds [{min}, {max}]",
+                path.display(),
+                decl.name
+            );
+            format!("CvarValue::I64({value}_i64)")
+        }
+        ValueType::F32 => {
+            let value: f32 =
+                raw.parse().unwrap_or_else(|_| panic!("{}:{line_no}: `{}` expects f32, got `{raw}`", path.display(), decl.name));
+            let (min_raw, max_raw) = decl.range_raw.as_ref().expect("validated f32 range");
+            let min: f32 = min_raw.parse().expect("validated f32 min");
+            let max: f32 = max_raw.parse().expect("validated f32 max");
+            assert!(
+                value.is_finite() && value >= min && value <= max,
+                "{}:{line_no}: `{}` value {value} out of bounds [{min}, {max}]",
+                path.display(),
+                decl.name
+            );
+            format!("CvarValue::F32({})", format_f32_literal(raw))
+        }
+        ValueType::F64 => {
+            let value: f64 =
+                raw.parse().unwrap_or_else(|_| panic!("{}:{line_no}: `{}` expects f64, got `{raw}`", path.display(), decl.name));
+            let (min_raw, max_raw) = decl.range_raw.as_ref().expect("validated f64 range");
+            let min: f64 = min_raw.parse().expect("validated f64 min");
+            let max: f64 = max_raw.parse().expect("validated f64 max");
+            assert!(
+                value.is_finite() && value >= min && value <= max,
+                "{}:{line_no}: `{}` value {value} out of bounds [{min}, {max}]",
+                path.display(),
+                decl.name
+            );
+            format!("CvarValue::F64({})", format_f64_literal(raw))
+        }
+        ValueType::String => {
+            let text = parse_string(path, &decl.name, raw);
+            let max_len: usize = decl.max_len_raw.as_deref().expect("validated max_len").parse().expect("validated max_len");
+            assert!(text.len() <= max_len, "{}:{line_no}: `{}` exceeds max_len {max_len}", path.display(), decl.name);
+            format!("CvarValue::String(Cow::Borrowed({text:?}))")
+        }
+        ValueType::Enum => {
+            let variant = parse_string(path, &decl.name, raw);
+            assert!(decl.variants.contains(&variant), "{}:{line_no}: `{}` invalid enum variant `{variant}`", path.display(), decl.name);
+            format!("CvarValue::Enum({variant:?})")
+        }
+    }
+}
+
+fn render_generated(declarations: &[Declaration], presets: &[Preset]) -> String {
     let mut output = String::new();
     let _ = writeln!(output, "pub const CVAR_COUNT: usize = {};", declarations.len());
     for (index, decl) in declarations.iter().enumerate() {
@@ -392,7 +540,17 @@ fn render_generated(declarations: &[Declaration]) -> String {
             decl.name, decl.help
         );
     }
-    let _ = writeln!(output, "];");
+    writeln!(output, "];").expect("write descriptors end");
+    writeln!(output, "pub const GRAPHICS_PRESET_COUNT: usize = {};", presets.len()).expect("write preset count");
+    writeln!(output, "pub static GRAPHICS_PRESETS: [GraphicsPreset; GRAPHICS_PRESET_COUNT] = [").expect("write presets start");
+    for preset in presets {
+        writeln!(output, "    GraphicsPreset {{ name: {:?}, entries: &[", preset.name).expect("write preset header");
+        for (key, value_expr) in &preset.entries {
+            writeln!(output, "        ({key:?}, {value_expr}),").expect("write preset entry");
+        }
+        writeln!(output, "    ] }},").expect("write preset footer");
+    }
+    writeln!(output, "];").expect("write presets end");
     output
 }
 
