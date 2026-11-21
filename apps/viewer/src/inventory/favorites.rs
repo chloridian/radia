@@ -166,7 +166,7 @@ pub async fn fetch_favorite_landmarks(
     let owner = InventoryOwner::new(agent_id);
     let folder = CategoryKey::new(owner, FolderId::new(favorite_folder_id));
     let folder_response = fetch_single_folder(capabilities, ais, descendents, folder).await.map_err(|error| match error {
-        InventoryFetchError::InvalidResponse => FavoritesError::InvalidFavoritesItemList,
+        InventoryFetchError::InvalidResponse(_) => FavoritesError::InvalidFavoritesItemList,
         error => FavoritesError::FetchFavoritesFolder(error.to_string()),
     })?;
     let items = favorite_folder_items(folder_response.children)?;
@@ -597,7 +597,7 @@ mod tests {
 
         let result = super::fetch_single_items(&client, Some(&ais), None, owner, &[item_id]).await;
 
-        assert_matches!(result, Err(InventoryFetchError::RequestFailed));
+        assert_matches!(result, Err(InventoryFetchError::HttpStatus(403)));
         timeout(Duration::from_secs(5), peer).await.expect("favorites peer completion").expect("favorites peer task");
     }
 }

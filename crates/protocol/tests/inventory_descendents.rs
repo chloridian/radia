@@ -103,7 +103,7 @@ fn duplicate_identity_is_rejected() {
 
     assert_eq!(
         decode_fetch_inventory_descendents2(&bytes, &[RequestedFolder { id: folder_id, owner_id: owner }]),
-        Err(DecodeError::InvalidResponse)
+        Err(DecodeError::DuplicateId)
     );
 }
 
@@ -116,6 +116,6 @@ fn foreign_auxiliary_owner_is_rejected() {
 
     assert_eq!(
         decode_fetch_inventory_descendents2(&bytes, &[RequestedFolder { id: folder_id, owner_id: owner }]),
-        Err(DecodeError::InvalidResponse)
+        Err(DecodeError::OwnerMismatch)
     );
 }

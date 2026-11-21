@@ -77,18 +77,18 @@ pub(super) fn delta_from_ais_response(
     let created_items = response.created_items.iter().copied().collect::<HashSet<_>>();
     let updated_items = response.updated_items.iter().copied().collect::<HashSet<_>>();
     if created_categories.iter().any(|id| updated_categories.contains(id)) || created_items.iter().any(|id| updated_items.contains(id)) {
-        return Err(DecodeError::InvalidResponse);
+        return Err(DecodeError::UnexpectedStructure("invalid ais edit delta"));
     }
 
     let created_category = match operation {
         EditOperation::CreateFolder { .. } => {
             if response.created_categories.len() > 1 {
-                return Err(DecodeError::InvalidResponse);
+                return Err(DecodeError::UnexpectedStructure("invalid ais edit delta"));
             }
             let metadata_id = response.created_categories.first().copied();
             let category_id = response.category.as_ref().map(|category| category.id);
             if metadata_id.is_some() && category_id.is_some() && metadata_id != category_id {
-                return Err(DecodeError::InvalidResponse);
+                return Err(DecodeError::UnexpectedStructure("invalid ais edit delta"));
             }
             metadata_id.or(category_id)
         }
@@ -116,7 +116,7 @@ pub(super) fn delta_from_ais_response(
 
     let mut delta = InventoryDelta::default();
     for id in category_order {
-        let category = categories.remove(&id).ok_or(DecodeError::InvalidResponse)?;
+        let category = categories.remove(&id).ok_or(DecodeError::UnexpectedStructure("invalid ais edit delta"))?;
         if created_categories.contains(&category.key.id().uuid()) || snapshot.category(category.key).is_none() {
             delta.created_categories.push(category);
         } else {
@@ -124,7 +124,7 @@ pub(super) fn delta_from_ais_response(
         }
     }
     for id in item_order {
-        let item = items.remove(&id).ok_or(DecodeError::InvalidResponse)?;
+        let item = items.remove(&id).ok_or(DecodeError::UnexpectedStructure("invalid ais edit delta"))?;
         if created_items.contains(&item.key.id().uuid()) || snapshot.item(item.key).is_none() {
             delta.created_items.push(item);
         } else {
@@ -135,11 +135,12 @@ pub(super) fn delta_from_ais_response(
     let mut confirmed_name = None;
     let created = match operation {
         EditOperation::CreateFolder { parent, name, preferred_type } => {
-            let created_id = created_category.filter(|id| !id.is_nil()).ok_or(DecodeError::InvalidResponse)?;
+            let created_id =
+                created_category.filter(|id| !id.is_nil()).ok_or(DecodeError::UnexpectedStructure("invalid ais edit delta"))?;
             let key = CategoryKey::new(owner, FolderId::new(created_id));
             if let Some(category) = delta.created_categories.iter_mut().find(|category| category.key == key) {
                 if category.parent != Some(*parent) || category.name.as_ref() != name {
-                    return Err(DecodeError::InvalidResponse);
+                    return Err(DecodeError::UnexpectedStructure("invalid ais edit delta"));
                 }
             } else {
                 delta.created_categories.push(inventory::Category {
@@ -155,12 +156,12 @@ pub(super) fn delta_from_ais_response(
         }
         EditOperation::RenameCategory { category, name } => {
             if created_categories.contains(&category.id().uuid()) {
-                return Err(DecodeError::InvalidResponse);
+                return Err(DecodeError::UnexpectedStructure("invalid ais edit delta"));
             }
             if !response.updated_categories.contains(&category.id().uuid())
                 && response.category.as_ref().is_none_or(|entry| entry.id != category.id().uuid())
             {
-                return Err(DecodeError::InvalidResponse);
+                return Err(DecodeError::UnexpectedStructure("invalid ais edit delta"));
             }
             delta.created_categories.retain(|entry| entry.key != *category);
             delta.updated_categories.retain(|entry| entry.key != *category);
@@ -169,12 +170,12 @@ pub(super) fn delta_from_ais_response(
         }
         EditOperation::RenameItem { item, name } => {
             if created_items.contains(&item.id().uuid()) {
-                return Err(DecodeError::InvalidResponse);
+                return Err(DecodeError::UnexpectedStructure("invalid ais edit delta"));
             }
             if !response.updated_items.contains(&item.id().uuid())
                 && response.item.as_ref().is_none_or(|entry| entry.id != item.id().uuid())
             {
-                return Err(DecodeError::InvalidResponse);
+                return Err(DecodeError::UnexpectedStructure("invalid ais edit delta"));
             }
             delta.created_items.retain(|entry| entry.key != *item);
             delta.updated_items.retain(|entry| entry.key != *item);
@@ -195,7 +196,7 @@ pub(super) fn delta_from_ais_response(
         !delta.created_items.iter().any(|item| item.key.id().uuid() == *id)
             && !delta.updated_items.iter().any(|item| item.key.id().uuid() == *id)
     }) {
-        return Err(DecodeError::InvalidResponse);
+        return Err(DecodeError::UnexpectedStructure("invalid ais edit delta"));
     }
 
     for id in &response.updated_categories {
@@ -206,7 +207,7 @@ pub(super) fn delta_from_ais_response(
         if !delta.created_categories.iter().any(|category| category.key == key)
             && !delta.updated_categories.iter().any(|category| category.key == key)
         {
-            let category = snapshot.category(key).ok_or(DecodeError::InvalidResponse)?;
+            let category = snapshot.category(key).ok_or(DecodeError::UnexpectedStructure("invalid ais edit delta"))?;
             delta.updated_categories.push(category.clone());
         }
     }
@@ -216,7 +217,7 @@ pub(super) fn delta_from_ais_response(
             continue;
         }
         if !delta.created_items.iter().any(|item| item.key == key) && !delta.updated_items.iter().any(|item| item.key == key) {
-            let item = snapshot.item(key).ok_or(DecodeError::InvalidResponse)?;
+            let item = snapshot.item(key).ok_or(DecodeError::UnexpectedStructure("invalid ais edit delta"))?;
             delta.updated_items.push(item.clone());
         }
     }
@@ -262,7 +263,7 @@ fn append_category(
     items: &mut HashMap<Uuid, inventory::Item>,
     item_order: &mut Vec<Uuid>,
 ) -> Result<(), DecodeError> {
-    let category = to_category(wire, owner, parent).map_err(|_| DecodeError::InvalidResponse)?;
+    let category = to_category(wire, owner, parent).map_err(|_| DecodeError::UnexpectedStructure("invalid ais edit delta"))?;
     let key = category.key;
     if insert_unique(categories, wire.id, category)? {
         category_order.push(wire.id);
@@ -283,9 +284,10 @@ fn append_item(
     items: &mut HashMap<Uuid, inventory::Item>,
     item_order: &mut Vec<Uuid>,
 ) -> Result<(), DecodeError> {
-    let parent =
-        parent.or_else(|| wire.parent_id.map(|id| CategoryKey::new(owner, FolderId::new(id)))).ok_or(DecodeError::InvalidResponse)?;
-    let item = to_item(wire, owner, parent).map_err(|_| DecodeError::InvalidResponse)?;
+    let parent = parent
+        .or_else(|| wire.parent_id.map(|id| CategoryKey::new(owner, FolderId::new(id))))
+        .ok_or(DecodeError::UnexpectedStructure("invalid ais edit delta"))?;
+    let item = to_item(wire, owner, parent).map_err(|_| DecodeError::UnexpectedStructure("invalid ais edit delta"))?;
     if insert_unique(items, wire.id, item)? {
         item_order.push(wire.id);
     }
@@ -299,7 +301,7 @@ fn insert_unique<T: PartialEq>(values: &mut HashMap<Uuid, T>, id: Uuid, value: T
             Ok(true)
         }
         Entry::Occupied(entry) if entry.get() == &value => Ok(false),
-        Entry::Occupied(_) => Err(DecodeError::InvalidResponse),
+        Entry::Occupied(_) => Err(DecodeError::UnexpectedStructure("invalid ais edit delta")),
     }
 }
 
