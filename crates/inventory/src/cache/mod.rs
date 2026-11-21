@@ -16,7 +16,7 @@ use std::{
 use rusqlite::{Transaction, params};
 use storage::{
     StorageError, default_cache_dir,
-    sqlite::{OpenStatus, SqliteBatch, SqliteControl, SqliteDb, SqliteError, SqliteReceipt},
+    sqlite::{OpenStatus, SqliteBatch, SqliteControl, SqliteDb, SqliteError, SqliteReceipt, StorageClass},
 };
 use uuid::Uuid;
 
@@ -314,8 +314,9 @@ impl InventoryCache {
         discard_legacy_layout(&cache_root.join("inventory"));
         let identity = CacheIdentity { grid_id: grid_id.to_owned(), personal_owner: agent_id, library_owner };
         let migration_identity = identity.clone();
-        let (db, status) =
-            SqliteDb::open(cache_root.join("inventory.sqlite"), move |connection| schema::migrate(connection, &migration_identity))?;
+        let (db, status) = SqliteDb::open(cache_root.join("inventory.sqlite"), StorageClass::Cache, move |connection| {
+            schema::migrate(connection, &migration_identity)
+        })?;
         Ok((Self { db, identity, invalidated: Arc::new(AtomicBool::new(false)) }, status))
     }
 
