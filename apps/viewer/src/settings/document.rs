@@ -154,6 +154,17 @@ fn parse_cvar_value(descriptor: &'static CvarDescriptor, raw: &Value) -> Result<
     descriptor.domain.validate(descriptor.name, &converted).map_err(SettingsError::InvalidValue)
 }
 
+pub(super) fn set_document_preset(document: &mut DocumentMut, preset: Option<&str>) {
+    match preset {
+        Some(name) => {
+            document.as_table_mut().insert("graphics_preset", value(name));
+        }
+        None => {
+            document.as_table_mut().remove("graphics_preset");
+        }
+    }
+}
+
 pub(super) fn set_document_value(document: &mut DocumentMut, descriptor: &'static CvarDescriptor, next: Option<&CvarValue>) {
     let segments = descriptor.name.split('.').collect::<Vec<_>>();
     let Some((leaf, parents)) = segments.split_last() else {

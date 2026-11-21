@@ -249,6 +249,12 @@ impl CvarTyped for &'static str {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphicsPreset {
+    pub name: &'static str,
+    pub entries: &'static [(&'static str, CvarValue)],
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CvarDescriptor {
     pub id: CvarId,
@@ -466,6 +472,20 @@ impl CvarRegistry {
         }
     }
 
+    pub fn apply_graphics_preset(&mut self, name: Option<&str>) -> Result<CvarRevision, CvarError> {
+        match name {
+            None => self.replace_layer(Layer::Preset, &[]),
+            Some(name) => {
+                let preset = graphics_preset(name).ok_or_else(|| CvarError::UnknownPreset(name.to_owned()))?;
+                self.replace_layer(Layer::Preset, preset.entries)
+            }
+        }
+    }
+
+    pub fn layer_value(&self, id: CvarId, layer: Layer) -> Option<&CvarValue> {
+        layer.slot().and_then(|slot| self.layers[slot][id.0].as_ref())
+    }
+
     pub fn masking_layer(&self, id: CvarId, layer: Layer) -> Option<Layer> {
         Layer::OVERRIDE_LAYERS
             .into_iter()
@@ -543,6 +563,10 @@ impl CvarRegistry {
 
 pub fn descriptors() -> &'static [CvarDescriptor; CVAR_COUNT] {
     &DESCRIPTORS
+}
+
+pub fn graphics_preset(name: &str) -> Option<&'static GraphicsPreset> {
+    GRAPHICS_PRESETS.iter().find(|preset| preset.name == name)
 }
 
 pub fn by_name(name: &str) -> Option<&'static CvarDescriptor> {
@@ -829,5 +853,33 @@ mod tests {
 
         let empty_with_hidden = search_in(&synthetic, "", true).map(|descriptor| descriptor.name).collect::<Vec<_>>();
         assert_eq!(empty_with_hidden, vec!["debug.visible_flag", "debug.secret_flag"]);
+    }
+
+    #[test]
+    fn bundled_graphics_presets_resolve_and_apply_expected_values() {
+        let cases = [
+            ("low", 128.0_f32, 512_i64, 0.75_f32),
+            ("medium", 256.0_f32, 1024_i64, 1.0_f32),
+            ("high", 384.0_f32, 1536_i64, 1.5_f32),
+            ("ultra", 512.0_f32, 2048_i64, 2.0_f32),
+        ];
+
+        assert_eq!(GRAPHICS_PRESETS.len(), cases.len());
+        let mut registry = CvarRegistry::new();
+
+        for (name, draw_distance, texture_cap, lod_factor) in cases {
+            assert!(graphics_preset(name).is_some(), "missing preset `{name}`");
+            registry.apply_graphics_preset(Some(name)).expect("apply bundled preset");
+            assert_eq!(registry.get(RENDER_DRAW_DISTANCE), draw_distance);
+            assert_eq!(registry.get(RENDER_TEXTURE_SOFT_CAP_MIB), texture_cap);
+            assert_eq!(registry.get(SCENE_LOD_FACTOR), lod_factor);
+            assert_eq!(registry.snapshot().provenance(RENDER_DRAW_DISTANCE.id()).source, Layer::Preset);
+        }
+
+        assert_matches!(registry.apply_graphics_preset(Some("nonexistent")), Err(CvarError::UnknownPreset(name)) if name == "nonexistent");
+
+        registry.apply_graphics_preset(None).expect("clear graphics preset");
+        assert_eq!(registry.get(RENDER_DRAW_DISTANCE), RENDER_DRAW_DISTANCE.default_value());
+        assert_eq!(registry.snapshot().provenance(RENDER_DRAW_DISTANCE.id()).source, Layer::Default);
     }
 }
