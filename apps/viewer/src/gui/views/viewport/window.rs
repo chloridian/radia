@@ -1031,7 +1031,7 @@ impl SceneView {
                 }),
         );
 
-        TitleBar::new().h(px(TITLE_BAR_HEIGHT)).child(left).child(right)
+        TitleBar::new().h(px(TITLE_BAR_HEIGHT)).border_b_0().child(left).child(right)
     }
 
     fn render_stats_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
