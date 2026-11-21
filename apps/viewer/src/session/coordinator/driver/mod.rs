@@ -7,7 +7,7 @@ use std::{
     net::SocketAddr,
     ops::ControlFlow,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use assets::cache::AssetCache;
@@ -61,6 +61,7 @@ use crate::{
         environment::{Completion, EnvironmentIntake},
         experience_environment::{EnvironmentInbox, EnvironmentQueueError, EnvironmentSender, PushOutcome},
         inbound::{ObjectMediaRequest, object_media_requests},
+        name_cache::NameCache,
         object_cache::{CachedObjectContinuation, CachedObjectProgress, ObjectCacheEvent, ObjectCacheSession},
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
         recovery::{RecoveryCompletion, RecoveryIntake, ScheduledRecovery, retryable_send_error, simulator_lost_error, warn_unrecovered},
@@ -85,6 +86,35 @@ fn network_end_after_stream_close(disconnect_requested: bool, failure: Option<St
     } else {
         SessionEnd::Failed("The network session ended.".into())
     }
+}
+
+fn record_verified_login_async(runtime: &Handle, grid: Grid, entered_username: String, session: AgentSession) {
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_millis() as u64);
+    drop(runtime.spawn(async move {
+        let (cache, _) = match NameCache::open_default() {
+            Ok(opened) => opened,
+            Err(error) => {
+                tracing::warn!(%error, grid = grid.id(), "could not open names.sqlite to record verified login");
+                return;
+            }
+        };
+        let receipt = match cache.record_verified_login(grid, &entered_username, &session, now_ms) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                tracing::warn!(%error, grid = grid.id(), "could not queue verified login in names.sqlite");
+                if let Err(shutdown_error) = cache.shutdown() {
+                    tracing::warn!(error = %shutdown_error, "could not shut down names.sqlite");
+                }
+                return;
+            }
+        };
+        if let Err(error) = receipt.wait().await {
+            tracing::warn!(%error, grid = grid.id(), "could not persist verified login in names.sqlite");
+        }
+        if let Err(error) = cache.shutdown() {
+            tracing::warn!(%error, "could not shut down names.sqlite");
+        }
+    }));
 }
 
 enum DriverInput {
@@ -1306,6 +1336,7 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             Event::SessionReady { simulator_id, session, capabilities, login_data } => {
+                record_verified_login_async(&self.runtime, self.credentials.grid, self.credentials.username.clone(), (*session).clone());
                 self.handoff.session_ready(&mut self.session_world, simulator_id, session.agent_id);
                 if self.inventory.is_none() && self.inventory_bootstrap.is_none() {
                     self.inventory_bootstrap = Some(spawn_inventory_build(&self.runtime, session.agent_id, login_data.clone()));
