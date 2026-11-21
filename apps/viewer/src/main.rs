@@ -1,9 +1,9 @@
 use std::{borrow::Cow, env::consts::OS, io, sync::Arc};
 
 use assets::cache::AssetCache;
-use gpui::{AssetSource, SharedString};
-use gpui_kit_assets::{Assets, icon_assets};
-use gpui_wgpu::WgpuDeviceRequirements;
+use prism::{AssetSource, SharedString};
+use prism_assets::{Assets, icon_assets};
+use prism_wgpu::WgpuDeviceRequirements;
 use tokio::runtime::Builder;
 use viewer::{gui, logging};
 
@@ -12,14 +12,14 @@ icon_assets!(ExtraIcons, [MessageCircle]);
 struct ViewerAssets;
 
 impl AssetSource for ViewerAssets {
-    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
-        match Assets.load(path)? {
+    fn load(&self, path: &str) -> prism::Result<Option<Cow<'static, [u8]>>> {
+        match ExtraIcons.load(path)? {
             Some(data) => Ok(Some(data)),
-            None => ExtraIcons.load(path),
+            None => Assets.load(path),
         }
     }
 
-    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
+    fn list(&self, path: &str) -> prism::Result<Vec<SharedString>> {
         let mut items = Assets.list(path)?;
         items.extend(ExtraIcons.list(path)?);
         Ok(items)
@@ -43,7 +43,7 @@ fn main() -> io::Result<()> {
         }
     };
     let gui_cache = asset_cache.clone();
-    gpui_platform::application().with_assets(ViewerAssets).run(move |cx| {
+    prism_platform::application().with_assets(ViewerAssets).run(move |cx| {
         cx.set_gpu_requirements(Box::new(WgpuDeviceRequirements {
             features: render::required_features(),
             limits: Some(render::required_limits()),

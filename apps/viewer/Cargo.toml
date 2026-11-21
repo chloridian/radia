@@ -25,11 +25,11 @@ tracy = ["dep:tracing-tracy"]
 [dependencies]
 dirs.workspace = true
 futures.workspace = true
-gpui.workspace = true
-gpui-component.workspace = true
-gpui-kit-assets.workspace = true
-gpui-platform.workspace = true
-gpui-wgpu.workspace = true
+prism.workspace = true
+prism-component.workspace = true
+prism-assets.workspace = true
+prism-platform.workspace = true
+prism-wgpu.workspace = true
 llsd.workspace = true
 uuid.workspace = true
 utils.workspace = true
@@ -55,7 +55,7 @@ world.workspace = true
 [dev-dependencies]
 url.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-gpui = { workspace = true, features = ["test-support"] }
+prism = { workspace = true, features = ["test-support"] }
 test-support.workspace = true
 tempfile.workspace = true
 proptest.workspace = true

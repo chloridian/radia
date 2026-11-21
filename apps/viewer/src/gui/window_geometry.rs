@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use gpui::{App, Bounds, Context, Pixels, Point, Size, Subscription, Window, point, px, size};
+use prism::{App, Bounds, Context, Pixels, Point, Size, Subscription, Window, point, px, size};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_vec};
 use utils::write_atomic;
@@ -76,7 +76,7 @@ impl From<StoredWindowSize> for Size<Pixels> {
 
 pub(crate) fn restore_bounds(
     key: &str,
-    display_id: Option<gpui::DisplayId>,
+    display_id: Option<prism::DisplayId>,
     default: Size<Pixels>,
     minimum: Size<Pixels>,
     cx: &App,
@@ -186,7 +186,7 @@ fn fit_inside_display(bounds: Bounds<Pixels>, display: Bounds<Pixels>) -> Bounds
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Bounds, Point, px, size};
+    use prism::{Bounds, Point, px, size};
     use tempfile::tempdir;
 
     use super::{

@@ -10,14 +10,14 @@ use std::{
 };
 
 use futures::{channel::oneshot, future::join};
-use gpui::{AppContext, Context, Window};
-use gpui_component::{
+use inventory::{CategoryKey, FolderType, InventorySnapshot};
+use network::{AgentSession, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
+use prism::{AppContext, Context, Window};
+use prism_component::{
     IndexPath,
     input::{InputEvent, InputState},
     select::{SelectEvent, SelectState},
 };
-use inventory::{CategoryKey, FolderType, InventorySnapshot};
-use network::{AgentSession, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
 use tokio::sync::watch;
 
 use self::{
@@ -213,26 +213,26 @@ impl LoginStatus {
 }
 
 pub struct LoginScreen {
-    username: gpui::Entity<InputState>,
-    password: gpui::Entity<InputState>,
-    mfa_code: gpui::Entity<InputState>,
-    region_name: gpui::Entity<InputState>,
-    spawn_location: gpui::Entity<SelectState<Vec<SpawnOption>>>,
+    username: prism::Entity<InputState>,
+    password: prism::Entity<InputState>,
+    mfa_code: prism::Entity<InputState>,
+    region_name: prism::Entity<InputState>,
+    spawn_location: prism::Entity<SelectState<Vec<SpawnOption>>>,
     spawn_choice: SpawnChoice,
     favorites: Favorites,
     credential_load: CredentialLoad,
     remember_login: bool,
     remembered_login: Option<RememberedLogin>,
-    chat_screen: gpui::Entity<ChatScreen>,
+    chat_screen: prism::Entity<ChatScreen>,
     active_session: Option<ActiveSession>,
     status: LoginStatus,
     login_phase: LoginPhase,
     session_generation: u64,
     credential_write_lock: WriteLock,
     session_lifecycle: Arc<SessionLifecycle>,
-    _spawn_subscription: gpui::Subscription,
-    _username_subscription: gpui::Subscription,
-    _window_geometry_subscription: gpui::Subscription,
+    _spawn_subscription: prism::Subscription,
+    _username_subscription: prism::Subscription,
+    _window_geometry_subscription: prism::Subscription,
 }
 
 struct ActiveSession {
@@ -761,6 +761,7 @@ mod tests {
 
     use futures::executor;
     use network::Grid;
+    use prism as gpui;
 
     use super::{CredentialLoad, CredentialLoadCompletion, LoginMessage, LoginPhase, LoginScreen, LoginStatus};
     use crate::{
@@ -797,9 +798,9 @@ mod tests {
         assert_eq!(load.complete(first), CredentialLoadCompletion::Stale);
     }
 
-    #[gpui::test]
-    fn stale_presentation_cannot_end_relogin(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
+    #[prism::test]
+    fn stale_presentation_cannot_end_relogin(cx: &mut prism::TestAppContext) {
+        cx.update(prism_component::init);
         let session_lifecycle = Arc::new(SessionLifecycle::default());
         let (screen, visual) = cx.add_window_view(|window, cx| LoginScreen::new(window, cx, session_lifecycle));
         let snapshot = PresentationSnapshot {

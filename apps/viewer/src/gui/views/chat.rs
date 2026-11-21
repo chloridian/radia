@@ -1,12 +1,12 @@
 use std::collections::VecDeque;
 
-use gpui::{Context, IntoElement, Render, Role, Window, div, prelude::*, px};
-use gpui_component::{
+use network::{AgentSession, Delivery, SessionHandle};
+use prism::{Context, IntoElement, Render, Role, Window, div, prelude::*, px};
+use prism_component::{
     Theme,
     button::{Button, ButtonVariants as _},
     input::{Input, InputState},
 };
-use network::{AgentSession, Delivery, SessionHandle};
 use protocol::{
     ChatType,
     messages::{
@@ -26,8 +26,8 @@ pub struct ChatScreen {
     session_handle: Option<SessionHandle>,
     messages: VecDeque<ChatMessage>,
     message_bytes: usize,
-    transcript_scroll: gpui::ScrollHandle,
-    message_input: gpui::Entity<InputState>,
+    transcript_scroll: prism::ScrollHandle,
+    message_input: prism::Entity<InputState>,
     send_error: Option<&'static str>,
 }
 
@@ -41,7 +41,7 @@ impl ChatScreen {
             session_handle: None,
             messages: VecDeque::new(),
             message_bytes: 0,
-            transcript_scroll: gpui::ScrollHandle::new(),
+            transcript_scroll: prism::ScrollHandle::new(),
             message_input,
             send_error: None,
         }
@@ -61,7 +61,7 @@ impl ChatScreen {
         self.send_error = None;
         self.messages.clear();
         self.message_bytes = 0;
-        self.transcript_scroll = gpui::ScrollHandle::new();
+        self.transcript_scroll = prism::ScrollHandle::new();
         cx.notify();
     }
 
@@ -257,7 +257,7 @@ fn retain_message(messages: &mut VecDeque<ChatMessage>, message_bytes: &mut usiz
 mod tests {
     use std::collections::VecDeque;
 
-    use gpui::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
+    use prism::{self as gpui, Modifiers, TestAppContext, VisualTestContext, point, px, size};
 
     use super::{ChatMessage, ChatScreen, MAX_CHAT_HISTORY_BYTES, MAX_CHAT_HISTORY_MESSAGES, retain_message, send_error_copy};
 
@@ -323,9 +323,9 @@ mod tests {
         cx.update(|window, cx| _ = window.draw(cx));
     }
 
-    #[gpui::test]
+    #[prism::test]
     fn rejected_send_preserves_draft(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(prism_component::init);
         let (chat, cx) = cx.add_window_view(ChatScreen::new);
         draw(cx);
 

@@ -46,11 +46,11 @@ rusqlite = { version = "=0.43.0", default-features = false, features = [
     "bundled",
 ] }
 glam = "0.34.1"
-gpui = { package = "gpui-ce", git = "https://github.com/hymenaei/prism" }
-gpui-component = { package = "gpui-component", git = "https://github.com/hymenaei/prism", default-features = false }
-gpui-kit-assets = { package = "gpui-kit-assets", git = "https://github.com/hymenaei/prism" }
-gpui-platform = { package = "gpui_ce_platform", git = "https://github.com/hymenaei/prism" }
-gpui-wgpu = { package = "gpui_ce_wgpu", git = "https://github.com/hymenaei/prism" }
+prism = { package = "gpui-ce", git = "https://github.com/hymenaei/prism" }
+prism-component = { package = "gpui-component", git = "https://github.com/hymenaei/prism", default-features = false }
+prism-assets = { package = "gpui-kit-assets", git = "https://github.com/hymenaei/prism" }
+prism-platform = { package = "gpui_ce_platform", git = "https://github.com/hymenaei/prism" }
+prism-wgpu = { package = "gpui_ce_wgpu", git = "https://github.com/hymenaei/prism" }
 hecs = "0.11"
 httpdate = "=1.0.3"
 intel_tex_2 = "=0.5.0"

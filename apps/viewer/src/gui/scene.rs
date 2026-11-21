@@ -1,8 +1,8 @@
-use gpui::{
+use prism::{
     AnyElement, AnyWindowHandle, App, AppContext, Entity, Render, Subscription, TitlebarOptions, Window, WindowBounds, WindowId,
     WindowOptions, div, prelude::*, px, size,
 };
-use gpui_component::{Root, StyledExt, Theme, TitleBar};
+use prism_component::{Root, StyledExt, Theme, TitleBar};
 use render::scene::Camera;
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -282,7 +282,7 @@ impl Render for ChatWindow {
 mod tests {
     use std::sync::Arc;
 
-    use gpui::App;
+    use prism::{self as gpui, App};
     use render::scene::ApplyError;
 
     use super::{MainWindow, end_session, request_chat, scene_failed, scene_ready};
@@ -300,12 +300,12 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn handoff_preserves_window_lifetimes(cx: &mut gpui::TestAppContext) {
+    #[prism::test]
+    fn handoff_preserves_window_lifetimes(cx: &mut prism::TestAppContext) {
         let session = Arc::new(SessionLifecycle::default());
         cx.update(|cx| {
-            gpui_component::init(cx);
-            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            prism_component::init(cx);
+            cx.set_quit_mode(prism::QuitMode::Explicit);
             install_lifecycle(Arc::clone(&session), cx);
         });
         let (controller, visual) = cx.add_window_view(|window, cx| LoginScreen::new(window, cx, session));
@@ -348,10 +348,10 @@ mod tests {
         cx.run_until_parked();
     }
 
-    #[gpui::test]
-    fn early_end_rejects_ready(cx: &mut gpui::TestAppContext) {
+    #[prism::test]
+    fn early_end_rejects_ready(cx: &mut prism::TestAppContext) {
         cx.update(|cx| {
-            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            cx.set_quit_mode(prism::QuitMode::Explicit);
             install_lifecycle(Arc::new(SessionLifecycle::default()), cx);
         });
         let login = cx.add_empty_window().update(|window, _| window.window_handle());
@@ -369,10 +369,10 @@ mod tests {
         cx.run_until_parked();
     }
 
-    #[gpui::test]
-    fn close_discards_late_ready(cx: &mut gpui::TestAppContext) {
+    #[prism::test]
+    fn close_discards_late_ready(cx: &mut prism::TestAppContext) {
         cx.update(|cx| {
-            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            cx.set_quit_mode(prism::QuitMode::Explicit);
             install_lifecycle(Arc::new(SessionLifecycle::default()), cx);
         });
         let login = cx.add_empty_window().update(|window, _| window.window_handle());

@@ -6,8 +6,8 @@ use std::{
     },
 };
 
-use gpui::Context;
 use network::Grid;
+use prism::Context;
 use uuid::Uuid;
 
 use super::{LoginScreen, spawn::favorites_for_username};

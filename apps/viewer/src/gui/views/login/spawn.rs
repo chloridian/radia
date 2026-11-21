@@ -1,6 +1,6 @@
-use gpui::SharedString;
-use gpui_component::select::SelectItem;
 use network::Grid;
+use prism::SharedString;
+use prism_component::select::SelectItem;
 
 use crate::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
 

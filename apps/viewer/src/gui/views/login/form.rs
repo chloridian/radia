@@ -1,12 +1,12 @@
-use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px};
-use gpui_component::{
+use network::Grid;
+use prism::{Context, IntoElement, Render, Window, div, prelude::*, px};
+use prism_component::{
     Disableable, Icon, IconName, Theme, TitleBar,
     button::{Button, ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
     input::Input,
     select::Select,
 };
-use network::Grid;
 
 use super::{
     CredentialWarning, LoginPhase, LoginScreen,

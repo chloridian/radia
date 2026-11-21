@@ -10,13 +10,14 @@ use std::{
 };
 
 use futures::{StreamExt, channel::mpsc as async_mpsc};
-use gpui::{
+use prism::{
     Anchor, AnyElement, Bounds, Context, DevicePixels, DispatchPhase, Entity, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent,
     KeyUpEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, RawMouseMotionEvent,
     Render, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, SurfaceSource, Window, canvas, div, prelude::*, px, rgb,
     rgb_to_hsla, size, surface, white,
 };
-use gpui_component::{
+use prism_assets::IconName as AssetIconName;
+use prism_component::{
     Disableable, Icon, IconName, IndexPath, Sizable, Theme, TitleBar,
     button::{Button, ButtonVariants as _},
     popover::Popover,
@@ -24,8 +25,7 @@ use gpui_component::{
     slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
 };
-use gpui_kit_assets::IconName as AssetIconName;
-use gpui_wgpu::WgpuContextHandle;
+use prism_wgpu::WgpuContextHandle;
 use render::{CompressionQuality, FrameInput, Renderer, TextureCompletion, scene};
 use tokio::{runtime::Handle, sync::watch};
 use tracing::Instrument;
@@ -1071,7 +1071,7 @@ impl SceneView {
 }
 
 impl Focusable for SceneView {
-    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+    fn focus_handle(&self, _cx: &prism::App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }

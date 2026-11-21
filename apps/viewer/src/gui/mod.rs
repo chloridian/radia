@@ -10,11 +10,11 @@ use std::{
 
 use assets::cache::AssetCache;
 use futures::FutureExt;
-use gpui::{
+use prism::{
     AnyWindowHandle, App, AppContext, ColorExt, Entity, Global, QuitMode, Subscription, TitlebarOptions, WindowBounds, WindowOptions, px,
     rgb, rgb_to_hsla, size,
 };
-use gpui_component::{Root, Theme, ThemeMode, TitleBar};
+use prism_component::{Root, Theme, ThemeMode, TitleBar};
 use tokio::{runtime::Handle, task::JoinHandle};
 
 use crate::{
@@ -110,7 +110,7 @@ pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>
     cx.set_global(ServiceRuntime { runtime: services, asset_cache, log_control });
     cx.set_quit_mode(QuitMode::Explicit);
 
-    gpui_component::init(cx);
+    prism_component::init(cx);
     set_dark_theme(cx);
 
     install_lifecycle(Arc::clone(&session_lifecycle), cx);
@@ -257,14 +257,15 @@ fn set_dark_theme(cx: &mut App) {
 mod tests {
     use std::sync::Arc;
 
+    use prism as gpui;
     use tokio::sync::oneshot;
 
     use super::{AppLifecycle, SessionLifecycle, install_lifecycle, shutdown};
 
-    #[gpui::test]
-    fn main_window_owns_shutdown(cx: &mut gpui::TestAppContext) {
+    #[prism::test]
+    fn main_window_owns_shutdown(cx: &mut prism::TestAppContext) {
         cx.update(|cx| {
-            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            cx.set_quit_mode(prism::QuitMode::Explicit);
             install_lifecycle(Arc::new(SessionLifecycle::default()), cx);
         });
         let main = cx.add_empty_window().update(|window, _| window.window_handle());
@@ -279,10 +280,10 @@ mod tests {
         cx.read_global::<AppLifecycle, _>(|lifecycle, _| assert!(lifecycle.quitting));
     }
 
-    #[gpui::test]
-    fn repeated_shutdown_starts_once(cx: &mut gpui::TestAppContext) {
+    #[prism::test]
+    fn repeated_shutdown_starts_once(cx: &mut prism::TestAppContext) {
         cx.update(|cx| {
-            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            cx.set_quit_mode(prism::QuitMode::Explicit);
             install_lifecycle(Arc::new(SessionLifecycle::default()), cx);
             assert!(shutdown(cx));
             assert!(!shutdown(cx));

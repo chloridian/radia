@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
-use gpui::SharedString;
-use gpui_component::select::SelectItem;
+use prism::SharedString;
+use prism_component::select::SelectItem;
 use render::scene::{self, EnvironmentPreset, LocalChoice};
 
 use super::FRAME_INTERVAL;

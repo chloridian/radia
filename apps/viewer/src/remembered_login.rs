@@ -3,8 +3,8 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
-use gpui::App;
 use network::Grid;
+use prism::App;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_vec};
 
@@ -81,12 +81,12 @@ fn grid_url(grid: Grid) -> &'static str {
 mod tests {
     use std::assert_matches;
 
-    use gpui::TestAppContext;
     use network::Grid;
+    use prism::{self as gpui, TestAppContext};
 
     use super::{CredentialStoreError, RememberedLogin, clear, decode, encode, grid_url, load, save};
 
-    #[gpui::test]
+    #[prism::test]
     async fn credential_store_operations_complete(cx: &mut TestAppContext) {
         let login = RememberedLogin { username: "Alice Resident".into(), password: "secret-password".into(), mfa_hash: "mfa-token".into() };
 
