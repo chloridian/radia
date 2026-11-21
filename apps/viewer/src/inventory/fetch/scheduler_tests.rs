@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use futures::{
@@ -17,24 +17,25 @@ use inventory::{
 };
 use llsd::{Map, Value, xml};
 use network::capabilities::{CapabilityUrl, Client};
+use protocol::inventory::DecodeError;
 use tokio::{
     sync::{mpsc, oneshot, watch},
-    task::JoinHandle,
-    time::timeout,
+    task::{self, JoinHandle},
+    time::{self, timeout},
 };
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
 use super::{
     BACKGROUND_CONCURRENCY, ForegroundRequest, InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequests, InventoryLoadingStatus,
-    MAX_AIS_DEPTH, REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, run_scheduler,
+    MAX_AIS_DEPTH, MAX_RETRY_AFTER, REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, retry_delay, run_scheduler,
 };
 use crate::{
     inventory::{
         InventoryEditController,
         fetch::{
-            FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES,
-            ais, legacy,
+            FetchFailureCause, FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent,
+            MAX_FETCH_RESPONSE_BYTES, MAX_FETCH_RETRIES, RequestFailure, ais, classify_request_error, legacy,
         },
         test_support::{LoopbackPeer, TEST_TIMEOUT},
     },
@@ -449,7 +450,7 @@ async fn ais_decodes_recursive_listing() {
         request.respond(200, response).await;
     });
 
-    let folders = ais::fetch_once(&client, &capability, root, MAX_AIS_DEPTH).await.expect("recursive AIS response");
+    let folders = ais::fetch_once(&client, &capability, root, MAX_AIS_DEPTH, false).await.expect("recursive AIS response");
     responder.await.expect("peer responder");
     assert_eq!(folders.len(), 2);
     assert_eq!(folders[0].folder, root);
@@ -585,7 +586,7 @@ async fn legacy_mapping_omits_auxiliary_targets() {
         request.respond(200, include_bytes!("../../../../../crates/protocol/tests/fixtures/legacy_one_link.xml").to_vec()).await;
     });
 
-    let mut fetched = legacy::fetch_batch(&client, &capability, &[source]).await.expect("decode legacy link response");
+    let mut fetched = legacy::fetch_batch(&client, &capability, &[source], false).await.expect("decode legacy link response");
     responder.await.expect("legacy response sent");
 
     assert_eq!(fetched.len(), 1);
@@ -1011,7 +1012,7 @@ async fn missing_folder_keeps_walk_retryable() {
         match next_event(&mut events).await {
             InventoryFetchEvent::Failed { folder, error } => {
                 assert_eq!(folder, missing);
-                assert_matches!(error, InventoryFetchError::RequestFailed);
+                assert_matches!(error, InventoryFetchError::HttpStatus(404));
                 missing_reported = true;
             }
             InventoryFetchEvent::Folder { fetch, applied } => {
@@ -1037,7 +1038,7 @@ async fn missing_folder_keeps_walk_retryable() {
         match next_event(&mut events).await {
             InventoryFetchEvent::Failed { folder, error } => {
                 assert_eq!(folder, missing);
-                assert_matches!(error, InventoryFetchError::RequestFailed);
+                assert_matches!(error, InventoryFetchError::HttpStatus(404));
             }
             event => panic!("expected failed folder retry, received {event:?}"),
         }
@@ -1085,7 +1086,7 @@ async fn stale_response_requeues_folder() {
         panic!("expected initial background failure");
     };
     assert_eq!(folder, root);
-    assert_matches!(error, InventoryFetchError::RequestFailed);
+    assert_matches!(error, InventoryFetchError::HttpStatus(404));
     assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
 
     let (_status_sender, status) = watch::channel(InventoryLoadingStatus::default());
@@ -1265,7 +1266,7 @@ async fn rejected_folder_retries() {
         panic!("expected first folder response to fail validation");
     };
     assert_eq!(folder, root);
-    assert_matches!(error, InventoryFetchError::InvalidResponse);
+    assert_matches!(error, InventoryFetchError::InvalidResponse(DecodeError::UnexpectedStructure(_)));
     assert!(!inventory.snapshot().is_complete(root));
 
     requests.sender.send(ForegroundRequest::background(root)).await.expect("queue retry after rejected folder response");
@@ -1721,4 +1722,171 @@ async fn owner_refresh_reconciles_deep_folders() {
     drop(requests);
     stop.send(()).expect("stop owner refresh scheduler");
     task.await.expect("scheduler stopped");
+}
+
+#[tokio::test]
+async fn library_fetch_accepts_nil_and_linden_owners() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let personal = InventoryOwner::new(Uuid::from_u128(100));
+    let library = InventoryOwner::new(Uuid::from_u128(101));
+    let linden = Uuid::from_u128(102);
+    let personal_root = key(personal, 103);
+    let library_root = key(library, 104);
+    let library_item_id = Uuid::from_u128(105);
+    let mut inventory = Inventory::new(category(personal_root, None), Some(category(library_root, None)), InventoryLimits::default())
+        .expect("valid inventory roots");
+    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    peer.grant(&[("InventoryAPIv3", "/ais"), ("FetchLibDescendents2", "/lib")]).await;
+
+    let first = peer.next().await;
+    let second = peer.next().await;
+    let personal_path = format!("/ais/category/{}/children?depth=16", personal_root.id().uuid());
+    let (personal_req, library_req) = if first.path == personal_path { (first, second) } else { (second, first) };
+    assert_eq!(personal_req.path, personal_path);
+    assert_eq!(library_req.path, "/lib");
+    personal_req.respond(200, empty_folder_response(personal_root, 1)).await;
+
+    let library_body = xml::to_vec(&Value::Map(Map::from([(
+        "folders".into(),
+        Value::Array(vec![Value::Map(Map::from([
+            ("folder_id".into(), Value::Uuid(library_root.id().uuid())),
+            ("owner_id".into(), Value::Uuid(Uuid::nil())),
+            ("version".into(), Value::Integer(1)),
+            ("descendents".into(), Value::Integer(1)),
+            ("categories".into(), Value::Array(Vec::new())),
+            (
+                "items".into(),
+                Value::Array(vec![Value::Map(Map::from([
+                    ("item_id".into(), Value::Uuid(library_item_id)),
+                    ("owner_id".into(), Value::Uuid(linden)),
+                    ("parent_id".into(), Value::Uuid(library_root.id().uuid())),
+                    ("name".into(), Value::String("Library Note".into())),
+                    ("desc".into(), Value::String(String::new())),
+                    ("type".into(), Value::Integer(7)),
+                    ("inv_type".into(), Value::Integer(7)),
+                ]))]),
+            ),
+        ]))]),
+    )])))
+    .expect("encode library descendents");
+    library_req.respond(200, library_body).await;
+
+    let mut done = false;
+    while !done {
+        match next_event(&mut events).await {
+            InventoryFetchEvent::Folder { fetch, applied } => {
+                apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply folder");
+            }
+            InventoryFetchEvent::Failed { folder, error } => panic!("unexpected failure for {folder:?}: {error}"),
+            InventoryFetchEvent::BackgroundDone => done = true,
+        }
+    }
+    assert!(inventory.snapshot().is_complete(personal_root));
+    assert!(inventory.snapshot().is_complete(library_root));
+    assert!(inventory.snapshot().item(ItemKey::new(library, ItemId::new(library_item_id))).is_some());
+
+    drop(requests);
+    stop.send(()).expect("stop scheduler");
+    task.await.expect("scheduler stopped");
+}
+
+#[tokio::test]
+async fn malformed_response_preserves_decode_error_cause() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let capability = CapabilityUrl::parse(peer.url("/ais").as_str()).expect("valid AIS URL");
+    let owner = InventoryOwner::new(Uuid::from_u128(110));
+    let root = key(owner, 111);
+    let responder = tokio::spawn(async move {
+        let request = peer.next().await;
+        request.respond(200, "<llsd><not-valid-xml").await;
+    });
+
+    let result = fetch_ais(&client, &capability, root, 0).await;
+    responder.await.expect("peer responder");
+    assert_matches!(result, Err(InventoryFetchError::InvalidResponse(DecodeError::MalformedLlsd)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_after_honors_pacing_and_preserves_status_on_exhaustion() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let capability = CapabilityUrl::parse(peer.url("/ais").as_str()).expect("valid AIS URL");
+    let owner = InventoryOwner::new(Uuid::from_u128(120));
+    let root = key(owner, 121);
+    let successful_body = empty_folder_response(root, 1);
+
+    let fetch_task = tokio::spawn({
+        let client = client.clone();
+        let capability = capability.clone();
+        async move { fetch_ais(&client, &capability, root, 0).await }
+    });
+
+    let first = peer.next().await;
+    first.respond_with_headers(429, "", &[("Retry-After", "5")]).await;
+
+    time::advance(Duration::from_secs(4)).await;
+    task::yield_now().await;
+    assert!(timeout(Duration::from_millis(50), peer.next()).await.is_err());
+
+    time::advance(Duration::from_secs(2)).await;
+    let second = peer.next().await;
+    second.respond(200, successful_body).await;
+    let fetched = fetch_task.await.expect("fetch task").expect("retry after 5s should succeed");
+    assert_eq!(fetched.len(), 1);
+
+    let exhaust_task = tokio::spawn({
+        let client = client.clone();
+        let capability = capability.clone();
+        async move { fetch_ais(&client, &capability, root, 0).await }
+    });
+    for attempt in 0..=MAX_FETCH_RETRIES {
+        let req = peer.next().await;
+        let status = if attempt < MAX_FETCH_RETRIES { 429 } else { 503 };
+        req.respond_with_headers(status, "", &[("Retry-After", "0")]).await;
+    }
+    let error = exhaust_task.await.expect("exhaust task").expect_err("exhausted retries should fail");
+    assert_eq!(error, InventoryFetchError::RetryExhausted(FetchFailureCause::HttpStatus(503)));
+    assert!(error.to_string().contains("HTTP 503"));
+}
+
+#[test]
+fn timeout_and_cancellation_causes_are_preserved() {
+    assert_eq!(classify_request_error(network::Error::CapabilityRequestCanceled), RequestFailure::Cancelled);
+    assert_eq!(classify_request_error(network::Error::CapabilitySessionClosed), RequestFailure::Cancelled);
+    assert_eq!(retry_delay(0, Some(Duration::from_secs(86_400))), MAX_RETRY_AFTER);
+    let error = InventoryFetchError::RetryExhausted(FetchFailureCause::Timeout);
+    assert!(error.to_string().contains("timed out"));
+}
+
+#[tokio::test]
+async fn logout_cancellation_emits_zero_failures() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let owner = InventoryOwner::new(Uuid::from_u128(130));
+    let root = key(owner, 131);
+    let inventory = Inventory::new(category(root, None), None, InventoryLimits::default()).expect("valid inventory root");
+
+    let (requests, mut events, _model, task, cancel, _stop) = scheduler(client.clone(), inventory.snapshot());
+    let _seed_req = peer.next().await;
+    cancel.send(()).expect("cancel during discover");
+    task.await.expect("scheduler exits cleanly during discover");
+    drop(requests);
+    while let Ok(event) = events.try_recv() {
+        assert!(!matches!(event, InventoryFetchEvent::Failed { .. }), "unexpected failure event during discover cancel: {event:?}");
+    }
+
+    let mut peer2 = LoopbackPeer::start().await;
+    let client2 = Client::new(peer2.url("/seed")).expect("active Tokio runtime");
+    let (requests2, mut events2, _model2, task2, cancel2, _stop2) = scheduler(client2, inventory.snapshot());
+    peer2.grant(&[("InventoryAPIv3", "/ais")]).await;
+    let in_flight = peer2.next().await;
+    in_flight.respond_with_headers(429, "", &[("Retry-After", "10")]).await;
+    cancel2.send(()).expect("cancel during retry backoff");
+    task2.await.expect("scheduler exits cleanly during retry backoff");
+    drop(requests2);
+    while let Ok(event) = events2.try_recv() {
+        assert!(!matches!(event, InventoryFetchEvent::Failed { .. }), "unexpected failure event during backoff cancel: {event:?}");
+    }
 }

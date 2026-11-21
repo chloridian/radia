@@ -5,8 +5,8 @@ use std::{collections::BTreeMap, error, fmt};
 use uuid::Uuid;
 
 pub use self::wire::{
-    decode_ais_children, decode_ais_edit_response, decode_ais_item, decode_created_category_response, decode_fetch_inventory_descendents2,
-    decode_fetch_inventory2,
+    decode_ais_children, decode_ais_edit_response, decode_ais_item, decode_ais_library_children, decode_created_category_response,
+    decode_fetch_inventory_descendents2, decode_fetch_inventory2, decode_fetch_lib_descendents2,
 };
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RESPONSE_DEPTH: usize = 192;
@@ -24,16 +24,24 @@ const MAX_FOLDER_CHILDREN: usize = 100_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecodeError {
-    InvalidResponse,
     TooLarge,
+    MalformedLlsd,
+    UnexpectedStructure(&'static str),
+    OwnerMismatch,
+    ParentMismatch,
+    DuplicateId,
 }
 
 impl fmt::Display for DecodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidResponse => "inventory response is invalid",
-            Self::TooLarge => "inventory response exceeds a decoding limit",
-        })
+        match self {
+            Self::TooLarge => formatter.write_str("inventory response exceeds a decoding limit"),
+            Self::MalformedLlsd => formatter.write_str("inventory response contains malformed LLSD"),
+            Self::UnexpectedStructure(detail) => write!(formatter, "inventory response has unexpected structure: {detail}"),
+            Self::OwnerMismatch => formatter.write_str("inventory response owner does not match requested owner"),
+            Self::ParentMismatch => formatter.write_str("inventory response parent does not match expected folder"),
+            Self::DuplicateId => formatter.write_str("inventory response contains a duplicate identifier"),
+        }
     }
 }
 
@@ -263,9 +271,8 @@ mod tests {
         ];
         for (name, value) in cases {
             let response = Value::Map(Map::from([(name.into(), value)]));
-            assert_eq!(
-                decode_ais_edit_response(&encode(&response), Uuid::from_u128(99)),
-                Err(DecodeError::InvalidResponse),
+            assert!(
+                matches!(decode_ais_edit_response(&encode(&response), Uuid::from_u128(99)), Err(DecodeError::UnexpectedStructure(_))),
                 "{name} must use its AIS schema shape"
             );
         }
@@ -353,9 +360,8 @@ mod tests {
                 ("version".into(), Value::Integer(1)),
             ]);
             root_fields.insert("_embedded".into(), map_value([(name.into(), Value::Map(Map::from([(wrong_key.to_string(), child)])))]));
-            assert_eq!(
-                decode_ais_children(&encode(&Value::Map(root_fields)), root, owner),
-                Err(DecodeError::InvalidResponse),
+            assert!(
+                matches!(decode_ais_children(&encode(&Value::Map(root_fields)), root, owner), Err(DecodeError::UnexpectedStructure(_))),
                 "{name} map key must match the child's ID"
             );
         }
@@ -370,7 +376,10 @@ mod tests {
             _ => unreachable!(),
         };
         root_fields.insert("_embedded".into(), map_value([("items".into(), Value::Array(Vec::new()))]));
-        assert_eq!(decode_ais_children(&encode(&Value::Map(root_fields)), root, owner), Err(DecodeError::InvalidResponse));
+        assert_eq!(
+            decode_ais_children(&encode(&Value::Map(root_fields)), root, owner),
+            Err(DecodeError::UnexpectedStructure("expected map"))
+        );
     }
 
     #[test]
@@ -454,7 +463,7 @@ mod tests {
 
         assert_eq!(
             decode_fetch_inventory_descendents2(bytes.as_bytes(), &[RequestedFolder { id: folder, owner_id: owner }]),
-            Err(DecodeError::InvalidResponse)
+            Err(DecodeError::UnexpectedStructure("conflicting uuid aliases"))
         );
     }
 
@@ -481,7 +490,7 @@ mod tests {
             "<llsd><map><key>category_id</key><uuid>{folder}</uuid><key>ignored</key><map><key>bad</key><uuid>not-a-uuid</uuid></map></map></llsd>"
         );
 
-        assert_eq!(decode_ais_children(bytes.as_bytes(), folder, Uuid::from_u128(99)), Err(DecodeError::InvalidResponse));
+        assert_eq!(decode_ais_children(bytes.as_bytes(), folder, Uuid::from_u128(99)), Err(DecodeError::MalformedLlsd));
     }
 
     #[test]
@@ -503,7 +512,10 @@ mod tests {
                 ("links".into(), Value::Map(Map::new())),
             ]),
         );
-        assert_eq!(decode_ais_children(&encode(&Value::Map(root_fields)), root, owner), Err(DecodeError::InvalidResponse));
+        assert_eq!(
+            decode_ais_children(&encode(&Value::Map(root_fields)), root, owner),
+            Err(DecodeError::UnexpectedStructure("expected integer"))
+        );
     }
 
     #[test]
@@ -677,7 +689,57 @@ mod tests {
             _ => unreachable!(),
         };
         value.insert("agent_id".into(), Value::Uuid(Uuid::from_u128(3)));
-        assert_eq!(decode_ais_children(&encode(&Value::Map(value)), root, owner), Err(DecodeError::InvalidResponse));
+        assert_eq!(decode_ais_children(&encode(&Value::Map(value)), root, owner), Err(DecodeError::OwnerMismatch));
+    }
+
+    #[test]
+    fn library_children_accept_nil_omitted_and_linden_owners() {
+        let library_owner = Uuid::from_u128(1);
+        let linden_owner = Uuid::from_u128(999);
+        let root = Uuid::from_u128(2);
+        let child_folder = Uuid::from_u128(3);
+        let nil_item = Uuid::from_u128(4);
+        let linden_item = Uuid::from_u128(5);
+
+        let mut root_fields = match category(root, None, 3) {
+            Value::Map(fields) => fields,
+            _ => unreachable!(),
+        };
+        root_fields.insert("agent_id".into(), Value::Uuid(Uuid::nil()));
+        let mut sub_fields = match category(child_folder, Some(root), 0) {
+            Value::Map(fields) => fields,
+            _ => unreachable!(),
+        };
+        sub_fields.insert("agent_id".into(), Value::Uuid(linden_owner));
+        root_fields.insert(
+            "_embedded".into(),
+            map_value([
+                ("categories".into(), keyed(vec![Value::Map(sub_fields)], "category_id")),
+                ("items".into(), keyed(vec![item(nil_item, root, Uuid::nil()), item(linden_item, root, linden_owner)], "item_id")),
+                ("links".into(), Value::Map(Map::new())),
+            ]),
+        );
+
+        let decoded = decode_ais_library_children(&encode(&Value::Map(root_fields)), root).expect("library AIS children decode");
+        assert_eq!(decoded.id, root);
+        assert_eq!(decoded.children.as_ref().map(Vec::len), Some(3));
+
+        let legacy_response = Value::Map(Map::from([(
+            "folders".into(),
+            Value::Array(vec![Value::Map(Map::from([
+                ("folder_id".into(), Value::Uuid(root)),
+                ("owner_id".into(), Value::Uuid(Uuid::nil())),
+                ("version".into(), Value::Integer(1)),
+                ("descendents".into(), Value::Integer(2)),
+                ("categories".into(), Value::Array(vec![category(child_folder, Some(root), 0)])),
+                ("items".into(), Value::Array(vec![legacy_item(linden_item, root, linden_owner)])),
+            ]))]),
+        )]));
+        let decoded_legacy =
+            decode_fetch_lib_descendents2(&encode(&legacy_response), &[RequestedFolder { id: root, owner_id: library_owner }])
+                .expect("library legacy descendents decode");
+        assert_eq!(decoded_legacy[0].direct_categories.len(), 1);
+        assert_eq!(decoded_legacy[0].direct_items.len(), 1);
     }
 
     #[test]
@@ -686,7 +748,10 @@ mod tests {
         let parent = Uuid::from_u128(2);
         let item_id = Uuid::from_u128(3);
         let response = Value::Map(Map::from([("items".into(), Value::Array(vec![legacy_item(item_id, parent, owner)]))]));
-        assert_eq!(decode_fetch_inventory2(&encode(&response), owner, &[Uuid::from_u128(4)]), Err(DecodeError::InvalidResponse));
+        assert_eq!(
+            decode_fetch_inventory2(&encode(&response), owner, &[Uuid::from_u128(4)]),
+            Err(DecodeError::UnexpectedStructure("unrequested item id"))
+        );
     }
 
     #[test]
@@ -701,7 +766,7 @@ mod tests {
         assert!(decoded.iter().all(|item| item.parent_id == Some(parent) && item.owner_id == Some(owner)));
         items[10] = items[0].clone();
         let response = map_value([("items".into(), Value::Array(items))]);
-        assert_eq!(decode_fetch_inventory2(&encode(&response), owner, &requested), Err(DecodeError::InvalidResponse));
+        assert_eq!(decode_fetch_inventory2(&encode(&response), owner, &requested), Err(DecodeError::DuplicateId));
     }
 
     #[test]
@@ -738,6 +803,6 @@ mod tests {
         }));
         folders[10] = folders[0].clone();
         let response = map_value([("folders".into(), Value::Array(folders))]);
-        assert_eq!(decode_fetch_inventory_descendents2(&encode(&response), &requested), Err(DecodeError::InvalidResponse));
+        assert_eq!(decode_fetch_inventory_descendents2(&encode(&response), &requested), Err(DecodeError::DuplicateId));
     }
 }

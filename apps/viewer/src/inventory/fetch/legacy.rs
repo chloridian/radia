@@ -1,19 +1,23 @@
 use inventory::{CategoryKey, InventoryChild, InventoryOwner, Item, ServerVersion};
 use llsd::{Map, Value};
 use network::capabilities::{CapabilityUrl, Client};
-use protocol::inventory::{DecodeError, FolderDescendents, RequestedFolder, decode_fetch_inventory_descendents2, decode_fetch_inventory2};
+use protocol::inventory::{
+    DecodeError, FolderDescendents, RequestedFolder, decode_fetch_inventory_descendents2, decode_fetch_inventory2,
+    decode_fetch_lib_descendents2,
+};
 use uuid::Uuid;
 
 use super::{
     FolderFetch, FolderFetchProvenance, InventoryFetchError, MAX_FETCH_RESPONSE_BYTES, MAX_LEGACY_BATCH, RequestFailure,
     classify_request_error,
-    decode::{to_category, to_item},
+    decode::{to_category_with_scope, to_item, to_item_with_scope},
 };
 
 pub(super) async fn fetch_batch(
     client: &Client,
     capability: &CapabilityUrl,
     folders: &[CategoryKey],
+    is_library: bool,
 ) -> Result<Vec<FolderFetch>, RequestFailure> {
     if folders.is_empty() || folders.len() > MAX_LEGACY_BATCH {
         return Err(RequestFailure::Failed);
@@ -24,11 +28,22 @@ pub(super) async fn fetch_batch(
         .post_bytes_with_response_limit(capability, &folder_request(folders), MAX_FETCH_RESPONSE_BYTES)
         .await
         .map_err(classify_request_error)?;
-    decode_fetch_inventory_descendents2(&response, &requested)
-        .map_err(classify_decode_error)?
+    let decoded = if is_library {
+        decode_fetch_lib_descendents2(&response, &requested)
+    } else {
+        decode_fetch_inventory_descendents2(&response, &requested)
+    }
+    .map_err(classify_decode_error)?;
+    decoded
         .into_iter()
         .zip(folders.iter().copied())
-        .map(|(folder, key)| to_folder_fetch(folder, key).map_err(|_| RequestFailure::InvalidResponse))
+        .map(|(folder, key)| {
+            to_folder_fetch(folder, key, is_library).map_err(|error| match error {
+                InventoryFetchError::InvalidResponse(decode) => RequestFailure::InvalidResponse(decode),
+                InventoryFetchError::FolderTooLarge => RequestFailure::FolderTooLarge,
+                _ => RequestFailure::InvalidResponse(DecodeError::UnexpectedStructure("legacy folder decode")),
+            })
+        })
         .collect()
 }
 
@@ -46,20 +61,20 @@ pub(crate) async fn fetch_items(
             .map_err(map_request_error)?;
         let decoded = decode_fetch_inventory2(&response, owner.id(), batch).map_err(map_decode_error)?;
         for item in decoded {
-            let parent = item.parent_id.ok_or(InventoryFetchError::InvalidResponse)?;
+            let parent = item.parent_id.ok_or(InventoryFetchError::InvalidResponse(DecodeError::ParentMismatch))?;
             items.push(to_item(&item, owner, CategoryKey::new(owner, utils::FolderId::new(parent)))?);
         }
     }
     Ok(items)
 }
 
-fn to_folder_fetch(folder: FolderDescendents, key: CategoryKey) -> Result<FolderFetch, InventoryFetchError> {
+fn to_folder_fetch(folder: FolderDescendents, key: CategoryKey, is_library: bool) -> Result<FolderFetch, InventoryFetchError> {
     let mut children = Vec::with_capacity(folder.direct_categories.len().saturating_add(folder.direct_items.len()));
     for category in &folder.direct_categories {
-        children.push(InventoryChild::Category(to_category(category, key.owner(), Some(key))?));
+        children.push(InventoryChild::Category(to_category_with_scope(category, key.owner(), Some(key), is_library)?));
     }
     for item in &folder.direct_items {
-        children.push(InventoryChild::Item(to_item(item, key.owner(), key)?));
+        children.push(InventoryChild::Item(to_item_with_scope(item, key.owner(), key, is_library)?));
     }
     let descendent_count = Some(folder.descendent_count);
     Ok(FolderFetch {
@@ -95,22 +110,25 @@ fn item_request(item_ids: &[Uuid]) -> Value {
 fn classify_decode_error(error: DecodeError) -> RequestFailure {
     match error {
         DecodeError::TooLarge => RequestFailure::FolderTooLarge,
-        DecodeError::InvalidResponse => RequestFailure::InvalidResponse,
+        other => RequestFailure::InvalidResponse(other),
     }
 }
 
 fn map_decode_error(error: DecodeError) -> InventoryFetchError {
     match error {
         DecodeError::TooLarge => InventoryFetchError::FolderTooLarge,
-        DecodeError::InvalidResponse => InventoryFetchError::InvalidResponse,
+        other => InventoryFetchError::InvalidResponse(other),
     }
 }
 
 fn map_request_error(error: network::Error) -> InventoryFetchError {
     match classify_request_error(error) {
+        RequestFailure::Cancelled => InventoryFetchError::Cancelled,
         RequestFailure::FolderTooLarge => InventoryFetchError::FolderTooLarge,
-        RequestFailure::InvalidResponse => InventoryFetchError::InvalidResponse,
-        RequestFailure::Transient(_) => InventoryFetchError::RetryExhausted,
-        RequestFailure::Forbidden | RequestFailure::Missing | RequestFailure::Failed => InventoryFetchError::RequestFailed,
+        RequestFailure::InvalidResponse(decode) => InventoryFetchError::InvalidResponse(decode),
+        RequestFailure::Transient { cause, .. } => InventoryFetchError::RetryExhausted(cause),
+        RequestFailure::Forbidden => InventoryFetchError::HttpStatus(403),
+        RequestFailure::Missing(status) | RequestFailure::HttpStatus(status) => InventoryFetchError::HttpStatus(status),
+        RequestFailure::Failed => InventoryFetchError::RequestFailed,
     }
 }

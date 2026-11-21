@@ -4,25 +4,30 @@ use inventory::{
     AssetType, CategoryKey, FolderType, InventoryOwner, InventoryType, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType,
     ServerVersion,
 };
-use protocol::inventory::{Category, Child, Item};
+use protocol::inventory::{Category, Child, DecodeError, Item};
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
 use super::{FolderFetch, FolderFetchProvenance, InventoryFetchError};
 
-pub(super) fn ais_folders(root: &Category, requested: CategoryKey) -> Result<Vec<FolderFetch>, InventoryFetchError> {
+pub(super) fn ais_folders(root: &Category, requested: CategoryKey, is_library: bool) -> Result<Vec<FolderFetch>, InventoryFetchError> {
     if root.id != requested.id().uuid() {
-        return Err(InventoryFetchError::InvalidResponse);
+        return Err(InventoryFetchError::InvalidResponse(DecodeError::UnexpectedStructure("root category_id mismatch")));
     }
     let mut folders = Vec::new();
-    append_ais_folder(root, requested.owner(), &mut folders)?;
+    append_ais_folder(root, requested.owner(), is_library, &mut folders)?;
     if folders.first().is_none_or(|folder| folder.folder != requested) {
-        return Err(InventoryFetchError::InvalidResponse);
+        return Err(InventoryFetchError::InvalidResponse(DecodeError::UnexpectedStructure("missing requested root folder")));
     }
     Ok(folders)
 }
 
-pub(super) fn append_ais_folder(wire: &Category, owner: InventoryOwner, folders: &mut Vec<FolderFetch>) -> Result<(), InventoryFetchError> {
+pub(super) fn append_ais_folder(
+    wire: &Category,
+    owner: InventoryOwner,
+    is_library: bool,
+    folders: &mut Vec<FolderFetch>,
+) -> Result<(), InventoryFetchError> {
     let folder = CategoryKey::new(owner, FolderId::new(wire.id));
     let Some(wire_children) = &wire.children else { return Ok(()) };
     let mut children = Vec::with_capacity(wire_children.len());
@@ -30,10 +35,10 @@ pub(super) fn append_ais_folder(wire: &Category, owner: InventoryOwner, folders:
     for child in wire_children {
         match child {
             Child::Category(category) => {
-                children.push(inventory::InventoryChild::Category(to_category(category, owner, Some(folder))?));
+                children.push(inventory::InventoryChild::Category(to_category_with_scope(category, owner, Some(folder), is_library)?));
                 child_categories.push(category);
             }
-            Child::Item(item) => children.push(inventory::InventoryChild::Item(to_item(item, owner, folder)?)),
+            Child::Item(item) => children.push(inventory::InventoryChild::Item(to_item_with_scope(item, owner, folder, is_library)?)),
         }
     }
     let fetch = FolderFetch {
@@ -45,7 +50,7 @@ pub(super) fn append_ais_folder(wire: &Category, owner: InventoryOwner, folders:
     };
     folders.push(fetch);
     for category in child_categories {
-        append_ais_folder(category, owner, folders)?;
+        append_ais_folder(category, owner, is_library, folders)?;
     }
     Ok(())
 }
@@ -55,9 +60,18 @@ pub(crate) fn to_category(
     owner: InventoryOwner,
     parent: Option<CategoryKey>,
 ) -> Result<inventory::Category, InventoryFetchError> {
-    validate_identity(wire.owner_id, wire.parent_id, owner, parent)?;
+    to_category_with_scope(wire, owner, parent, false)
+}
+
+pub(super) fn to_category_with_scope(
+    wire: &Category,
+    owner: InventoryOwner,
+    parent: Option<CategoryKey>,
+    is_library: bool,
+) -> Result<inventory::Category, InventoryFetchError> {
+    validate_identity(wire.owner_id, wire.parent_id, owner, parent, is_library)?;
     if wire.name.len() > inventory::MAX_INVENTORY_NAME_BYTES {
-        return Err(InventoryFetchError::InvalidResponse);
+        return Err(InventoryFetchError::InvalidResponse(DecodeError::TooLarge));
     }
     Ok(inventory::Category {
         key: CategoryKey::new(owner, FolderId::new(wire.id)),
@@ -70,9 +84,18 @@ pub(crate) fn to_category(
 }
 
 pub(crate) fn to_item(wire: &Item, owner: InventoryOwner, parent: CategoryKey) -> Result<inventory::Item, InventoryFetchError> {
-    validate_identity(wire.owner_id, wire.parent_id, owner, Some(parent))?;
+    to_item_with_scope(wire, owner, parent, false)
+}
+
+pub(super) fn to_item_with_scope(
+    wire: &Item,
+    owner: InventoryOwner,
+    parent: CategoryKey,
+    is_library: bool,
+) -> Result<inventory::Item, InventoryFetchError> {
+    validate_identity(wire.owner_id, wire.parent_id, owner, Some(parent), is_library)?;
     if wire.name.len() > inventory::MAX_INVENTORY_NAME_BYTES || wire.description.len() > inventory::MAX_INVENTORY_DESCRIPTION_BYTES {
-        return Err(InventoryFetchError::InvalidResponse);
+        return Err(InventoryFetchError::InvalidResponse(DecodeError::TooLarge));
     }
     let permissions = &wire.permissions;
     let sale = &wire.sale_info;
@@ -106,11 +129,13 @@ fn validate_identity(
     actual_parent: Option<Uuid>,
     owner: InventoryOwner,
     parent: Option<CategoryKey>,
+    is_library: bool,
 ) -> Result<(), InventoryFetchError> {
-    if actual_owner.is_some_and(|actual| actual != owner.id())
-        || parent.is_some_and(|parent| actual_parent.is_some_and(|actual| actual != parent.id().uuid()))
-    {
-        return Err(InventoryFetchError::InvalidResponse);
+    if !is_library && actual_owner.is_some_and(|actual| actual != owner.id()) {
+        return Err(InventoryFetchError::InvalidResponse(DecodeError::OwnerMismatch));
+    }
+    if parent.is_some_and(|parent| actual_parent.is_some_and(|actual| actual != parent.id().uuid())) {
+        return Err(InventoryFetchError::InvalidResponse(DecodeError::ParentMismatch));
     }
     Ok(())
 }
