@@ -281,6 +281,7 @@ pub struct CvarProvenance {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CvarError {
     UnknownName(String),
+    UnknownPreset(String),
     TypeMismatch { name: &'static str, expected: &'static str },
     OutOfBounds { name: &'static str },
     NonFinite { name: &'static str },
@@ -293,6 +294,7 @@ impl fmt::Display for CvarError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownName(name) => write!(formatter, "unknown CVar `{name}`"),
+            Self::UnknownPreset(name) => write!(formatter, "unknown graphics preset `{name}`"),
             Self::TypeMismatch { name, expected } => write!(formatter, "CVar `{name}` expects a `{expected}` value"),
             Self::OutOfBounds { name } => write!(formatter, "CVar `{name}` value is outside declared bounds"),
             Self::NonFinite { name } => write!(formatter, "CVar `{name}` value must be finite"),
@@ -334,6 +336,14 @@ impl CvarSnapshot {
     pub fn provenance(&self, id: CvarId) -> CvarProvenance {
         let entry = &self.entries[id.0];
         CvarProvenance { value: entry.effective.clone(), source: entry.source, pending_restart_value: entry.pending_restart_value.clone() }
+    }
+
+    pub fn pending_restarts(&self) -> Vec<(&'static CvarDescriptor, CvarValue)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| entry.pending_restart_value.as_ref().map(|pending| (&DESCRIPTORS[index], pending.clone())))
+            .collect()
     }
 }
 
@@ -424,6 +434,43 @@ impl CvarRegistry {
             self.commit_layer_changes();
         }
         Ok(self.revision)
+    }
+
+    pub fn replace_layer(&mut self, layer: Layer, entries: &[(&str, CvarValue)]) -> Result<CvarRevision, CvarError> {
+        let Some(slot) = layer.slot() else {
+            return Err(CvarError::LayerNotAllowed { name: "", layer });
+        };
+        let mut next: [Option<CvarValue>; CVAR_COUNT] = array::from_fn(|_| None);
+        for (name, value) in entries {
+            let descriptor = lookup_by_name(name).ok_or_else(|| CvarError::UnknownName((*name).to_owned()))?;
+            Self::validate_layer(descriptor, layer)?;
+            let validated = descriptor.domain.validate(descriptor.name, value)?;
+            let normalized = if layer == Layer::Global && validated == descriptor.default { None } else { Some(validated) };
+            next[descriptor.id.0] = normalized;
+        }
+        if self.layers[slot] != next {
+            self.layers[slot] = next;
+            self.commit_layer_changes();
+        }
+        Ok(self.revision)
+    }
+
+    pub fn apply_preset(&mut self, preset: Option<&str>, presets: &[(&str, &[(&str, CvarValue)])]) -> Result<CvarRevision, CvarError> {
+        match preset {
+            None => self.replace_layer(Layer::Preset, &[]),
+            Some(name) => {
+                let (_, entries) =
+                    presets.iter().find(|(candidate, _)| *candidate == name).ok_or_else(|| CvarError::UnknownPreset(name.to_owned()))?;
+                self.replace_layer(Layer::Preset, entries)
+            }
+        }
+    }
+
+    pub fn masking_layer(&self, id: CvarId, layer: Layer) -> Option<Layer> {
+        Layer::OVERRIDE_LAYERS
+            .into_iter()
+            .rev()
+            .find(|candidate| *candidate > layer && candidate.slot().is_some_and(|slot| self.layers[slot][id.0].is_some()))
     }
 
     pub fn lock_startup_values(&mut self) {
@@ -536,10 +583,10 @@ mod tests {
 
         assert_eq!(RENDER_DRAW_DISTANCE.default_value(), 512.0);
         assert_eq!(SCENE_LOD_FACTOR.default_value(), 1.0);
-        assert_eq!(ASSET_TEXTURE_SOFT_CAP_MIB.default_value(), 512);
+        assert_eq!(RENDER_TEXTURE_SOFT_CAP_MIB.default_value(), 1024);
         assert_eq!(snapshot.get(RENDER_DRAW_DISTANCE), 512.0);
         assert_eq!(snapshot.get(SCENE_LOD_FACTOR), 1.0);
-        assert_eq!(snapshot.get(ASSET_TEXTURE_SOFT_CAP_MIB), 512);
+        assert_eq!(snapshot.get(RENDER_TEXTURE_SOFT_CAP_MIB), 1024);
         assert_eq!(
             snapshot.provenance(RENDER_DRAW_DISTANCE.id()),
             CvarProvenance { value: CvarValue::F32(512.0), source: Layer::Default, pending_restart_value: None }
@@ -636,14 +683,14 @@ mod tests {
                 &[
                     ("render.draw_distance", CvarValue::F32(256.0)),
                     ("scene.lod_factor", CvarValue::F32(2.0)),
-                    ("asset.texture_soft_cap_mib", CvarValue::I64(1024)),
+                    ("render.texture_soft_cap_mib", CvarValue::I64(2048)),
                 ],
             )
             .expect("valid batch applies");
         assert!(after > before);
         assert_eq!(registry.get(RENDER_DRAW_DISTANCE), 256.0);
         assert_eq!(registry.get(SCENE_LOD_FACTOR), 2.0);
-        assert_eq!(registry.get(ASSET_TEXTURE_SOFT_CAP_MIB), 1024);
+        assert_eq!(registry.get(RENDER_TEXTURE_SOFT_CAP_MIB), 2048);
     }
 
     #[test]
@@ -744,7 +791,7 @@ mod tests {
         assert_eq!(by_name_match, vec!["render.draw_distance"]);
 
         let by_help_match = search("EVICTION", false).map(|descriptor| descriptor.name).collect::<Vec<_>>();
-        assert_eq!(by_help_match, vec!["asset.texture_soft_cap_mib"]);
+        assert_eq!(by_help_match, vec!["render.texture_soft_cap_mib"]);
 
         let synthetic = [
             CvarDescriptor {

@@ -1,5 +1,6 @@
 use std::{
     backtrace::Backtrace,
+    env,
     fs::{self, OpenOptions},
     io::{self, IsTerminal},
     panic,
@@ -51,6 +52,17 @@ impl LogLevel {
             Self::Info => "info",
             Self::Debug => "debug",
             Self::Trace => "trace",
+        }
+    }
+
+    pub fn from_directive(directive: &str) -> Option<Self> {
+        match directive {
+            "error" => Some(Self::Error),
+            "warn" => Some(Self::Warn),
+            "info" => Some(Self::Info),
+            "debug" => Some(Self::Debug),
+            "trace" => Some(Self::Trace),
+            _ => None,
         }
     }
 }
@@ -106,6 +118,22 @@ impl LogControl {
             state.level
         };
         self.apply(level, noisy_network);
+    }
+
+    pub fn apply_startup_settings(&self, level: LogLevel, noisy_network: bool) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.level = level;
+            state.noisy_network = noisy_network;
+        }
+        if env::var_os("LOG").is_none() {
+            (self.reload_console)(build_filter(level, noisy_network));
+        }
+        if env::var_os("FILE_LOG").is_none()
+            && let Some(reload_file) = &self.reload_file
+        {
+            reload_file(build_filter(level, noisy_network));
+        }
     }
 
     fn apply(&self, level: LogLevel, noisy_network: bool) {

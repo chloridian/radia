@@ -210,8 +210,12 @@ impl AssetCache {
     }
 
     pub fn open_default() -> Result<Self, AssetCacheError> {
+        Self::open_default_with_limit(storage::DEFAULT_SIZE_LIMIT)
+    }
+
+    pub fn open_default_with_limit(size_limit: u64) -> Result<Self, AssetCacheError> {
         let directory = storage::default_cache_dir().map_err(AssetCacheError::Storage)?;
-        Self::open(directory, storage::DEFAULT_SIZE_LIMIT)
+        Self::open(directory, size_limit)
     }
 
     pub fn lookup(&self, request: Request) -> AssetLookup {

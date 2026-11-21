@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use cvars::CHAT_MAX_HISTORY_MESSAGES;
 use network::{AgentSession, Delivery, SessionHandle};
 use prism::{
     Context, Entity, IntoElement, Render, Role, StyleRefinement, Window,
@@ -21,9 +22,11 @@ use protocol::{
     },
 };
 
-use crate::session::{ChatMessage, format_avatar_name};
+use crate::{
+    gui::settings,
+    session::{ChatMessage, format_avatar_name},
+};
 
-const MAX_CHAT_HISTORY_MESSAGES: usize = 500;
 const MAX_CHAT_HISTORY_BYTES: usize = 1024 * 1024;
 
 pub struct ChatScreen {
@@ -136,8 +139,9 @@ impl ChatScreen {
     }
 
     fn push_message(&mut self, message: ChatMessage, cx: &mut Context<Self>) -> bool {
+        let max_messages = usize::try_from(settings(cx).get(CHAT_MAX_HISTORY_MESSAGES)).unwrap_or(500);
         let before = self.messages.len();
-        if !retain_message(&mut self.messages, &mut self.message_bytes, message) {
+        if !retain_message(&mut self.messages, &mut self.message_bytes, message, max_messages) {
             return false;
         }
         let after = self.messages.len();
@@ -248,13 +252,13 @@ fn send_error_copy(error: &network::Error) -> &'static str {
     }
 }
 
-fn retain_message(messages: &mut VecDeque<ChatMessage>, message_bytes: &mut usize, message: ChatMessage) -> bool {
+fn retain_message(messages: &mut VecDeque<ChatMessage>, message_bytes: &mut usize, message: ChatMessage, max_messages: usize) -> bool {
     let size = message.from_name.len().saturating_add(message.message.len());
     if size > MAX_CHAT_HISTORY_BYTES {
         return false;
     }
 
-    while messages.len() >= MAX_CHAT_HISTORY_MESSAGES || message_bytes.saturating_add(size) > MAX_CHAT_HISTORY_BYTES {
+    while messages.len() >= max_messages || message_bytes.saturating_add(size) > MAX_CHAT_HISTORY_BYTES {
         let Some(removed) = messages.pop_front() else {
             break;
         };
@@ -272,21 +276,23 @@ mod tests {
 
     use prism::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
 
-    use super::{ChatMessage, ChatScreen, MAX_CHAT_HISTORY_BYTES, MAX_CHAT_HISTORY_MESSAGES, retain_message, send_error_copy};
+    use super::{CHAT_MAX_HISTORY_MESSAGES, ChatMessage, ChatScreen, MAX_CHAT_HISTORY_BYTES, retain_message, send_error_copy};
 
     #[test]
     fn history_keeps_recent_messages() {
+        let max_messages = usize::try_from(CHAT_MAX_HISTORY_MESSAGES.default_value()).expect("positive default");
         let mut messages = VecDeque::new();
         let mut bytes = 0;
-        for index in 0..MAX_CHAT_HISTORY_MESSAGES + 5 {
+        for index in 0..max_messages + 5 {
             assert!(retain_message(
                 &mut messages,
                 &mut bytes,
                 ChatMessage { from_name: format!("Agent {index}"), message: "hello".into() },
+                max_messages,
             ));
         }
 
-        assert_eq!(messages.len(), MAX_CHAT_HISTORY_MESSAGES);
+        assert_eq!(messages.len(), max_messages);
         assert_eq!(messages.front().map(|message| message.from_name.as_str()), Some("Agent 5"));
         assert_eq!(messages.back().map(|message| message.from_name.as_str()), Some("Agent 504"));
         assert!(bytes <= MAX_CHAT_HISTORY_BYTES);
@@ -294,6 +300,7 @@ mod tests {
 
     #[test]
     fn history_bounds_bytes() {
+        let max_messages = usize::try_from(CHAT_MAX_HISTORY_MESSAGES.default_value()).expect("positive default");
         let mut messages = VecDeque::new();
         let mut bytes = 0;
         for index in 0..2 {
@@ -301,6 +308,7 @@ mod tests {
                 &mut messages,
                 &mut bytes,
                 ChatMessage { from_name: format!("Agent {index}"), message: "x".repeat(600 * 1024) },
+                max_messages,
             ));
         }
 
@@ -312,6 +320,7 @@ mod tests {
             &mut messages,
             &mut bytes,
             ChatMessage { from_name: "Agent".into(), message: "x".repeat(MAX_CHAT_HISTORY_BYTES) },
+            max_messages,
         ));
         assert_eq!(messages.len(), 1);
         assert_eq!(messages.front().map(|message| message.from_name.as_str()), Some("Agent 1"));

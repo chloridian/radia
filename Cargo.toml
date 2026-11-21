@@ -74,6 +74,7 @@ tokio = { version = "1", features = [
     "sync",
     "time",
 ] }
+toml_edit = "0.22"
 tracing = "0.1"
 tracing-appender = "=0.2.5"
 tracing-subscriber = { version = "0.3", features = [
