@@ -199,6 +199,7 @@ pub(super) struct ObjectCacheSession {
     started: bool,
     disabled: bool,
     warned: bool,
+    degraded_warned: bool,
     dropped_writes: u64,
     override_cursor: Option<WorldChangeCursor>,
 }
@@ -230,6 +231,7 @@ impl ObjectCacheSession {
             started: false,
             disabled: false,
             warned: false,
+            degraded_warned: false,
             dropped_writes: 0,
             override_cursor: None,
         }
@@ -667,6 +669,25 @@ impl ObjectCacheSession {
 
     fn count_dropped_write(&mut self) {
         self.dropped_writes = self.dropped_writes.saturating_add(1);
+        if !self.degraded_warned {
+            self.degraded_warned = true;
+            tracing::warn!("object cache write queue is full or busy; some objects will be refetched");
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_degraded(&self) -> bool {
+        !self.disabled && self.dropped_writes > 0
+    }
+
+    #[cfg(test)]
+    pub(super) fn dropped_writes(&self) -> u64 {
+        self.dropped_writes
     }
 
     fn next_cache_generation(&mut self) -> u64 {
