@@ -1,21 +1,12 @@
-#![allow(unexpected_cfgs)]
-
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
-};
-#[cfg(world_bench_detailed)]
-use std::{
-    mem,
-    time::{Duration, Instant},
 };
 
 use hecs::{Component, EntityBuilder, QueryBorrow, QueryOne, Ref, ViewBorrow};
 use math::{Quat, Vec3};
 use uuid::Uuid;
 
-#[cfg(world_bench_detailed)]
-use crate::World;
 #[cfg(test)]
 use crate::mutation::facet;
 use crate::{
@@ -33,15 +24,6 @@ pub(crate) struct ObjectStore {
     addresses: HashMap<LocalAddress, Entity>,
     regions: HashMap<Region, BTreeMap<Uuid, Entity>>,
     avatars: BTreeMap<Uuid, Entity>,
-    #[cfg(world_bench_detailed)]
-    facet_structural_moves: usize,
-}
-
-pub(crate) struct StoreRemovalTimes {
-    #[cfg(world_bench_detailed)]
-    pub(crate) component_destruction: Duration,
-    #[cfg(world_bench_detailed)]
-    pub(crate) index_removal: Duration,
 }
 
 pub(crate) struct ComponentView<'a, T: Component> {
@@ -65,8 +47,6 @@ impl ObjectStore {
             addresses: HashMap::new(),
             regions: HashMap::new(),
             avatars: BTreeMap::new(),
-            #[cfg(world_bench_detailed)]
-            facet_structural_moves: 0,
         }
     }
 
@@ -141,19 +121,13 @@ impl ObjectStore {
         entity
     }
 
-    pub(crate) fn remove(&mut self, entity: Entity) -> StoreRemovalTimes {
+    pub(crate) fn remove(&mut self, entity: Entity) {
         let (id, address) = {
             let record = self.object_record(entity).expect("removal target is live");
             (record.id, record.state.binding.address)
         };
         let current_identity = self.entities.get(&id) == Some(&entity);
-        #[cfg(world_bench_detailed)]
-        let component_started = Instant::now();
         self.ecs.despawn(entity.0).expect("removal target is live");
-        #[cfg(world_bench_detailed)]
-        let component_destruction = component_started.elapsed();
-        #[cfg(world_bench_detailed)]
-        let indexes_started = Instant::now();
         if current_identity {
             self.entities.remove(&id);
             self.ids.remove(&id);
@@ -163,16 +137,6 @@ impl ObjectStore {
             self.addresses.remove(&address);
         }
         self.remove_region_id(address.region(), id, entity);
-        #[cfg(world_bench_detailed)]
-        let index_removal = indexes_started.elapsed();
-        #[cfg(world_bench_detailed)]
-        {
-            StoreRemovalTimes { component_destruction, index_removal }
-        }
-        #[cfg(not(world_bench_detailed))]
-        {
-            StoreRemovalTimes {}
-        }
     }
 
     pub(crate) fn commit(&mut self, entity: Entity, state: ObjectState, facets: Option<FacetChanges>, ordering: ObjectOrdering) {
@@ -200,9 +164,6 @@ impl ObjectStore {
             *stored_ordering = ordering;
         }
         if let Some(facets) = facets {
-            #[cfg(world_bench_detailed)]
-            facets.apply(&mut self.ecs, entity.0, &mut self.facet_structural_moves);
-            #[cfg(not(world_bench_detailed))]
             facets.apply(&mut self.ecs, entity.0);
         }
     }
@@ -298,13 +259,6 @@ impl ObjectStore {
 
     pub(crate) fn ordering_mut(&mut self, entity: hecs::Entity) -> &mut ObjectOrdering {
         self.ecs.query_one_mut::<&mut ObjectOrdering>(entity).expect("mutation target has ordering")
-    }
-}
-
-#[cfg(world_bench_detailed)]
-impl World {
-    pub fn take_bench_layout_stats(&mut self) -> (usize, usize) {
-        (self.store.ecs.archetypes().len(), mem::take(&mut self.store.facet_structural_moves))
     }
 }
 
