@@ -5,7 +5,7 @@ use std::{
     num::NonZeroU32,
     sync::{Arc, mpsc},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use futures::{FutureExt, future, poll};
@@ -28,12 +28,13 @@ use tokio::{
     sync::{oneshot, oneshot::error::TryRecvError},
     task,
 };
-use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
+use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId, Summary};
 use uuid::Uuid;
 use world::{Kind, LocalAddress, ObjectObservation, ObjectPatch, OrderEvidence, Parent, ParentUpdate, SitTarget, UpdateSource};
 
 use super::{
-    MoveExpectation, PendingFolderPreparation, PendingHandshakeReplies, cancel_pending_folder_preparation,
+    DECODE_REJECTION_LOSS_REPORT_INTERVAL, DecodeRejectionLosses, MoveExpectation, PendingFolderPreparation, PendingHandshakeReplies,
+    cancel_pending_folder_preparation,
     inventory_sync::{
         FolderFetchApply, PreparedInventoryFetch, apply_inventory_fetch, cancel_favorites_refresh, confirm_pending_moves,
         prepare_inventory_fetch, publish_favorites_refresh, stop_favorites_refresh,
@@ -1012,4 +1013,36 @@ async fn favorites_shutdown_reaps_worker() {
 
     assert!(current.is_none());
     dropped_rx.await.expect("shutdown reaped the cancelled worker");
+}
+
+#[test]
+fn decode_rejection_coverage_loss_aggregates_and_flushes() {
+    let simulator = test_helpers::simulator_id();
+    let mut summary = Summary::<DecodeRejectionLosses>::new(DECODE_REJECTION_LOSS_REPORT_INTERVAL);
+    let start = Instant::now();
+
+    let first = summary
+        .record(start, |losses| losses.record(simulator, Some(42), "lludp"))
+        .expect("first decode rejection loss reports immediately");
+    assert_eq!(first.count, 1);
+    assert_eq!(first.sample_simulator, Some(simulator));
+    assert_eq!(first.sample_region, Some(42));
+    assert_eq!(first.sample_source, Some("lludp"));
+
+    assert!(summary.record(start + Duration::from_secs(1), |losses| losses.record(simulator, Some(42), "lludp")).is_none());
+    assert!(summary.record(start + Duration::from_secs(2), |losses| losses.record(simulator, Some(42), "lludp")).is_none());
+
+    let flushed = summary.flush().expect("pending decode rejection losses flush on teardown");
+    assert_eq!(flushed.count, 2);
+    assert_eq!(flushed.sample_simulator, Some(simulator));
+    assert_eq!(flushed.sample_region, Some(42));
+    assert_eq!(flushed.sample_source, Some("lludp"));
+    assert!(summary.flush().is_none());
+
+    assert!(summary.record(start + Duration::from_secs(3), |losses| losses.record(simulator, Some(99), "lludp")).is_none());
+    let due = summary
+        .record(start + DECODE_REJECTION_LOSS_REPORT_INTERVAL, |losses| losses.record(simulator, Some(99), "lludp"))
+        .expect("decode rejection losses report when interval elapses");
+    assert_eq!(due.count, 2);
+    assert_eq!(due.sample_region, Some(99));
 }
