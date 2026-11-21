@@ -1,7 +1,7 @@
 use std::{assert_matches, future::poll_fn, net::TcpStream, task::Poll};
 
 use super::*;
-use crate::{capabilities::budget::EVENT_QUEUE_REQUEST_TIMEOUT, coverage::CoverageLoss, fixtures::event_queue::EventQueueBudgetHarness};
+use crate::{capabilities::budget::EVENT_QUEUE_REQUEST_TIMEOUT, fixtures::event_queue::EventQueueBudgetHarness};
 
 async fn held_body(server: &EventQueueBudgetTestServer, client: &http::Client, body_bytes: usize) -> (http::IncomingResponse, TcpStream) {
     let request = {
@@ -385,10 +385,9 @@ async fn primary_slot_follows_role() {
     let neighbor_client = Client::new_with_budget(neighbor_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
     let old_primary_client = Client::new_with_budget(old_primary_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
     let new_primary_client = Client::new_with_budget(new_primary_server.url("/seed"), budget).expect("active Tokio runtime");
-    let (events, _received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
+    let (events, mut received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
     let (shutdown, shutdown_requested) = watch::channel(false);
     let old_coverage_losses = CoverageLossLedger::new();
-    let mut old_losses_changed = old_coverage_losses.subscribe();
     let mut neighbors = Vec::with_capacity(MAX_CONCURRENT_EVENT_QUEUES - 1);
 
     for index in 0..MAX_CONCURRENT_EVENT_QUEUES - 1 {
@@ -428,15 +427,6 @@ async fn primary_slot_follows_role() {
     );
     old_poll.write_all(partial_response.as_bytes()).expect("send a partial event batch from the old simulator");
     old_primary.role_handle().set_primary(false);
-    timeout(Duration::from_secs(1), old_losses_changed.changed())
-        .await
-        .expect("canceling a live EventQueue poll must record uncertain coverage")
-        .expect("coverage ledger remains available");
-    assert!(old_coverage_losses.snapshot().losses.iter().any(|loss| {
-        matches!(loss, CoverageLoss::Source(record)
-                    if record.watermark.simulator_id == test_simulator_id(MAX_CONCURRENT_EVENT_QUEUES as u64)
-                        && record.reason == CoverageLossReason::EventQueueAdmission)
-    }));
     let new_primary = new_primary_client
         .start_event_queue(
             test_simulator_id(MAX_CONCURRENT_EVENT_QUEUES as u64 + 1),
@@ -455,6 +445,8 @@ async fn primary_slot_follows_role() {
     old_primary.role_handle().set_primary(true);
     let returned_poll =
         old_primary_server.polls.recv_timeout(Duration::from_secs(1)).expect("a re-promoted EventQueue reacquires the primary slot");
+    assert!(old_coverage_losses.snapshot().losses.is_empty(), "role transitions must not record false EventQueue coverage loss");
+    assert!(received_events.try_recv().is_err(), "role transitions must not emit EventQueueCoverageLost");
 
     shutdown.send_replace(true);
     drop((neighbor_polls, old_poll, new_poll, returned_poll));

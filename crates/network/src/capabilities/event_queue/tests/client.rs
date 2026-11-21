@@ -757,3 +757,120 @@ async fn primary_404_keeps_session() {
     assert!(result.is_ok(), "explicit logout is a normal session end");
     assert!(server.finish().is_empty(), "404 must end polling without another request");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn role_change_during_in_flight_poll_redelivers_events_without_gap() {
+    const SECOND_BATCH: &str = "<llsd><map><key>id</key><integer>6</integer><key>events</key><array><map><key>message</key><string>Third</string></map></array></map></llsd>";
+    const THIRD_BATCH: &str = "<llsd><map><key>id</key><integer>7</integer><key>events</key><array><map><key>message</key><string>Fourth</string></map></array></map></llsd>";
+
+    let mut harness = EventQueueHarness::seeded(
+        "/events",
+        CLIENT_EVENT_CAPACITY,
+        [
+            EventServerResponse::Response(llsd_response(TWO_EVENT_BATCH)),
+            hold_response(),
+            EventServerResponse::Response(llsd_response(SECOND_BATCH)),
+            hold_response(),
+            EventServerResponse::Response(llsd_response(THIRD_BATCH)),
+            hold_response(),
+        ],
+    );
+    let task = harness.start_queue();
+
+    harness.expect_request("/seed");
+    let first_poll = harness.expect_request("/events");
+    assert_eq!(map_field(&decode_request_body(&first_poll), "ack"), Some(&Value::Undefined));
+    let first_batch = timeout(TEST_TIMEOUT, harness.received_events.recv())
+        .await
+        .expect("first batch should be delivered")
+        .expect("event channel should remain open");
+    assert_matches!(
+        first_batch,
+        Event::CapabilityEventBatch { events, .. }
+            if events.iter().map(|event| event.message.as_str()).collect::<Vec<_>>() == ["First", "Second"]
+    );
+
+    let held_neighbor_poll = harness.expect_request("/events");
+    assert_eq!(map_field(&decode_request_body(&held_neighbor_poll), "ack"), Some(&Value::Integer(5)));
+    task.role_handle().set_primary(true);
+
+    let promoted_retry_poll = harness.expect_request("/events");
+    assert_eq!(map_field(&decode_request_body(&promoted_retry_poll), "ack"), Some(&Value::Integer(5)));
+    let second_batch = timeout(TEST_TIMEOUT, harness.received_events.recv())
+        .await
+        .expect("promoted retry batch should be delivered")
+        .expect("event channel should remain open");
+    assert_matches!(
+        second_batch,
+        Event::CapabilityEventBatch { events, .. }
+            if events.iter().map(|event| event.message.as_str()).collect::<Vec<_>>() == ["Third"]
+    );
+
+    let held_primary_poll = harness.expect_request("/events");
+    assert_eq!(map_field(&decode_request_body(&held_primary_poll), "ack"), Some(&Value::Integer(6)));
+    task.role_handle().set_primary(false);
+
+    let demoted_retry_poll = harness.expect_request("/events");
+    assert_eq!(map_field(&decode_request_body(&demoted_retry_poll), "ack"), Some(&Value::Integer(6)));
+    let third_batch = timeout(TEST_TIMEOUT, harness.received_events.recv())
+        .await
+        .expect("demoted retry batch should be delivered")
+        .expect("event channel should remain open");
+    assert_matches!(
+        third_batch,
+        Event::CapabilityEventBatch { events, .. }
+            if events.iter().map(|event| event.message.as_str()).collect::<Vec<_>>() == ["Fourth"]
+    );
+
+    let final_poll = harness.expect_request("/events");
+    assert_eq!(map_field(&decode_request_body(&final_poll), "ack"), Some(&Value::Integer(7)));
+    assert!(harness.coverage_losses.snapshot().losses.is_empty(), "role transitions must not record coverage loss");
+    assert!(harness.received_events.try_recv().is_err(), "role transitions must not emit EventQueueCoverageLost");
+
+    harness.shutdown.send_replace(true);
+    assert_eq!(timeout(TEST_TIMEOUT, task.wait()).await.expect("shutdown should stop the held poll"), EventQueueExit::Stopped);
+    harness.server.stop();
+    assert!(harness.server.finish().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn genuine_event_queue_loss_still_reports_gap() {
+    let mut harness = EventQueueHarness::seeded(
+        "/events",
+        CLIENT_EVENT_CAPACITY,
+        [hold_response(), EventServerResponse::Response(response(404, "Not Found", "text/plain", None, "not found"))],
+    );
+    let task = harness.start_queue();
+
+    harness.expect_request("/seed");
+    let first_poll = harness.expect_request("/events");
+    assert_eq!(map_field(&decode_request_body(&first_poll), "ack"), Some(&Value::Undefined));
+    task.role_handle().set_primary(true);
+
+    let retry_poll = harness.expect_request("/events");
+    assert_eq!(map_field(&decode_request_body(&retry_poll), "ack"), Some(&Value::Undefined));
+
+    let loss_event = timeout(TEST_TIMEOUT, harness.received_events.recv())
+        .await
+        .expect("404 after role transition should report coverage loss")
+        .expect("event channel should remain open");
+    assert_matches!(loss_event, Event::EventQueueCoverageLost { .. });
+
+    let error_event = timeout(TEST_TIMEOUT, harness.received_events.recv())
+        .await
+        .expect("404 after role transition should report capability error")
+        .expect("event channel should remain open");
+    assert_matches!(error_event, Event::CapabilityError { capability, reason, .. } if capability == EVENT_QUEUE_NAME && reason.contains("HTTP 404"));
+
+    assert_eq!(timeout(TEST_TIMEOUT, task.wait()).await.expect("404 should stop the queue"), EventQueueExit::StoppedWithCoverageLoss);
+    assert!(
+        harness
+            .coverage_losses
+            .snapshot()
+            .losses
+            .iter()
+            .any(|loss| { matches!(loss, CoverageLoss::Source(record) if record.reason == CoverageLossReason::EventQueueAdmission) })
+    );
+    harness.server.stop();
+    assert!(harness.server.finish().is_empty());
+}

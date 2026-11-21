@@ -548,7 +548,7 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                 return EventQueueExit::Stopped;
             },
             changed = primary.changed() => {
-                pending_loss.record();
+                pending_loss.commit();
                 if changed.is_err() {
                     return EventQueueExit::Stopped;
                 }
