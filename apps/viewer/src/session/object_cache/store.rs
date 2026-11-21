@@ -9,7 +9,9 @@ use network::Grid;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use storage::{
     default_cache_dir,
-    sqlite::{MAX_BATCH_BYTES, MAX_BATCH_ROWS, MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError, SqliteReceipt},
+    sqlite::{
+        MAX_BATCH_BYTES, MAX_BATCH_ROWS, MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError, SqliteReceipt, StorageClass,
+    },
 };
 #[cfg(test)]
 use tokio::runtime::Handle;
@@ -109,14 +111,14 @@ pub(super) fn open_default() -> Result<(SqliteDb, OpenStatus), String> {
 }
 
 pub(super) fn open_at(path: impl AsRef<Path>) -> Result<(SqliteDb, OpenStatus), SqliteError> {
-    SqliteDb::open(path, migrate)
+    SqliteDb::open(path, StorageClass::Cache, migrate)
 }
 
 pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     match version {
         0 => {
-            let transaction = connection.transaction()?;
+            let transaction = connection.savepoint()?;
             for (_, _, sql) in SCHEMA {
                 transaction.execute_batch(sql)?;
             }

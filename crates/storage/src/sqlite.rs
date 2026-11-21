@@ -10,7 +10,7 @@ use std::{
     sync,
     sync::{
         Arc, Condvar, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -28,11 +28,34 @@ pub const MAX_QUEUED_BYTES: usize = 32 * 1024 * 1024;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(25);
 const MAX_CONTROL_COMMANDS: usize = MAX_QUEUED_BATCHES;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StorageClass {
+    Persistent,
+    Journal,
+    Cache,
+    Ephemeral,
+}
+
+impl StorageClass {
+    pub const fn allows_destructive_recovery(self) -> bool {
+        matches!(self, Self::Cache | Self::Ephemeral)
+    }
+
+    const fn synchronous_pragma(self) -> &'static str {
+        match self {
+            Self::Persistent => "FULL",
+            Self::Journal | Self::Cache => "NORMAL",
+            Self::Ephemeral => "OFF",
+        }
+    }
+}
+
 pub enum SqliteError {
     Busy,
     Corrupt,
     SchemaMismatch,
     UnsupportedSchemaVersion,
+    UnsupportedOperation,
     QueueFull,
     BatchTooLarge { rows: usize, bytes: usize },
     WorkerStopped,
@@ -47,6 +70,7 @@ impl fmt::Debug for SqliteError {
             Self::Corrupt => formatter.write_str("Corrupt"),
             Self::SchemaMismatch => formatter.write_str("SchemaMismatch"),
             Self::UnsupportedSchemaVersion => formatter.write_str("UnsupportedSchemaVersion"),
+            Self::UnsupportedOperation => formatter.write_str("UnsupportedOperation"),
             Self::QueueFull => formatter.write_str("QueueFull"),
             Self::BatchTooLarge { rows, bytes } => {
                 formatter.debug_struct("BatchTooLarge").field("rows", rows).field("bytes", bytes).finish()
@@ -65,6 +89,7 @@ impl fmt::Display for SqliteError {
             Self::Corrupt => formatter.write_str("SQLite database is corrupt"),
             Self::SchemaMismatch => formatter.write_str("SQLite schema does not match the consumer"),
             Self::UnsupportedSchemaVersion => formatter.write_str("SQLite schema version is newer than supported"),
+            Self::UnsupportedOperation => formatter.write_str("SQLite operation is not supported by the storage class"),
             Self::QueueFull => formatter.write_str("SQLite worker queue is full"),
             Self::BatchTooLarge { rows, bytes } => write!(formatter, "SQLite batch exceeds limits: {rows} rows, {bytes} bytes"),
             Self::WorkerStopped => formatter.write_str("SQLite worker stopped"),
@@ -115,6 +140,64 @@ pub enum OpenStatus {
     Created,
     Existing,
     Recreated(RecoveryReason),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SqliteStats {
+    pub busy_count: u64,
+    pub queue_rejections: u64,
+    pub failed_writes: u64,
+    pub recoveries: u64,
+    pub last_recovery_reason: Option<RecoveryReason>,
+}
+
+#[derive(Default)]
+struct SqliteCounters {
+    busy_count: AtomicU64,
+    queue_rejections: AtomicU64,
+    failed_writes: AtomicU64,
+    recoveries: AtomicU64,
+    last_recovery_reason: AtomicU8,
+}
+
+impl SqliteCounters {
+    fn record_busy(&self) {
+        self.busy_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_queue_rejection(&self) {
+        self.queue_rejections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_failed_write(&self) {
+        self.failed_writes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_recovery(&self, reason: RecoveryReason) {
+        self.recoveries.fetch_add(1, Ordering::Relaxed);
+        let code = match reason {
+            RecoveryReason::Corrupt => 1,
+            RecoveryReason::SchemaMismatch => 2,
+            RecoveryReason::ConsumerDiscard => 3,
+        };
+        self.last_recovery_reason.store(code, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> SqliteStats {
+        let last_recovery_reason = match self.last_recovery_reason.load(Ordering::Relaxed) {
+            1 => Some(RecoveryReason::Corrupt),
+            2 => Some(RecoveryReason::SchemaMismatch),
+            3 => Some(RecoveryReason::ConsumerDiscard),
+            _ => None,
+        };
+        SqliteStats {
+            busy_count: self.busy_count.load(Ordering::Relaxed),
+            queue_rejections: self.queue_rejections.load(Ordering::Relaxed),
+            failed_writes: self.failed_writes.load(Ordering::Relaxed),
+            recoveries: self.recoveries.load(Ordering::Relaxed),
+            last_recovery_reason,
+        }
+    }
 }
 
 type BatchAction = dyn for<'transaction> FnOnce(&Transaction<'transaction>) -> Result<(), rusqlite::Error> + Send + 'static;
@@ -187,6 +270,7 @@ struct QueueState {
 struct WorkQueue {
     state: Mutex<QueueState>,
     ready: Condvar,
+    counters: SqliteCounters,
 }
 
 impl WorkQueue {
@@ -197,19 +281,23 @@ impl WorkQueue {
         }
         if queued.control {
             if state.control_pending >= MAX_CONTROL_COMMANDS {
+                self.counters.record_queue_rejection();
                 return Err(SqliteError::QueueFull);
             }
             state.control_pending += 1;
             state.blocked = true;
         } else {
             let Some(next_bytes) = state.pending_bytes.checked_add(queued.bytes) else {
+                self.counters.record_queue_rejection();
                 return Err(SqliteError::QueueFull);
             };
             let Some(next_rows) = state.pending_rows.checked_add(queued.rows) else {
+                self.counters.record_queue_rejection();
                 return Err(SqliteError::QueueFull);
             };
             if state.blocked || state.pending_batches >= MAX_QUEUED_BATCHES || next_bytes > MAX_QUEUED_BYTES || next_rows > MAX_QUEUED_ROWS
             {
+                self.counters.record_queue_rejection();
                 return Err(SqliteError::QueueFull);
             }
             state.pending_batches += 1;
@@ -275,6 +363,7 @@ impl Drop for WorkerQueueGuard<'_> {
 
 pub struct SqliteDb {
     path: PathBuf,
+    storage_class: StorageClass,
     queue: Arc<WorkQueue>,
     worker: Option<JoinHandle<()>>,
     failed_writes: Arc<AtomicBool>,
@@ -299,12 +388,12 @@ impl SqliteControl {
 
 impl fmt::Debug for SqliteDb {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("SqliteDb").field("path", &self.path).finish()
+        formatter.debug_struct("SqliteDb").field("path", &self.path).field("storage_class", &self.storage_class).finish()
     }
 }
 
 impl SqliteDb {
-    pub fn open<F>(path: impl AsRef<Path>, migrate: F) -> Result<(Self, OpenStatus), SqliteError>
+    pub fn open<F>(path: impl AsRef<Path>, storage_class: StorageClass, migrate: F) -> Result<(Self, OpenStatus), SqliteError>
     where
         F: Fn(&mut Connection) -> Result<(), MigrationError> + Send + Sync + 'static,
     {
@@ -318,14 +407,20 @@ impl SqliteDb {
         let worker_path = path.clone();
         let (ready, started) = mpsc::sync_channel(0);
         let worker = thread::Builder::new().name("storage-sqlite".to_owned()).spawn(move || {
-            match open_database(&worker_path, thread_migration.as_ref()) {
+            match open_database(&worker_path, storage_class, thread_migration.as_ref()) {
                 Ok(opened) => {
+                    if let OpenStatus::Recreated(reason) = opened.status {
+                        worker_queue.counters.record_recovery(reason);
+                    }
                     if ready.send(Ok(opened.status)).is_err() {
                         return;
                     }
-                    worker_loop(&worker_path, thread_migration, &worker_queue, worker_failures, opened);
+                    worker_loop(&worker_path, storage_class, thread_migration, &worker_queue, worker_failures, opened);
                 }
                 Err(error) => {
+                    if matches!(error, SqliteError::Busy) {
+                        worker_queue.counters.record_busy();
+                    }
                     if let Err(send_error) = ready.send(Err(error)) {
                         drop(send_error);
                     }
@@ -347,11 +442,19 @@ impl SqliteDb {
                 return Err(SqliteError::WorkerStopped);
             }
         };
-        Ok((Self { path, queue, worker: Some(worker), failed_writes }, status))
+        Ok((Self { path, storage_class, queue, worker: Some(worker), failed_writes }, status))
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub const fn storage_class(&self) -> StorageClass {
+        self.storage_class
+    }
+
+    pub fn stats(&self) -> SqliteStats {
+        self.queue.counters.snapshot()
     }
 
     pub fn control_handle(&self) -> SqliteControl {
@@ -397,6 +500,7 @@ impl SqliteDb {
         T: Send + 'static,
     {
         if weight_bytes > MAX_QUEUED_BYTES {
+            self.queue.counters.record_queue_rejection();
             return Err(SqliteError::QueueFull);
         }
         let (reply, receiver) = oneshot::channel();
@@ -424,6 +528,9 @@ impl SqliteDb {
     }
 
     pub fn discard(&self) -> Result<SqliteReceipt<()>, SqliteError> {
+        if !self.storage_class.allows_destructive_recovery() {
+            return Err(SqliteError::UnsupportedOperation);
+        }
         let (reply, receiver) = oneshot::channel();
         let work: Work = Box::new(|_: &mut Connection| Ok(Box::new(()) as Box<dyn Any + Send>));
         let completion = Box::new(move |result: WorkResult| {
@@ -438,9 +545,16 @@ impl SqliteDb {
 }
 
 fn submit(queue: &WorkQueue, batches: Vec<SqliteBatch>, control: bool) -> Result<SqliteReceipt<()>, SqliteError> {
-    let bytes = batches.iter().try_fold(0usize, |total, batch| total.checked_add(batch.bytes)).ok_or(SqliteError::QueueFull)?;
-    let rows = batches.iter().try_fold(0usize, |total, batch| total.checked_add(batch.rows)).ok_or(SqliteError::QueueFull)?;
+    let Some(bytes) = batches.iter().try_fold(0usize, |total, batch| total.checked_add(batch.bytes)) else {
+        queue.counters.record_queue_rejection();
+        return Err(SqliteError::QueueFull);
+    };
+    let Some(rows) = batches.iter().try_fold(0usize, |total, batch| total.checked_add(batch.rows)) else {
+        queue.counters.record_queue_rejection();
+        return Err(SqliteError::QueueFull);
+    };
     if bytes > MAX_QUEUED_BYTES {
+        queue.counters.record_queue_rejection();
         return Err(SqliteError::QueueFull);
     }
     let (reply, receiver) = oneshot::channel();
@@ -473,12 +587,12 @@ struct OpenedDatabase {
     status: OpenStatus,
 }
 
-fn open_database(path: &Path, migrate: &Migration) -> Result<OpenedDatabase, SqliteError> {
+fn open_database(path: &Path, storage_class: StorageClass, migrate: &Migration) -> Result<OpenedDatabase, SqliteError> {
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let existed = path.try_exists()?;
     let shared = open_shared_lock(path)?;
-    let attempt = open_connection(path).and_then(|mut connection| {
+    let attempt = open_connection(path, storage_class).and_then(|mut connection| {
         check_database(&connection)?;
         run_migration(&mut connection, migrate)?;
         Ok(connection)
@@ -487,15 +601,20 @@ fn open_database(path: &Path, migrate: &Migration) -> Result<OpenedDatabase, Sql
         Ok(connection) => {
             Ok(OpenedDatabase { connection, lock: shared, status: if existed { OpenStatus::Existing } else { OpenStatus::Created } })
         }
-        Err(error) if recovery_reason(&error).is_some() => {
+        Err(error) if storage_class.allows_destructive_recovery() && recovery_reason(&error).is_some() => {
             drop(shared);
-            recreate_database(path, migrate, recovery_reason(&error).ok_or(SqliteError::Corrupt)?)
+            recreate_database(path, storage_class, migrate, recovery_reason(&error).ok_or(SqliteError::Corrupt)?)
         }
         Err(error) => Err(error),
     }
 }
 
-fn recreate_database(path: &Path, migrate: &Migration, reason: RecoveryReason) -> Result<OpenedDatabase, SqliteError> {
+fn recreate_database(
+    path: &Path,
+    storage_class: StorageClass,
+    migrate: &Migration,
+    reason: RecoveryReason,
+) -> Result<OpenedDatabase, SqliteError> {
     let exclusive = open_lock_file(path)?;
     match exclusive.try_lock() {
         Ok(()) => {}
@@ -503,19 +622,19 @@ fn recreate_database(path: &Path, migrate: &Migration, reason: RecoveryReason) -
         Err(fs::TryLockError::Error(error)) => return Err(SqliteError::Unavailable(error)),
     }
     remove_database_files(path)?;
-    let mut connection = open_connection(path)?;
+    let mut connection = open_connection(path, storage_class)?;
     check_database(&connection)?;
     run_migration(&mut connection, migrate)?;
     drop(connection);
     drop(exclusive);
     let shared = open_shared_lock(path)?;
-    let mut connection = open_connection(path)?;
+    let mut connection = open_connection(path, storage_class)?;
     check_database(&connection)?;
     run_migration(&mut connection, migrate)?;
     Ok(OpenedDatabase { connection, lock: shared, status: OpenStatus::Recreated(reason) })
 }
 
-fn open_connection(path: &Path) -> Result<Connection, SqliteError> {
+fn open_connection(path: &Path, storage_class: StorageClass) -> Result<Connection, SqliteError> {
     let connection = Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -526,7 +645,7 @@ fn open_connection(path: &Path) -> Result<Connection, SqliteError> {
     if !journal_mode.eq_ignore_ascii_case("wal") {
         return Err(SqliteError::Sqlite(rusqlite::Error::InvalidQuery));
     }
-    connection.pragma_update(None, "synchronous", "NORMAL").map_err(map_sqlite_error)?;
+    connection.pragma_update(None, "synchronous", storage_class.synchronous_pragma()).map_err(map_sqlite_error)?;
     Ok(connection)
 }
 
@@ -545,12 +664,20 @@ fn check_database(connection: &Connection) -> Result<(), SqliteError> {
 }
 
 fn run_migration(connection: &mut Connection, migrate: &Migration) -> Result<(), SqliteError> {
-    match migrate(connection) {
-        Ok(()) => Ok(()),
+    connection.execute_batch("BEGIN IMMEDIATE").map_err(map_sqlite_error)?;
+    let outcome = match migrate(connection) {
+        Ok(()) => connection.execute_batch("COMMIT").map_err(map_sqlite_error),
         Err(MigrationError::SchemaMismatch) => Err(SqliteError::SchemaMismatch),
         Err(MigrationError::UnsupportedSchemaVersion) => Err(SqliteError::UnsupportedSchemaVersion),
         Err(MigrationError::Sqlite(error)) => Err(map_sqlite_error(error)),
+    };
+    if outcome.is_err()
+        && !connection.is_autocommit()
+        && let Err(rollback_error) = connection.execute_batch("ROLLBACK")
+    {
+        drop(rollback_error);
     }
+    outcome
 }
 
 fn open_shared_lock(path: &Path) -> Result<File, SqliteError> {
@@ -627,7 +754,14 @@ struct WorkerDatabase {
     lock: Option<File>,
 }
 
-fn worker_loop(path: &Path, migrate: Arc<Migration>, queue: &WorkQueue, failed_writes: Arc<AtomicBool>, opened: OpenedDatabase) {
+fn worker_loop(
+    path: &Path,
+    storage_class: StorageClass,
+    migrate: Arc<Migration>,
+    queue: &WorkQueue,
+    failed_writes: Arc<AtomicBool>,
+    opened: OpenedDatabase,
+) {
     let _queue_guard = WorkerQueueGuard { queue };
     let mut database = WorkerDatabase { connection: Some(opened.connection), lock: Some(opened.lock) };
     loop {
@@ -638,12 +772,18 @@ fn worker_loop(path: &Path, migrate: Arc<Migration>, queue: &WorkQueue, failed_w
         for queued in work {
             let QueuedWork { work, completion, bytes, rows, control, write, reset } = queued;
             let result = if reset {
-                reset_database(path, migrate.as_ref(), &mut database)
+                reset_database(path, storage_class, migrate.as_ref(), &mut database, &queue.counters)
             } else {
-                run_work(path, migrate.as_ref(), &mut database, work)
+                run_work(path, storage_class, migrate.as_ref(), &mut database, work, &queue.counters)
             };
-            if !reset && let Some(reason) = recovery_reason_from_result(&result) {
-                let recovery = reopen_after_damage(path, migrate.as_ref(), &mut database, reason);
+            if matches!(result, Err(SqliteError::Busy)) {
+                queue.counters.record_busy();
+            }
+            if !reset
+                && storage_class.allows_destructive_recovery()
+                && let Some(reason) = recovery_reason_from_result(&result)
+            {
+                let recovery = reopen_after_damage(path, storage_class, migrate.as_ref(), &mut database, reason, &queue.counters);
                 if recovery.is_err() {
                     database.connection = None;
                     database.lock = None;
@@ -653,6 +793,7 @@ fn worker_loop(path: &Path, migrate: Arc<Migration>, queue: &WorkQueue, failed_w
                 failed_writes.store(false, Ordering::Relaxed);
             } else if write && result.is_err() {
                 failed_writes.store(true, Ordering::Relaxed);
+                queue.counters.record_failed_write();
             }
             queue.complete(bytes, rows, control);
             completion(result);
@@ -662,9 +803,19 @@ fn worker_loop(path: &Path, migrate: Arc<Migration>, queue: &WorkQueue, failed_w
     drop(database.lock.take());
 }
 
-fn run_work(path: &Path, migrate: &Migration, database: &mut WorkerDatabase, work: Work) -> WorkResult {
+fn run_work(
+    path: &Path,
+    storage_class: StorageClass,
+    migrate: &Migration,
+    database: &mut WorkerDatabase,
+    work: Work,
+    counters: &SqliteCounters,
+) -> WorkResult {
     if database.connection.is_none() {
-        let opened = open_database(path, migrate)?;
+        let opened = open_database(path, storage_class, migrate)?;
+        if let OpenStatus::Recreated(reason) = opened.status {
+            counters.record_recovery(reason);
+        }
         database.connection = Some(opened.connection);
         database.lock = Some(opened.lock);
     }
@@ -682,11 +833,19 @@ fn recovery_reason_from_result(result: &WorkResult) -> Option<RecoveryReason> {
     }
 }
 
-fn reopen_after_damage(path: &Path, migrate: &Migration, database: &mut WorkerDatabase, reason: RecoveryReason) -> Result<(), SqliteError> {
+fn reopen_after_damage(
+    path: &Path,
+    storage_class: StorageClass,
+    migrate: &Migration,
+    database: &mut WorkerDatabase,
+    reason: RecoveryReason,
+    counters: &SqliteCounters,
+) -> Result<(), SqliteError> {
     drop(database.connection.take());
     drop(database.lock.take());
-    match recreate_database(path, migrate, reason) {
+    match recreate_database(path, storage_class, migrate, reason) {
         Ok(opened) => {
+            counters.record_recovery(reason);
             database.connection = Some(opened.connection);
             database.lock = Some(opened.lock);
             Ok(())
@@ -695,11 +854,18 @@ fn reopen_after_damage(path: &Path, migrate: &Migration, database: &mut WorkerDa
     }
 }
 
-fn reset_database(path: &Path, migrate: &Migration, database: &mut WorkerDatabase) -> WorkResult {
+fn reset_database(
+    path: &Path,
+    storage_class: StorageClass,
+    migrate: &Migration,
+    database: &mut WorkerDatabase,
+    counters: &SqliteCounters,
+) -> WorkResult {
     drop(database.connection.take());
     drop(database.lock.take());
-    match recreate_database(path, migrate, RecoveryReason::ConsumerDiscard) {
+    match recreate_database(path, storage_class, migrate, RecoveryReason::ConsumerDiscard) {
         Ok(opened) => {
+            counters.record_recovery(RecoveryReason::ConsumerDiscard);
             database.connection = Some(opened.connection);
             database.lock = Some(opened.lock);
             Ok(Box::new(()) as Box<dyn Any + Send>)

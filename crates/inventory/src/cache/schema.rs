@@ -100,7 +100,7 @@ pub(super) fn migrate(connection: &mut Connection, identity: &CacheIdentity) -> 
             {
                 return Err(MigrationError::SchemaMismatch);
             }
-            let transaction = connection.transaction()?;
+            let transaction = connection.savepoint()?;
             transaction.execute_batch(CREATE_SCHEMA)?;
             for owner in identity.owners() {
                 transaction.execute(
@@ -115,7 +115,7 @@ pub(super) fn migrate(connection: &mut Connection, identity: &CacheIdentity) -> 
             require_columns(connection, "scopes", &SCOPE_COLUMNS)?;
             require_columns(connection, "categories", &CATEGORY_COLUMNS)?;
             require_columns(connection, "items", &ITEM_COLUMNS)?;
-            let transaction = connection.transaction()?;
+            let transaction = connection.savepoint()?;
             for owner in identity.owners() {
                 transaction.execute(
                     "INSERT OR IGNORE INTO scopes (grid_id, owner_id, cache_generation) VALUES (?1, ?2, 1)",
