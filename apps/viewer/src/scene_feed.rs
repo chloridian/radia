@@ -215,17 +215,14 @@ impl SceneFeed {
         }
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn camera_pose(&mut self) -> Option<WorldPose> {
         self.camera_pose_at(Instant::now())
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn camera_pose_at(&mut self, now: Instant) -> Option<WorldPose> {
         self.camera_pose_and_seed_at(now).map(|(pose, _)| pose)
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn camera_pose_and_seed_at(&mut self, now: Instant) -> Option<(WorldPose, (u64, math::Quat))> {
         if self.agent_motion.has_changed().is_ok_and(|changed| changed) {
             self.dead_reckoning.replace(*self.agent_motion.borrow_and_update());

@@ -32,7 +32,6 @@ use tokio::{
     task,
     task::{JoinError, JoinHandle},
 };
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 use tracing::field;
 use utils::Summary;
 use uuid::Uuid;
@@ -50,8 +49,6 @@ use super::{
     media::{ObjectMediaApplyProgress, ObjectMediaIntake, PendingObjectMediaApply},
     presentation::{AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, SessionEnd, SessionReadyUpdate, ViewerUpdate},
 };
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use crate::session::experience_environment::{EnvironmentInbox, EnvironmentQueueError, EnvironmentSender, PushOutcome};
 use crate::{
     asset_coordinator::AssetCoordinator,
     inventory::{
@@ -62,6 +59,7 @@ use crate::{
     session::{
         AgentMotionPublisher, CameraUplink, RegionLookup, Session, SessionHandle,
         environment::{Completion, EnvironmentIntake},
+        experience_environment::{EnvironmentInbox, EnvironmentQueueError, EnvironmentSender, PushOutcome},
         inbound::{ObjectMediaRequest, object_media_requests},
         object_cache::{CachedObjectContinuation, CachedObjectProgress, ObjectCacheEvent, ObjectCacheSession},
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
@@ -227,7 +225,6 @@ const MAX_DEFERRED_INVENTORY_BYTES: usize = 96 * 1024 * 1024;
 pub(super) const MAX_DEFERRED_NETWORK_EVENT_BYTES: usize = 9 * 1024 * 1024;
 const SEND_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 const DECODE_REJECTION_LOSS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 const DROPPED_PUSH_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Default, Debug, Eq, PartialEq)]
@@ -271,7 +268,6 @@ impl SendFailures {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[derive(Default)]
 struct DroppedPushes {
     dropped: u64,
@@ -280,7 +276,6 @@ struct DroppedPushes {
     last_error: Option<EnvironmentQueueError>,
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl DroppedPushes {
     fn record(&mut self, simulator_id: SimulatorId, region: world::Region, outcome: Result<PushOutcome, EnvironmentQueueError>) {
         match outcome {
@@ -392,11 +387,8 @@ struct SessionDriver {
     ordinary_input_turn: OrdinaryInputTurn,
     terrain: TerrainDecodeQueue,
     environments: EnvironmentIntake,
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     environment_pushes: EnvironmentSender,
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     environment_inbox: EnvironmentInbox,
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     dropped_pushes: Summary<DroppedPushes>,
     send_failures: Summary<SendFailures>,
     decode_rejection_losses: Summary<DecodeRejectionLosses>,
@@ -596,7 +588,6 @@ impl SessionDriver {
         let reads = WorldReadHost::new(session_world.world(), runtime.clone());
         let terrain = TerrainDecodeQueue::default();
         let environments = EnvironmentIntake::new(runtime.clone());
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
         let (environment_pushes, environment_inbox) = EnvironmentInbox::channel();
         let assets = AssetCoordinator::new(runtime.clone(), cancellation.clone(), cache);
         let camera = CameraUplink::new();
@@ -625,11 +616,8 @@ impl SessionDriver {
             ordinary_input_turn: OrdinaryInputTurn::default(),
             terrain,
             environments,
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
             environment_pushes,
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
             environment_inbox,
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
             dropped_pushes: Summary::new(DROPPED_PUSH_REPORT_INTERVAL),
             send_failures: Summary::new(SEND_FAILURE_REPORT_INTERVAL),
             decode_rejection_losses: Summary::new(DECODE_REJECTION_LOSS_REPORT_INTERVAL),
@@ -1331,7 +1319,6 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             Event::SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
-                #[cfg(any(target_os = "windows", target_os = "linux"))]
                 if let Some(region) = self.session_world.region_for(simulator_id)
                     && let Err(error) = self.environment_pushes.clear_region(region)
                 {
@@ -1621,7 +1608,6 @@ impl SessionDriver {
                 );
             }
         }
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
         if matches!(packet_order, PacketOrder::Ordered(_))
             && Some(simulator_id) == self.primary_simulator
             && let (Some(agent), Some(region)) = (self.active_session.as_ref(), region)
@@ -1847,23 +1833,16 @@ impl SessionDriver {
 
     fn publish_session_ready_update(&self, simulator_id: SimulatorId, session: AgentSession) {
         self.mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate {
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
             environments: self.environment_inbox.clone(),
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
             camera: self.camera.sender(),
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
             movement: self.camera.movement_sender(),
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
             agent_motion: self.agent_motion.receiver(),
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
             motion_circuits: self.region_motion_sender.subscribe(),
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
             assets: self.assets.handle(),
             session,
             region_name: self.session_world.region_name(simulator_id).map(str::to_owned),
             inventory_updates: self.inventory_changes.subscribe(),
             inventory_fetch: self.inventory.as_ref().map(|_| self.inventory_fetch.handle()),
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
             world_reader: self.reads.reader(),
         }));
     }
@@ -2033,7 +2012,6 @@ impl SessionDriver {
         if let Some(due) = self.decode_rejection_losses.flush() {
             due.report();
         }
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
         if let Some(due) = self.dropped_pushes.flush() {
             due.report();
         }

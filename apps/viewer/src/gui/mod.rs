@@ -1,4 +1,3 @@
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 mod scene;
 mod views;
 mod window_geometry;
@@ -26,12 +25,10 @@ struct AppLifecycle {
     _window_closed: Subscription,
     controller: Option<Entity<LoginScreen>>,
     login_window: Option<AnyWindowHandle>,
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     scene: scene::State,
     quitting: bool,
     session_lifecycle: Arc<SessionLifecycle>,
     asset_cache: Option<Arc<AssetCache>>,
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     log_control: LogControl,
 }
 
@@ -92,14 +89,11 @@ pub(crate) fn asset_cache(cx: &App) -> Option<Arc<AssetCache>> {
     cx.global::<AppLifecycle>().asset_cache.clone()
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) fn log_control(cx: &App) -> LogControl {
     cx.try_global::<AppLifecycle>().map_or_else(LogControl::noop, |lifecycle| lifecycle.log_control.clone())
 }
 
 pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>, log_control: LogControl) {
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    let _ = log_control;
     let session_lifecycle = Arc::new(SessionLifecycle::default());
     cx.set_app_identity("org.radia.viewer", "Radia");
     cx.set_keyring_label("Radia");
@@ -113,10 +107,7 @@ pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>
     {
         let lifecycle = cx.global_mut::<AppLifecycle>();
         lifecycle.asset_cache = asset_cache;
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
-        {
-            lifecycle.log_control = log_control;
-        }
+        lifecycle.log_control = log_control;
     }
 
     let (main_window, login) =
@@ -135,7 +126,6 @@ fn install_lifecycle(session_lifecycle: Arc<SessionLifecycle>, cx: &mut App) {
         if closing_main {
             lifecycle.login_window = None;
         }
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
         if lifecycle.scene.window_closed(closed_window_id) {
             return;
         }
@@ -147,12 +137,10 @@ fn install_lifecycle(session_lifecycle: Arc<SessionLifecycle>, cx: &mut App) {
         _window_closed: window_closed,
         controller: None,
         login_window: None,
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
         scene: scene::State::new(),
         quitting: false,
         session_lifecycle,
         asset_cache: None,
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
         log_control: LogControl::noop(),
     });
 }
@@ -177,7 +165,6 @@ fn shutdown(cx: &mut App) -> bool {
         drop(lifecycle.asset_cache.take());
         Arc::clone(&lifecycle.session_lifecycle)
     };
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     scene::shutdown(cx);
     for window in cx.windows() {
         window.update(cx, |_, window, _| window.remove_window()).ok();

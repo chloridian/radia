@@ -1,9 +1,7 @@
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) mod input;
 
 use math::Quat;
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) use self::input::{BodyRotation, HeldControls, KeyBinding, STOP};
 
 pub(crate) const BODY_ROTATION_DOT_THRESHOLD: f32 = 0.9997;

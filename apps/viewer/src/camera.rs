@@ -7,7 +7,6 @@ use math::{DQuat, DVec3};
 use render::scene;
 use world::WorldPose;
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::agent_movement::{HeldControls, KeyBinding};
 
 pub(crate) const DEFAULT_DRAW_DISTANCE: f32 = 512.0;
@@ -282,7 +281,6 @@ impl CameraMode {
         *self = Self::Follow;
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn on_movement_key(&mut self, binding: KeyBinding, pressed: bool, repeat: bool, captured: bool) {
         if pressed
             && !repeat
@@ -294,7 +292,6 @@ impl CameraMode {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) fn handle_keyboard_input(
     controls: &mut HeldControls,
     camera_mode: &mut CameraMode,
@@ -315,7 +312,6 @@ mod tests {
     use math::Quat;
 
     use super::*;
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     use crate::agent_movement::input::MovementKey;
 
     #[test]
@@ -377,7 +373,6 @@ mod tests {
         assert!(!camera.moving(pose, start + Duration::from_millis(10)));
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn keys_select_camera_mode() {
         for (key, pressed, captured, result, mode, moving) in [

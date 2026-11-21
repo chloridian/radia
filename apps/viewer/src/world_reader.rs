@@ -308,7 +308,6 @@ impl WorldReadHost {
         }
     }
 
-    #[cfg(any(test, target_os = "windows", target_os = "linux"))]
     pub(crate) fn reader(&self) -> WorldReader {
         self.reader.clone()
     }

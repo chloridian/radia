@@ -51,7 +51,6 @@ impl AgentMotionPublisher {
         Self { sender, seed: 0 }
     }
 
-    #[cfg(any(test, target_os = "windows", target_os = "linux"))]
     pub(crate) fn receiver(&self) -> watch::Receiver<Option<AgentMotionSample>> {
         self.sender.subscribe()
     }
