@@ -1,3 +1,4 @@
+mod landmarks;
 mod read;
 mod schema;
 mod write;
@@ -20,6 +21,10 @@ use storage::{
 };
 use uuid::Uuid;
 
+pub use self::landmarks::{
+    LoginLandmark, LoginLandmarkCache, LoginLandmarkImportSnapshot, MAX_LOGIN_LANDMARK_IMPORT_SOURCE_KEY_BYTES,
+    MAX_LOGIN_LANDMARK_NAME_BYTES, MAX_LOGIN_LANDMARK_SLURL_BYTES, MAX_LOGIN_LANDMARKS_PER_AGENT,
+};
 use crate::{
     Category, CategoryKey, ChangeSet, Inventory, InventoryChild, InventoryError, InventoryLimits, InventoryNodeId, InventorySnapshot,
     mutation::CachedFolderApply,
@@ -35,6 +40,7 @@ pub enum InventoryCacheError {
     Storage(StorageError),
     Sqlite(SqliteError),
     InvalidIdentity,
+    InvalidLandmark(&'static str),
     Inconsistent,
     Model(InventoryError),
 }
@@ -45,6 +51,7 @@ impl fmt::Display for InventoryCacheError {
             Self::Storage(error) => write!(formatter, "inventory cache storage is unavailable: {error}"),
             Self::Sqlite(error) => write!(formatter, "inventory cache database failed: {error}"),
             Self::InvalidIdentity => formatter.write_str("inventory cache identity is invalid"),
+            Self::InvalidLandmark(reason) => write!(formatter, "login landmark is invalid: {reason}"),
             Self::Inconsistent => formatter.write_str("inventory cache tree is inconsistent"),
             Self::Model(error) => write!(formatter, "cached inventory does not fit the model: {error}"),
         }
@@ -57,7 +64,7 @@ impl Error for InventoryCacheError {
             Self::Storage(error) => Some(error),
             Self::Sqlite(error) => Some(error),
             Self::Model(error) => Some(error),
-            Self::InvalidIdentity | Self::Inconsistent => None,
+            Self::InvalidIdentity | Self::InvalidLandmark(_) | Self::Inconsistent => None,
         }
     }
 }
@@ -315,7 +322,7 @@ impl InventoryCache {
         let identity = CacheIdentity { grid_id: grid_id.to_owned(), personal_owner: agent_id, library_owner };
         let migration_identity = identity.clone();
         let (db, status) = SqliteDb::open(cache_root.join("inventory.sqlite"), StorageClass::Cache, move |connection| {
-            schema::migrate(connection, &migration_identity)
+            schema::migrate(connection, Some(&migration_identity))
         })?;
         Ok((Self { db, identity, invalidated: Arc::new(AtomicBool::new(false)) }, status))
     }
@@ -367,6 +374,16 @@ impl InventoryCache {
         self.invalidated.store(true, Ordering::Relaxed);
         let owners = self.identity.owners().collect::<Vec<_>>();
         invalidate_scopes(&self.db.control_handle(), &self.identity, &owners).await?;
+        let grid_id = self.identity.grid_id.clone();
+        let agent_id = self.identity.personal_owner;
+        let batch = SqliteBatch::new(1, 64, move |transaction: &Transaction<'_>| {
+            transaction.execute(
+                "DELETE FROM login_landmarks WHERE grid_id = ?1 AND agent_id = ?2",
+                params![grid_id, agent_id.as_bytes().as_slice()],
+            )?;
+            Ok(())
+        })?;
+        self.db.control_handle().submit_control_batch(batch)?.wait().await?;
         Ok(())
     }
 

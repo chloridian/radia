@@ -51,9 +51,36 @@ CREATE TABLE items (
     sale_price INTEGER NOT NULL,
     PRIMARY KEY (scope_id, id)
 );
+CREATE TABLE IF NOT EXISTS login_landmarks (
+    grid_id TEXT NOT NULL CHECK (length(grid_id) BETWEEN 1 AND 64),
+    agent_id BLOB NOT NULL CHECK (length(agent_id) = 16),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    name TEXT NOT NULL,
+    slurl TEXT NOT NULL,
+    PRIMARY KEY (grid_id, agent_id, ordinal)
+);
+CREATE TABLE IF NOT EXISTS login_landmarks_import (
+    source_key TEXT PRIMARY KEY
+);
+";
+
+const CREATE_LOGIN_LANDMARKS_TABLES: &str = "
+CREATE TABLE IF NOT EXISTS login_landmarks (
+    grid_id TEXT NOT NULL CHECK (length(grid_id) BETWEEN 1 AND 64),
+    agent_id BLOB NOT NULL CHECK (length(agent_id) = 16),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    name TEXT NOT NULL,
+    slurl TEXT NOT NULL,
+    PRIMARY KEY (grid_id, agent_id, ordinal)
+);
+CREATE TABLE IF NOT EXISTS login_landmarks_import (
+    source_key TEXT PRIMARY KEY
+);
 ";
 
 const SCOPE_COLUMNS: [&str; 4] = ["scope_id", "grid_id", "owner_id", "cache_generation"];
+const LOGIN_LANDMARK_COLUMNS: [&str; 5] = ["grid_id", "agent_id", "ordinal", "name", "slurl"];
+const LOGIN_LANDMARK_IMPORT_COLUMNS: [&str; 1] = ["source_key"];
 const CATEGORY_COLUMNS: [&str; 9] = [
     "scope_id",
     "id",
@@ -89,7 +116,7 @@ const ITEM_COLUMNS: [&str; 21] = [
     "sale_price",
 ];
 
-pub(super) fn migrate(connection: &mut Connection, identity: &CacheIdentity) -> Result<(), MigrationError> {
+pub(super) fn migrate(connection: &mut Connection, identity: Option<&CacheIdentity>) -> Result<(), MigrationError> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     match version {
         0 => {
@@ -97,16 +124,20 @@ pub(super) fn migrate(connection: &mut Connection, identity: &CacheIdentity) -> 
                 || table_exists(connection, "scopes")?
                 || table_exists(connection, "categories")?
                 || table_exists(connection, "items")?
+                || table_exists(connection, "login_landmarks")?
+                || table_exists(connection, "login_landmarks_import")?
             {
                 return Err(MigrationError::SchemaMismatch);
             }
             let transaction = connection.savepoint()?;
             transaction.execute_batch(CREATE_SCHEMA)?;
-            for owner in identity.owners() {
-                transaction.execute(
-                    "INSERT INTO scopes (grid_id, owner_id, cache_generation) VALUES (?1, ?2, 1)",
-                    params![identity.grid_id, owner.as_bytes().as_slice()],
-                )?;
+            if let Some(identity) = identity {
+                for owner in identity.owners() {
+                    transaction.execute(
+                        "INSERT INTO scopes (grid_id, owner_id, cache_generation) VALUES (?1, ?2, 1)",
+                        params![identity.grid_id, owner.as_bytes().as_slice()],
+                    )?;
+                }
             }
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             transaction.commit()?;
@@ -116,13 +147,18 @@ pub(super) fn migrate(connection: &mut Connection, identity: &CacheIdentity) -> 
             require_columns(connection, "categories", &CATEGORY_COLUMNS)?;
             require_columns(connection, "items", &ITEM_COLUMNS)?;
             let transaction = connection.savepoint()?;
-            for owner in identity.owners() {
-                transaction.execute(
-                    "INSERT OR IGNORE INTO scopes (grid_id, owner_id, cache_generation) VALUES (?1, ?2, 1)",
-                    params![identity.grid_id, owner.as_bytes().as_slice()],
-                )?;
+            transaction.execute_batch(CREATE_LOGIN_LANDMARKS_TABLES)?;
+            if let Some(identity) = identity {
+                for owner in identity.owners() {
+                    transaction.execute(
+                        "INSERT OR IGNORE INTO scopes (grid_id, owner_id, cache_generation) VALUES (?1, ?2, 1)",
+                        params![identity.grid_id, owner.as_bytes().as_slice()],
+                    )?;
+                }
             }
             transaction.commit()?;
+            require_columns(connection, "login_landmarks", &LOGIN_LANDMARK_COLUMNS)?;
+            require_columns(connection, "login_landmarks_import", &LOGIN_LANDMARK_IMPORT_COLUMNS)?;
         }
         version if version > SCHEMA_VERSION => return Err(MigrationError::UnsupportedSchemaVersion),
         _ => return Err(MigrationError::SchemaMismatch),

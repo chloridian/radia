@@ -1,31 +1,30 @@
+use inventory::{LoginLandmark, LoginLandmarkCache};
 use network::Grid;
+use tempfile::tempdir;
 use uuid::Uuid;
-use viewer::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
 
-#[test]
-fn scopes_agents_reassigns_usernames() {
+#[tokio::test]
+async fn scopes_landmarks_by_grid_and_agent_and_preserves_order() {
+    let dir = tempdir().expect("tempdir");
+    let (cache, _) = LoginLandmarkCache::open_at_root(dir.path()).expect("open login landmark cache");
     let agni_agent = Uuid::from_u128(1);
     let aditi_agent = Uuid::from_u128(2);
-    let agni_favorites = vec![FavoriteLocation { name: "Sandbox".into(), region_name: "Agni region".into(), x: 128, y: 64, z: 23 }];
-    let aditi_favorites = vec![FavoriteLocation { name: "Home".into(), region_name: "Aditi region".into(), x: 1, y: 2, z: 3 }];
-    let mut store = FavoriteStore::default();
+    let agni_landmarks = vec![
+        LoginLandmark { name: "Sandbox".into(), slurl: "secondlife://Agni%20region/128/64/23".into() },
+        LoginLandmark { name: "Plaza".into(), slurl: "secondlife://Ahern/10/20/30".into() },
+    ];
+    let aditi_landmarks = vec![LoginLandmark { name: "Home".into(), slurl: "secondlife://Aditi%20region/1/2/3".into() }];
 
-    store.replace_favorites(Grid::Agni, agni_agent, "  Example  ", agni_favorites.clone()).expect("replace Agni favorites");
-    store.replace_favorites(Grid::Aditi, aditi_agent, "Example Resident", aditi_favorites.clone()).expect("replace Aditi favorites");
+    cache.replace(Grid::Agni.id(), agni_agent, &agni_landmarks).await.expect("replace Agni landmarks");
+    cache.replace(Grid::Aditi.id(), aditi_agent, &aditi_landmarks).await.expect("replace Aditi landmarks");
 
-    assert_eq!(store.favorites_for(Grid::Agni, agni_agent), agni_favorites);
-    assert_eq!(store.favorites_for(Grid::Aditi, aditi_agent), aditi_favorites);
-    assert!(store.favorites_for(Grid::Agni, aditi_agent).is_empty());
-    assert_eq!(store.agent_id_for_username(Grid::Agni, "EXAMPLE resident"), Some(agni_agent));
-    assert_eq!(store.agent_id_for_username(Grid::Aditi, "example"), Some(aditi_agent));
+    assert_eq!(cache.load(Grid::Agni.id(), agni_agent).await.expect("load Agni"), agni_landmarks);
+    assert_eq!(cache.load(Grid::Aditi.id(), aditi_agent).await.expect("load Aditi"), aditi_landmarks);
+    assert!(cache.load(Grid::Agni.id(), aditi_agent).await.expect("cross-grid isolation").is_empty());
 
-    assert!(store.remember_agent(Grid::Agni, agni_agent, "Renamed Account").expect("remember renamed account"));
-    assert_eq!(store.favorites_for(Grid::Agni, agni_agent), agni_favorites);
-    assert_eq!(store.agent_id_for_username(Grid::Agni, "Example"), None);
+    cache.clear_all().await.expect("clear all landmarks");
+    assert!(cache.load(Grid::Agni.id(), agni_agent).await.expect("Agni cleared").is_empty());
+    assert!(cache.load(Grid::Aditi.id(), aditi_agent).await.expect("Aditi cleared").is_empty());
 
-    let replacement_agent = Uuid::from_u128(3);
-    assert!(store.remember_agent(Grid::Agni, replacement_agent, "Renamed Account").expect("remember replacement account"));
-    assert_eq!(store.agent_id_for_username(Grid::Agni, "Renamed Account"), Some(replacement_agent));
-    assert_eq!(store.favorites_for(Grid::Agni, agni_agent), agni_favorites);
-    assert!(store.favorites_for(Grid::Agni, replacement_agent).is_empty());
+    cache.close().expect("close cache");
 }

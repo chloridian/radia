@@ -1,7 +1,6 @@
-use network::Grid;
 use prism::{SharedString, component::select};
 
-use crate::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
+use crate::inventory::FavoriteLocation;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum SpawnChoice {
@@ -42,8 +41,4 @@ pub(super) fn spawn_options(favorites: &[FavoriteLocation]) -> Vec<SpawnOption> 
     );
     options.push(SpawnOption { title: "Enter region name…".into(), choice: SpawnChoice::Region });
     options
-}
-
-pub(super) fn favorites_for_username(favorites: &FavoriteStore, grid: Grid, username: &str) -> Vec<FavoriteLocation> {
-    favorites.agent_id_for_username(grid, username).map(|agent_id| favorites.favorites_for(grid, agent_id).to_vec()).unwrap_or_default()
 }

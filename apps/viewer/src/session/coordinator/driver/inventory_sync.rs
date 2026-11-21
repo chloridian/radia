@@ -299,11 +299,10 @@ impl SessionDriver {
         lookup: RegionLookup,
         inventory: Option<InventorySnapshot>,
     ) -> JoinHandle<FavoritesUpdate> {
-        let username = self.credentials.username.clone();
         self.runtime.spawn(
             async move {
                 let result = load_favorites(&capabilities, &lookup, &session, inventory.as_ref()).await;
-                FavoritesUpdate { grid: session.grid, agent_id: session.agent_id, session_id: session.session_id, username, result }
+                FavoritesUpdate { grid: session.grid, agent_id: session.agent_id, session_id: session.session_id, result }
             }
             .in_current_span(),
         )
