@@ -531,24 +531,6 @@ mod benches {
     }
 
     #[divan::bench]
-    fn geometry_prepare_history_loss_layout_memory_1000(bencher: divan::Bencher) {
-        let (device, queue) = gpu();
-        history_loss(bencher, &device, &queue, 1_000, true);
-    }
-
-    #[divan::bench]
-    fn geometry_prepare_history_loss_layout_memory_16000(bencher: divan::Bencher) {
-        let (device, queue) = gpu();
-        history_loss(bencher, &device, &queue, 16_000, true);
-    }
-
-    #[divan::bench]
-    fn geometry_prepare_history_loss_layout_memory_65000(bencher: divan::Bencher) {
-        let (device, queue) = gpu();
-        history_loss(bencher, &device, &queue, 65_000, true);
-    }
-
-    #[divan::bench]
     fn geometry_prepare_region_load_progress_5000(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         region_load_progress(bencher, &device, &queue, 5_000);

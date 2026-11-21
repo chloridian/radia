@@ -10,15 +10,9 @@ use assets::{
     TextureSize,
 };
 use divan::counter::ItemsCount;
-use test_support::{
-    allocation::{self, CountingAllocator},
-    texture::GRAY_4096_J2C,
-};
+use test_support::texture::GRAY_4096_J2C;
 use utils::AssetId;
 use uuid::Uuid;
-
-#[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 type Fixture = (Store, Vec<Demand>, Vec<Route>, Instant, Vec<assets::DecodeJob>);
 const DIRTY_BACKLOG: usize = 512;
@@ -128,24 +122,6 @@ fn dirty_progress_fixture(count: usize) -> (Fixture, Vec<Demand>, Vec<Demand>) {
         .collect();
     settle(&mut fixture, count + eligible.len() + churn.len());
     (fixture, eligible, churn)
-}
-
-pub(crate) fn report_diagnostics() {
-    for count in [1_000usize, 65_000] {
-        let (sample, allocations) = allocation::measure(|| {
-            let mut fixture = fixture(count);
-            settle(&mut fixture, count);
-            fixture
-        });
-        eprintln!(
-            "store/demand_reconcile/memory/{count}: resources={}, leases={}, retained_bytes={}, peak_bytes={}",
-            count + MAX_TEXTURE_DECODES,
-            sample.1.len(),
-            allocations.live_bytes,
-            allocations.peak_bytes
-        );
-        drop(sample);
-    }
 }
 
 const RECONCILE_COUNTS: &[usize] = &[1_000, 65_000];
@@ -311,6 +287,7 @@ fn store_request(bencher: divan::Bencher, count: usize) {
     let (mut store, _demands, routes, now, _decodes) = fixture(count);
     let resource = Resource { id: AssetId::new(Uuid::from_u128(1)), kind: Kind::Texture };
     bencher.bench_local(|| {
-        black_box(store.request(routes[1], Request::new(resource), Priority::Visible, now).expect("benchmark route admission"));
+        let demand = store.request(routes[1], Request::new(resource), Priority::Visible, now).expect("benchmark route admission");
+        drop(black_box(demand));
     });
 }
