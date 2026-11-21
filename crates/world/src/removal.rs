@@ -1,7 +1,3 @@
-#![allow(unexpected_cfgs)]
-
-#[cfg(world_bench_detailed)]
-use std::time::{Duration, Instant};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     num::NonZeroU32,
@@ -21,26 +17,6 @@ use crate::{
 };
 
 pub const MAX_REMOVAL_WORK_PER_TURN: usize = 16;
-
-#[cfg(world_bench_detailed)]
-struct PhaseTimer<'a> {
-    elapsed: &'a mut Duration,
-    started: Instant,
-}
-
-#[cfg(world_bench_detailed)]
-impl<'a> PhaseTimer<'a> {
-    fn new(elapsed: &'a mut Duration) -> Self {
-        Self { elapsed, started: Instant::now() }
-    }
-}
-
-#[cfg(world_bench_detailed)]
-impl Drop for PhaseTimer<'_> {
-    fn drop(&mut self) {
-        *self.elapsed += self.started.elapsed();
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RemovalFence {
@@ -76,34 +52,6 @@ pub struct RemovalProgress {
     pub revision: Option<WorldRevision>,
     pub recovery: Recovery,
     pub recovery_cancellations: Vec<RecoveryCancellation>,
-    #[cfg(world_bench_detailed)]
-    pub reclamation_work_time: Duration,
-    #[cfg(world_bench_detailed)]
-    pub finalization_time: Duration,
-    #[cfg(world_bench_detailed)]
-    pub entity_children_time: Duration,
-    #[cfg(world_bench_detailed)]
-    pub entity_relationship_time: Duration,
-    #[cfg(world_bench_detailed)]
-    pub region_objects_time: Duration,
-    #[cfg(world_bench_detailed)]
-    pub region_state_time: Duration,
-    #[cfg(world_bench_detailed)]
-    pub region_tombstones_time: Duration,
-    #[cfg(world_bench_detailed)]
-    pub transfer_time: Duration,
-    #[cfg(world_bench_detailed)]
-    pub index_removal_time: Duration,
-    #[cfg(world_bench_detailed)]
-    pub component_destruction_time: Duration,
-    #[cfg(world_bench_detailed)]
-    pub tombstone_insertion_time: Duration,
-    #[cfg(world_bench_detailed)]
-    pub journal_publication_time: Duration,
-    #[cfg(world_bench_detailed)]
-    pub recovery_compaction_time: Duration,
-    #[cfg(world_bench_detailed)]
-    pub final_buffer_release_time: Duration,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -433,8 +381,6 @@ impl World {
         let mut changes = Vec::with_capacity(limit.saturating_mul(2));
         let mut recovery_targets = Vec::with_capacity(limit);
         let mut recovery_cancellations = Vec::with_capacity(limit);
-        #[cfg(world_bench_detailed)]
-        let work_started = Instant::now();
 
         while progress.work_units < limit {
             if self.reclamation.is_empty() {
@@ -454,8 +400,6 @@ impl World {
             match frame {
                 ReclamationFrame::Entity(mut frame) => match frame.phase {
                     RemovalPhase::Children => {
-                        #[cfg(world_bench_detailed)]
-                        let _phase_timer = PhaseTimer::new(&mut progress.entity_children_time);
                         let next_child = self.children.get(&frame.entity).and_then(|children| {
                             let lower = frame.after_child.map_or(Unbounded, Excluded);
                             children.range((lower, Unbounded)).next().map(|(id, child)| (*id, *child))
@@ -478,8 +422,6 @@ impl World {
                         }
                     }
                     RemovalPhase::RelationshipWork => {
-                        #[cfg(world_bench_detailed)]
-                        let _phase_timer = PhaseTimer::new(&mut progress.entity_relationship_time);
                         let Some(id) = self.store.object_record(frame.entity).map(|record| record.id) else {
                             frame.phase = RemovalPhase::Finalize;
                             self.reclamation.push(ReclamationFrame::Entity(frame));
@@ -548,21 +490,13 @@ impl World {
                         }
                     }
                     RemovalPhase::Finalize => {
-                        #[cfg(world_bench_detailed)]
-                        let started = Instant::now();
-                        self.finalize_removal(frame, &mut changes, &mut recovery_cancellations, &mut progress);
-                        #[cfg(world_bench_detailed)]
-                        {
-                            progress.finalization_time += started.elapsed();
-                        }
+                        self.finalize_removal(frame, &mut changes, &mut recovery_cancellations);
                         progress.removed_entities += 1;
                         progress.work_units += 1;
                     }
                 },
                 ReclamationFrame::Region(mut frame) => match frame.phase {
                     RegionPhase::Objects => {
-                        #[cfg(world_bench_detailed)]
-                        let _phase_timer = PhaseTimer::new(&mut progress.region_objects_time);
                         let next = self.store.region_ids(frame.region).and_then(|objects| {
                             let lower = frame.after_object.map_or(Unbounded, Excluded);
                             objects.range((lower, Unbounded)).next().map(|(id, entity)| (*id, *entity))
@@ -593,8 +527,6 @@ impl World {
                         }
                     }
                     RegionPhase::State => {
-                        #[cfg(world_bench_detailed)]
-                        let _phase_timer = PhaseTimer::new(&mut progress.region_state_time);
                         let Some(state) = self.retiring_regions.get_mut(&frame.region) else {
                             frame.phase = RegionPhase::Tombstones;
                             self.reclamation.push(ReclamationFrame::Region(frame));
@@ -615,8 +547,6 @@ impl World {
                         }
                     }
                     RegionPhase::Tombstones => {
-                        #[cfg(world_bench_detailed)]
-                        let _phase_timer = PhaseTimer::new(&mut progress.region_tombstones_time);
                         if let Some(address) = self.tombstones.first_region_address(frame.region) {
                             self.tombstones.remove(&address);
                             self.reclamation.push(ReclamationFrame::Region(frame));
@@ -633,8 +563,6 @@ impl World {
                     }
                 },
                 ReclamationFrame::Transfer(entity) => {
-                    #[cfg(world_bench_detailed)]
-                    let _phase_timer = PhaseTimer::new(&mut progress.transfer_time);
                     let Some(state) = self.transfer_cursors.get(&entity) else {
                         progress.work_units += 1;
                         continue;
@@ -819,17 +747,7 @@ impl World {
             }
         }
 
-        #[cfg(world_bench_detailed)]
-        {
-            progress.reclamation_work_time = work_started.elapsed();
-        }
-        #[cfg(world_bench_detailed)]
-        let journal_started = Instant::now();
         progress.revision = self.publish_changes(changes);
-        #[cfg(world_bench_detailed)]
-        {
-            progress.journal_publication_time = journal_started.elapsed();
-        }
         progress.pending = self.has_pending_removals();
         if !progress.pending
             && self.invalidations.is_empty()
@@ -838,21 +756,9 @@ impl World {
             && self.invalidated_region_counts.is_empty()
             && self.transfer_address_count == 0
         {
-            #[cfg(world_bench_detailed)]
-            let started = Instant::now();
             self.release_empty_removal_capacity();
-            #[cfg(world_bench_detailed)]
-            {
-                progress.final_buffer_release_time = started.elapsed();
-            }
         }
-        #[cfg(world_bench_detailed)]
-        let recovery_started = Instant::now();
         progress.recovery = Recovery::from_targets(recovery_targets, self.limits.max_recovery_targets);
-        #[cfg(world_bench_detailed)]
-        {
-            progress.recovery_compaction_time = recovery_started.elapsed();
-        }
         progress.recovery_cancellations = recovery_cancellations;
         progress
     }
@@ -1392,7 +1298,6 @@ impl World {
         frame: RemovalFrame,
         changes: &mut Vec<WorldChange>,
         recovery_cancellations: &mut Vec<RecoveryCancellation>,
-        _progress: &mut RemovalProgress,
     ) {
         let (id, state, media_bytes) = self.store.removal_data(frame.entity.0);
         let address = state.binding.address;
@@ -1400,13 +1305,6 @@ impl World {
         self.detach_parent(frame.entity);
         self.object_media_bytes = self.object_media_bytes.saturating_sub(media_bytes);
         self.untrack_current_invalidation(frame.entity);
-        #[cfg(world_bench_detailed)]
-        {
-            let store_times = self.store.remove(frame.entity);
-            _progress.component_destruction_time += store_times.component_destruction;
-            _progress.index_removal_time += store_times.index_removal;
-        }
-        #[cfg(not(world_bench_detailed))]
         self.store.remove(frame.entity);
         self.invalidations.remove(&frame.entity);
         self.counted_invalidations.remove(&frame.entity);
@@ -1416,14 +1314,8 @@ impl World {
         if self.removal_fences.get(&address).is_some_and(|(entity, _, _)| *entity == frame.entity) {
             self.removal_fences.remove(&address);
         }
-        #[cfg(world_bench_detailed)]
-        let tombstone_started = Instant::now();
         if !address_is_replaced && let Some(stamp) = frame.cause.tombstone_stamp() {
             self.insert_tombstone(address, stamp);
-        }
-        #[cfg(world_bench_detailed)]
-        {
-            _progress.tombstone_insertion_time += tombstone_started.elapsed();
         }
         changes.push(EntityRemoved { id, entity: frame.entity, address, reason: frame.cause.reason() });
         if !frame.cancelled_at_invalidation {
