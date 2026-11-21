@@ -21,7 +21,7 @@ use crate::{
 };
 use crate::{
     inventory::{FavoriteLocation, InventoryFetchHandle, favorite_store::FavoriteStoreError, favorites::FavoritesError},
-    remembered_login::{CredentialStoreError, RememberedLogin},
+    remembered_login::RememberedLogin,
     session::ChatMessage,
 };
 
@@ -146,7 +146,7 @@ impl PresentationSnapshot {
 
 pub(crate) enum AuthenticationUpdate {
     MfaRequired(MfaChallenge),
-    CredentialsUpdated { remembered_login: Option<RememberedLogin>, warning: Option<CredentialStoreError> },
+    PersistCredentials { grid: Grid, remembered_login: Option<RememberedLogin> },
 }
 
 #[derive(Debug, Eq, PartialEq)]

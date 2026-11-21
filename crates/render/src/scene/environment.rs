@@ -52,6 +52,10 @@ pub enum EnvironmentChoice {
     #[default]
     Shared,
     Local(LocalChoice),
+    Split {
+        sky: Option<LocalChoice>,
+        water: Option<LocalChoice>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,15 +65,50 @@ pub enum LocalChoice {
 }
 
 impl EnvironmentChoice {
+    pub fn sky_choice(&self) -> Option<&LocalChoice> {
+        match self {
+            Self::Split { sky, .. } => sky.as_ref(),
+            Self::Shared | Self::Local(_) => None,
+        }
+    }
+
+    pub fn water_choice(&self) -> Option<&LocalChoice> {
+        match self {
+            Self::Split { water, .. } => water.as_ref(),
+            Self::Shared | Self::Local(_) => None,
+        }
+    }
+
+    pub fn with_sky(&self, sky: Option<LocalChoice>) -> Self {
+        let water = self.water_choice().cloned();
+        Self::Split { sky, water }.normalized()
+    }
+
+    pub fn with_water(&self, water: Option<LocalChoice>) -> Self {
+        let sky = self.sky_choice().cloned();
+        Self::Split { sky, water }.normalized()
+    }
+
+    fn normalized(self) -> Self {
+        match self {
+            Self::Split { sky: None, water: None } => Self::Shared,
+            other => other,
+        }
+    }
+
     fn local(&self) -> Option<&LocalChoice> {
         match self {
-            Self::Shared => None,
             Self::Local(choice) => Some(choice),
+            Self::Shared | Self::Split { .. } => None,
         }
     }
 }
 
 impl LocalChoice {
+    fn is_invalid(&self) -> bool {
+        matches!(self, Self::Inventory { owner_id, item_id, asset_id } if owner_id.is_nil() || item_id.is_nil() || asset_id.uuid().is_nil())
+    }
+
     fn asset_id(&self) -> Option<AssetId> {
         match self {
             Self::Preset(preset) => preset.asset_id(),
@@ -201,6 +240,8 @@ struct State {
     sky_properties: BTreeMap<String, ExperienceProperty>,
     water_properties: BTreeMap<String, ExperienceProperty>,
     local: Option<LocalEnvironment>,
+    local_sky: Option<LocalEnvironment>,
+    local_water: Option<LocalEnvironment>,
     selected: EnvironmentChoice,
     local_error: Option<Failure>,
 }
@@ -269,6 +310,12 @@ impl ViewerEnvironment {
     }
     pub fn local(&self) -> Option<&LocalEnvironment> {
         self.0.state.local.as_ref()
+    }
+    pub fn local_sky(&self) -> Option<&LocalEnvironment> {
+        self.0.state.local_sky.as_ref()
+    }
+    pub fn local_water(&self) -> Option<&LocalEnvironment> {
+        self.0.state.local_water.as_ref()
     }
     pub fn selected(&self) -> &EnvironmentChoice {
         &self.0.state.selected
@@ -363,6 +410,8 @@ pub(in crate::scene) struct ViewerEnvironments {
     current: Option<ViewerEnvironment>,
     pending: VecDeque<Pending>,
     local_pending: Option<LocalPending>,
+    local_sky_pending: Option<LocalPending>,
+    local_water_pending: Option<LocalPending>,
     local_region: Option<Region>,
     events: VecDeque<AssetChange>,
     version: u64,
@@ -377,6 +426,8 @@ impl ViewerEnvironments {
             current: None,
             pending: VecDeque::new(),
             local_pending: None,
+            local_sky_pending: None,
+            local_water_pending: None,
             local_region: None,
             events: VecDeque::new(),
             version: 0,
@@ -395,12 +446,25 @@ impl ViewerEnvironments {
         self.version
     }
     pub(in crate::scene) fn waiting(&self) -> bool {
+        let needs_local = self.local_pending.is_none()
+            && self.selected().local().is_some_and(|choice| {
+                self.current.as_ref().and_then(ViewerEnvironment::local).is_none_or(|local| local.choice() != choice)
+            });
+        let needs_sky = self.local_sky_pending.is_none()
+            && self.selected().sky_choice().is_some_and(|choice| {
+                self.current.as_ref().and_then(ViewerEnvironment::local_sky).is_none_or(|local| local.choice() != choice)
+            });
+        let needs_water = self.local_water_pending.is_none()
+            && self.selected().water_choice().is_some_and(|choice| {
+                self.current.as_ref().and_then(ViewerEnvironment::local_water).is_none_or(|local| local.choice() != choice)
+            });
         self.pending.front().is_some_and(|pending| pending.result.is_some())
             || self.local_pending.as_ref().is_some_and(|pending| pending.result.is_some())
-            || self.local_pending.is_none()
-                && self.selected().local().is_some_and(|choice| {
-                    self.current.as_ref().and_then(ViewerEnvironment::local).is_none_or(|local| local.choice() != choice)
-                })
+            || self.local_sky_pending.as_ref().is_some_and(|pending| pending.result.is_some())
+            || self.local_water_pending.as_ref().is_some_and(|pending| pending.result.is_some())
+            || needs_local
+            || needs_sky
+            || needs_water
     }
 
     pub(in crate::scene) fn selected(&self) -> &EnvironmentChoice {
@@ -408,44 +472,123 @@ impl ViewerEnvironments {
     }
 
     pub(in crate::scene) fn set_local(&mut self, choice: EnvironmentChoice, region: Region) -> Result<(), EnvironmentPushError> {
-        let local_choice = choice.local();
-        if matches!(local_choice, Some(LocalChoice::Inventory { owner_id, item_id, asset_id }) if owner_id.is_nil() || item_id.is_nil() || asset_id.uuid().is_nil())
-        {
-            return Err(EnvironmentPushError::Invalid);
+        let choice = choice.normalized();
+        match &choice {
+            EnvironmentChoice::Shared => {}
+            EnvironmentChoice::Local(local) => {
+                if local.is_invalid() {
+                    return Err(EnvironmentPushError::Invalid);
+                }
+            }
+            EnvironmentChoice::Split { sky, water } => {
+                if sky.as_ref().is_some_and(LocalChoice::is_invalid) || water.as_ref().is_some_and(LocalChoice::is_invalid) {
+                    return Err(EnvironmentPushError::Invalid);
+                }
+            }
         }
         let mut state = self.state();
-        let current_local_matches = local_choice.is_some_and(|choice| state.local.as_ref().is_some_and(|local| local.choice() == choice));
-        let pending_matches = local_choice
-            .is_some_and(|choice| self.local_pending.as_ref().is_some_and(|pending| pending.choice == *choice && pending.region == region));
-        if state.selected == choice && (local_choice.is_none() || current_local_matches || pending_matches) {
-            if current_local_matches
-                && let Some(local) = state.local.as_ref()
-                && local.region() != region
-            {
-                state.local = Some(local.with_region(region));
+        match &choice {
+            EnvironmentChoice::Shared | EnvironmentChoice::Local(_) => {
+                let local_choice = choice.local();
+                let current_local_matches =
+                    local_choice.is_some_and(|choice| state.local.as_ref().is_some_and(|local| local.choice() == choice));
+                let pending_matches = local_choice.is_some_and(|choice| {
+                    self.local_pending.as_ref().is_some_and(|pending| pending.choice == *choice && pending.region == region)
+                });
+                if state.selected == choice && (local_choice.is_none() || current_local_matches || pending_matches) {
+                    if current_local_matches
+                        && let Some(local) = state.local.as_ref()
+                        && local.region() != region
+                    {
+                        state.local = Some(local.with_region(region));
+                        self.store(state)?;
+                    }
+                    self.local_region = Some(region);
+                    self.route_local();
+                    return Ok(());
+                }
+                let release_count = usize::from(self.local_pending.is_some())
+                    + usize::from(self.local_sky_pending.is_some())
+                    + usize::from(self.local_water_pending.is_some());
+                let request_count = usize::from(local_choice.is_some() && !current_local_matches && !pending_matches);
+                if self.events.len().saturating_add(release_count).saturating_add(request_count) > 2 * MAX_PENDING {
+                    return Err(EnvironmentPushError::Capacity);
+                }
+                state.selected = choice;
+                state.local_error = None;
+                state.local_sky = None;
+                state.local_water = None;
+                if matches!(&state.selected, EnvironmentChoice::Shared) {
+                    state.local = None;
+                }
                 self.store(state)?;
+                self.local_region = Some(region);
+                if !pending_matches {
+                    self.cancel_local_pending();
+                }
+                self.cancel_split_pending(true, true);
+                self.route_local();
+                Ok(())
             }
-            self.local_region = Some(region);
-            self.route_local();
-            return Ok(());
+            EnvironmentChoice::Split { sky, water } => {
+                let sky_matches = sky.as_ref().is_some_and(|c| state.local_sky.as_ref().is_some_and(|l| l.choice() == c));
+                let sky_pending_matches = sky.as_ref().is_some_and(|c| {
+                    self.local_sky_pending.as_ref().is_some_and(|pending| pending.choice == *c && pending.region == region)
+                });
+                let water_matches = water.as_ref().is_some_and(|c| state.local_water.as_ref().is_some_and(|l| l.choice() == c));
+                let water_pending_matches = water.as_ref().is_some_and(|c| {
+                    self.local_water_pending.as_ref().is_some_and(|pending| pending.choice == *c && pending.region == region)
+                });
+                let sky_settled = sky.is_none() || sky_matches || sky_pending_matches;
+                let water_settled = water.is_none() || water_matches || water_pending_matches;
+                if state.selected == choice && sky_settled && water_settled {
+                    let mut region_updated = false;
+                    if sky_matches
+                        && let Some(local) = state.local_sky.as_ref()
+                        && local.region() != region
+                    {
+                        state.local_sky = Some(local.with_region(region));
+                        region_updated = true;
+                    }
+                    if water_matches
+                        && let Some(local) = state.local_water.as_ref()
+                        && local.region() != region
+                    {
+                        state.local_water = Some(local.with_region(region));
+                        region_updated = true;
+                    }
+                    if region_updated {
+                        self.store(state)?;
+                    }
+                    self.local_region = Some(region);
+                    self.route_local();
+                    return Ok(());
+                }
+                let release_count = usize::from(self.local_pending.is_some())
+                    + usize::from(!sky_pending_matches && self.local_sky_pending.is_some())
+                    + usize::from(!water_pending_matches && self.local_water_pending.is_some());
+                let request_count = usize::from(sky.is_some() && !sky_matches && !sky_pending_matches)
+                    + usize::from(water.is_some() && !water_matches && !water_pending_matches);
+                if self.events.len().saturating_add(release_count).saturating_add(request_count) > 2 * MAX_PENDING {
+                    return Err(EnvironmentPushError::Capacity);
+                }
+                state.selected = choice.clone();
+                state.local_error = None;
+                state.local = None;
+                if sky.is_none() {
+                    state.local_sky = None;
+                }
+                if water.is_none() {
+                    state.local_water = None;
+                }
+                self.store(state)?;
+                self.local_region = Some(region);
+                self.cancel_local_pending();
+                self.cancel_split_pending(!sky_pending_matches, !water_pending_matches);
+                self.route_local();
+                Ok(())
+            }
         }
-        let release_count = usize::from(self.local_pending.is_some());
-        let request_count = usize::from(local_choice.is_some() && !current_local_matches && !pending_matches);
-        if self.events.len().saturating_add(release_count).saturating_add(request_count) > 2 * MAX_PENDING {
-            return Err(EnvironmentPushError::Capacity);
-        }
-        state.selected = choice;
-        state.local_error = None;
-        if matches!(&state.selected, EnvironmentChoice::Shared) {
-            state.local = None;
-        }
-        self.store(state)?;
-        self.local_region = Some(region);
-        if !pending_matches {
-            self.cancel_local_pending();
-        }
-        self.route_local();
-        Ok(())
     }
 
     pub(in crate::scene) fn retry_local_route(&mut self) {
@@ -454,29 +597,68 @@ impl ViewerEnvironments {
 
     fn route_local(&mut self) {
         let Some(region) = self.local_region else { return };
-        let Some(choice) = self.selected().local().cloned() else { return };
-        let Some(asset) = choice.asset_id() else { return };
-        if self.current.as_ref().and_then(ViewerEnvironment::local).is_some_and(|local| local.choice() == &choice)
-            || self.local_pending.as_ref().is_some_and(|pending| pending.choice == choice)
-            || self.events.len() >= 2 * MAX_PENDING
+        if let Some(choice) = self.selected().local().cloned()
+            && let Some(asset) = choice.asset_id()
+            && !self.current.as_ref().and_then(ViewerEnvironment::local).is_some_and(|local| local.choice() == &choice)
+            && !self.local_pending.as_ref().is_some_and(|pending| pending.choice == choice)
+            && self.events.len() < 2 * MAX_PENDING
         {
-            return;
+            self.cancel_local_pending();
+            if let Some(lease) = self.budget.reserve(size_of::<LocalPending>() + 64) {
+                let ticket = AssetTicket::new();
+                self.local_pending = Some(LocalPending { ticket, region, choice, result: None, _lease: lease });
+                self.events.push_back(AssetChange::Request(AssetRequest {
+                    ticket,
+                    region,
+                    request: Request::Environment(asset),
+                    priority: Priority::Visible,
+                    importance: 0,
+                }));
+            }
         }
-        self.cancel_local_pending();
-        let Some(lease) = self.budget.reserve(size_of::<LocalPending>() + 64) else { return };
-        let ticket = AssetTicket::new();
-        self.local_pending = Some(LocalPending { ticket, region, choice, result: None, _lease: lease });
-        self.events.push_back(AssetChange::Request(AssetRequest {
-            ticket,
-            region,
-            request: Request::Environment(asset),
-            priority: Priority::Visible,
-            importance: 0,
-        }));
+        if let Some(choice) = self.selected().sky_choice().cloned()
+            && let Some(asset) = choice.asset_id()
+            && !self.current.as_ref().and_then(ViewerEnvironment::local_sky).is_some_and(|local| local.choice() == &choice)
+            && !self.local_sky_pending.as_ref().is_some_and(|pending| pending.choice == choice)
+            && self.events.len() < 2 * MAX_PENDING
+        {
+            self.cancel_split_pending(true, false);
+            if let Some(lease) = self.budget.reserve(size_of::<LocalPending>() + 64) {
+                let ticket = AssetTicket::new();
+                self.local_sky_pending = Some(LocalPending { ticket, region, choice, result: None, _lease: lease });
+                self.events.push_back(AssetChange::Request(AssetRequest {
+                    ticket,
+                    region,
+                    request: Request::Environment(asset),
+                    priority: Priority::Visible,
+                    importance: 0,
+                }));
+            }
+        }
+        if let Some(choice) = self.selected().water_choice().cloned()
+            && let Some(asset) = choice.asset_id()
+            && !self.current.as_ref().and_then(ViewerEnvironment::local_water).is_some_and(|local| local.choice() == &choice)
+            && !self.local_water_pending.as_ref().is_some_and(|pending| pending.choice == choice)
+            && self.events.len() < 2 * MAX_PENDING
+        {
+            self.cancel_split_pending(false, true);
+            if let Some(lease) = self.budget.reserve(size_of::<LocalPending>() + 64) {
+                let ticket = AssetTicket::new();
+                self.local_water_pending = Some(LocalPending { ticket, region, choice, result: None, _lease: lease });
+                self.events.push_back(AssetChange::Request(AssetRequest {
+                    ticket,
+                    region,
+                    request: Request::Environment(asset),
+                    priority: Priority::Visible,
+                    importance: 0,
+                }));
+            }
+        }
     }
 
     pub(in crate::scene) fn close(&mut self) {
         self.cancel_local_pending();
+        self.cancel_split_pending(true, true);
         self.local_region = None;
         for pending in self.pending.drain(..) {
             self.events.push_back(AssetChange::Release(pending.ticket));
@@ -486,6 +668,15 @@ impl ViewerEnvironments {
 
     fn cancel_local_pending(&mut self) {
         if let Some(pending) = self.local_pending.take() {
+            self.events.push_back(AssetChange::Release(pending.ticket));
+        }
+    }
+
+    fn cancel_split_pending(&mut self, sky: bool, water: bool) {
+        if sky && let Some(pending) = self.local_sky_pending.take() {
+            self.events.push_back(AssetChange::Release(pending.ticket));
+        }
+        if water && let Some(pending) = self.local_water_pending.take() {
             self.events.push_back(AssetChange::Release(pending.ticket));
         }
     }
@@ -616,6 +807,32 @@ impl ViewerEnvironments {
             self.advance_local();
             return true;
         }
+        if let Some(pending) = self.local_sky_pending.as_mut().filter(|pending| pending.ticket == ticket) {
+            pending.result = match status {
+                Status::Ready(Content::Environment(environment)) if matches!(&environment.settings, EnvironmentSettings::Sky(_)) => {
+                    Some(Ok(environment.clone()))
+                }
+                Status::Failed { failure, .. } => Some(Err(*failure)),
+                Status::StaleSession => Some(Err(Failure::SessionClosed)),
+                Status::Ready(_) => Some(Err(Failure::Malformed)),
+                _ => None,
+            };
+            self.advance_local();
+            return true;
+        }
+        if let Some(pending) = self.local_water_pending.as_mut().filter(|pending| pending.ticket == ticket) {
+            pending.result = match status {
+                Status::Ready(Content::Environment(environment)) if matches!(&environment.settings, EnvironmentSettings::Water(_)) => {
+                    Some(Ok(environment.clone()))
+                }
+                Status::Failed { failure, .. } => Some(Err(*failure)),
+                Status::StaleSession => Some(Err(Failure::SessionClosed)),
+                Status::Ready(_) => Some(Err(Failure::Malformed)),
+                _ => None,
+            };
+            self.advance_local();
+            return true;
+        }
         let Some(pending) = self.pending.iter_mut().find(|pending| pending.ticket == ticket) else { return false };
         pending.result = match status {
             Status::Ready(Content::Environment(environment)) => Some(Ok(environment.clone())),
@@ -663,29 +880,83 @@ impl ViewerEnvironments {
     }
 
     fn advance_local(&mut self) {
-        let Some(pending) = self.local_pending.as_ref().filter(|pending| pending.result.is_some()) else { return };
-        let ticket = pending.ticket;
-        let choice = pending.choice.clone();
-        let region = pending.region;
-        let result = pending.result.clone().expect("completed local environment request");
-        let mut state = self.state();
-        match result {
-            Ok(environment) => {
-                let Some(lease) = self.budget.reserve(size_of::<LocalSetting>() + 32) else { return };
-                state.local = Some(LocalEnvironment { setting: Arc::new(LocalSetting::new(choice.clone(), environment, lease)), region });
-                state.selected = EnvironmentChoice::Local(choice);
+        if let Some(pending) = self.local_pending.as_ref().filter(|pending| pending.result.is_some()) {
+            let ticket = pending.ticket;
+            let choice = pending.choice.clone();
+            let region = pending.region;
+            let result = pending.result.clone().expect("completed local environment request");
+            let mut state = self.state();
+            match result {
+                Ok(environment) => {
+                    let Some(lease) = self.budget.reserve(size_of::<LocalSetting>() + 32) else { return };
+                    state.local =
+                        Some(LocalEnvironment { setting: Arc::new(LocalSetting::new(choice.clone(), environment, lease)), region });
+                    state.selected = EnvironmentChoice::Local(choice);
+                }
+                Err(error) => {
+                    state.selected = state
+                        .local
+                        .as_ref()
+                        .map_or_else(EnvironmentChoice::default, |local| EnvironmentChoice::Local(local.choice().clone()));
+                    state.local_error = Some(error);
+                }
             }
-            Err(error) => {
-                state.selected =
-                    state.local.as_ref().map_or_else(EnvironmentChoice::default, |local| EnvironmentChoice::Local(local.choice().clone()));
-                state.local_error = Some(error);
+            if self.store(state).is_err() {
+                return;
             }
+            self.local_pending = None;
+            self.events.push_back(AssetChange::Release(ticket));
         }
-        if self.store(state).is_err() {
-            return;
+        if let Some(pending) = self.local_sky_pending.as_ref().filter(|pending| pending.result.is_some()) {
+            let ticket = pending.ticket;
+            let choice = pending.choice.clone();
+            let region = pending.region;
+            let result = pending.result.clone().expect("completed local sky request");
+            let mut state = self.state();
+            match result {
+                Ok(environment) => {
+                    let Some(lease) = self.budget.reserve(size_of::<LocalSetting>() + 32) else { return };
+                    state.local_sky =
+                        Some(LocalEnvironment { setting: Arc::new(LocalSetting::new(choice.clone(), environment, lease)), region });
+                    state.selected = state.selected.with_sky(Some(choice));
+                }
+                Err(error) => {
+                    let fallback = state.local_sky.as_ref().map(|local| local.choice().clone());
+                    state.selected = state.selected.with_sky(fallback);
+                    state.local_error = Some(error);
+                }
+            }
+            if self.store(state).is_err() {
+                return;
+            }
+            self.local_sky_pending = None;
+            self.events.push_back(AssetChange::Release(ticket));
         }
-        self.local_pending = None;
-        self.events.push_back(AssetChange::Release(ticket));
+        if let Some(pending) = self.local_water_pending.as_ref().filter(|pending| pending.result.is_some()) {
+            let ticket = pending.ticket;
+            let choice = pending.choice.clone();
+            let region = pending.region;
+            let result = pending.result.clone().expect("completed local water request");
+            let mut state = self.state();
+            match result {
+                Ok(environment) => {
+                    let Some(lease) = self.budget.reserve(size_of::<LocalSetting>() + 32) else { return };
+                    state.local_water =
+                        Some(LocalEnvironment { setting: Arc::new(LocalSetting::new(choice.clone(), environment, lease)), region });
+                    state.selected = state.selected.with_water(Some(choice));
+                }
+                Err(error) => {
+                    let fallback = state.local_water.as_ref().map(|local| local.choice().clone());
+                    state.selected = state.selected.with_water(fallback);
+                    state.local_error = Some(error);
+                }
+            }
+            if self.store(state).is_err() {
+                return;
+            }
+            self.local_water_pending = None;
+            self.events.push_back(AssetChange::Release(ticket));
+        }
     }
 
     fn state(&self) -> State {

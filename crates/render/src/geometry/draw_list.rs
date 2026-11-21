@@ -201,6 +201,7 @@ pub(super) struct ViewDraws {
     blended_keys: Vec<(f64, FaceOrder, u32)>,
     batch_commands: Vec<Vec<DrawIndexedArgs>>,
     batch_order: Vec<usize>,
+    triangles: u64,
     mark: u64,
     layout: LayoutId,
 }
@@ -216,6 +217,10 @@ impl ViewDraws {
 
     pub(super) fn command_count(&self) -> usize {
         self.first_instances.len()
+    }
+
+    pub(super) fn triangles(&self) -> u64 {
+        self.triangles
     }
 
     pub(super) fn first_instance(&self, offset: u64, command: u32) -> Option<u32> {
@@ -1218,11 +1223,14 @@ impl DrawList {
         view.encoded.clear();
         view.first_instances.clear();
         view.batches.clear();
+        view.triangles = 0;
         for id in &view.batch_order {
             let (Some(group), Some(commands)) = (groups.batch_group(*id), view.batch_commands.get(*id)) else { continue };
             let offset = view.encoded.len() as u64;
             for args in commands {
                 view.first_instances.push(args.first_instance);
+                view.triangles =
+                    view.triangles.saturating_add(u64::from(args.index_count / 3).saturating_mul(u64::from(args.instance_count)));
                 encode_draw(args, &mut view.encoded, indirect_first_instance);
             }
             view.batches.push(DrawBatch {
@@ -1239,6 +1247,7 @@ impl DrawList {
             let (binding, args) = ensure_batch(groups, draw, meshes);
             let offset = view.encoded.len() as u64;
             view.first_instances.push(args.first_instance);
+            view.triangles = view.triangles.saturating_add(u64::from(args.index_count / 3).saturating_mul(u64::from(args.instance_count)));
             encode_draw(&args, &mut view.encoded, indirect_first_instance);
             if view.batches.len() > blended_start
                 && let Some(batch) = view.batches.last_mut()

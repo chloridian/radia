@@ -5,10 +5,6 @@ use std::{
 
 use math::{DQuat, DVec3};
 use render::scene;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use winit::event::ElementState;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use winit::keyboard::Key;
 use world::WorldPose;
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -278,13 +274,6 @@ pub(crate) enum CameraMode {
 }
 
 impl CameraMode {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Follow => "Follow",
-            Self::Free => "Free",
-        }
-    }
-
     pub(crate) fn detach_for_focus(&mut self) {
         *self = Self::Free;
     }
@@ -294,8 +283,8 @@ impl CameraMode {
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    fn on_movement_key(&mut self, binding: KeyBinding, state: ElementState, repeat: bool, captured: bool) {
-        if state == ElementState::Pressed
+    fn on_movement_key(&mut self, binding: KeyBinding, pressed: bool, repeat: bool, captured: bool) {
+        if pressed
             && !repeat
             && !captured
             && matches!(binding, KeyBinding::Movement(_) | KeyBinding::ToggleFlying | KeyBinding::ToggleRun | KeyBinding::Stop)
@@ -309,13 +298,13 @@ impl CameraMode {
 pub(crate) fn handle_keyboard_input(
     controls: &mut HeldControls,
     camera_mode: &mut CameraMode,
-    key: &Key,
-    state: ElementState,
+    key: &str,
+    pressed: bool,
     repeat: bool,
     captured: bool,
 ) -> Option<bool> {
-    let (binding, changed) = controls.keyboard_event(key, state, repeat, captured)?;
-    camera_mode.on_movement_key(binding, state, repeat, captured);
+    let (binding, changed) = controls.keyboard_event(key, pressed, repeat, captured)?;
+    camera_mode.on_movement_key(binding, pressed, repeat, captured);
     Some(changed)
 }
 
@@ -324,8 +313,6 @@ mod tests {
     use std::f32::consts::FRAC_PI_2;
 
     use math::Quat;
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    use winit::keyboard::NamedKey;
 
     use super::*;
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -393,23 +380,22 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn keys_select_camera_mode() {
-        let forward = Key::Character("w".into());
-        for (key, state, captured, result, mode, moving) in [
-            (forward.clone(), ElementState::Pressed, false, Some(true), CameraMode::Follow, true),
-            (forward.clone(), ElementState::Pressed, true, None, CameraMode::Free, false),
-            (forward, ElementState::Released, false, Some(true), CameraMode::Free, false),
-            (Key::Character("f".into()), ElementState::Pressed, false, Some(true), CameraMode::Follow, false),
-            (Key::Character("r".into()), ElementState::Pressed, false, Some(true), CameraMode::Follow, false),
-            (Key::Named(NamedKey::Space), ElementState::Pressed, false, Some(true), CameraMode::Follow, false),
+        for (key, pressed, captured, result, mode, moving) in [
+            ("w", true, false, Some(true), CameraMode::Follow, true),
+            ("w", true, true, None, CameraMode::Free, false),
+            ("w", false, false, Some(true), CameraMode::Free, false),
+            ("f", true, false, Some(true), CameraMode::Follow, false),
+            ("r", true, false, Some(true), CameraMode::Follow, false),
+            ("space", true, false, Some(true), CameraMode::Follow, false),
         ] {
-            let case = format!("{key:?} {state:?} captured={captured}");
+            let case = format!("{key:?} pressed={pressed} captured={captured}");
             let mut camera_mode = CameraMode::Free;
             let mut controls = HeldControls::default();
-            if state == ElementState::Released {
+            if !pressed {
                 controls.set_pressed(MovementKey::Forward, true);
             }
 
-            assert_eq!(handle_keyboard_input(&mut controls, &mut camera_mode, &key, state, false, captured), result, "{case}");
+            assert_eq!(handle_keyboard_input(&mut controls, &mut camera_mode, key, pressed, false, captured), result, "{case}");
             assert_eq!(camera_mode, mode, "{case}");
             let flags = controls.observation(false, Quat::IDENTITY).control_flags;
             assert_eq!(flags & 0x0000_0001 != 0, moving, "{case}");

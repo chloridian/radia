@@ -4,6 +4,7 @@ use std::{
     io::{self, IsTerminal},
     panic,
     path::Path,
+    sync::{Arc, Mutex, PoisonError},
 };
 
 use time::{Duration, OffsetDateTime, UtcOffset, format_description};
@@ -13,13 +14,109 @@ use tracing_subscriber::{
     EnvFilter, Layer,
     fmt::{self, time::OffsetTime},
     layer::SubscriberExt,
+    reload,
     util::SubscriberInitExt,
 };
 
 const LOG_DIR: &str = "target/logs";
 const MAX_LOGS: usize = 20;
 
-pub(crate) fn init() -> Option<WorkerGuard> {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    #[default]
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    pub const ALL: [Self; 5] = [Self::Error, Self::Warn, Self::Info, Self::Debug, Self::Trace];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Error => "Error",
+            Self::Warn => "Warn",
+            Self::Info => "Info",
+            Self::Debug => "Debug",
+            Self::Trace => "Trace",
+        }
+    }
+
+    fn directive(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct LogControl {
+    state: Arc<Mutex<LogState>>,
+    reload_console: Arc<dyn Fn(EnvFilter) + Send + Sync>,
+    reload_file: Option<Arc<dyn Fn(EnvFilter) + Send + Sync>>,
+}
+
+struct LogState {
+    level: LogLevel,
+    noisy_network: bool,
+}
+
+impl LogControl {
+    pub fn noop() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(LogState { level: LogLevel::Info, noisy_network: false })),
+            reload_console: Arc::new(|_| {}),
+            reload_file: None,
+        }
+    }
+
+    pub fn level(&self) -> LogLevel {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).level
+    }
+
+    pub fn noisy_network(&self) -> bool {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).noisy_network
+    }
+
+    pub fn set_level(&self, level: LogLevel) {
+        let noisy_network = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.level == level {
+                return;
+            }
+            state.level = level;
+            state.noisy_network
+        };
+        self.apply(level, noisy_network);
+    }
+
+    pub fn set_noisy_network(&self, noisy_network: bool) {
+        let level = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.noisy_network == noisy_network {
+                return;
+            }
+            state.noisy_network = noisy_network;
+            state.level
+        };
+        self.apply(level, noisy_network);
+    }
+
+    fn apply(&self, level: LogLevel, noisy_network: bool) {
+        (self.reload_console)(build_filter(level, noisy_network));
+        if let Some(reload_file) = &self.reload_file {
+            reload_file(build_filter(level, noisy_network));
+        }
+    }
+}
+
+pub fn init() -> (Option<WorkerGuard>, LogControl) {
     let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
     let json_timer = OffsetTime::new(
         offset,
@@ -33,7 +130,7 @@ pub(crate) fn init() -> Option<WorkerGuard> {
         format_description::parse_owned::<2>("[hour]:[minute]:[second].[subsecond digits:3]").expect("valid console log timestamp format"),
     );
 
-    let (json, guard, file_error, maintenance_warning) = match create_session_log(offset) {
+    let (json, guard, file_reload, file_error, maintenance_warning) = match create_session_log(offset) {
         Ok((file, warning)) => {
             let (writer, guard) = tracing_appender::non_blocking(file);
             let file_filter = EnvFilter::try_from_env("FILE_LOG")
@@ -43,6 +140,7 @@ pub(crate) fn init() -> Option<WorkerGuard> {
                     )
                 })
                 .add_directive("jpeg2k=warn".parse().expect("valid jpeg2k tracing directive"));
+            let (file_filter, file_handle) = reload::Layer::new(file_filter);
             let json = fmt::layer()
                 .json()
                 .with_timer(json_timer)
@@ -50,14 +148,20 @@ pub(crate) fn init() -> Option<WorkerGuard> {
                 .with_line_number(true)
                 .with_writer(writer)
                 .with_filter(file_filter);
-            (Some(json), Some(guard), None, warning)
+            let reload_file: Arc<dyn Fn(EnvFilter) + Send + Sync> = Arc::new(move |filter| {
+                if let Err(error) = file_handle.reload(filter) {
+                    tracing::warn!(%error, "could not reload file log filter");
+                }
+            });
+            (Some(json), Some(guard), Some(reload_file), None, warning)
         }
-        Err(error) => (None, None, Some(error), None),
+        Err(error) => (None, None, None, Some(error), None),
     };
 
     let console_filter = EnvFilter::try_from_env("LOG")
         .unwrap_or_else(|_| EnvFilter::new("warn,viewer=info,network=info"))
         .add_directive("jpeg2k=warn".parse().expect("valid jpeg2k tracing directive"));
+    let (console_filter, console_handle) = reload::Layer::new(console_filter);
 
     let console = fmt::layer()
         .compact()
@@ -94,7 +198,41 @@ pub(crate) fn init() -> Option<WorkerGuard> {
         default_hook(info);
     }));
 
-    guard
+    let control = LogControl {
+        state: Arc::new(Mutex::new(LogState { level: LogLevel::Info, noisy_network: false })),
+        reload_console: Arc::new(move |filter| {
+            if let Err(error) = console_handle.reload(filter) {
+                tracing::warn!(%error, "could not reload console log filter");
+            }
+        }),
+        reload_file: file_reload,
+    };
+
+    (guard, control)
+}
+
+fn filter_spec(level: LogLevel, noisy_network: bool) -> String {
+    let base = match level {
+        LogLevel::Error => "error",
+        LogLevel::Warn | LogLevel::Info | LogLevel::Debug | LogLevel::Trace => "warn",
+    };
+    let app = level.directive();
+    let net = if noisy_network {
+        "trace"
+    } else {
+        match level {
+            LogLevel::Error => "error",
+            LogLevel::Warn => "warn",
+            LogLevel::Info | LogLevel::Debug | LogLevel::Trace => "info",
+        }
+    };
+    format!(
+        "{base},viewer={app},assets={app},storage={app},inventory={app},render={app},world={app},llsd={app},network={net},protocol={net},jpeg2k=warn"
+    )
+}
+
+fn build_filter(level: LogLevel, noisy_network: bool) -> EnvFilter {
+    EnvFilter::new(filter_spec(level, noisy_network))
 }
 
 fn create_session_log(offset: UtcOffset) -> io::Result<(fs::File, Option<String>)> {
@@ -160,4 +298,32 @@ fn prune_logs(dir: &Path) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LogLevel, build_filter, filter_spec};
+
+    #[test]
+    fn filter_directives_match_levels_and_noisy_network() {
+        for level in LogLevel::ALL {
+            for noisy in [false, true] {
+                let spec = filter_spec(level, noisy);
+                let parsed = build_filter(level, noisy).to_string();
+                assert!(parsed.contains(&format!("viewer={}", level.directive())), "{spec} -> {parsed}");
+                assert!(parsed.contains("jpeg2k=warn"), "{spec} -> {parsed}");
+                let expected_net = if noisy {
+                    "trace"
+                } else {
+                    match level {
+                        LogLevel::Error => "error",
+                        LogLevel::Warn => "warn",
+                        LogLevel::Info | LogLevel::Debug | LogLevel::Trace => "info",
+                    }
+                };
+                assert!(parsed.contains(&format!("network={expected_net}")), "{spec} -> {parsed}");
+                assert!(parsed.contains(&format!("protocol={expected_net}")), "{spec} -> {parsed}");
+            }
+        }
+    }
 }

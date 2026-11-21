@@ -4,10 +4,6 @@ use std::{
 };
 
 use math::{Quat, Vec3};
-use winit::{
-    event::ElementState,
-    keyboard::{Key, NamedKey},
-};
 
 use super::MovementObservation;
 
@@ -73,25 +69,41 @@ impl Default for BodyRotation {
 }
 
 impl KeyBinding {
-    pub(crate) fn from_key(key: &Key) -> Option<Self> {
-        match key {
-            Key::Character(character) if character.as_str().eq_ignore_ascii_case("w") => Some(Self::Movement(MovementKey::Forward)),
-            Key::Character(character) if character.as_str().eq_ignore_ascii_case("s") => Some(Self::Movement(MovementKey::Backward)),
-            Key::Character(character) if character.as_str().eq_ignore_ascii_case("a") => Some(Self::Movement(MovementKey::TurnLeft)),
-            Key::Character(character) if character.as_str().eq_ignore_ascii_case("d") => Some(Self::Movement(MovementKey::TurnRight)),
-            Key::Character(character) if character.as_str().eq_ignore_ascii_case("e") => Some(Self::Movement(MovementKey::Jump)),
-            Key::Character(character) if character.as_str().eq_ignore_ascii_case("c") => Some(Self::Movement(MovementKey::Down)),
-            Key::Character(character) if character.as_str().eq_ignore_ascii_case("f") => Some(Self::ToggleFlying),
-            Key::Character(character) if character.as_str().eq_ignore_ascii_case("r") => Some(Self::ToggleRun),
-            Key::Named(NamedKey::ArrowUp) => Some(Self::Movement(MovementKey::ForwardArrow)),
-            Key::Named(NamedKey::ArrowDown) => Some(Self::Movement(MovementKey::BackwardArrow)),
-            Key::Named(NamedKey::ArrowLeft) => Some(Self::Movement(MovementKey::TurnLeftArrow)),
-            Key::Named(NamedKey::ArrowRight) => Some(Self::Movement(MovementKey::TurnRightArrow)),
-            Key::Named(NamedKey::PageUp) => Some(Self::Movement(MovementKey::JumpPage)),
-            Key::Named(NamedKey::PageDown) => Some(Self::Movement(MovementKey::DownPage)),
-            Key::Named(NamedKey::Home) => Some(Self::ToggleFlying),
-            Key::Named(NamedKey::Space) => Some(Self::Stop),
-            _ => None,
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        if key.eq_ignore_ascii_case("w") {
+            Some(Self::Movement(MovementKey::Forward))
+        } else if key.eq_ignore_ascii_case("s") {
+            Some(Self::Movement(MovementKey::Backward))
+        } else if key.eq_ignore_ascii_case("a") {
+            Some(Self::Movement(MovementKey::TurnLeft))
+        } else if key.eq_ignore_ascii_case("d") {
+            Some(Self::Movement(MovementKey::TurnRight))
+        } else if key.eq_ignore_ascii_case("e") {
+            Some(Self::Movement(MovementKey::Jump))
+        } else if key.eq_ignore_ascii_case("c") {
+            Some(Self::Movement(MovementKey::Down))
+        } else if key.eq_ignore_ascii_case("f") {
+            Some(Self::ToggleFlying)
+        } else if key.eq_ignore_ascii_case("r") {
+            Some(Self::ToggleRun)
+        } else if key.eq_ignore_ascii_case("up") {
+            Some(Self::Movement(MovementKey::ForwardArrow))
+        } else if key.eq_ignore_ascii_case("down") {
+            Some(Self::Movement(MovementKey::BackwardArrow))
+        } else if key.eq_ignore_ascii_case("left") {
+            Some(Self::Movement(MovementKey::TurnLeftArrow))
+        } else if key.eq_ignore_ascii_case("right") {
+            Some(Self::Movement(MovementKey::TurnRightArrow))
+        } else if key.eq_ignore_ascii_case("pageup") {
+            Some(Self::Movement(MovementKey::JumpPage))
+        } else if key.eq_ignore_ascii_case("pagedown") {
+            Some(Self::Movement(MovementKey::DownPage))
+        } else if key.eq_ignore_ascii_case("home") {
+            Some(Self::ToggleFlying)
+        } else if key.eq_ignore_ascii_case("space") {
+            Some(Self::Stop)
+        } else {
+            None
         }
     }
 }
@@ -114,9 +126,9 @@ impl HeldControls {
         self.pressed != previous
     }
 
-    pub(crate) fn keyboard_event(&mut self, key: &Key, state: ElementState, repeat: bool, captured: bool) -> Option<(KeyBinding, bool)> {
+    pub(crate) fn keyboard_event(&mut self, key: &str, pressed: bool, repeat: bool, captured: bool) -> Option<(KeyBinding, bool)> {
         let binding = KeyBinding::from_key(key)?;
-        if state == ElementState::Released {
+        if !pressed {
             let changed = match binding {
                 KeyBinding::Movement(key) => self.set_pressed(key, false),
                 _ => false,
@@ -269,7 +281,6 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use math::{Quat, Vec3};
-    use winit::{event::ElementState, keyboard::Key};
 
     use super::{
         AT_NEG, AT_POS, BodyRotation, FAST_AT, FAST_LEFT, FAST_UP, FLY, HeldControls, KeyBinding, LEFT_NEG, LEFT_POS, MovementKey, STOP,
@@ -287,7 +298,7 @@ mod tests {
             ("e", UP_POS | FAST_UP),
             ("c", UP_NEG | FAST_UP),
         ] {
-            let binding = KeyBinding::from_key(&Key::Character(key.into())).expect("movement key");
+            let binding = KeyBinding::from_key(key).expect("movement key");
             let KeyBinding::Movement(key) = binding else { panic!("movement binding") };
             controls.set_pressed(key, true);
             assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, expected);
@@ -307,12 +318,11 @@ mod tests {
     #[test]
     fn captured_press_does_not_move() {
         let mut controls = HeldControls::default();
-        let key = Key::Character("w".into());
-        assert_eq!(controls.keyboard_event(&key, ElementState::Pressed, false, true), None);
+        assert_eq!(controls.keyboard_event("w", true, false, true), None);
         assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
 
-        controls.keyboard_event(&key, ElementState::Pressed, false, false).expect("forward press");
-        controls.keyboard_event(&key, ElementState::Released, false, true).expect("forward release");
+        controls.keyboard_event("w", true, false, false).expect("forward press");
+        controls.keyboard_event("w", false, false, true).expect("forward release");
         assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
     }
 

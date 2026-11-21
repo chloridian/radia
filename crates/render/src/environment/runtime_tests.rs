@@ -688,6 +688,71 @@ fn inventory_water_keeps_local_sky() {
 }
 
 #[test]
+fn split_sky_and_water_override_independently() {
+    let mut world = world();
+    let region = region(&world, 0);
+    add_region_environment(
+        &mut world,
+        region,
+        b"{'type':'daycycle','frames':{'water':{'type':'water','water_fog_density':r3},'sky':{'type':'sky','sunlight_color':[r1,r0,r0]}},'tracks':[[{'key_keyframe':r0,'key_name':'water'}],[{'key_keyframe':r0,'key_name':'sky'}],[],[],[]]}",
+        None,
+    );
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    settle(&mut scene, &mut view, &world);
+    let now = Instant::now();
+    let mut active = ActiveEnvironment::default();
+    assert!(active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now));
+    assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([1.0, 0.0, 0.0]));
+    assert_eq!(active.evaluated().map(|value| value.water.fog_density), Some(3.0));
+
+    let sky_asset = AssetId::new(Uuid::from_u128(30));
+    let sky_choice = LocalChoice::Inventory { owner_id: Uuid::from_u128(1), item_id: Uuid::from_u128(31), asset_id: sky_asset };
+    push_local_asset(
+        &mut scene,
+        &mut view,
+        &world,
+        region,
+        EnvironmentChoice::Shared.with_sky(Some(sky_choice.clone())),
+        sky_asset,
+        b"{'type':'sky','sunlight_color':[r0,r0,r1]}",
+    );
+    active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_millis(1));
+    active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_secs(6));
+    assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([0.0, 0.0, 1.0]));
+    assert_eq!(active.evaluated().map(|value| value.water.fog_density), Some(3.0));
+
+    let water_asset = AssetId::new(Uuid::from_u128(32));
+    let water_choice = LocalChoice::Inventory { owner_id: Uuid::from_u128(1), item_id: Uuid::from_u128(33), asset_id: water_asset };
+    push_local_asset(
+        &mut scene,
+        &mut view,
+        &world,
+        region,
+        EnvironmentChoice::Shared.with_sky(Some(sky_choice)).with_water(Some(water_choice.clone())),
+        water_asset,
+        b"{'type':'water','water_fog_density':r9}",
+    );
+    active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_secs(6) + Duration::from_millis(1));
+    active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_secs(12));
+    assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([0.0, 0.0, 1.0]));
+    assert_eq!(active.evaluated().map(|value| value.water.fog_density), Some(9.0));
+
+    scene.set_local_environment(EnvironmentChoice::Shared.with_water(Some(water_choice)), region).unwrap();
+    settle(&mut scene, &mut view, &world);
+    active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_secs(12) + Duration::from_millis(1));
+    active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_secs(18));
+    assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([1.0, 0.0, 0.0]));
+    assert_eq!(active.evaluated().map(|value| value.water.fog_density), Some(9.0));
+
+    scene.set_local_environment(EnvironmentChoice::Shared, region).unwrap();
+    settle(&mut scene, &mut view, &world);
+    active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_secs(18) + Duration::from_millis(1));
+    active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_secs(24));
+    assert_eq!(active.evaluated().map(|value| value.sky.sunlight), Some([1.0, 0.0, 0.0]));
+    assert_eq!(active.evaluated().map(|value| value.water.fog_density), Some(3.0));
+}
+
+#[test]
 fn close_releases_local_request() {
     let mut world = world();
     let region = region(&world, 0);
