@@ -1,4 +1,3 @@
-mod components;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod scene;
 mod views;
@@ -11,15 +10,17 @@ use std::{
 
 use assets::cache::AssetCache;
 use futures::FutureExt;
-use gpui::{
-    AnyWindowHandle, App, AppContext, ColorExt, Entity, Global, QuitMode, Subscription, TitlebarOptions, WindowBounds, WindowOptions, px,
-    rgb, rgb_to_hsla, size,
+use prism::{
+    AnyWindowHandle, App, AppContext, ColorExt, Entity, Global, QuitMode, Subscription, TitlebarOptions, WindowBounds, WindowOptions,
+    component::{Theme, ThemeMode, TitleBar},
+    px, rgb, rgb_to_hsla, size,
 };
-use gpui_component::{Root, Theme, ThemeMode};
 use tokio::{runtime::Handle, task::JoinHandle};
 
-use self::components::window_chrome;
-use crate::gui::{views::login::LoginScreen, window_geometry::restore_bounds};
+use crate::{
+    gui::{views::login::LoginScreen, window_geometry::restore_bounds},
+    logging::LogControl,
+};
 
 struct AppLifecycle {
     _window_closed: Subscription,
@@ -29,6 +30,9 @@ struct AppLifecycle {
     scene: scene::State,
     quitting: bool,
     session_lifecycle: Arc<SessionLifecycle>,
+    asset_cache: Option<Arc<AssetCache>>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    log_control: LogControl,
 }
 
 impl Global for AppLifecycle {}
@@ -84,41 +88,43 @@ impl SessionLifecycle {
     }
 }
 
-struct ServiceRuntime {
-    runtime: Handle,
-    asset_cache: Option<Arc<AssetCache>>,
-}
-
-impl Global for ServiceRuntime {}
-
-pub(crate) fn service_runtime(cx: &App) -> Handle {
-    cx.global::<ServiceRuntime>().runtime.clone()
-}
-
 pub(crate) fn asset_cache(cx: &App) -> Option<Arc<AssetCache>> {
-    cx.global::<ServiceRuntime>().asset_cache.clone()
+    cx.global::<AppLifecycle>().asset_cache.clone()
 }
 
-pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>) {
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub(crate) fn log_control(cx: &App) -> LogControl {
+    cx.try_global::<AppLifecycle>().map_or_else(LogControl::noop, |lifecycle| lifecycle.log_control.clone())
+}
+
+pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>, log_control: LogControl) {
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let _ = log_control;
     let session_lifecycle = Arc::new(SessionLifecycle::default());
-    cx.set_global(ServiceRuntime { runtime: services, asset_cache });
+    cx.set_app_identity("org.radia.viewer", "Radia");
+    cx.set_keyring_label("Radia");
+    prism_tokio::init_from_handle(cx, services);
     cx.set_quit_mode(QuitMode::Explicit);
 
-    gpui_component::init(cx);
+    prism::init(cx);
     set_dark_theme(cx);
 
     install_lifecycle(Arc::clone(&session_lifecycle), cx);
+    {
+        let lifecycle = cx.global_mut::<AppLifecycle>();
+        lifecycle.asset_cache = asset_cache;
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            lifecycle.log_control = log_control;
+        }
+    }
 
-    let main_window = cx
-        .open_window(login_options(cx), move |window, cx| {
-            cx.new(|cx| {
-                let login = cx.new(|cx| LoginScreen::new(window, cx, session_lifecycle));
-                cx.global_mut::<AppLifecycle>().controller = Some(login.clone());
-                Root::new(login, window, cx)
-            })
-        })
-        .expect("failed to open the main window");
-    cx.global_mut::<AppLifecycle>().login_window = Some(main_window.into());
+    let (main_window, login) =
+        prism::open_window(login_options(cx), cx, move |window, cx| cx.new(|cx| LoginScreen::new(window, cx, session_lifecycle)))
+            .expect("failed to open the main window");
+    let lifecycle = cx.global_mut::<AppLifecycle>();
+    lifecycle.controller = Some(login);
+    lifecycle.login_window = Some(main_window);
     cx.activate(true);
 }
 
@@ -145,46 +151,39 @@ fn install_lifecycle(session_lifecycle: Arc<SessionLifecycle>, cx: &mut App) {
         scene: scene::State::new(),
         quitting: false,
         session_lifecycle,
+        asset_cache: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        log_control: LogControl::noop(),
     });
 }
 
 fn login_options(cx: &App) -> WindowOptions {
     let minimum = size(px(460.), px(420.));
     WindowOptions {
-        titlebar: Some(TitlebarOptions {
-            title: Some("Radia".into()),
-            appears_transparent: window_chrome::appears_transparent(),
-            ..Default::default()
-        }),
+        titlebar: Some(TitlebarOptions { title: Some("Radia".into()), ..TitleBar::title_bar_options() }),
         window_bounds: Some(WindowBounds::Windowed(restore_bounds("login", None, size(px(720.), px(480.)), minimum, cx))),
         window_min_size: Some(minimum),
-        ..Default::default()
+        ..TitleBar::window_options()
     }
 }
 
 fn shutdown(cx: &mut App) -> bool {
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    let background_executor = cx.background_executor().clone();
     let session_lifecycle = {
         let lifecycle = cx.global_mut::<AppLifecycle>();
         if lifecycle.quitting {
             return false;
         }
         lifecycle.quitting = true;
+        drop(lifecycle.asset_cache.take());
         Arc::clone(&lifecycle.session_lifecycle)
     };
-    if cx.has_global::<ServiceRuntime>() {
-        drop(cx.global_mut::<ServiceRuntime>().asset_cache.take());
-    }
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    let scene_shutdown = cx.global_mut::<AppLifecycle>().scene.shutdown(background_executor);
+    scene::shutdown(cx);
     for window in cx.windows() {
         window.update(cx, |_, window, _| window.remove_window()).ok();
     }
     cx.spawn(async move |cx| {
         disconnect_session(&session_lifecycle).await;
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
-        scene_shutdown.await;
         session_lifecycle.wait_for_drains().await;
         cx.update(|app| app.quit());
     })
@@ -252,6 +251,7 @@ fn set_dark_theme(cx: &mut App) {
     theme.table_active = rgb_to_hsla(rgb(0x666666)).opacity(0.35);
     theme.table_active_border = theme.table_active.opacity(0.0);
     theme.tokens.table_active = theme.table_active.into();
+    theme.icon_stroke_width = Some(1.33);
     Theme::sync_base(cx);
 }
 
@@ -263,10 +263,10 @@ mod tests {
 
     use super::{AppLifecycle, SessionLifecycle, install_lifecycle, shutdown};
 
-    #[gpui::test]
-    fn main_window_owns_shutdown(cx: &mut gpui::TestAppContext) {
+    #[prism::test]
+    fn main_window_owns_shutdown(cx: &mut prism::TestAppContext) {
         cx.update(|cx| {
-            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            cx.set_quit_mode(prism::QuitMode::Explicit);
             install_lifecycle(Arc::new(SessionLifecycle::default()), cx);
         });
         let main = cx.add_empty_window().update(|window, _| window.window_handle());
@@ -281,10 +281,10 @@ mod tests {
         cx.read_global::<AppLifecycle, _>(|lifecycle, _| assert!(lifecycle.quitting));
     }
 
-    #[gpui::test]
-    fn repeated_shutdown_starts_once(cx: &mut gpui::TestAppContext) {
+    #[prism::test]
+    fn repeated_shutdown_starts_once(cx: &mut prism::TestAppContext) {
         cx.update(|cx| {
-            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            cx.set_quit_mode(prism::QuitMode::Explicit);
             install_lifecycle(Arc::new(SessionLifecycle::default()), cx);
             assert!(shutdown(cx));
             assert!(!shutdown(cx));

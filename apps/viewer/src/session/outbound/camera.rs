@@ -380,11 +380,6 @@ mod tests {
     use tokio::time::{Instant, advance};
     use uuid::Uuid;
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    use winit::{
-        event::ElementState,
-        keyboard::{Key, NamedKey},
-    };
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     use world::RegionHandle;
 
     use super::{CameraUplink, KEEPALIVE_INTERVAL, MIN_UPDATE_INTERVAL, UplinkMessage, camera_changed};
@@ -533,10 +528,7 @@ mod tests {
         let session_id = Uuid::from_u128(2);
         let camera = view(DVec3::ZERO, Vec3::X);
         let mut controls = HeldControls::default();
-        assert_eq!(
-            controls.keyboard_event(&Key::Named(NamedKey::Space), ElementState::Pressed, false, false),
-            Some((KeyBinding::Stop, true))
-        );
+        assert_eq!(controls.keyboard_event("space", true, false, false), Some((KeyBinding::Stop, true)));
         let mut uplink = CameraUplink::new();
         uplink.movement_sender().send_replace(Some(controls.observation(false, Quat::IDENTITY)));
         let movement = *uplink.movements.borrow_and_update();
@@ -595,8 +587,7 @@ mod tests {
         assert_eq!(world.world().entity(agent_id), None, "the self avatar has not resolved in World");
 
         let mut controls = HeldControls::default();
-        let (binding, changed) =
-            controls.keyboard_event(&Key::Character("w".into()), ElementState::Pressed, false, false).expect("forward key binding");
+        let (binding, changed) = controls.keyboard_event("w", true, false, false).expect("forward key binding");
         assert_eq!(binding, KeyBinding::Movement(MovementKey::Forward));
         assert!(changed);
         let movement = controls.observation(false, Quat::IDENTITY);
@@ -677,8 +668,7 @@ mod tests {
         });
         assert_eq!(sent.len(), 2, "held controls do not repeat before the one-second keepalive");
 
-        let (_, changed) =
-            controls.keyboard_event(&Key::Character("w".into()), ElementState::Released, false, false).expect("forward key release");
+        let (_, changed) = controls.keyboard_event("w", false, false, false).expect("forward key release");
         assert!(changed);
         let released = controls.observation(false, Quat::IDENTITY);
         assert_eq!(released.control_flags, 0);

@@ -18,8 +18,8 @@ use network::CircuitMotionStatus;
 use render::{
     environment::{ActiveEnvironment, Evaluated},
     scene::{
-        ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, EnvironmentChoice, MotionCircuit, Object, ReadFailure,
-        ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView, Status,
+        ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, EnvironmentChoice, LocalChoice, MotionCircuit, Object,
+        ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView, Status,
     },
 };
 use tokio::{
@@ -304,6 +304,16 @@ impl SceneFeed {
         self.motion_active.retain(|region, _| regions.contains(region));
     }
 
+    pub(crate) fn ping_delay(&self) -> Option<Duration> {
+        let circuits = self.motion_circuits.borrow();
+        let target_region = self.dead_reckoning.sample.map(|sample| sample.region);
+        let status = target_region
+            .and_then(|region| circuits.iter().find(|(candidate, _)| *candidate == region))
+            .or_else(|| circuits.first())
+            .map(|(_, receiver)| *receiver.borrow())?;
+        status.connected.then_some(status.measured_ping_delay).flatten()
+    }
+
     pub(crate) fn set_camera(&self, camera: Option<Camera>) {
         self.camera.send_if_modified(|previous| {
             if *previous == camera {
@@ -341,6 +351,16 @@ impl SceneFeed {
 
     pub(crate) fn environment_choice(&self) -> EnvironmentChoice {
         self.view.viewer_environment().map_or_else(EnvironmentChoice::default, |environment| environment.selected().clone())
+    }
+
+    pub(crate) fn set_sky_choice(&self, sky: Option<LocalChoice>) {
+        let next = self.environment_choice().with_sky(sky);
+        self.set_environment_choice(next);
+    }
+
+    pub(crate) fn set_water_choice(&self, water: Option<LocalChoice>) {
+        let next = self.environment_choice().with_water(water);
+        self.set_environment_choice(next);
     }
 
     pub(crate) fn set_environment_choice(&self, choice: EnvironmentChoice) {

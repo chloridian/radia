@@ -14,6 +14,6 @@ mod texture;
 pub use self::benchmark::GeometryPrepare;
 pub use self::{
     geometry::{OmissionReason, PickError, Stats},
-    renderer::{Error, FrameInput, Overlay, Progress, Renderer, RendererInit, Retirement},
+    renderer::{Error, FrameInput, Progress, Renderer, Retirement, required_features, required_limits},
     texture::{CompressionQuality, TextureCompletion, TextureJob},
 };

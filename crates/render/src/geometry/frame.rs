@@ -542,6 +542,7 @@ impl GeometryRenderer {
         let draw_submissions = if self.indirect_first_instance { self.main_view.batches().len() } else { self.main_view.command_count() };
         self.stats.draw_calls = draw_submissions + usize::from(self.void_water.active);
         self.stats.draw_commands = self.main_view.command_count() + usize::from(self.void_water.active);
+        self.stats.triangles = self.main_view.triangles();
         self.stats.pending_meshes = self.pending_meshes.len();
         self.stats.pending_textures = self.pending_textures.len();
         if self.recovery_publication_pending

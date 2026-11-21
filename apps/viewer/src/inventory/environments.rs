@@ -24,13 +24,13 @@ impl EnvironmentMenu {
     pub(crate) fn items(&self) -> &[EnvironmentMenuItem] {
         &self.items
     }
-
-    pub(crate) fn label(&self, key: ItemKey) -> Option<String> {
-        self.items.iter().find(|item| item.key == key).map(EnvironmentMenuItem::label)
-    }
 }
 
 impl EnvironmentMenuItem {
+    pub(crate) fn kind(&self) -> EnvironmentSettingKind {
+        self.kind
+    }
+
     pub(crate) fn label(&self) -> String {
         let label = environment_setting_label(&self.name, self.kind, self.library);
         if self.duplicate {
@@ -51,7 +51,7 @@ pub(crate) enum EnvironmentItems {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EnvironmentSettingKind {
+pub(crate) enum EnvironmentSettingKind {
     Sky,
     Water,
     DayCycle,
@@ -224,7 +224,6 @@ mod tests {
             items.iter().map(|item| item.label()).collect::<Vec<_>>(),
             ["Cycle (Day cycle)", "SkyPreset (Sky)", "Water (Water, Library)",]
         );
-        assert_eq!(menu.label(items[1].key).as_deref(), Some("SkyPreset (Sky)"));
         assert!(items.iter().any(|item| item.key.owner() == library));
     }
 
@@ -249,7 +248,6 @@ mod tests {
         let labels = menu.items().iter().map(|row| row.label()).collect::<HashSet<_>>();
         assert_eq!(labels.len(), 3);
         for row in menu.items() {
-            assert_eq!(menu.label(row.key), Some(row.label()));
             assert!(row.label().contains(&row.key.id().uuid().to_string()));
         }
         inventory.upsert_category(category(personal, 9, Some(1), "Renamed folder")).unwrap();

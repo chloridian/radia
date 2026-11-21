@@ -1,6 +1,5 @@
-use gpui::SharedString;
-use gpui_component::select::SelectItem;
 use network::Grid;
+use prism::{SharedString, component::select};
 
 use crate::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
 
@@ -18,7 +17,7 @@ pub(super) struct SpawnOption {
     choice: SpawnChoice,
 }
 
-impl SelectItem for SpawnOption {
+impl select::SelectItem for SpawnOption {
     type Value = SpawnChoice;
 
     fn title(&self) -> SharedString {

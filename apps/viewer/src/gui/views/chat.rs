@@ -1,12 +1,18 @@
 use std::collections::VecDeque;
 
-use gpui::{Context, IntoElement, Render, Role, Window, div, prelude::*, px};
-use gpui_component::{
-    Theme,
-    button::{Button, ButtonVariants as _},
-    input::{Input, InputState},
-};
 use network::{AgentSession, Delivery, SessionHandle};
+use prism::{
+    Context, Entity, IntoElement, Render, Role, StyleRefinement, Window,
+    component::{
+        Theme,
+        button::{Button, ButtonVariants as _},
+        input::{Input, InputState},
+        message_scroller::{MessageScroller, MessageScrollerState},
+    },
+    div,
+    prelude::*,
+    px,
+};
 use protocol::{
     ChatType,
     messages::{
@@ -26,14 +32,15 @@ pub struct ChatScreen {
     session_handle: Option<SessionHandle>,
     messages: VecDeque<ChatMessage>,
     message_bytes: usize,
-    transcript_scroll: gpui::ScrollHandle,
-    message_input: gpui::Entity<InputState>,
+    scroller: Entity<MessageScrollerState>,
+    message_input: Entity<InputState>,
     send_error: Option<&'static str>,
 }
 
 impl ChatScreen {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let message_input = cx.new(|cx| InputState::new(window, cx).placeholder("To nearby chat"));
+        let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
 
         Self {
             session: None,
@@ -41,7 +48,7 @@ impl ChatScreen {
             session_handle: None,
             messages: VecDeque::new(),
             message_bytes: 0,
-            transcript_scroll: gpui::ScrollHandle::new(),
+            scroller,
             message_input,
             send_error: None,
         }
@@ -61,7 +68,7 @@ impl ChatScreen {
         self.send_error = None;
         self.messages.clear();
         self.message_bytes = 0;
-        self.transcript_scroll = gpui::ScrollHandle::new();
+        self.scroller.update(cx, |state, cx| state.reset(0, cx));
         cx.notify();
     }
 
@@ -79,7 +86,7 @@ impl ChatScreen {
     pub fn add_chat_messages(&mut self, messages: impl IntoIterator<Item = ChatMessage>, cx: &mut Context<Self>) {
         let mut added_message = false;
         for message in messages {
-            added_message |= self.push_message(message);
+            added_message |= self.push_message(message, cx);
         }
         if added_message {
             cx.notify();
@@ -116,7 +123,8 @@ impl ChatScreen {
                     .as_ref()
                     .map(|session| format_avatar_name(&format!("{} {}", session.first_name, session.last_name)))
                     .unwrap_or_else(|| "You".into());
-                self.push_message(ChatMessage { from_name, message });
+                self.push_message(ChatMessage { from_name, message }, cx);
+                self.scroller.update(cx, |state, cx| state.scroll_to_end(cx));
                 self.message_input.update(cx, |input, cx| input.set_value("", window, cx));
                 cx.notify();
             }
@@ -127,17 +135,19 @@ impl ChatScreen {
         }
     }
 
-    fn push_message(&mut self, message: ChatMessage) -> bool {
+    fn push_message(&mut self, message: ChatMessage, cx: &mut Context<Self>) -> bool {
+        let before = self.messages.len();
         if !retain_message(&mut self.messages, &mut self.message_bytes, message) {
             return false;
         }
-
-        let max_offset = self.transcript_scroll.max_offset().y;
-        let was_at_bottom = self.transcript_scroll.offset().y <= -max_offset + px(2.);
-
-        if was_at_bottom {
-            self.transcript_scroll.scroll_to_bottom();
-        }
+        let after = self.messages.len();
+        let evicted = before + 1 - after;
+        self.scroller.update(cx, |state, cx| {
+            if evicted > 0 {
+                state.splice(0..evicted, 0, cx);
+            }
+            state.append(1, cx);
+        });
         true
     }
 }
@@ -146,17 +156,17 @@ impl Render for ChatScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::global(cx).colors;
 
-        let scroll_handle = self.transcript_scroll.clone();
+        let chat = cx.entity();
         let transcript = div()
             .flex_1()
             .min_h_0()
-            .id("chat-transcript")
             .debug_selector(|| "chat-transcript-viewport".to_owned())
-            .track_scroll(&scroll_handle)
-            .overflow_y_scroll()
-            .scrollbar_width(px(0.))
-            .child(div().flex_none().h_auto().min_h_full().flex().flex_col().px_2().child(div().flex_1()).children(
-                self.messages.iter().map(|message| {
+            .child(
+                MessageScroller::new("chat-transcript", self.scroller.clone(), move |index, _window, cx| {
+                    let theme = Theme::global(cx).colors;
+                    let Some(message) = chat.read(cx).messages.get(index) else {
+                        return div().into_any_element();
+                    };
                     div()
                         .flex()
                         .items_start()
@@ -165,8 +175,11 @@ impl Render for ChatScreen {
                         .text_sm()
                         .child(div().flex_none().text_color(theme.muted_foreground).child(format!("{}:", message.from_name)))
                         .child(div().min_w_0().flex_1().text_color(theme.foreground).child(message.message.clone()))
-                }),
-            ))
+                        .into_any_element()
+                })
+                .with_row_style(StyleRefinement::default().px_2().pb_0())
+                .with_bottom_fade(theme.background),
+            )
             .into_any_element();
 
         div()
@@ -257,7 +270,7 @@ fn retain_message(messages: &mut VecDeque<ChatMessage>, message_bytes: &mut usiz
 mod tests {
     use std::collections::VecDeque;
 
-    use gpui::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
+    use prism::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
 
     use super::{ChatMessage, ChatScreen, MAX_CHAT_HISTORY_BYTES, MAX_CHAT_HISTORY_MESSAGES, retain_message, send_error_copy};
 
@@ -323,9 +336,9 @@ mod tests {
         cx.update(|window, cx| _ = window.draw(cx));
     }
 
-    #[gpui::test]
+    #[prism::test]
     fn rejected_send_preserves_draft(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(prism::init);
         let (chat, cx) = cx.add_window_view(ChatScreen::new);
         draw(cx);
 

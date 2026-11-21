@@ -1,20 +1,14 @@
 use std::{
     error, fmt,
-    sync::{
-        Arc, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use egui::{ClippedPrimitive, TexturesDelta};
-use egui_wgpu::{RendererOptions, ScreenDescriptor};
 use math::DVec3;
 use wgpu::{
-    AdapterInfo, Backends, CommandEncoderDescriptor, CreateSurfaceError, CurrentSurfaceTexture, Device, DeviceDescriptor, ErrorFilter,
-    Instance, InstanceDescriptor, LoadOp, Operations, PollError, PollType, PowerPreference, PresentMode, Queue, RenderPassColorAttachment,
-    RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPassTimestampWrites, RequestAdapterError, RequestAdapterOptions,
-    RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureFormat, TextureViewDescriptor,
+    AdapterInfo, CommandEncoderDescriptor, Device, Extent3d, LoadOp, Operations, PollError, PollType, Queue, RenderPassColorAttachment,
+    RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPassTimestampWrites, StoreOp, Texture, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 
 use crate::{
@@ -26,35 +20,31 @@ use crate::{
     texture::{TextureCompletion, TextureJob},
 };
 
-const MAX_STORAGE_BUFFER_BYTES: u64 = 512 * 1024 * 1024;
+pub fn required_features() -> wgpu::Features {
+    wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::INDIRECT_FIRST_INSTANCE | wgpu::Features::TIMESTAMP_QUERY
+}
+
+pub fn required_limits() -> wgpu::Limits {
+    wgpu::Limits::default()
+}
 
 #[derive(Debug)]
 pub enum Error {
-    Surface(CreateSurfaceError),
-    Adapter(RequestAdapterError),
-    Device(RequestDeviceError),
     Poll(PollError),
-    UnsupportedSurface,
     UnsupportedColorFormat,
     UnsupportedSurfaceSize,
     Gpu(wgpu::Error),
     DeviceLost,
-    SurfaceLost,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Surface(error) => write!(f, "Could not create the Vulkan surface: {error}"),
-            Self::Adapter(error) => write!(f, "Could not select a Vulkan GPU: {error}"),
-            Self::Device(error) => write!(f, "Could not initialize the Vulkan device: {error}"),
             Self::Poll(error) => write!(f, "Could not poll the scene GPU: {error}"),
-            Self::UnsupportedSurface => f.write_str("The GPU cannot present to this window."),
             Self::UnsupportedColorFormat => f.write_str("The GPU has no supported sRGB surface format."),
             Self::UnsupportedSurfaceSize => f.write_str("The scene window exceeds the GPU's supported surface size."),
             Self::Gpu(error) => write!(f, "GPU operation failed: {error}"),
             Self::DeviceLost => f.write_str("The scene GPU device is unavailable."),
-            Self::SurfaceLost => f.write_str("The scene presentation surface is unavailable."),
         }
     }
 }
@@ -62,30 +52,22 @@ impl fmt::Display for Error {
 impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
-            Self::Surface(error) => Some(error),
-            Self::Adapter(error) => Some(error),
-            Self::Device(error) => Some(error),
             Self::Poll(error) => Some(error),
             Self::Gpu(error) => Some(error),
-            Self::UnsupportedSurface
-            | Self::UnsupportedColorFormat
-            | Self::UnsupportedSurfaceSize
-            | Self::DeviceLost
-            | Self::SurfaceLost => None,
+            Self::UnsupportedColorFormat | Self::UnsupportedSurfaceSize | Self::DeviceLost => None,
         }
     }
 }
 
 pub struct Renderer {
-    surface: Surface<'static>,
-    device: Device,
-    queue: Queue,
-    config: SurfaceConfiguration,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+    unorm_format: TextureFormat,
+    srgb_format: TextureFormat,
     size: [u32; 2],
     info: AdapterInfo,
-    lost: Arc<AtomicBool>,
-    failure: Arc<Mutex<Option<wgpu::Error>>>,
-    overlay: egui_wgpu::Renderer,
+    output_texture: Option<Arc<Texture>>,
+    output_view: Option<TextureView>,
     geometry: GeometryRenderer,
     gpu_timings: Option<GpuTimings>,
     postprocess: PostProcess,
@@ -93,8 +75,49 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    pub fn new(
+        device: Arc<Device>,
+        queue: Arc<Queue>,
+        info: AdapterInfo,
+        format: TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, Error> {
+        let srgb_format = format.add_srgb_suffix();
+        if !srgb_format.is_srgb() {
+            return Err(Error::UnsupportedColorFormat);
+        }
+        let unorm_format = format.remove_srgb_suffix();
+        let timestamp_queries = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        tracing::info!(
+            format = ?unorm_format,
+            srgb_format = ?srgb_format,
+            timestamp_queries,
+            "scene renderer configured"
+        );
+        let geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float);
+        let gpu_timings = if timestamp_queries { GpuTimings::new(&device, queue.get_timestamp_period()) } else { None };
+        let postprocess = PostProcess::new(&device, &queue, srgb_format);
+        let mut renderer = Self {
+            device,
+            queue,
+            unorm_format,
+            srgb_format,
+            size: [0, 0],
+            info,
+            output_texture: None,
+            output_view: None,
+            geometry,
+            gpu_timings,
+            postprocess,
+            last_frame: Instant::now(),
+        };
+        renderer.resize(width, height);
+        Ok(renderer)
+    }
+
     pub fn retire(self) -> Retirement {
-        let device = self.device.clone();
+        let device = Arc::clone(&self.device);
         drop(self);
         Retirement { device }
     }
@@ -105,12 +128,6 @@ impl Renderer {
         if let Some(gpu_timings) = &mut self.gpu_timings {
             gpu_timings.poll();
         }
-        if let Some(error) = self.failure.lock().unwrap_or_else(PoisonError::into_inner).take() {
-            return Err(Error::Gpu(error));
-        }
-        if self.lost.load(Ordering::Acquire) {
-            return Err(Error::DeviceLost);
-        }
         let now = Instant::now();
         let redraw_at = self.geometry.redraw_deadline().filter(|deadline| *deadline > now);
         Ok(Progress {
@@ -119,8 +136,13 @@ impl Renderer {
             redraw_at,
         })
     }
+
     pub fn adapter_info(&self) -> &AdapterInfo {
         &self.info
+    }
+
+    pub fn output_texture(&self) -> Option<(Arc<Texture>, [u32; 2])> {
+        self.output_texture.as_ref().map(|texture| (Arc::clone(texture), self.size))
     }
 
     pub fn stats(&self) -> Stats {
@@ -142,27 +164,53 @@ impl Renderer {
     pub fn next_texture_job(&mut self) -> Option<TextureJob> {
         self.geometry.next_texture_job()
     }
+
     pub fn complete_texture(&mut self, completion: TextureCompletion) {
         self.geometry.complete_texture(completion);
     }
+
     pub fn texture_soft_cap_mib(&self) -> u32 {
         self.geometry.texture_soft_cap_mib()
     }
+
+    pub fn vram_budget_bytes(&self) -> usize {
+        self.geometry.vram_budget_bytes()
+    }
+
     pub fn set_texture_soft_cap(&mut self, mib: u32) {
         self.geometry.set_texture_soft_cap(mib);
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
+        if self.size == [width, height] && (width == 0 || height == 0 || self.output_texture.is_some()) {
+            return;
+        }
         self.size = [width, height];
-        if width == 0 || height == 0 || self.lost.load(Ordering::Acquire) {
+        if width == 0 || height == 0 {
+            self.output_texture = None;
+            self.output_view = None;
             return;
         }
-        if width > self.device.limits().max_texture_dimension_2d || height > self.device.limits().max_texture_dimension_2d {
+        let max_dim = self.device.limits().max_texture_dimension_2d;
+        if width > max_dim || height > max_dim {
+            self.output_texture = None;
+            self.output_view = None;
             return;
         }
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        let view_formats = [self.srgb_format];
+        let texture = Arc::new(self.device.create_texture(&TextureDescriptor {
+            label: Some("Scene output"),
+            size: Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: self.unorm_format,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            view_formats: &view_formats,
+        }));
+        let view = texture.create_view(&TextureViewDescriptor { format: Some(self.srgb_format), ..Default::default() });
+        self.output_texture = Some(texture);
+        self.output_view = Some(view);
         self.postprocess.resize(&self.device, self.size);
         let depth = self.geometry.depth(&self.device, self.size);
         self.postprocess.set_depth_view(&self.device, depth.as_ref());
@@ -170,31 +218,9 @@ impl Renderer {
 
     pub fn draw(
         &mut self,
-        mut overlay: Overlay,
         scene: Option<(&SceneView, Camera)>,
         agent_pose: Option<AgentPose>,
         frame_input: FrameInput<'_>,
-        before_present: impl FnOnce(),
-    ) -> Result<bool, Error> {
-        for (id, deltas) in overlay.textures.set.drain() {
-            for delta in deltas {
-                self.overlay.update_texture(&self.device, &self.queue, id, &delta);
-            }
-        }
-        let result = self.draw_frame(&overlay, scene, agent_pose, frame_input, before_present);
-        for id in overlay.textures.free.drain() {
-            self.overlay.free_texture(&id);
-        }
-        result
-    }
-
-    fn draw_frame(
-        &mut self,
-        overlay: &Overlay,
-        scene: Option<(&SceneView, Camera)>,
-        agent_pose: Option<AgentPose>,
-        frame_input: FrameInput<'_>,
-        before_present: impl FnOnce(),
     ) -> Result<bool, Error> {
         self.poll()?;
         if self.size.contains(&0) {
@@ -203,29 +229,17 @@ impl Renderer {
         if self.size.into_iter().any(|n| n > self.device.limits().max_texture_dimension_2d) {
             return Err(Error::UnsupportedSurfaceSize);
         }
+        let Some(view) = self.output_view.as_ref() else {
+            return Ok(false);
+        };
         let Some(admission) = self.geometry.admit() else {
             return Ok(false);
         };
-        let (frame, reconfigure) = match self.surface.get_current_texture() {
-            CurrentSurfaceTexture::Success(frame) => (frame, false),
-            CurrentSurfaceTexture::Suboptimal(frame) => (frame, true),
-            CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => return Ok(false),
-            CurrentSurfaceTexture::Outdated => {
-                self.resize(self.size[0], self.size[1]);
-                return Ok(false);
-            }
-            CurrentSurfaceTexture::Lost | CurrentSurfaceTexture::Validation => {
-                return Err(Error::SurfaceLost);
-            }
-        };
-        let view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("Scene frame") });
         let timestamp_queries = self.gpu_timings.as_ref().filter(|timings| timings.recording()).map(GpuTimings::query_set);
         let now = Instant::now();
         let delta_seconds = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
-        let screen = ScreenDescriptor { size_in_pixels: self.size, pixels_per_point: overlay.pixels_per_point };
-        let commands = self.overlay.update_buffers(&self.device, &self.queue, &mut encoder, &overlay.primitives, &screen);
         let depth = if let Some((scene, camera)) = scene {
             let depth = self.geometry.depth(&self.device, self.size);
             if depth.is_some() {
@@ -270,7 +284,7 @@ impl Renderer {
         self.postprocess.render(
             &self.queue,
             &mut encoder,
-            &view,
+            view,
             frame_input.environment,
             delta_seconds,
             camera_position,
@@ -280,49 +294,20 @@ impl Renderer {
             scene_version,
             self.geometry.texture_revision(),
         );
-        {
-            let pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("Diagnostics"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations { load: LoadOp::Load, store: StoreOp::Store },
-                })],
-                timestamp_writes: timestamp_queries.map(|query_set| RenderPassTimestampWrites {
-                    query_set,
-                    beginning_of_pass_write_index: Some(2),
-                    end_of_pass_write_index: Some(3),
-                }),
-                ..Default::default()
-            });
-            self.overlay.render(&mut pass.forget_lifetime(), &overlay.primitives, &screen);
-        }
         if timestamp_queries.is_some()
             && let Some(gpu_timings) = &self.gpu_timings
         {
             gpu_timings.resolve(&mut encoder);
         }
-        self.queue.submit(commands.into_iter().chain([encoder.finish()]));
+        self.queue.submit([encoder.finish()]);
         if timestamp_queries.is_some()
             && let Some(gpu_timings) = &mut self.gpu_timings
         {
             gpu_timings.submitted();
         }
         self.geometry.submitted(admission);
-        before_present();
-        self.queue.present(frame);
-        if reconfigure {
-            self.resize(self.size[0], self.size[1]);
-        }
         Ok(true)
     }
-}
-
-pub struct Overlay {
-    pub primitives: Vec<ClippedPrimitive>,
-    pub textures: TexturesDelta,
-    pub pixels_per_point: f32,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -340,100 +325,8 @@ pub struct Progress {
     pub redraw_at: Option<Instant>,
 }
 
-pub struct RendererInit {
-    instance: Instance,
-    surface: Surface<'static>,
-    width: u32,
-    height: u32,
-}
-
-impl RendererInit {
-    pub fn new(target: impl Into<SurfaceTarget<'static>>, width: u32, height: u32) -> Result<Self, Error> {
-        let instance = Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
-        let surface = instance.create_surface(target).map_err(Error::Surface)?;
-        Ok(Self { instance, surface, width, height })
-    }
-
-    pub async fn finish(self) -> Result<Renderer, Error> {
-        let Self { instance, surface, width, height } = self;
-        let adapter = instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                ..Default::default()
-            })
-            .await
-            .map_err(Error::Adapter)?;
-        let info = adapter.get_info();
-        let supported_features = adapter.features();
-        let timestamp_features = supported_features & wgpu::Features::TIMESTAMP_QUERY;
-        let (device, queue) = adapter
-            .request_device(&DeviceDescriptor {
-                label: Some("Radia scene"),
-                required_features: (supported_features
-                    & (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::INDIRECT_FIRST_INSTANCE))
-                    | timestamp_features,
-                required_limits: scene_limits(&adapter.limits()),
-                ..Default::default()
-            })
-            .await
-            .map_err(Error::Device)?;
-        let lost = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&lost);
-        device.set_device_lost_callback(move |_, _| {
-            flag.store(true, Ordering::Release);
-        });
-        let failure = Arc::new(Mutex::new(None));
-        let reported_failure = Arc::clone(&failure);
-        device.on_uncaptured_error(Arc::new(move |error| {
-            let mut reported = reported_failure.lock().unwrap_or_else(PoisonError::into_inner);
-            if reported.is_none() {
-                *reported = Some(error);
-            }
-        }));
-        let mut config = surface.get_default_config(&adapter, width.max(1), height.max(1)).ok_or(Error::UnsupportedSurface)?;
-        let capabilities = surface.get_capabilities(&adapter);
-        config.format = capabilities.formats.into_iter().find(|format| format.is_srgb()).ok_or(Error::UnsupportedColorFormat)?;
-        config.present_mode =
-            if capabilities.present_modes.contains(&PresentMode::Mailbox) { PresentMode::Mailbox } else { PresentMode::Fifo };
-        config.desired_maximum_frame_latency = 1;
-        tracing::info!(
-            present_mode = ?config.present_mode,
-            maximum_frame_latency = config.desired_maximum_frame_latency,
-            timestamp_queries = !timestamp_features.is_empty(),
-            "scene presentation configured"
-        );
-        let scope = device.push_error_scope(ErrorFilter::Validation);
-        let overlay = egui_wgpu::Renderer::new(&device, config.format, RendererOptions::default());
-        let geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float);
-        let gpu_timings = if timestamp_features.is_empty() { None } else { GpuTimings::new(&device, queue.get_timestamp_period()) };
-        let postprocess = PostProcess::new(&device, &queue, config.format);
-        if let Some(error) = scope.pop().await {
-            return Err(Error::Gpu(error));
-        }
-        let mut renderer = Renderer {
-            surface,
-            device,
-            queue,
-            config,
-            size: [0, 0],
-            info,
-            lost,
-            failure,
-            overlay,
-            geometry,
-            gpu_timings,
-            postprocess,
-            last_frame: Instant::now(),
-        };
-        renderer.resize(width, height);
-        Ok(renderer)
-    }
-}
-
 pub struct Retirement {
-    device: Device,
+    device: Arc<Device>,
 }
 
 impl Retirement {
@@ -446,16 +339,6 @@ impl Retirement {
             .poll(PollType::Wait { submission_index: None, timeout: Some(Duration::from_millis(500)) })
             .map(|_| ())
             .map_err(Error::Poll)
-    }
-}
-
-fn scene_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
-    let defaults = wgpu::Limits::default();
-    let granted = |offered: u64, default: u64| offered.min(MAX_STORAGE_BUFFER_BYTES).max(default);
-    wgpu::Limits {
-        max_storage_buffer_binding_size: granted(adapter.max_storage_buffer_binding_size, defaults.max_storage_buffer_binding_size),
-        max_buffer_size: granted(adapter.max_buffer_size, defaults.max_buffer_size),
-        ..defaults
     }
 }
 

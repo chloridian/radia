@@ -25,10 +25,9 @@ tracy = ["dep:tracing-tracy"]
 [dependencies]
 dirs.workspace = true
 futures.workspace = true
-gpui.workspace = true
-gpui-component.workspace = true
-gpui-component-assets.workspace = true
-gpui-platform.workspace = true
+prism.workspace = true
+prism-tokio.workspace = true
+prism-wgpu.workspace = true
 llsd.workspace = true
 uuid.workspace = true
 utils.workspace = true
@@ -48,31 +47,13 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 tracing-tracy = { workspace = true, optional = true }
 tokio.workspace = true
+wgpu.workspace = true
 world.workspace = true
-
-[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
-egui.workspace = true
-egui-winit.workspace = true
-winit.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-keyring = { workspace = true, features = [
-    "async-secret-service",
-    "tokio",
-    "crypto-rust",
-] }
-winit = { workspace = true, features = ["x11", "wayland", "wayland-dlopen"] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-keyring = { workspace = true, features = ["windows-native"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { workspace = true, features = ["apple-native"] }
 
 [dev-dependencies]
 url.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-gpui = { workspace = true, features = ["test-support"] }
+prism-test-support.workspace = true
 test-support.workspace = true
 tempfile.workspace = true
 proptest.workspace = true

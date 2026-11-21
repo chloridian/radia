@@ -14,7 +14,6 @@ use assets::cache::AssetCache;
 use futures::{
     FutureExt,
     channel::oneshot,
-    executor::block_on,
     future::{BoxFuture, Shared},
 };
 use inventory::{CategoryKey, Inventory, InventoryChild, InventoryNodeKey, InventoryPreparationCancellation, InventorySnapshot};
@@ -40,7 +39,6 @@ use uuid::Uuid;
 use world::{MAX_OBJECT_LOOKUP_WORK_ITEMS, ObjectLookupCursor, ObjectLookupProgress, UpdateSource};
 
 use super::{
-    WriteLock,
     events::{
         EntityUpdateContinuation, EntityUpdateProgress, MovementCompleteOutcome, ObjectUpdateFinishContinuation,
         ObjectUpdateFinishProgress, ObjectUpdatePreparation, PromotionProgress, SimulatorMessageOutcome, SimulatorScope, WorldHandoff,
@@ -60,7 +58,7 @@ use crate::{
         FolderApplyOutcome, FolderFetch, InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError,
         InventoryFetchEvent, MoveExpectation,
     },
-    remembered_login::{self, RememberedLogin},
+    remembered_login::RememberedLogin,
     session::{
         AgentMotionPublisher, CameraUplink, RegionLookup, Session, SessionHandle,
         environment::{Completion, EnvironmentIntake},
@@ -378,7 +376,6 @@ pub(crate) struct CredentialPersistence {
     pub(crate) username: String,
     pub(crate) password: String,
     pub(crate) remember_login: bool,
-    pub(crate) write_lock: WriteLock,
 }
 
 struct SessionDriver {
@@ -1589,33 +1586,14 @@ impl SessionDriver {
     }
 
     fn handle_login_accepted(&self, mfa_hash: Option<String>) {
-        let mailbox = self.mailbox.clone();
-        let write_lock = self.credentials.write_lock.clone();
-        let username = self.credentials.username.clone();
-        let password = self.credentials.password.clone();
-        let grid = self.credentials.grid;
-        let remember_login = self.credentials.remember_login;
-        let span = tracing::Span::current();
-        drop(self.runtime.spawn_blocking(move || {
-            let _span = span.enter();
-            let _guard = block_on(write_lock.lock());
-            let mut warning = None;
-            let remembered_login = if remember_login {
-                let saved = RememberedLogin { username, password, mfa_hash: mfa_hash.unwrap_or_default() };
-                match remembered_login::save(grid, &saved) {
-                    Ok(()) => Some(saved),
-                    Err(error) => {
-                        warning = Some(error);
-                        None
-                    }
-                }
-            } else {
-                if let Err(error) = remembered_login::clear(grid) {
-                    warning = Some(error);
-                }
-                None
-            };
-            mailbox.publish(ViewerUpdate::Authentication(AuthenticationUpdate::CredentialsUpdated { remembered_login, warning }));
+        let remembered_login = self.credentials.remember_login.then(|| RememberedLogin {
+            username: self.credentials.username.clone(),
+            password: self.credentials.password.clone(),
+            mfa_hash: mfa_hash.unwrap_or_default(),
+        });
+        self.mailbox.publish(ViewerUpdate::Authentication(AuthenticationUpdate::PersistCredentials {
+            grid: self.credentials.grid,
+            remembered_login,
         }));
     }
 
