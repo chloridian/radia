@@ -1,6 +1,6 @@
 use inventory::{CategoryKey, InventoryOwner, Item};
 use network::capabilities::{CapabilityUrl, Client};
-use protocol::inventory::{DecodeError, decode_ais_children, decode_ais_item};
+use protocol::inventory::{DecodeError, decode_ais_children, decode_ais_item, decode_ais_library_children};
 use utils::FolderId;
 
 use super::{
@@ -13,6 +13,7 @@ pub(super) async fn fetch_once(
     capability: &CapabilityUrl,
     folder: CategoryKey,
     depth: u8,
+    is_library: bool,
 ) -> Result<Vec<FolderFetch>, RequestFailure> {
     let folder_id = folder.id().uuid().to_string();
     let url = capability
@@ -21,10 +22,16 @@ pub(super) async fn fetch_once(
         .with_query_pair("depth", &depth.min(MAX_AIS_DEPTH).to_string());
     let body =
         client.get_bytes_with_accept(&url, "application/llsd+xml", MAX_FETCH_RESPONSE_BYTES).await.map_err(classify_request_error)?;
-    let category = decode_ais_children(&body, folder.id().uuid(), folder.owner().id()).map_err(classify_decode_error)?;
-    ais_folders(&category, folder).map_err(|error| match error {
+    let category = if is_library {
+        decode_ais_library_children(&body, folder.id().uuid())
+    } else {
+        decode_ais_children(&body, folder.id().uuid(), folder.owner().id())
+    }
+    .map_err(classify_decode_error)?;
+    ais_folders(&category, folder, is_library).map_err(|error| match error {
         InventoryFetchError::FolderTooLarge => RequestFailure::FolderTooLarge,
-        _ => RequestFailure::InvalidResponse,
+        InventoryFetchError::InvalidResponse(decode) => RequestFailure::InvalidResponse(decode),
+        _ => RequestFailure::InvalidResponse(DecodeError::UnexpectedStructure("ais folder decode")),
     })
 }
 
@@ -39,13 +46,16 @@ pub(super) async fn fetch_item_once(
     let body =
         client.get_bytes_with_accept(&url, "application/llsd+xml", MAX_FETCH_RESPONSE_BYTES).await.map_err(classify_request_error)?;
     let item = decode_ais_item(&body, item_id, owner.id()).map_err(classify_decode_error)?;
-    let parent = item.parent_id.ok_or(RequestFailure::InvalidResponse)?;
-    to_item(&item, owner, CategoryKey::new(owner, FolderId::new(parent))).map_err(|_| RequestFailure::InvalidResponse)
+    let parent = item.parent_id.ok_or(RequestFailure::InvalidResponse(DecodeError::ParentMismatch))?;
+    to_item(&item, owner, CategoryKey::new(owner, FolderId::new(parent))).map_err(|error| match error {
+        InventoryFetchError::InvalidResponse(decode) => RequestFailure::InvalidResponse(decode),
+        _ => RequestFailure::InvalidResponse(DecodeError::UnexpectedStructure("ais item decode")),
+    })
 }
 
 fn classify_decode_error(error: DecodeError) -> RequestFailure {
     match error {
         DecodeError::TooLarge => RequestFailure::FolderTooLarge,
-        DecodeError::InvalidResponse => RequestFailure::InvalidResponse,
+        other => RequestFailure::InvalidResponse(other),
     }
 }

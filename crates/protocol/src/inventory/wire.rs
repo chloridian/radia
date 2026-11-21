@@ -23,6 +23,21 @@ enum InventoryWireFormat {
     Legacy,
 }
 
+#[derive(Clone, Copy)]
+enum OwnerScope {
+    Personal(Uuid),
+    Library,
+}
+
+impl OwnerScope {
+    fn allows(self, owner: Option<Uuid>) -> bool {
+        match self {
+            Self::Personal(expected) => owner.is_none_or(|actual| actual == expected),
+            Self::Library => true,
+        }
+    }
+}
+
 #[derive(Default)]
 struct ParseCounts {
     categories: usize,
@@ -239,7 +254,7 @@ impl<'de, T: Deserialize<'de>> Visitor<'de> for MapValueVisitor<T> {
             variant.newtype_variant().map(|value| MapValue(Ok(value)))
         } else {
             skip_value_variant(variant, tag)?;
-            Ok(MapValue(Err(DecodeError::InvalidResponse)))
+            Ok(MapValue(Err(DecodeError::UnexpectedStructure("expected map"))))
         }
     }
 }
@@ -268,7 +283,7 @@ impl<'de, T: Deserialize<'de>> Visitor<'de> for ArrayValueVisitor<T> {
             variant.newtype_variant().map(|value| ArrayValue(Ok(value)))
         } else {
             skip_value_variant(variant, tag)?;
-            Ok(ArrayValue(Err(DecodeError::InvalidResponse)))
+            Ok(ArrayValue(Err(DecodeError::UnexpectedStructure("expected array"))))
         }
     }
 }
@@ -296,7 +311,7 @@ impl<'de> Visitor<'de> for ItemArrayValueVisitor {
             variant.newtype_variant_seed(ItemArraySeed)
         } else {
             skip_value_variant(variant, tag)?;
-            Ok(ItemArrayValue(Err(DecodeError::InvalidResponse)))
+            Ok(ItemArrayValue(Err(DecodeError::UnexpectedStructure("expected items array"))))
         }
     }
 }
@@ -363,7 +378,7 @@ impl<'de> Visitor<'de> for CategoryArrayValueVisitor {
             variant.newtype_variant_seed(CategoryArraySeed)
         } else {
             skip_value_variant(variant, tag)?;
-            Ok(CategoryArrayValue(Err(DecodeError::InvalidResponse)))
+            Ok(CategoryArrayValue(Err(DecodeError::UnexpectedStructure("expected categories array"))))
         }
     }
 }
@@ -422,15 +437,15 @@ fn decode_llsd<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeError> {
     )
     .map_err(|error| match error {
         llsd::Error::LimitExceeded(_) => DecodeError::TooLarge,
-        _ => DecodeError::InvalidResponse,
+        _ => DecodeError::MalformedLlsd,
     })
 }
 
 fn scalar_uuid(value: &Scalar) -> Result<Uuid, DecodeError> {
     match value {
         Scalar::Uuid(id) => Ok(*id),
-        Scalar::String(value) => Uuid::parse_str(value).map_err(|_| DecodeError::InvalidResponse),
-        _ => Err(DecodeError::InvalidResponse),
+        Scalar::String(value) => Uuid::parse_str(value).map_err(|_| DecodeError::UnexpectedStructure("invalid uuid")),
+        _ => Err(DecodeError::UnexpectedStructure("expected uuid")),
     }
 }
 
@@ -439,7 +454,7 @@ fn uuid_fields(values: &[Option<&Scalar>]) -> Result<Option<Uuid>, DecodeError> 
     for value in values.iter().flatten() {
         let id = scalar_uuid(value)?;
         if found.is_some_and(|previous| previous != id) {
-            return Err(DecodeError::InvalidResponse);
+            return Err(DecodeError::UnexpectedStructure("conflicting uuid aliases"));
         }
         found = Some(id);
     }
@@ -450,18 +465,18 @@ fn integer(value: Option<&Scalar>) -> Result<Option<i32>, DecodeError> {
     match value {
         None => Ok(None),
         Some(Scalar::Integer(value)) => Ok(Some(*value)),
-        Some(_) => Err(DecodeError::InvalidResponse),
+        Some(_) => Err(DecodeError::UnexpectedStructure("expected integer")),
     }
 }
 
 fn unsigned(value: Option<&Scalar>) -> Result<Option<u32>, DecodeError> {
     let Some(Scalar::Integer(value)) = value else {
-        return if value.is_none() { Ok(None) } else { Err(DecodeError::InvalidResponse) };
+        return if value.is_none() { Ok(None) } else { Err(DecodeError::UnexpectedStructure("expected unsigned integer")) };
     };
     if *value < 0 {
-        return Err(DecodeError::InvalidResponse);
+        return Err(DecodeError::UnexpectedStructure("negative unsigned integer"));
     }
-    Ok(Some(u32::try_from(*value).map_err(|_| DecodeError::InvalidResponse)?))
+    Ok(Some(u32::try_from(*value).map_err(|_| DecodeError::UnexpectedStructure("unsigned integer overflow"))?))
 }
 
 fn count(value: Option<&Scalar>) -> Result<Option<u32>, DecodeError> {
@@ -476,7 +491,7 @@ fn string(value: Option<Scalar>, default: &str) -> Result<String, DecodeError> {
     match value {
         Some(Scalar::String(value)) => Ok(value),
         None => Ok(default.to_owned()),
-        Some(_) => Err(DecodeError::InvalidResponse),
+        Some(_) => Err(DecodeError::UnexpectedStructure("expected string")),
     }
 }
 
@@ -489,9 +504,9 @@ fn timestamp(value: Option<&Scalar>) -> Result<Option<i64>, DecodeError> {
             (seconds >= i64::MIN as f64 && seconds <= i64::MAX as f64)
                 .then_some(seconds.trunc() as i64)
                 .map(Some)
-                .ok_or(DecodeError::InvalidResponse)
+                .ok_or(DecodeError::UnexpectedStructure("timestamp out of range"))
         }
-        Some(_) => Err(DecodeError::InvalidResponse),
+        Some(_) => Err(DecodeError::UnexpectedStructure("expected timestamp")),
     }
 }
 
@@ -753,14 +768,14 @@ impl CategoryFields {
                 integer(self.type_default.as_ref().or(self.type_.as_ref()))?,
             ),
         };
-        let id = id.filter(|id| !id.is_nil()).ok_or(DecodeError::InvalidResponse)?;
+        let id = id.filter(|id| !id.is_nil()).ok_or(DecodeError::UnexpectedStructure("missing category id"))?;
         if name.len() > MAX_NAME_BYTES || descendent_count.is_some_and(|count| count as usize > MAX_FOLDER_CHILDREN) {
-            return Err(DecodeError::InvalidResponse);
+            return Err(DecodeError::TooLarge);
         }
         let mut category = Category { id, owner_id, parent_id, name, version, descendent_count, preferred_folder_type, children: None };
         let Some(embedded) = self.embedded else { return Ok(category) };
         if matches!(format, InventoryWireFormat::Legacy) {
-            return Err(DecodeError::InvalidResponse);
+            return Err(DecodeError::UnexpectedStructure("unexpected _embedded in legacy category"));
         }
         let embedded_complete =
             embedded.0.as_ref().is_ok_and(|embedded| embedded.categories.is_some() && embedded.items.is_some() && embedded.links.is_some());
@@ -779,26 +794,26 @@ impl CategoryFields {
         }
         let mut children = Vec::with_capacity(direct_count);
         for (key, value) in items.into_iter().flatten() {
-            let expected_id = Uuid::parse_str(&key).map_err(|_| DecodeError::InvalidResponse)?;
+            let expected_id = Uuid::parse_str(&key).map_err(|_| DecodeError::UnexpectedStructure("invalid embedded item key"))?;
             let item = value.0?;
             if item.id != expected_id {
-                return Err(DecodeError::InvalidResponse);
+                return Err(DecodeError::UnexpectedStructure("embedded item key mismatch"));
             }
             children.push(Child::Item(item));
         }
         for (key, value) in links.into_iter().flatten() {
-            let expected_id = Uuid::parse_str(&key).map_err(|_| DecodeError::InvalidResponse)?;
+            let expected_id = Uuid::parse_str(&key).map_err(|_| DecodeError::UnexpectedStructure("invalid embedded link key"))?;
             let item = value.0?;
             if item.id != expected_id {
-                return Err(DecodeError::InvalidResponse);
+                return Err(DecodeError::UnexpectedStructure("embedded link key mismatch"));
             }
             children.push(Child::Item(item));
         }
         for (key, value) in categories.into_iter().flatten() {
-            let expected_id = Uuid::parse_str(&key).map_err(|_| DecodeError::InvalidResponse)?;
+            let expected_id = Uuid::parse_str(&key).map_err(|_| DecodeError::UnexpectedStructure("invalid embedded category key"))?;
             let child = value.0?;
             if child.id != expected_id {
-                return Err(DecodeError::InvalidResponse);
+                return Err(DecodeError::UnexpectedStructure("embedded category key mismatch"));
             }
             children.push(Child::Category(child));
         }
@@ -963,7 +978,8 @@ impl ItemFields {
 
     fn into_item(self, format: InventoryWireFormat, link: bool) -> Result<Item, DecodeError> {
         validate_hypermedia(self.base_uri.as_ref(), self.links.as_ref())?;
-        let id = uuid_fields(&[self.item_id.as_ref()])?.filter(|id| !id.is_nil()).ok_or(DecodeError::InvalidResponse)?;
+        let id =
+            uuid_fields(&[self.item_id.as_ref()])?.filter(|id| !id.is_nil()).ok_or(DecodeError::UnexpectedStructure("missing item id"))?;
         let owner_names = match format {
             InventoryWireFormat::Ais => [self.agent_id.as_ref(), None],
             InventoryWireFormat::Legacy => [self.owner_id.as_ref(), self.agent_id.as_ref()],
@@ -976,7 +992,7 @@ impl ItemFields {
             (InventoryWireFormat::Legacy, _) => uuid_fields(&[self.asset_id.as_ref(), self.linked_id.as_ref()])?,
         };
         if matches!((format, link), (InventoryWireFormat::Ais, true)) && asset_id.is_none() {
-            return Err(DecodeError::InvalidResponse);
+            return Err(DecodeError::UnexpectedStructure("missing linked_id"));
         }
         let asset_type = inventory_type(
             match format {
@@ -1001,15 +1017,23 @@ impl ItemFields {
             "",
         )?;
         if name.len() > MAX_NAME_BYTES || description.len() > MAX_DESCRIPTION_BYTES {
-            return Err(DecodeError::InvalidResponse);
+            return Err(DecodeError::TooLarge);
         }
         let flags = unsigned(self.flags.as_ref())?.unwrap_or_default();
         let created_at = match format {
             InventoryWireFormat::Ais => integer(self.created_at.as_ref())?.map(i64::from).unwrap_or_default(),
             InventoryWireFormat::Legacy => timestamp(self.created_at.as_ref().or(self.creation_date.as_ref()))?.unwrap_or_default(),
         };
-        let permissions = self.permissions.as_ref().map(|value| value.0.as_ref().map_err(|_| DecodeError::InvalidResponse)).transpose()?;
-        let sale_info = self.sale_info.as_ref().map(|value| value.0.as_ref().map_err(|_| DecodeError::InvalidResponse)).transpose()?;
+        let permissions = self
+            .permissions
+            .as_ref()
+            .map(|value| value.0.as_ref().map_err(|_| DecodeError::UnexpectedStructure("invalid permissions")))
+            .transpose()?;
+        let sale_info = self
+            .sale_info
+            .as_ref()
+            .map(|value| value.0.as_ref().map_err(|_| DecodeError::UnexpectedStructure("invalid sale_info")))
+            .transpose()?;
         Ok(Item {
             id,
             owner_id,
@@ -1178,15 +1202,15 @@ fn inventory_type(value: Option<&Scalar>, named: fn(&str) -> i32) -> Option<i32>
 
 fn validate_hypermedia(base_uri: Option<&Scalar>, links: Option<&MapValue<LinksFields>>) -> Result<(), DecodeError> {
     if base_uri.is_some_and(|value| string_or_uri(value).is_none_or(|uri| uri.len() > MAX_HYPERMEDIA_URI_BYTES)) {
-        return Err(DecodeError::InvalidResponse);
+        return Err(DecodeError::UnexpectedStructure("invalid _base_uri"));
     }
     if let Some(links) = links {
-        let links = links.0.as_ref().map_err(|_| DecodeError::InvalidResponse)?;
+        let links = links.0.as_ref().map_err(|_| DecodeError::UnexpectedStructure("invalid _links"))?;
         for link in links.values() {
-            let link = link.0.as_ref().map_err(|_| DecodeError::InvalidResponse)?;
-            let href = link.href.as_ref().and_then(string_or_uri).ok_or(DecodeError::InvalidResponse)?;
+            let link = link.0.as_ref().map_err(|_| DecodeError::UnexpectedStructure("invalid _links entry"))?;
+            let href = link.href.as_ref().and_then(string_or_uri).ok_or(DecodeError::UnexpectedStructure("missing link href"))?;
             if href.len() > MAX_HYPERMEDIA_URI_BYTES {
-                return Err(DecodeError::InvalidResponse);
+                return Err(DecodeError::TooLarge);
             }
         }
     }
@@ -1317,7 +1341,7 @@ fn optional_category_array(value: Option<CategoryArrayValue>, required_count: u3
     match value {
         Some(value) => value.0,
         None if required_count == 0 => Ok(Vec::new()),
-        None => Err(DecodeError::InvalidResponse),
+        None => Err(DecodeError::UnexpectedStructure("missing categories array")),
     }
 }
 
@@ -1325,18 +1349,25 @@ fn optional_item_array(value: Option<ItemArrayValue>, required_count: u32) -> Re
     match value {
         Some(value) => value.0,
         None if required_count == 0 => Ok(Vec::new()),
-        None => Err(DecodeError::InvalidResponse),
+        None => Err(DecodeError::UnexpectedStructure("missing items array")),
     }
 }
 
-fn parse_folder_descendents(fields: FolderFields, requested: RequestedFolder) -> Result<FolderDescendents, DecodeError> {
-    let id = uuid_fields(&[fields.folder_id.as_ref()])?.ok_or(DecodeError::InvalidResponse)?;
+fn parse_folder_descendents(
+    fields: FolderFields,
+    requested: RequestedFolder,
+    owner_scope: OwnerScope,
+) -> Result<FolderDescendents, DecodeError> {
+    let id = uuid_fields(&[fields.folder_id.as_ref()])?.ok_or(DecodeError::UnexpectedStructure("missing folder_id"))?;
     let owner_id = uuid_fields(&[fields.owner_id.as_ref()])?;
-    if id != requested.id || owner_id.is_some_and(|owner| owner != requested.owner_id) {
-        return Err(DecodeError::InvalidResponse);
+    if id != requested.id {
+        return Err(DecodeError::UnexpectedStructure("folder_id mismatch"));
+    }
+    if !owner_scope.allows(owner_id) {
+        return Err(DecodeError::OwnerMismatch);
     }
     let version = integer(fields.version.as_ref())?.unwrap_or(-1);
-    let descendent_count = count(fields.descendents.as_ref())?.ok_or(DecodeError::InvalidResponse)?;
+    let descendent_count = count(fields.descendents.as_ref())?.ok_or(DecodeError::UnexpectedStructure("missing descendents count"))?;
     let raw_categories = optional_category_array(fields.categories, descendent_count)?;
     let raw_items = optional_item_array(fields.items, descendent_count)?;
     let record_count = raw_categories.len().checked_add(raw_items.len()).ok_or(DecodeError::TooLarge)?;
@@ -1345,15 +1376,21 @@ fn parse_folder_descendents(fields: FolderFields, requested: RequestedFolder) ->
     }
     let mut identities = HashSet::with_capacity(record_count);
     for category in &raw_categories {
-        validate_legacy_category(category, requested.owner_id)?;
-        if !identities.insert(category.id) || category.parent_id.is_some_and(|parent| parent.is_nil()) {
-            return Err(DecodeError::InvalidResponse);
+        validate_legacy_category(category, owner_scope)?;
+        if !identities.insert(category.id) {
+            return Err(DecodeError::DuplicateId);
+        }
+        if category.parent_id.is_some_and(|parent| parent.is_nil()) {
+            return Err(DecodeError::ParentMismatch);
         }
     }
     for item in &raw_items {
-        validate_item(item, requested.owner_id, None)?;
-        if !identities.insert(item.id) || item.parent_id.is_some_and(|parent| parent.is_nil()) {
-            return Err(DecodeError::InvalidResponse);
+        validate_item(item, owner_scope, None)?;
+        if !identities.insert(item.id) {
+            return Err(DecodeError::DuplicateId);
+        }
+        if item.parent_id.is_some_and(|parent| parent.is_nil()) {
+            return Err(DecodeError::ParentMismatch);
         }
     }
     let all_categories_direct = raw_categories.iter().all(|category| category.parent_id.is_none_or(|parent| parent == id));
@@ -1398,25 +1435,26 @@ fn parse_folder_descendents(fields: FolderFields, requested: RequestedFolder) ->
     })
 }
 
-fn validate_legacy_category(category: &Category, expected_owner: Uuid) -> Result<(), DecodeError> {
-    if category.owner_id.is_some_and(|owner| owner != expected_owner) {
-        return Err(DecodeError::InvalidResponse);
+fn validate_legacy_category(category: &Category, owner_scope: OwnerScope) -> Result<(), DecodeError> {
+    if !owner_scope.allows(category.owner_id) {
+        return Err(DecodeError::OwnerMismatch);
     }
     Ok(())
 }
 
-fn validate_item(item: &Item, expected_owner: Uuid, expected_parent: Option<Uuid>) -> Result<(), DecodeError> {
-    if item.owner_id.is_some_and(|owner| owner != expected_owner)
-        || expected_parent.is_some_and(|parent| item.parent_id.is_some_and(|actual| actual != parent))
-    {
-        return Err(DecodeError::InvalidResponse);
+fn validate_item(item: &Item, owner_scope: OwnerScope, expected_parent: Option<Uuid>) -> Result<(), DecodeError> {
+    if !owner_scope.allows(item.owner_id) {
+        return Err(DecodeError::OwnerMismatch);
+    }
+    if expected_parent.is_some_and(|parent| item.parent_id.is_some_and(|actual| actual != parent)) {
+        return Err(DecodeError::ParentMismatch);
     }
     Ok(())
 }
 
 fn validate_category_tree(
     category: Category,
-    expected_owner: Uuid,
+    owner_scope: OwnerScope,
     expected_parent: Option<Uuid>,
     depth: usize,
     counts: &mut ParseCounts,
@@ -1428,10 +1466,11 @@ fn validate_category_tree(
     if counts.categories > MAX_CATEGORIES {
         return Err(DecodeError::TooLarge);
     }
-    if category.owner_id.is_some_and(|owner| owner != expected_owner)
-        || expected_parent.is_some_and(|parent| category.parent_id.is_some_and(|actual| actual != parent))
-    {
-        return Err(DecodeError::InvalidResponse);
+    if !owner_scope.allows(category.owner_id) {
+        return Err(DecodeError::OwnerMismatch);
+    }
+    if expected_parent.is_some_and(|parent| category.parent_id.is_some_and(|actual| actual != parent)) {
+        return Err(DecodeError::ParentMismatch);
     }
     let Category { id, owner_id, parent_id, name, version, descendent_count, preferred_folder_type, children } = category;
     let Some(children) = children else {
@@ -1441,14 +1480,14 @@ fn validate_category_tree(
     for child in children {
         match child {
             Child::Category(child) => {
-                validated.push(Child::Category(validate_category_tree(child, expected_owner, Some(id), depth.saturating_add(1), counts)?))
+                validated.push(Child::Category(validate_category_tree(child, owner_scope, Some(id), depth.saturating_add(1), counts)?))
             }
             Child::Item(item) => {
                 counts.items = counts.items.checked_add(1).ok_or(DecodeError::TooLarge)?;
                 if counts.items > MAX_ITEMS {
                     return Err(DecodeError::TooLarge);
                 }
-                validate_item(&item, expected_owner, Some(id))?;
+                validate_item(&item, owner_scope, Some(id))?;
                 validated.push(Child::Item(item));
             }
         }
@@ -1667,20 +1706,21 @@ impl AisEditFields {
         let has_category = self.category.category_id.is_some();
         let has_item = self.item.item_id.is_some();
         if has_category && has_item {
-            return Err(DecodeError::InvalidResponse);
+            return Err(DecodeError::UnexpectedStructure("response contains both category and item"));
         }
         if has_category {
             self.shared.apply_to_category(&mut self.category);
         } else if has_item {
             self.shared.apply_to_item(&mut self.item);
         }
+        let owner_scope = OwnerScope::Personal(expected_owner);
         let mut category = has_category.then(|| self.category.into_category(InventoryWireFormat::Ais)).transpose()?;
         let item = has_item.then(|| self.item.into_item(InventoryWireFormat::Ais, false)).transpose()?;
         if let Some(value) = category.take() {
-            category = Some(validate_category_tree(value, expected_owner, None, 0, &mut ParseCounts::default())?);
+            category = Some(validate_category_tree(value, owner_scope, None, 0, &mut ParseCounts::default())?);
         }
         if let Some(item) = &item {
-            validate_item(item, expected_owner, None)?;
+            validate_item(item, owner_scope, None)?;
         }
         validate_map_ids(&self.attachments_removed, MAX_ITEMS, MapIdKind::IntegerKey)?;
         validate_map_ids(&self.wearables_removed, MAX_ITEMS, MapIdKind::IntegerKey)?;
@@ -1691,10 +1731,10 @@ impl AisEditFields {
             validate_update_result(result)?;
         }
         if self.top_category_id.as_ref().map(scalar_uuid).transpose()?.is_some_and(|id| id.is_nil()) {
-            return Err(DecodeError::InvalidResponse);
+            return Err(DecodeError::UnexpectedStructure("nil _top_category_id"));
         }
         if integer(self.total_items_removed.as_ref())?.is_some_and(|total| total < 0) {
-            return Err(DecodeError::InvalidResponse);
+            return Err(DecodeError::UnexpectedStructure("negative _total_items_removed"));
         }
         Ok(AisEditResponse {
             category,
@@ -1718,7 +1758,7 @@ enum MapIdKind {
 }
 
 fn map_values<T>(value: &Option<MapValue<T>>) -> Result<Option<&T>, DecodeError> {
-    value.as_ref().map(|value| value.0.as_ref().map_err(|_| DecodeError::InvalidResponse)).transpose()
+    value.as_ref().map(|value| value.0.as_ref().map_err(|error| *error)).transpose()
 }
 
 fn metadata_ids(value: Option<ArrayValue<Scalar>>, limit: usize) -> Result<Vec<Uuid>, DecodeError> {
@@ -1731,8 +1771,11 @@ fn metadata_ids(value: Option<ArrayValue<Scalar>>, limit: usize) -> Result<Vec<U
     let mut unique = HashSet::with_capacity(values.len());
     for value in values {
         let id = scalar_uuid(&value)?;
-        if id.is_nil() || !unique.insert(id) {
-            return Err(DecodeError::InvalidResponse);
+        if id.is_nil() {
+            return Err(DecodeError::UnexpectedStructure("nil metadata id"));
+        }
+        if !unique.insert(id) {
+            return Err(DecodeError::DuplicateId);
         }
         ids.push(id);
     }
@@ -1741,15 +1784,18 @@ fn metadata_ids(value: Option<ArrayValue<Scalar>>, limit: usize) -> Result<Vec<U
 
 fn validate_metadata_ids(value: &Option<ArrayValue<Scalar>>, limit: usize) -> Result<(), DecodeError> {
     let Some(value) = value else { return Ok(()) };
-    let values = value.0.as_ref().map_err(|_| DecodeError::InvalidResponse)?;
+    let values = value.0.as_ref().map_err(|error| *error)?;
     if values.len() > limit {
         return Err(DecodeError::TooLarge);
     }
     let mut unique = HashSet::with_capacity(values.len());
     for value in values {
         let id = scalar_uuid(value)?;
-        if id.is_nil() || !unique.insert(id) {
-            return Err(DecodeError::InvalidResponse);
+        if id.is_nil() {
+            return Err(DecodeError::UnexpectedStructure("nil metadata id"));
+        }
+        if !unique.insert(id) {
+            return Err(DecodeError::DuplicateId);
         }
     }
     Ok(())
@@ -1764,14 +1810,14 @@ fn validate_map_ids(value: &Option<MapValue<BTreeMap<String, Scalar>>>, limit: u
     for (key, value) in values {
         match kind {
             MapIdKind::IntegerKey => {
-                let index = key.parse::<u32>().map_err(|_| DecodeError::InvalidResponse)?;
+                let index = key.parse::<u32>().map_err(|_| DecodeError::UnexpectedStructure("invalid integer map key"))?;
                 if !indices.insert(index) {
-                    return Err(DecodeError::InvalidResponse);
+                    return Err(DecodeError::DuplicateId);
                 }
                 scalar_uuid(value)?;
             }
             MapIdKind::UuidKey => {
-                Uuid::parse_str(key).map_err(|_| DecodeError::InvalidResponse)?;
+                Uuid::parse_str(key).map_err(|_| DecodeError::UnexpectedStructure("invalid uuid map key"))?;
                 scalar_uuid(value)?;
             }
         }
@@ -1788,26 +1834,26 @@ fn metadata_versions(value: Option<MapValue<BTreeMap<String, Scalar>>>) -> Resul
     values
         .into_iter()
         .map(|(id, version)| {
-            let id = Uuid::parse_str(&id).map_err(|_| DecodeError::InvalidResponse)?;
+            let id = Uuid::parse_str(&id).map_err(|_| DecodeError::UnexpectedStructure("invalid category version uuid"))?;
             if id.is_nil() {
-                return Err(DecodeError::InvalidResponse);
+                return Err(DecodeError::UnexpectedStructure("nil category version uuid"));
             }
-            let version = integer(Some(&version))?.ok_or(DecodeError::InvalidResponse)?;
+            let version = integer(Some(&version))?.ok_or(DecodeError::UnexpectedStructure("missing category version"))?;
             Ok((id, version))
         })
         .collect()
 }
 
 fn validate_update_result(value: &MapValue<UpdateResultFields>) -> Result<(), DecodeError> {
-    let fields = value.0.as_ref().map_err(|_| DecodeError::InvalidResponse)?;
-    let code = integer(fields.code.as_ref())?.ok_or(DecodeError::InvalidResponse)?;
+    let fields = value.0.as_ref().map_err(|error| *error)?;
+    let code = integer(fields.code.as_ref())?.ok_or(DecodeError::UnexpectedStructure("missing _update_result code"))?;
     if !matches!(fields.success, Some(Scalar::Boolean))
         || !(0..=8).contains(&code)
         || !matches!(fields.message.as_ref(), Some(Scalar::String(_)))
         || (fields.fault_code.is_some() && integer(fields.fault_code.as_ref())?.is_none())
         || (fields.server_response.is_some() && !matches!(fields.server_response.as_ref(), Some(Scalar::String(_))))
     {
-        return Err(DecodeError::InvalidResponse);
+        return Err(DecodeError::UnexpectedStructure("invalid _update_result"));
     }
     Ok(())
 }
@@ -1876,10 +1922,18 @@ fn named_inventory_type(value: &str) -> i32 {
 }
 
 pub fn decode_ais_children(bytes: &[u8], expected_folder: Uuid, expected_owner: Uuid) -> Result<Category, DecodeError> {
+    decode_ais_children_with_scope(bytes, expected_folder, OwnerScope::Personal(expected_owner))
+}
+
+pub fn decode_ais_library_children(bytes: &[u8], expected_folder: Uuid) -> Result<Category, DecodeError> {
+    decode_ais_children_with_scope(bytes, expected_folder, OwnerScope::Library)
+}
+
+fn decode_ais_children_with_scope(bytes: &[u8], expected_folder: Uuid, owner_scope: OwnerScope) -> Result<Category, DecodeError> {
     let AisCategoryValue(category) = decode_llsd(bytes)?;
-    let category = validate_category_tree(category?, expected_owner, None, 0, &mut ParseCounts::default())?;
+    let category = validate_category_tree(category?, owner_scope, None, 0, &mut ParseCounts::default())?;
     if category.id != expected_folder {
-        return Err(DecodeError::InvalidResponse);
+        return Err(DecodeError::UnexpectedStructure("category_id mismatch"));
     }
     Ok(category)
 }
@@ -1887,9 +1941,12 @@ pub fn decode_ais_children(bytes: &[u8], expected_folder: Uuid, expected_owner: 
 pub fn decode_ais_item(bytes: &[u8], expected_item: Uuid, expected_owner: Uuid) -> Result<Item, DecodeError> {
     let AisItemValue(item) = decode_llsd(bytes)?;
     let item = item?;
-    validate_item(&item, expected_owner, None)?;
-    if item.id != expected_item || item.parent_id.is_none_or(|parent| parent.is_nil()) {
-        return Err(DecodeError::InvalidResponse);
+    validate_item(&item, OwnerScope::Personal(expected_owner), None)?;
+    if item.id != expected_item {
+        return Err(DecodeError::UnexpectedStructure("item_id mismatch"));
+    }
+    if item.parent_id.is_none_or(|parent| parent.is_nil()) {
+        return Err(DecodeError::ParentMismatch);
     }
     Ok(item)
 }
@@ -1900,54 +1957,73 @@ pub fn decode_ais_edit_response(bytes: &[u8], expected_owner: Uuid) -> Result<Ai
 
 pub fn decode_created_category_response(bytes: &[u8]) -> Result<CreatedCategoryResponse, DecodeError> {
     let fields = decode_llsd::<CreatedCategoryFields>(bytes)?;
-    let id = uuid_fields(&[fields.folder_id.as_ref()])?.filter(|id| !id.is_nil()).ok_or(DecodeError::InvalidResponse)?;
-    let parent_id = uuid_fields(&[fields.parent_id.as_ref()])?.filter(|id| !id.is_nil()).ok_or(DecodeError::InvalidResponse)?;
+    let id = uuid_fields(&[fields.folder_id.as_ref()])?
+        .filter(|id| !id.is_nil())
+        .ok_or(DecodeError::UnexpectedStructure("missing folder_id"))?;
+    let parent_id = uuid_fields(&[fields.parent_id.as_ref()])?
+        .filter(|id| !id.is_nil())
+        .ok_or(DecodeError::UnexpectedStructure("missing parent_id"))?;
     let preferred_folder_type = integer(fields.type_.as_ref())?.unwrap_or(-1);
     let name = string(fields.name, "")?;
     if name.len() > MAX_NAME_BYTES {
-        return Err(DecodeError::InvalidResponse);
+        return Err(DecodeError::TooLarge);
     }
     Ok(CreatedCategoryResponse { id, parent_id, preferred_folder_type, name })
 }
 
 pub fn decode_fetch_inventory_descendents2(bytes: &[u8], requested: &[RequestedFolder]) -> Result<Vec<FolderDescendents>, DecodeError> {
+    decode_fetch_descendents2(bytes, requested, false)
+}
+
+pub fn decode_fetch_lib_descendents2(bytes: &[u8], requested: &[RequestedFolder]) -> Result<Vec<FolderDescendents>, DecodeError> {
+    decode_fetch_descendents2(bytes, requested, true)
+}
+
+fn decode_fetch_descendents2(bytes: &[u8], requested: &[RequestedFolder], library: bool) -> Result<Vec<FolderDescendents>, DecodeError> {
     if requested.is_empty() {
-        return Err(DecodeError::InvalidResponse);
+        return Err(DecodeError::UnexpectedStructure("empty requested folders"));
     }
     let fields = decode_llsd::<FetchDescendentsFields>(bytes)?;
-    let folders = fields.folders.ok_or(DecodeError::InvalidResponse)?.0?;
+    let folders = fields.folders.ok_or(DecodeError::UnexpectedStructure("missing folders array"))?.0?;
     if folders.len() != requested.len() {
-        return Err(DecodeError::InvalidResponse);
+        return Err(DecodeError::UnexpectedStructure("folder count mismatch"));
     }
     let mut by_id = HashMap::with_capacity(folders.len());
     for FolderValue(fields) in folders {
         let fields = fields?;
-        let id = uuid_fields(&[fields.folder_id.as_ref()])?.ok_or(DecodeError::InvalidResponse)?;
+        let id = uuid_fields(&[fields.folder_id.as_ref()])?.ok_or(DecodeError::UnexpectedStructure("missing folder_id"))?;
         if by_id.insert(id, fields).is_some() {
-            return Err(DecodeError::InvalidResponse);
+            return Err(DecodeError::DuplicateId);
         }
     }
     requested
         .iter()
         .map(|requested| {
-            let folder = by_id.remove(&requested.id).ok_or(DecodeError::InvalidResponse)?;
-            parse_folder_descendents(folder, *requested)
+            let folder = by_id.remove(&requested.id).ok_or(DecodeError::UnexpectedStructure("missing requested folder"))?;
+            let owner_scope = if library { OwnerScope::Library } else { OwnerScope::Personal(requested.owner_id) };
+            parse_folder_descendents(folder, *requested, owner_scope)
         })
         .collect()
 }
 
 pub fn decode_fetch_inventory2(bytes: &[u8], expected_owner: Uuid, requested_items: &[Uuid]) -> Result<Vec<Item>, DecodeError> {
     let fields = decode_llsd::<FetchItemsFields>(bytes)?;
-    let items = fields.items.ok_or(DecodeError::InvalidResponse)?.0?;
+    let items = fields.items.ok_or(DecodeError::UnexpectedStructure("missing items array"))?.0?;
     if items.len() > requested_items.len() {
-        return Err(DecodeError::InvalidResponse);
+        return Err(DecodeError::UnexpectedStructure("unexpected item count"));
     }
     let requested = requested_items.iter().copied().collect::<HashSet<_>>();
     let mut returned = HashSet::with_capacity(items.len());
     for item in &items {
-        validate_item(item, expected_owner, None)?;
-        if item.parent_id.is_none_or(|parent| parent.is_nil()) || !requested.contains(&item.id) || !returned.insert(item.id) {
-            return Err(DecodeError::InvalidResponse);
+        validate_item(item, OwnerScope::Personal(expected_owner), None)?;
+        if item.parent_id.is_none_or(|parent| parent.is_nil()) {
+            return Err(DecodeError::ParentMismatch);
+        }
+        if !requested.contains(&item.id) {
+            return Err(DecodeError::UnexpectedStructure("unrequested item id"));
+        }
+        if !returned.insert(item.id) {
+            return Err(DecodeError::DuplicateId);
         }
     }
     Ok(items)

@@ -12,6 +12,7 @@ use futures::{
 };
 use inventory::{CategoryKey, InventoryOwner, InventorySnapshot, Item, MAX_INVENTORY_ITEMS};
 use network::capabilities::{CapabilityUrl, Client};
+use protocol::inventory::DecodeError;
 use tokio::{
     runtime::Handle,
     sync::{mpsc, mpsc::error::TrySendError, oneshot, watch},
@@ -32,7 +33,7 @@ const RESULT_CAPACITY: usize = 2;
 const BACKGROUND_CONCURRENCY: usize = 2;
 const OWNER_REFRESH_SCAN_CHUNK: usize = 512;
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(2);
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 pub(crate) type Cancellation = Shared<BoxFuture<'static, ()>>;
 
@@ -212,6 +213,7 @@ impl InventoryFetchController {
 #[derive(Clone)]
 struct SourceCapabilities {
     owner: InventoryOwner,
+    is_library: bool,
     ais: Option<CapabilityUrl>,
     legacy: Option<CapabilityUrl>,
 }
@@ -253,17 +255,19 @@ async fn run_scheduler(
     cancellation: Cancellation,
     mut stop: oneshot::Receiver<()>,
 ) {
-    let Ok(discovered) = discover(&client, cancellation.clone(), &mut stop).await else {
-        let roots = iter::once(snapshot.roots().personal()).chain(snapshot.roots().library());
-        for folder in roots {
-            if !emit(&events, InventoryFetchEvent::Failed { folder, error: InventoryFetchError::RequestFailed }, &cancellation, &mut stop)
-                .await
-            {
-                return;
+    let discovered = match discover(&client, cancellation.clone(), &mut stop).await {
+        Ok(discovered) => discovered,
+        Err(InventoryFetchError::Cancelled) => return,
+        Err(error) => {
+            let roots = iter::once(snapshot.roots().personal()).chain(snapshot.roots().library());
+            for folder in roots {
+                if !emit(&events, InventoryFetchEvent::Failed { folder, error: error.clone() }, &cancellation, &mut stop).await {
+                    return;
+                }
             }
+            let _ = emit(&events, InventoryFetchEvent::BackgroundDone, &cancellation, &mut stop).await;
+            return;
         }
-        let _ = emit(&events, InventoryFetchEvent::BackgroundDone, &cancellation, &mut stop).await;
-        return;
     };
     let capabilities = make_capabilities(&snapshot, discovered);
     let personal_root = snapshot.roots().personal();
@@ -359,7 +363,7 @@ async fn run_scheduler(
             in_flight.insert(folder);
             let job = BackgroundJob { id: next_job_id, folders: vec![folder], depth: 0 };
             next_job_id = next_job_id.wrapping_add(1);
-            let fetch = execute_job(&client, source.clone(), job.clone(), &model, &snapshot);
+            let fetch = execute_job(&client, source.clone(), job.clone(), &model, &snapshot, &cancellation);
             futures::pin_mut!(fetch);
             let result = loop {
                 tokio::select! {
@@ -455,9 +459,10 @@ async fn run_scheduler(
             let model = model.clone();
             let initial = snapshot.clone();
             let active_job = job.clone();
+            let job_cancellation = cancellation.clone();
             jobs.push(
                 async move {
-                    let result = execute_job(&client, source, active_job.clone(), &model, &initial).await;
+                    let result = execute_job(&client, source, active_job.clone(), &model, &initial, &job_cancellation).await;
                     JobCompletion { job: active_job, result }
                 }
                 .boxed(),
@@ -591,11 +596,13 @@ fn make_capabilities(snapshot: &InventorySnapshot, grants: HashMap<String, Capab
     let personal_owner = snapshot.roots().personal().owner();
     let personal = SourceCapabilities {
         owner: personal_owner,
+        is_library: false,
         ais: grants.get("InventoryAPIv3").cloned(),
         legacy: grants.get("FetchInventoryDescendents2").cloned(),
     };
     let library = snapshot.roots().library().map(|root| SourceCapabilities {
         owner: root.owner(),
+        is_library: true,
         ais: grants.get("LibraryAPIv3").cloned(),
         legacy: grants.get("FetchLibDescendents2").cloned(),
     });
@@ -612,20 +619,26 @@ async fn discover(
     loop {
         let result = tokio::select! {
             biased;
-            _ = cancellation.clone() => return Err(InventoryFetchError::RequestFailed),
-            _ = &mut *stop => return Err(InventoryFetchError::RequestFailed),
+            _ = cancellation.clone() => return Err(InventoryFetchError::Cancelled),
+            _ = &mut *stop => return Err(InventoryFetchError::Cancelled),
             result = client.request_capabilities(&names) => result,
         };
         match result {
             Ok(capabilities) => return Ok(capabilities),
             Err(error) => match classify_request_error(error) {
-                RequestFailure::Transient(retry_after) if retries < MAX_FETCH_RETRIES => {
+                RequestFailure::Cancelled => return Err(InventoryFetchError::Cancelled),
+                RequestFailure::Transient { retry_after, .. } if retries < MAX_FETCH_RETRIES => {
                     wait_retry(retries, retry_after, cancellation.clone(), stop).await?;
                     retries += 1;
                 }
-                RequestFailure::Missing => return Err(InventoryFetchError::RequestFailed),
-                RequestFailure::InvalidResponse => return Err(InventoryFetchError::InvalidResponse),
-                _ => return Err(InventoryFetchError::RetryExhausted),
+                RequestFailure::Transient { cause, .. } => return Err(InventoryFetchError::RetryExhausted(cause)),
+                RequestFailure::Forbidden => return Err(InventoryFetchError::HttpStatus(403)),
+                RequestFailure::Missing(status) | RequestFailure::HttpStatus(status) => {
+                    return Err(InventoryFetchError::HttpStatus(status));
+                }
+                RequestFailure::FolderTooLarge => return Err(InventoryFetchError::FolderTooLarge),
+                RequestFailure::InvalidResponse(decode) => return Err(InventoryFetchError::InvalidResponse(decode)),
+                RequestFailure::Failed => return Err(InventoryFetchError::RequestFailed),
             },
         }
     }
@@ -637,14 +650,21 @@ async fn execute_job(
     job: BackgroundJob,
     model: &watch::Receiver<Option<InventorySnapshot>>,
     initial: &InventorySnapshot,
+    cancellation: &Cancellation,
 ) -> Result<Vec<FolderFetch>, InventoryFetchError> {
     let Some(folder) = job.folders.first().copied() else {
-        return Err(InventoryFetchError::InvalidResponse);
+        return Err(InventoryFetchError::InvalidResponse(DecodeError::UnexpectedStructure("empty fetch job")));
     };
     if let Some(capability) = source.ais {
-        fetch_ais_with_provenance(client, &capability, folder, job.depth, || Some(latest_snapshot(model, initial))).await
+        fetch_ais_with_provenance(client, &capability, folder, job.depth, source.is_library, Some(cancellation), || {
+            Some(latest_snapshot(model, initial))
+        })
+        .await
     } else if let Some(capability) = source.legacy {
-        fetch_legacy_with_provenance(client, &capability, &job.folders, || Some(latest_snapshot(model, initial))).await
+        fetch_legacy_with_provenance(client, &capability, &job.folders, source.is_library, Some(cancellation), || {
+            Some(latest_snapshot(model, initial))
+        })
+        .await
     } else {
         Err(InventoryFetchError::CapabilityUnavailable)
     }
@@ -663,7 +683,10 @@ pub(crate) async fn fetch_single_folder(
     } else {
         return Err(InventoryFetchError::CapabilityUnavailable);
     };
-    folders.drain(..).find(|fetch| fetch.folder == folder).ok_or(InventoryFetchError::InvalidResponse)
+    folders
+        .drain(..)
+        .find(|fetch| fetch.folder == folder)
+        .ok_or(InventoryFetchError::InvalidResponse(DecodeError::UnexpectedStructure("missing requested folder")))
 }
 
 pub(crate) async fn fetch_single_items(
@@ -686,15 +709,18 @@ pub(crate) async fn fetch_single_items(
                         items.push(item);
                         break;
                     }
-                    Err(RequestFailure::Transient(retry_after)) if retries < MAX_FETCH_RETRIES => {
-                        wait_retry_foreground(retries, retry_after).await;
+                    Err(RequestFailure::Cancelled) => return Err(InventoryFetchError::Cancelled),
+                    Err(RequestFailure::Transient { retry_after, .. }) if retries < MAX_FETCH_RETRIES => {
+                        wait_retry_cancellable(retries, retry_after, None).await?;
                         retries += 1;
                     }
-                    Err(RequestFailure::Transient(_)) => return Err(InventoryFetchError::RetryExhausted),
-                    Err(RequestFailure::Missing) => break,
+                    Err(RequestFailure::Transient { cause, .. }) => return Err(InventoryFetchError::RetryExhausted(cause)),
+                    Err(RequestFailure::Missing(_)) => break,
                     Err(RequestFailure::FolderTooLarge) => return Err(InventoryFetchError::FolderTooLarge),
-                    Err(RequestFailure::InvalidResponse) => return Err(InventoryFetchError::InvalidResponse),
-                    Err(RequestFailure::Forbidden | RequestFailure::Failed) => return Err(InventoryFetchError::RequestFailed),
+                    Err(RequestFailure::InvalidResponse(decode)) => return Err(InventoryFetchError::InvalidResponse(decode)),
+                    Err(RequestFailure::Forbidden) => return Err(InventoryFetchError::HttpStatus(403)),
+                    Err(RequestFailure::HttpStatus(status)) => return Err(InventoryFetchError::HttpStatus(status)),
+                    Err(RequestFailure::Failed) => return Err(InventoryFetchError::RequestFailed),
                 }
             }
         }
@@ -712,7 +738,7 @@ async fn fetch_ais(
     folder: CategoryKey,
     initial_depth: u8,
 ) -> Result<Vec<FolderFetch>, InventoryFetchError> {
-    fetch_ais_with_provenance(client, capability, folder, initial_depth, || None).await
+    fetch_ais_with_provenance(client, capability, folder, initial_depth, false, None, || None).await
 }
 
 async fn fetch_ais_with_provenance(
@@ -720,29 +746,35 @@ async fn fetch_ais_with_provenance(
     capability: &CapabilityUrl,
     folder: CategoryKey,
     initial_depth: u8,
+    is_library: bool,
+    cancellation: Option<&Cancellation>,
     mut capture_snapshot: impl FnMut() -> Option<InventorySnapshot>,
 ) -> Result<Vec<FolderFetch>, InventoryFetchError> {
     let mut depth = initial_depth.min(MAX_AIS_DEPTH);
     let mut retries = 0;
     loop {
         let request_snapshot = capture_snapshot();
-        match ais::fetch_once(client, capability, folder, depth).await {
+        match ais::fetch_once(client, capability, folder, depth, is_library).await {
             Ok(mut folders) => {
                 stamp_request_provenance(&mut folders, request_snapshot.as_ref());
                 return Ok(folders);
             }
+            Err(RequestFailure::Cancelled) => return Err(InventoryFetchError::Cancelled),
             Err(RequestFailure::Forbidden | RequestFailure::FolderTooLarge) if depth > 0 => {
                 depth /= 2;
                 retries = 0;
             }
             Err(RequestFailure::Forbidden | RequestFailure::FolderTooLarge) => return Err(InventoryFetchError::FolderTooLarge),
-            Err(RequestFailure::Transient(retry_after)) if retries < MAX_FETCH_RETRIES => {
-                wait_retry_foreground(retries, retry_after).await;
+            Err(RequestFailure::Transient { retry_after, .. }) if retries < MAX_FETCH_RETRIES => {
+                wait_retry_cancellable(retries, retry_after, cancellation).await?;
                 retries += 1;
             }
-            Err(RequestFailure::Transient(_)) => return Err(InventoryFetchError::RetryExhausted),
-            Err(RequestFailure::InvalidResponse) => return Err(InventoryFetchError::InvalidResponse),
-            Err(RequestFailure::Missing | RequestFailure::Failed) => return Err(InventoryFetchError::RequestFailed),
+            Err(RequestFailure::Transient { cause, .. }) => return Err(InventoryFetchError::RetryExhausted(cause)),
+            Err(RequestFailure::InvalidResponse(decode)) => return Err(InventoryFetchError::InvalidResponse(decode)),
+            Err(RequestFailure::Missing(status) | RequestFailure::HttpStatus(status)) => {
+                return Err(InventoryFetchError::HttpStatus(status));
+            }
+            Err(RequestFailure::Failed) => return Err(InventoryFetchError::RequestFailed),
         }
     }
 }
@@ -752,33 +784,38 @@ async fn fetch_legacy(
     capability: &CapabilityUrl,
     folders: &[CategoryKey],
 ) -> Result<Vec<FolderFetch>, InventoryFetchError> {
-    fetch_legacy_with_provenance(client, capability, folders, || None).await
+    fetch_legacy_with_provenance(client, capability, folders, false, None, || None).await
 }
 
 async fn fetch_legacy_with_provenance(
     client: &Client,
     capability: &CapabilityUrl,
     folders: &[CategoryKey],
+    is_library: bool,
+    cancellation: Option<&Cancellation>,
     mut capture_snapshot: impl FnMut() -> Option<InventorySnapshot>,
 ) -> Result<Vec<FolderFetch>, InventoryFetchError> {
     let mut retries = 0;
     loop {
         let request_snapshot = capture_snapshot();
-        match legacy::fetch_batch(client, capability, folders).await {
+        match legacy::fetch_batch(client, capability, folders, is_library).await {
             Ok(mut folders) => {
                 stamp_request_provenance(&mut folders, request_snapshot.as_ref());
                 return Ok(folders);
             }
-            Err(RequestFailure::Transient(retry_after)) if retries < MAX_FETCH_RETRIES => {
-                wait_retry_foreground(retries, retry_after).await;
+            Err(RequestFailure::Cancelled) => return Err(InventoryFetchError::Cancelled),
+            Err(RequestFailure::Transient { retry_after, .. }) if retries < MAX_FETCH_RETRIES => {
+                wait_retry_cancellable(retries, retry_after, cancellation).await?;
                 retries += 1;
             }
-            Err(RequestFailure::Transient(_)) => return Err(InventoryFetchError::RetryExhausted),
+            Err(RequestFailure::Transient { cause, .. }) => return Err(InventoryFetchError::RetryExhausted(cause)),
             Err(RequestFailure::FolderTooLarge) => return Err(InventoryFetchError::FolderTooLarge),
-            Err(RequestFailure::InvalidResponse) => return Err(InventoryFetchError::InvalidResponse),
-            Err(RequestFailure::Forbidden | RequestFailure::Missing | RequestFailure::Failed) => {
-                return Err(InventoryFetchError::RequestFailed);
+            Err(RequestFailure::InvalidResponse(decode)) => return Err(InventoryFetchError::InvalidResponse(decode)),
+            Err(RequestFailure::Forbidden) => return Err(InventoryFetchError::HttpStatus(403)),
+            Err(RequestFailure::Missing(status) | RequestFailure::HttpStatus(status)) => {
+                return Err(InventoryFetchError::HttpStatus(status));
             }
+            Err(RequestFailure::Failed) => return Err(InventoryFetchError::RequestFailed),
         }
     }
 }
@@ -793,9 +830,22 @@ fn stamp_request_provenance(folders: &mut [FolderFetch], snapshot: Option<&Inven
     }
 }
 
-async fn wait_retry_foreground(retries: u32, retry_after: Option<Duration>) {
+async fn wait_retry_cancellable(
+    retries: u32,
+    retry_after: Option<Duration>,
+    cancellation: Option<&Cancellation>,
+) -> Result<(), InventoryFetchError> {
     let delay = retry_delay(retries, retry_after);
-    time::sleep(delay).await;
+    if let Some(cancellation) = cancellation {
+        tokio::select! {
+            biased;
+            _ = cancellation.clone() => Err(InventoryFetchError::Cancelled),
+            _ = time::sleep(delay) => Ok(()),
+        }
+    } else {
+        time::sleep(delay).await;
+        Ok(())
+    }
 }
 
 async fn wait_retry(
@@ -806,8 +856,8 @@ async fn wait_retry(
 ) -> Result<(), InventoryFetchError> {
     tokio::select! {
         biased;
-        _ = cancellation => Err(InventoryFetchError::RequestFailed),
-        _ = &mut *stop => Err(InventoryFetchError::RequestFailed),
+        _ = cancellation => Err(InventoryFetchError::Cancelled),
+        _ = &mut *stop => Err(InventoryFetchError::Cancelled),
         _ = time::sleep(retry_delay(retries, retry_after)) => Ok(()),
     }
 }
@@ -834,6 +884,7 @@ async fn process_completion(
     let foreground_folder = foreground_request.as_ref().map(|(folder, _)| *folder);
     let folders = match completion.result {
         Ok(folders) => folders,
+        Err(InventoryFetchError::Cancelled) => return false,
         Err(error) => {
             for folder in completion.job.folders {
                 failed.insert(folder);

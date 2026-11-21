@@ -116,23 +116,25 @@ fn malformed_flat_fields_are_rejected() {
         "<key>sale_price</key><string>not-an-integer</string>",
     ] {
         let ais = ais_item(item_id, parent_id, owner_id, fields);
-        assert_eq!(
-            decode_ais_item(&ais, item_id, owner_id),
-            Err(DecodeError::InvalidResponse),
+        assert!(
+            matches!(decode_ais_item(&ais, item_id, owner_id), Err(DecodeError::MalformedLlsd | DecodeError::UnexpectedStructure(_))),
             "malformed flat field must be validated: {fields}"
         );
-        assert_eq!(decode_ais_edit_response(&ais, owner_id), Err(DecodeError::InvalidResponse));
+        assert!(matches!(decode_ais_edit_response(&ais, owner_id), Err(DecodeError::MalformedLlsd | DecodeError::UnexpectedStructure(_))));
 
         let legacy = legacy_item(item_id, folder_id, owner_id, fields);
         let fetched = format!("<llsd><map><key>items</key><array>{legacy}</array></map></llsd>");
-        assert_eq!(decode_fetch_inventory2(fetched.as_bytes(), owner_id, &[item_id]), Err(DecodeError::InvalidResponse));
+        assert!(matches!(
+            decode_fetch_inventory2(fetched.as_bytes(), owner_id, &[item_id]),
+            Err(DecodeError::MalformedLlsd | DecodeError::UnexpectedStructure(_))
+        ));
         let descendents = format!(
             "<llsd><map><key>folders</key><array><map><key>folder_id</key><uuid>{folder_id}</uuid><key>owner_id</key><uuid>{owner_id}</uuid><key>version</key><integer>1</integer><key>descendents</key><integer>1</integer><key>categories</key><array/><key>items</key><array>{legacy}</array></map></array></map></llsd>"
         );
-        assert_eq!(
-            decode_fetch_inventory_descendents2(descendents.as_bytes(), &[RequestedFolder { id: folder_id, owner_id }],),
-            Err(DecodeError::InvalidResponse)
-        );
+        assert!(matches!(
+            decode_fetch_inventory_descendents2(descendents.as_bytes(), &[RequestedFolder { id: folder_id, owner_id }]),
+            Err(DecodeError::MalformedLlsd | DecodeError::UnexpectedStructure(_))
+        ));
     }
 }
 
