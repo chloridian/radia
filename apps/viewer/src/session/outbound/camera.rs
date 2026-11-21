@@ -22,7 +22,6 @@ const CAMERA_AXIS_THRESHOLD: f32 = 0.1f32.to_radians();
 const DEFERRED_UPDATE_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) struct CameraUplink {
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     camera: watch::Sender<Option<Camera>>,
     observations: watch::Receiver<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
@@ -88,13 +87,9 @@ enum UplinkMessage {
 
 impl CameraUplink {
     pub(crate) fn new() -> Self {
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
         let (camera, observations) = watch::channel(None);
-        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-        let (_, observations) = watch::channel(None);
         let (movement, movements) = watch::channel(None);
         Self {
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
             camera,
             observations,
             movement,
@@ -131,12 +126,10 @@ impl CameraUplink {
         }
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn sender(&self) -> watch::Sender<Option<Camera>> {
         self.camera.clone()
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn movement_sender(&self) -> watch::Sender<Option<MovementObservation>> {
         self.movement.clone()
     }
@@ -363,39 +356,39 @@ fn rotation_changed(previous: Quat, current: Quat) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    use std::net::{SocketAddr, UdpSocket};
-    use std::{cell::Cell, time::Duration};
+    use std::{
+        cell::Cell,
+        net::{SocketAddr, UdpSocket},
+        time::Duration,
+    };
 
     use futures::FutureExt;
     use math::{DVec3, Quat, Vec3};
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     use network::Delivery;
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    use protocol::lludp::{Message, Packet};
-    use protocol::messages::SetAlwaysRun;
+    use protocol::{
+        lludp::{Message, Packet},
+        messages::SetAlwaysRun,
+    };
     use render::scene::Camera;
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    use tokio::net;
-    use tokio::time::{Instant, advance};
+    use tokio::{
+        net,
+        time::{Instant, advance},
+    };
     use uuid::Uuid;
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     use world::RegionHandle;
 
     use super::{CameraUplink, KEEPALIVE_INTERVAL, MIN_UPDATE_INTERVAL, UplinkMessage, camera_changed};
-    use crate::{agent_movement::MovementObservation, test_helpers::simulator_id};
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     use crate::{
-        agent_movement::{HeldControls, KeyBinding, STOP, input::MovementKey},
+        agent_movement::{HeldControls, KeyBinding, MovementObservation, STOP, input::MovementKey},
         camera::FollowCamera,
         session::world::{SessionWorld, viewer_world_limits},
+        test_helpers::simulator_id,
     };
 
     fn view(position: DVec3, direction: Vec3) -> Camera {
         Camera::new(position, direction, 1.0, [720, 720]).expect("valid camera").with_quality(64.0, 1.0).expect("valid quality")
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn send_as_packet(socket: &UdpSocket, destination: SocketAddr, sequence: u32, message: UplinkMessage) -> Result<(), network::Error> {
         let message = match message {
             UplinkMessage::AgentUpdate(update) => Message::AgentUpdate(update),
@@ -405,14 +398,12 @@ mod tests {
         socket.send_to(&bytes, destination).map(|_| ()).map_err(|_| network::Error::SessionClosed)
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     async fn receive_packet(socket: &net::UdpSocket) -> Message {
         let mut bytes = [0; 2048];
         let (length, _) = socket.recv_from(&mut bytes).await.expect("loopback update");
         Packet::decode(&bytes[..length]).expect("valid LLUDP packet").message().clone()
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn send_loopback(
         uplink: &mut CameraUplink,
         simulator: network::SimulatorId,
@@ -436,7 +427,6 @@ mod tests {
         });
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[tokio::test]
     async fn simulator_receives_actions_and_stop() {
         let receiver = net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
@@ -520,7 +510,6 @@ mod tests {
         assert_eq!(update.agent_data.control_flags, 0x0000_2000);
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn space_stop_reaches_agent_update() {
         let simulator = simulator_id();
@@ -545,7 +534,6 @@ mod tests {
         assert_eq!(sent[0].agent_data.control_flags & STOP, STOP);
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn redundant_wake_sends_nothing() {
         let simulator = simulator_id();
@@ -572,7 +560,6 @@ mod tests {
         assert_eq!(sent.len(), 1, "a redundant wake must not duplicate the current state");
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[tokio::test(start_paused = true)]
     async fn origin_wakes_camera_and_key() {
         let receiver = net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");

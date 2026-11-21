@@ -1,6 +1,5 @@
 mod favorites;
 mod form;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 mod scene;
 mod spawn;
 
@@ -27,11 +26,14 @@ use self::{
     favorites::Favorites,
     spawn::{SpawnChoice, SpawnOption, spawn_options},
 };
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use crate::gui::scene::{end_session, start_session};
 use crate::{
     gui,
-    gui::{SessionLifecycle, views::chat::ChatScreen, window_geometry::observe},
+    gui::{
+        SessionLifecycle,
+        scene::{end_session, start_session},
+        views::chat::ChatScreen,
+        window_geometry::observe,
+    },
     inventory::{FavoriteLocation, InventoryFetchHandle, InventoryFetchRequestError, favorite_store},
     remembered_login::{self, CredentialStoreError, RememberedLogin},
     session::{
@@ -661,7 +663,6 @@ impl LoginScreen {
 
         let username = self.username.read(cx).value();
         self.favorites.prepare_session(session.grid, session.agent_id, &username, Some(mailbox), cx);
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
         let scene_inventory_updates = inventory_updates.clone();
         if let Some(active) = &mut self.active_session {
             active.ready = Some(ReadySession { session: session.clone(), inventory_updates, inventory_fetch });
@@ -678,7 +679,6 @@ impl LoginScreen {
             }
         });
 
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
         start_session(
             self.session_generation,
             &ready.world_reader,
@@ -695,7 +695,6 @@ impl LoginScreen {
     }
 
     pub(crate) fn end_session(&mut self, end: SessionEnd, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
         end_session(self.session_generation, cx);
         match &end {
             SessionEnd::Requested => tracing::info!("viewer session ended normally"),

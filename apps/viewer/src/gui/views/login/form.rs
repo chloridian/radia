@@ -17,9 +17,7 @@ use super::{
     CredentialWarning, LoginPhase, LoginScreen,
     spawn::{SpawnChoice, spawn_options},
 };
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use crate::gui::scene;
-use crate::remembered_login;
+use crate::{gui::scene, remembered_login};
 impl LoginScreen {
     fn render_heading(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::global(cx).colors;
@@ -260,10 +258,6 @@ impl Render for LoginScreen {
 
         let chat_content = div().flex_1().min_h_0().child(self.chat_screen.clone()).into_any_element();
         let session_ready = self.active_session.as_ref().is_some_and(super::ActiveSession::is_ready);
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
-        let content = scene::login_content(session_ready, login_screen.into_any_element(), chat_content);
-        #[cfg(target_os = "macos")]
-        let content = if session_ready { chat_content } else { login_screen.into_any_element() };
-        content
+        scene::login_content(session_ready, login_screen.into_any_element(), chat_content)
     }
 }
