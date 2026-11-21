@@ -1,13 +1,7 @@
-#![allow(unexpected_cfgs)]
-
-#[cfg(world_bench_detailed)]
-use std::time::Instant;
 use std::{fmt, hint::black_box, num::NonZeroU8};
 
 use divan::counter::ItemsCount;
 use math::{Quat, Vec3};
-#[cfg(not(world_bench_uninstrumented))]
-use test_support::allocation;
 use utils::AssetId;
 use uuid::Uuid;
 use world::{
@@ -296,62 +290,6 @@ impl FacetWorkload {
             + self.attachment_rows.len()
             + self.scene.rows.len().div_ceil(17)
             + 5
-    }
-}
-
-pub(crate) fn report_diagnostics() {
-    #[cfg(world_bench_detailed)]
-    {
-        let mut profile = FacetWorkload::new();
-        let (archetypes_before, _) = profile.scene.world.take_bench_layout_stats();
-        let update_ops = profile.cycle();
-        let (archetypes_after, facet_moves) = profile.scene.world.take_bench_layout_stats();
-        eprintln!(
-            "facet-layout-trace fixture=synthetic_10k_sparse before_archetypes={archetypes_before} after_archetypes={archetypes_after} facet_structural_moves={facet_moves} update_ops_per_cycle={update_ops}",
-        );
-        let (visible, details) = profile.read();
-        eprintln!("facet-layout-read fixture=synthetic_10k_sparse visible={visible} details={details}");
-
-        for index in 1..=256 {
-            let child = profile.scene.rows[100 + index];
-            let mut patch = ObjectPatch::new(source(child.region, profile.order), child.local_id);
-            profile.order += 1;
-            patch.parent = Some(Local(profile.scene.rows[100].local_id));
-            let _ = profile.scene.world.patch_object(patch).expect("link cleanup profile");
-        }
-        let root = profile.scene.rows[100];
-        let started = Instant::now();
-        let _ = profile.scene.world.remove_object(source(root.region, profile.order), root.local_id).expect("remove cleanup profile root");
-        let mut turns = 0;
-        let mut total_work = 0;
-        let mut maximum_work = 0;
-        while profile.scene.world.has_pending_removals() {
-            let progress = profile.scene.world.reclaim_removals(MAX_REMOVAL_WORK_PER_TURN);
-            assert!(progress.work_units <= MAX_REMOVAL_WORK_PER_TURN);
-            assert!(progress.work_units > 0 || !progress.pending);
-            turns += 1;
-            total_work += progress.work_units;
-            maximum_work = maximum_work.max(progress.work_units);
-            drop(progress);
-        }
-        assert_eq!(profile.scene.world.object_count(), LAYOUT_OBJECTS - 257);
-        eprintln!(
-            "facet-layout-cleanup fixture=synthetic_10k_257_linkset elapsed_us={} turns={turns} work_units={total_work} max_work_units_per_turn={maximum_work} cap={MAX_REMOVAL_WORK_PER_TURN}",
-            started.elapsed().as_micros(),
-        );
-    }
-    #[cfg(not(world_bench_uninstrumented))]
-    {
-        let before = allocation::live_bytes();
-        let (profile, allocation) = allocation::measure(FacetWorkload::new);
-        eprintln!(
-            "facet-layout-memory fixture=synthetic_10k_sparse retained_delta_bytes={} peak_delta_bytes={} allocation_calls={} reallocation_calls={}",
-            allocation::live_bytes() - before,
-            allocation.peak_bytes,
-            allocation.allocation_calls,
-            allocation.reallocation_calls,
-        );
-        black_box(profile.scene.world.object_count());
     }
 }
 

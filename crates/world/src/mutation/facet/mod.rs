@@ -1,5 +1,3 @@
-#![allow(unexpected_cfgs)]
-
 mod impls;
 
 use std::sync::Arc;
@@ -105,18 +103,9 @@ macro_rules! define_facets {
                 })+
             }
 
-            pub(crate) fn remove_cleared(
-                &self,
-                previous: &Self,
-                ecs: &mut World,
-                entity: hecs::Entity,
-                #[cfg(world_bench_detailed)] structural_moves: &mut usize,
-            ) {
+            pub(crate) fn remove_cleared(&self, previous: &Self, ecs: &mut World, entity: hecs::Entity) {
                 $(if self.$field != previous.$field && previous.$field.is_stored() && !self.$field.is_stored() {
                     ecs.remove_one::<Fenced<$ty>>(entity).expect("changed facet component is present");
-                    #[cfg(world_bench_detailed)] {
-                        *structural_moves += 1;
-                    }
                 })+
             }
 
@@ -232,7 +221,7 @@ impl FacetChanges {
         Self { before, after }
     }
 
-    pub(crate) fn apply(self, ecs: &mut World, entity: hecs::Entity, #[cfg(world_bench_detailed)] structural_moves: &mut usize) {
+    pub(crate) fn apply(self, ecs: &mut World, entity: hecs::Entity) {
         if self.before == self.after {
             return;
         }
@@ -241,18 +230,8 @@ impl FacetChanges {
         let has_components = self.after.add_new(&self.before, &mut builder);
         if has_components {
             ecs.insert(entity, builder.build()).expect("facet commit target is live");
-            #[cfg(world_bench_detailed)]
-            {
-                *structural_moves += 1;
-            }
         }
-        self.after.remove_cleared(
-            &self.before,
-            ecs,
-            entity,
-            #[cfg(world_bench_detailed)]
-            structural_moves,
-        );
+        self.after.remove_cleared(&self.before, ecs, entity);
     }
 
     pub(crate) fn media_bytes(&self) -> Option<(usize, usize)> {
