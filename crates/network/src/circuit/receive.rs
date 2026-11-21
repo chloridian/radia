@@ -1,8 +1,14 @@
-use std::{collections::VecDeque, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    io,
+    net::SocketAddr,
+    sync::Arc,
+    time::{self, Duration},
+};
 
 use protocol::{
     LLUdpError,
-    lludp::{Message, Packet},
+    lludp::{Frequency, Message, MessageId, Packet, SchemaMessage},
     messages::{CompleteAgentMovement, CompletePingCheck, PingId, agent::complete_agent_movement},
     schema::ids::PACKET_ACK,
 };
@@ -28,6 +34,7 @@ use crate::{
 };
 
 const PACKET_REJECTION_SUMMARY_INTERVAL: Duration = Duration::from_secs(10);
+const MAX_DECODE_FAILURE_SAMPLES: usize = 4;
 
 enum EventQueueOutcome {
     Queued,
@@ -56,7 +63,53 @@ struct DecodedPacket {
     memory_reservation: Option<PacketMemoryReservation>,
 }
 
-pub(super) struct PacketRejections(Summary<[u64; 8]>);
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DecodeFailureSample {
+    message: String,
+    error: String,
+    count: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PacketRejectionWindow {
+    counts: [u64; 8],
+    decode_failures: Vec<DecodeFailureSample>,
+    additional_decode_failures: u64,
+}
+
+impl PacketRejectionWindow {
+    fn record(&mut self, kind: RejectionKind) {
+        let index = rejection_index(kind);
+        self.counts[index] = self.counts[index].saturating_add(1);
+    }
+
+    fn record_decode_failure(&mut self, message_id: MessageId, error: &LLUdpError) {
+        self.record(RejectionKind::Decode);
+        let message = format_message_id(message_id);
+        let error = error.to_string();
+        if let Some(sample) = self.decode_failures.iter_mut().find(|sample| sample.message == message && sample.error == error) {
+            sample.count = sample.count.saturating_add(1);
+        } else if self.decode_failures.len() < MAX_DECODE_FAILURE_SAMPLES {
+            self.decode_failures.push(DecodeFailureSample { message, error, count: 1 });
+        } else {
+            self.additional_decode_failures = self.additional_decode_failures.saturating_add(1);
+        }
+    }
+
+    fn format_decode_failures(&self) -> Option<String> {
+        if self.decode_failures.is_empty() {
+            return None;
+        }
+        let mut entries: Vec<String> =
+            self.decode_failures.iter().map(|sample| format!("{}: {} (x{})", sample.message, sample.error, sample.count)).collect();
+        if self.additional_decode_failures > 0 {
+            entries.push(format!("+{} more", self.additional_decode_failures));
+        }
+        Some(entries.join(", "))
+    }
+}
+
+pub(super) struct PacketRejections(Summary<PacketRejectionWindow>);
 
 impl Default for PacketRejections {
     fn default() -> Self {
@@ -66,29 +119,63 @@ impl Default for PacketRejections {
 
 impl PacketRejections {
     pub(super) fn flush(&mut self) {
-        if let Some(counts) = self.0.flush() {
-            report_packet_rejections(counts);
+        if let Some(window) = self.flush_window() {
+            report_packet_rejections(window);
         }
     }
 
+    fn flush_window(&mut self) -> Option<PacketRejectionWindow> {
+        self.0.flush()
+    }
+
     fn record(&mut self, kind: RejectionKind) {
-        let index = match kind {
-            RejectionKind::FrameInspection => 0,
-            RejectionKind::AcknowledgementAdmission => 1,
-            RejectionKind::DecodeAdmission => 2,
-            RejectionKind::Preflight => 3,
-            RejectionKind::RetainedMemoryAdmission => 4,
-            RejectionKind::Decode => 5,
-            RejectionKind::AllocationEstimateMismatch => 6,
-            RejectionKind::EventAdmission => 7,
-        };
-        if let Some(counts) = self.0.record(Instant::now().into_std(), |counts| counts[index] = counts[index].saturating_add(1)) {
-            report_packet_rejections(counts);
+        if let Some(window) = self.record_at(Instant::now().into_std(), kind) {
+            report_packet_rejections(window);
+        }
+    }
+
+    fn record_at(&mut self, now: time::Instant, kind: RejectionKind) -> Option<PacketRejectionWindow> {
+        self.0.record(now, |window| window.record(kind))
+    }
+
+    fn record_decode_failure(&mut self, message_id: MessageId, error: &LLUdpError) {
+        if let Some(window) = self.record_decode_failure_at(Instant::now().into_std(), message_id, error) {
+            report_packet_rejections(window);
+        }
+    }
+
+    fn record_decode_failure_at(&mut self, now: time::Instant, message_id: MessageId, error: &LLUdpError) -> Option<PacketRejectionWindow> {
+        self.0.record(now, |window| window.record_decode_failure(message_id, error))
+    }
+}
+
+fn rejection_index(kind: RejectionKind) -> usize {
+    match kind {
+        RejectionKind::FrameInspection => 0,
+        RejectionKind::AcknowledgementAdmission => 1,
+        RejectionKind::DecodeAdmission => 2,
+        RejectionKind::Preflight => 3,
+        RejectionKind::RetainedMemoryAdmission => 4,
+        RejectionKind::Decode => 5,
+        RejectionKind::AllocationEstimateMismatch => 6,
+        RejectionKind::EventAdmission => 7,
+    }
+}
+
+fn format_message_id(message_id: MessageId) -> String {
+    if let Some(schema) = SchemaMessage::schema_by_id(message_id) {
+        schema.name.to_owned()
+    } else {
+        match message_id.frequency {
+            Frequency::High => format!("High({})", message_id.number),
+            Frequency::Medium => format!("Medium({})", message_id.number),
+            Frequency::Low => format!("Low({})", message_id.number),
+            Frequency::Fixed => format!("Fixed({:#010x})", message_id.number),
         }
     }
 }
 
-fn report_packet_rejections(counts: [u64; 8]) {
+fn report_packet_rejections(window: PacketRejectionWindow) {
     let [
         frame_inspection,
         acknowledgement_admission,
@@ -98,7 +185,8 @@ fn report_packet_rejections(counts: [u64; 8]) {
         decode,
         allocation_estimate_mismatch,
         event_admission,
-    ] = counts;
+    ] = window.counts;
+    let decode_failures = window.format_decode_failures();
     if allocation_estimate_mismatch > 0 {
         tracing::error!(
             frame_inspection,
@@ -109,6 +197,7 @@ fn report_packet_rejections(counts: [u64; 8]) {
             decode,
             allocation_estimate_mismatch,
             event_admission,
+            decode_failures = decode_failures.as_deref(),
             "simulator packets rejected; allocation estimate mismatch"
         );
     } else {
@@ -121,6 +210,7 @@ fn report_packet_rejections(counts: [u64; 8]) {
             decode,
             allocation_estimate_mismatch,
             event_admission,
+            decode_failures = decode_failures.as_deref(),
             "simulator packets rejected"
         );
     }
@@ -216,19 +306,11 @@ impl ConnectionTask {
         let packet = match preflighted.decode() {
             Ok(packet) => packet,
             Err(error) => {
-                let reason = if matches!(error, LLUdpError::DecodedPacketTooLarge) {
-                    CoverageLossReason::AllocationEstimateMismatch
+                if matches!(error, LLUdpError::DecodedPacketTooLarge) {
+                    self.reject(RejectionKind::AllocationEstimateMismatch, CoverageLossReason::AllocationEstimateMismatch);
                 } else {
-                    CoverageLossReason::DecodeRejected
-                };
-                self.reject(
-                    if matches!(error, LLUdpError::DecodedPacketTooLarge) {
-                        RejectionKind::AllocationEstimateMismatch
-                    } else {
-                        RejectionKind::Decode
-                    },
-                    reason,
-                );
+                    self.reject_decode_failure(message_id, &error);
+                }
                 drop(memory_reservation);
                 drop(decode_permit);
                 return Ok(RunControl::Continue);
@@ -632,6 +714,16 @@ impl ConnectionTask {
         record_coverage_loss(&self.connection.coverage_losses, self.connection.simulator_id, CoverageSource::Lludp, reason);
     }
 
+    fn reject_decode_failure(&mut self, message_id: MessageId, error: &LLUdpError) {
+        self.packet_rejections.record_decode_failure(message_id, error);
+        record_coverage_loss(
+            &self.connection.coverage_losses,
+            self.connection.simulator_id,
+            CoverageSource::Lludp,
+            CoverageLossReason::DecodeRejected,
+        );
+    }
+
     fn note_application_admission_failure(&self, reason: &'static str) {
         if self.packet_memory.application_events().note_failure() {
             tracing::warn!(simulator = self.connection.simulator_id.get(), reason, "application event intake is under pressure");
@@ -679,5 +771,94 @@ fn queue_neighbor_channel_event(
         Err(TrySendError::Full(SimulatorEvent::SendCompleted { .. } | SimulatorEvent::Finished { .. })) => {
             unreachable!("only simulator events enter the neighbor event backlog")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches;
+
+    use protocol::schema::ids::{AGENT_MOVEMENT_COMPLETE, COMPLETE_PING_CHECK, OBJECT_UPDATE, START_PING_CHECK};
+
+    use super::*;
+
+    #[test]
+    fn decode_failure_records_known_schema_name_and_error() {
+        let mut rejections = PacketRejections::default();
+        let now = time::Instant::now();
+        let window = rejections
+            .record_decode_failure_at(now, OBJECT_UPDATE, &LLUdpError::TruncatedPacket)
+            .expect("first rejection reports immediately");
+
+        assert_eq!(window.counts[rejection_index(RejectionKind::Decode)], 1);
+        assert_eq!(window.decode_failures.len(), 1);
+        assert_eq!(window.decode_failures[0].message, "ObjectUpdate");
+        assert_eq!(window.decode_failures[0].error, LLUdpError::TruncatedPacket.to_string());
+        assert_eq!(window.decode_failures[0].count, 1);
+        assert_eq!(window.additional_decode_failures, 0);
+        let formatted = window.format_decode_failures().expect("decode failure summary");
+        assert!(formatted.contains("ObjectUpdate"));
+        assert!(formatted.contains(&LLUdpError::TruncatedPacket.to_string()));
+        assert!(formatted.contains("(x1)"));
+    }
+
+    #[test]
+    fn decode_failure_formats_unknown_message_id_without_schema() {
+        let mut rejections = PacketRejections::default();
+        let now = time::Instant::now();
+        let unknown_id = MessageId::low(0xfff0);
+        assert!(SchemaMessage::schema_by_id(unknown_id).is_none());
+
+        let window = rejections
+            .record_decode_failure_at(now, unknown_id, &LLUdpError::InvalidMessageId)
+            .expect("first rejection reports immediately");
+
+        assert_eq!(window.decode_failures.len(), 1);
+        assert_eq!(window.decode_failures[0].message, "Low(65520)");
+        assert_eq!(window.decode_failures[0].error, LLUdpError::InvalidMessageId.to_string());
+    }
+
+    #[test]
+    fn decode_failure_samples_are_bounded_and_aggregate_repeats() {
+        let mut rejections = PacketRejections::default();
+        let start = time::Instant::now();
+        assert_matches!(rejections.record_decode_failure_at(start, OBJECT_UPDATE, &LLUdpError::TruncatedPacket), Some(_));
+
+        let within_window = start + Duration::from_secs(1);
+        assert!(rejections.record_decode_failure_at(within_window, OBJECT_UPDATE, &LLUdpError::TruncatedPacket).is_none());
+        assert!(rejections.record_decode_failure_at(within_window, OBJECT_UPDATE, &LLUdpError::TruncatedPacket).is_none());
+        assert!(rejections.record_decode_failure_at(within_window, START_PING_CHECK, &LLUdpError::InvalidMessage).is_none());
+        assert!(rejections.record_decode_failure_at(within_window, COMPLETE_PING_CHECK, &LLUdpError::InvalidZeroCode).is_none());
+        assert!(rejections.record_decode_failure_at(within_window, AGENT_MOVEMENT_COMPLETE, &LLUdpError::InvalidSchemaMessage).is_none());
+        assert!(rejections.record_decode_failure_at(within_window, MessageId::low(0xfff1), &LLUdpError::InvalidMessageId).is_none());
+        assert!(rejections.record_decode_failure_at(within_window, MessageId::low(0xfff2), &LLUdpError::InvalidMessageId).is_none());
+
+        let window = rejections
+            .record_decode_failure_at(start + PACKET_REJECTION_SUMMARY_INTERVAL, OBJECT_UPDATE, &LLUdpError::TruncatedPacket)
+            .expect("summary reports when interval elapses");
+
+        assert_eq!(window.counts[rejection_index(RejectionKind::Decode)], 8);
+        assert_eq!(window.decode_failures.len(), MAX_DECODE_FAILURE_SAMPLES);
+        assert_eq!(window.decode_failures[0].message, "ObjectUpdate");
+        assert_eq!(window.decode_failures[0].count, 3);
+        assert_eq!(window.additional_decode_failures, 2);
+        let formatted = window.format_decode_failures().expect("decode failure summary");
+        assert!(formatted.contains("+2 more"));
+    }
+
+    #[test]
+    fn non_decode_rejection_categories_remain_unchanged() {
+        let mut rejections = PacketRejections::default();
+        let start = time::Instant::now();
+        let first = rejections.record_at(start, RejectionKind::FrameInspection).expect("first reports immediately");
+        assert_eq!(first.counts, [1, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(first.format_decode_failures().is_none());
+
+        let within = start + Duration::from_secs(1);
+        assert!(rejections.record_at(within, RejectionKind::Preflight).is_none());
+        assert!(rejections.record_at(within, RejectionKind::AllocationEstimateMismatch).is_none());
+        let flushed = rejections.flush_window().expect("pending rejections flush");
+        assert_eq!(flushed.counts, [0, 0, 0, 1, 0, 0, 1, 0]);
+        assert!(flushed.format_decode_failures().is_none());
     }
 }

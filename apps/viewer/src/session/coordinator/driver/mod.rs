@@ -228,8 +228,38 @@ pub(super) const MAX_DEFERRED_INVENTORY_EVENTS: usize = 128;
 const MAX_DEFERRED_INVENTORY_BYTES: usize = 96 * 1024 * 1024;
 pub(super) const MAX_DEFERRED_NETWORK_EVENT_BYTES: usize = 9 * 1024 * 1024;
 const SEND_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+const DECODE_REJECTION_LOSS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 const DROPPED_PUSH_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
+#[derive(Default, Debug, Eq, PartialEq)]
+struct DecodeRejectionLosses {
+    count: u64,
+    sample_simulator: Option<SimulatorId>,
+    sample_region: Option<u64>,
+    sample_source: Option<&'static str>,
+}
+
+impl DecodeRejectionLosses {
+    fn record(&mut self, simulator_id: SimulatorId, region: Option<u64>, source: &'static str) {
+        self.count = self.count.saturating_add(1);
+        self.sample_simulator = Some(simulator_id);
+        self.sample_region = region;
+        self.sample_source = Some(source);
+    }
+
+    fn report(self) {
+        let Some(simulator) = self.sample_simulator else { return };
+        tracing::warn!(
+            count = self.count,
+            simulator = simulator.get(),
+            region = self.sample_region,
+            source = self.sample_source,
+            reason = ?CoverageLossReason::DecodeRejected,
+            "world data may be incomplete"
+        );
+    }
+}
 
 #[derive(Default)]
 struct SendFailures {
@@ -372,6 +402,7 @@ struct SessionDriver {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     dropped_pushes: Summary<DroppedPushes>,
     send_failures: Summary<SendFailures>,
+    decode_rejection_losses: Summary<DecodeRejectionLosses>,
     assets: AssetCoordinator,
     terrain_received: bool,
     primary_simulator: Option<SimulatorId>,
@@ -604,6 +635,7 @@ impl SessionDriver {
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             dropped_pushes: Summary::new(DROPPED_PUSH_REPORT_INTERVAL),
             send_failures: Summary::new(SEND_FAILURE_REPORT_INTERVAL),
+            decode_rejection_losses: Summary::new(DECODE_REJECTION_LOSS_REPORT_INTERVAL),
             assets,
             terrain_received: false,
             primary_simulator: None,
@@ -1454,6 +1486,12 @@ impl SessionDriver {
                 };
                 if record.reason == CoverageLossReason::InventoryAdmission {
                     tracing::warn!(simulator = simulator_id.get(), source, "inventory data may be incomplete after intake overload");
+                } else if record.reason == CoverageLossReason::DecodeRejected {
+                    if let Some(due) = self.decode_rejection_losses.record(Instant::now(), |losses| {
+                        losses.record(simulator_id, region, source);
+                    }) {
+                        due.report();
+                    }
                 } else {
                     tracing::warn!(simulator = simulator_id.get(), region, source, reason = ?record.reason, "world data may be incomplete");
                 }
@@ -2012,6 +2050,9 @@ impl SessionDriver {
     fn flush_summaries(&mut self) {
         self.flush_inventory_summaries();
         if let Some(due) = self.send_failures.flush() {
+            due.report();
+        }
+        if let Some(due) = self.decode_rejection_losses.flush() {
             due.report();
         }
         #[cfg(any(target_os = "windows", target_os = "linux"))]
