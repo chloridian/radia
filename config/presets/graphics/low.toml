@@ -1,0 +1,6 @@
+[render]
+draw_distance = 128.0
+texture_soft_cap_mib = 512
+
+[scene]
+lod_factor = 0.75

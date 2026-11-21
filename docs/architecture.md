@@ -46,6 +46,12 @@ Unfinished network requests depend on their selected region route and cancel whe
 
 Assets declares cache namespaces and payload contracts, protects demanded entries with leases, and supplies eviction policy. Storage owns files, indexing, hashing, quotas, locking, and recovery. Generated prim geometry remains in Render's memory cache.
 
+### `crates/cvars`
+
+Owns typed configuration variables (`CvarDescriptor`, `CvarKey<T>`, `CvarRegistry`, `CvarSnapshot`) compiled and validated at build time from `config/cvars/*.toml` and embedded graphics presets from `config/presets/graphics/*.toml` so defaults and presets require no runtime I/O. It resolves values across five precedence layers (`Default`, `Preset`, `Global`, `StartupDeveloper`, `Session`), validates bounds and layer permissions atomically in batches, tracks provenance including pending restart-required changes, and publishes revisioned immutable snapshots. It has no workspace dependencies.
+
+`apps/viewer` persists `Global` overrides to `settings.toml` in the platform local-data directory (`%LOCALAPPDATA%\Radia\settings.toml` on Windows) using `toml_edit` so user comments, formatting, and unknown keys survive saves. Reads are bounded by file size, table count, and key count; malformed files or invalid known values are rejected atomically without modifying the file, falling back to defaults at startup or keeping the last valid configuration on reload. Saves check the on-disk content fingerprint before writing via `utils::write_atomic` on a background worker and abort with a conflict error rather than overwriting external edits. `SessionOnly` variables and `Session` overrides never write to disk, and `LOG` / `FILE_LOG` environment variables retain startup precedence over persisted logging CVars.
+
 ### `crates/llsd`
 
 Owns LLSD values, Serde integration, and XML, binary, and notation codecs. Decode limits bound input size, depth, value counts, and scalar/container sizes, including skipped values. Callers can tighten those limits for their admission budgets.
