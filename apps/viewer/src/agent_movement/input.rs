@@ -254,6 +254,10 @@ impl BodyRotation {
     }
 
     pub(crate) fn update(&mut self, seed: Option<(u64, Quat)>, yaw: f32, now: Instant) -> Quat {
+        self.update_with_turn_rate(seed, yaw, TURN_RATE, now)
+    }
+
+    pub(crate) fn update_with_turn_rate(&mut self, seed: Option<(u64, Quat)>, yaw: f32, turn_rate: f32, now: Instant) -> Quat {
         if let Some((generation, rotation)) = seed
             && self.seed != Some(generation)
             && let Some(rotation) = yaw_rotation(rotation)
@@ -264,7 +268,7 @@ impl BodyRotation {
         let dt = self.updated_at.map_or(Duration::ZERO, |previous| now.saturating_duration_since(previous).min(MAX_TURN_STEP));
         self.updated_at = Some(now);
         if yaw != 0.0 {
-            self.current = (Quat::from_rotation_z(yaw * TURN_RATE * dt.as_secs_f32()) * self.current).normalize();
+            self.current = (Quat::from_rotation_z(yaw * turn_rate * dt.as_secs_f32()) * self.current).normalize();
         }
         self.current
     }

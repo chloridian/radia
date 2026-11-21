@@ -8,6 +8,43 @@ persistent = true
 apply = "live"
 help = "Maximum distance in meters at which scene geometry and terrain are drawn."
 
+[render.field_of_view_deg]
+type = "f32"
+default = 60.0
+range = [30.0, 110.0]
+step = 1.0
+unit = "deg"
+persistent = true
+apply = "live"
+help = "Vertical camera field of view in degrees."
+
+[render.max_fps]
+type = "i64"
+default = 60
+range = [15, 240]
+unit = "fps"
+persistent = true
+apply = "live"
+help = "Maximum viewport frame rate in frames per second."
+
+[render.texture_soft_cap_mib]
+type = "i64"
+default = 1024
+range = [128, 4096]
+unit = "MiB"
+persistent = true
+apply = "live"
+help = "Target memory cap in MiB for decoded textures before background eviction."
+
+[render.mesh_memory_mib]
+type = "i64"
+default = 64
+range = [16, 1024]
+unit = "MiB"
+persistent = true
+apply = "restart_required"
+help = "GPU memory budget in MiB for resident scene meshes."
+
 [render.show_stats]
 type = "bool"
 default = false

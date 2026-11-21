@@ -3,7 +3,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cvars::{RENDER_DRAW_DISTANCE, SCENE_LOD_FACTOR};
+use cvars::{
+    CAMERA_FOCUS_DURATION_MS, CAMERA_FOLLOW_SMOOTHING_HALF_LIFE_S, CAMERA_INVERT_Y, CAMERA_ORBIT_SENSITIVITY, CvarSnapshot,
+    RENDER_DRAW_DISTANCE, RENDER_FIELD_OF_VIEW_DEG, SCENE_LOD_FACTOR,
+};
 use math::{DQuat, DVec3};
 use render::scene;
 use world::WorldPose;
@@ -13,6 +16,39 @@ use crate::agent_movement::{HeldControls, KeyBinding};
 const FOCUS_TIME: Duration = Duration::from_millis(400);
 const FOLLOW_SMOOTHING_HALF_LIFE: f64 = 0.02;
 const MAX_FOLLOW_SMOOTH_DISTANCE: f64 = 50.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CameraConfig {
+    pub(crate) fov_rad: f64,
+    pub(crate) focus_duration: Duration,
+    pub(crate) follow_smoothing_half_life_s: f64,
+    pub(crate) invert_y: bool,
+    pub(crate) orbit_sensitivity: f64,
+}
+
+impl Default for CameraConfig {
+    fn default() -> Self {
+        Self {
+            fov_rad: FRAC_PI_3,
+            focus_duration: FOCUS_TIME,
+            follow_smoothing_half_life_s: FOLLOW_SMOOTHING_HALF_LIFE,
+            invert_y: false,
+            orbit_sensitivity: 1.0,
+        }
+    }
+}
+
+impl CameraConfig {
+    pub(crate) fn from_snapshot(snapshot: &CvarSnapshot) -> Self {
+        Self {
+            fov_rad: f64::from(snapshot.get(RENDER_FIELD_OF_VIEW_DEG)).to_radians(),
+            focus_duration: Duration::from_millis(u64::try_from(snapshot.get(CAMERA_FOCUS_DURATION_MS)).unwrap_or(400)),
+            follow_smoothing_half_life_s: snapshot.get(CAMERA_FOLLOW_SMOOTHING_HALF_LIFE_S),
+            invert_y: snapshot.get(CAMERA_INVERT_Y),
+            orbit_sensitivity: snapshot.get(CAMERA_ORBIT_SENSITIVITY),
+        }
+    }
+}
 
 struct Transition {
     start: Instant,
@@ -27,6 +63,7 @@ pub(crate) struct OrbitCamera {
     transition: Option<Transition>,
     pub(crate) draw_distance: f32,
     pub(crate) lod_factor: f32,
+    pub(crate) config: CameraConfig,
 }
 
 pub(crate) struct FollowCamera {
@@ -36,6 +73,7 @@ pub(crate) struct FollowCamera {
     focus_offset: DVec3,
     offset: DVec3,
     minimum: f64,
+    pub(crate) config: CameraConfig,
 }
 
 impl Default for FollowCamera {
@@ -47,6 +85,7 @@ impl Default for FollowCamera {
             focus_offset: DVec3::new(1.0, 0.0, 1.0),
             offset: DVec3::new(-4.0, 0.0, -0.25),
             minimum: 0.5,
+            config: CameraConfig::default(),
         }
     }
 }
@@ -55,7 +94,7 @@ impl FollowCamera {
     #[cfg(test)]
     pub(crate) fn scene_camera(pose: WorldPose, viewport: [u32; 2], draw_distance: f32, lod_factor: f32) -> Option<scene::Camera> {
         let (position, focus) = Self::position_and_focus(pose);
-        Self::build_camera(position, focus, viewport, draw_distance, lod_factor)
+        Self::build_camera(position, focus, viewport, draw_distance, lod_factor, FRAC_PI_3)
     }
 
     pub(crate) fn follow(
@@ -67,11 +106,18 @@ impl FollowCamera {
         now: Instant,
     ) -> Option<scene::Camera> {
         let (position, focus) = self.advance(pose, now);
-        Self::build_camera(position, focus, viewport, draw_distance, lod_factor)
+        Self::build_camera(position, focus, viewport, draw_distance, lod_factor, self.config.fov_rad)
     }
 
-    fn build_camera(position: DVec3, focus: DVec3, viewport: [u32; 2], draw_distance: f32, lod_factor: f32) -> Option<scene::Camera> {
-        scene::Camera::new(position, (focus - position).as_vec3(), FRAC_PI_3, viewport)
+    fn build_camera(
+        position: DVec3,
+        focus: DVec3,
+        viewport: [u32; 2],
+        draw_distance: f32,
+        lod_factor: f32,
+        fov_rad: f64,
+    ) -> Option<scene::Camera> {
+        scene::Camera::new(position, (focus - position).as_vec3(), fov_rad, viewport)
             .and_then(|camera| camera.with_quality(f64::from(draw_distance), f64::from(lod_factor)))
             .ok()
     }
@@ -95,7 +141,9 @@ impl FollowCamera {
         if width <= 0.0 {
             return;
         }
-        let [dx, dy] = delta;
+        let sensitivity = self.config.orbit_sensitivity;
+        let dx = delta[0] * sensitivity;
+        let dy = delta[1] * sensitivity * if self.config.invert_y { -1.0 } else { 1.0 };
         let direction = -self.offset.normalize();
         let left = DVec3::Z.cross(direction).normalize_or(DVec3::Y);
         if control && shift {
@@ -129,13 +177,15 @@ impl FollowCamera {
         };
 
         let elapsed = self.updated_at.map_or(Duration::ZERO, |updated| now.saturating_duration_since(updated)).as_secs_f64();
-        let fraction = 1.0 - 2.0_f64.powf(-elapsed / FOLLOW_SMOOTHING_HALF_LIFE);
+        let half_life = self.config.follow_smoothing_half_life_s.max(1e-6);
+        let fraction = 1.0 - 2.0_f64.powf(-elapsed / half_life);
         if let Some(transition) = &self.transition {
+            let focus_duration = self.config.focus_duration;
             let elapsed = now.saturating_duration_since(transition.start);
-            if elapsed >= FOCUS_TIME {
+            if elapsed >= focus_duration || focus_duration.is_zero() {
                 self.transition = None;
             } else {
-                let fraction = elapsed.as_secs_f64() / FOCUS_TIME.as_secs_f64();
+                let fraction = elapsed.as_secs_f64() / focus_duration.as_secs_f64();
                 let fraction = fraction * fraction * (3.0 - 2.0 * fraction);
                 let position = transition.position.lerp(target_position, fraction);
                 let focus = transition.focus.lerp(target_focus, fraction);
@@ -158,9 +208,10 @@ impl FollowCamera {
     pub(crate) fn current_position_and_focus(&self, pose: WorldPose, now: Instant) -> (DVec3, DVec3) {
         let (target_position, target_focus) = self.target_position_and_focus(pose);
         if let Some(transition) = &self.transition {
+            let focus_duration = self.config.focus_duration;
             let elapsed = now.saturating_duration_since(transition.start);
-            if elapsed < FOCUS_TIME {
-                let fraction = elapsed.as_secs_f64() / FOCUS_TIME.as_secs_f64();
+            if !focus_duration.is_zero() && elapsed < focus_duration {
+                let fraction = elapsed.as_secs_f64() / focus_duration.as_secs_f64();
                 let fraction = fraction * fraction * (3.0 - 2.0 * fraction);
                 return (transition.position.lerp(target_position, fraction), transition.focus.lerp(target_focus, fraction));
             }
@@ -169,7 +220,9 @@ impl FollowCamera {
     }
 
     pub(crate) fn moving(&self, pose: WorldPose, now: Instant) -> bool {
-        if self.transition.as_ref().is_some_and(|transition| now.saturating_duration_since(transition.start) < FOCUS_TIME) {
+        if self.transition.as_ref().is_some_and(|transition| {
+            !self.config.focus_duration.is_zero() && now.saturating_duration_since(transition.start) < self.config.focus_duration
+        }) {
             return true;
         }
         let (target_position, target_focus) = self.target_position_and_focus(pose);
@@ -185,7 +238,9 @@ impl FollowCamera {
 
 impl OrbitCamera {
     pub(crate) fn moving(&self, now: Instant) -> bool {
-        self.transition.as_ref().is_some_and(|transition| now.saturating_duration_since(transition.start) < FOCUS_TIME)
+        self.transition.as_ref().is_some_and(|transition| {
+            !self.config.focus_duration.is_zero() && now.saturating_duration_since(transition.start) < self.config.focus_duration
+        })
     }
     pub(crate) fn new(position: DVec3) -> Self {
         Self {
@@ -195,16 +250,17 @@ impl OrbitCamera {
             transition: None,
             draw_distance: RENDER_DRAW_DISTANCE.default_value(),
             lod_factor: SCENE_LOD_FACTOR.default_value(),
+            config: CameraConfig::default(),
         }
     }
 
     pub(crate) fn from_follow_view(position: DVec3, focus: DVec3, draw_distance: f32, lod_factor: f32) -> Self {
-        Self { focus, offset: position - focus, minimum: 0.5, transition: None, draw_distance, lod_factor }
+        Self { focus, offset: position - focus, minimum: 0.5, transition: None, draw_distance, lod_factor, config: CameraConfig::default() }
     }
 
     pub(crate) fn scene_camera(&self, viewport: [u32; 2], now: Instant) -> Option<scene::Camera> {
         let (position, focus) = self.position_and_focus(now);
-        scene::Camera::new(position, (focus - position).as_vec3(), FRAC_PI_3, viewport)
+        scene::Camera::new(position, (focus - position).as_vec3(), self.config.fov_rad, viewport)
             .and_then(|camera| camera.with_quality(f64::from(self.draw_distance), f64::from(self.lod_factor)))
             .ok()
     }
@@ -214,7 +270,11 @@ impl OrbitCamera {
         let Some(transition) = &self.transition else {
             return (position, self.focus);
         };
-        let time = now.saturating_duration_since(transition.start).as_secs_f64() / FOCUS_TIME.as_secs_f64();
+        let focus_duration = self.config.focus_duration;
+        if focus_duration.is_zero() {
+            return (position, self.focus);
+        }
+        let time = now.saturating_duration_since(transition.start).as_secs_f64() / focus_duration.as_secs_f64();
         if time >= 1.0 {
             return (position, self.focus);
         }
@@ -241,7 +301,9 @@ impl OrbitCamera {
         if width <= 0.0 {
             return;
         }
-        let [dx, dy] = delta;
+        let sensitivity = self.config.orbit_sensitivity;
+        let dx = delta[0] * sensitivity;
+        let dy = delta[1] * sensitivity * if self.config.invert_y { -1.0 } else { 1.0 };
         let direction = -self.offset.normalize();
         let left = DVec3::Z.cross(direction).normalize_or(DVec3::Y);
         if control && shift {

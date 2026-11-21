@@ -1,8 +1,26 @@
-[asset.texture_soft_cap_mib]
+[asset.disk_cache_capacity_mib]
 type = "i64"
-default = 512
-range = [128, 4096]
+default = 1024
+range = [64, 16384]
 unit = "MiB"
 persistent = true
-apply = "live"
-help = "Target memory cap in MiB for decoded textures before background eviction."
+apply = "restart_required"
+help = "Maximum on-disk asset cache size in MiB."
+
+[asset.work_budget_mib]
+type = "i64"
+default = 512
+range = [64, 4096]
+unit = "MiB"
+persistent = true
+apply = "restart_required"
+help = "CPU memory budget in MiB for in-flight asset decoding and staging."
+
+[asset.texture_work_budget_mib]
+type = "i64"
+default = 192
+range = [32, 2048]
+unit = "MiB"
+persistent = true
+apply = "restart_required"
+help = "CPU memory budget in MiB for in-flight texture decoding."
