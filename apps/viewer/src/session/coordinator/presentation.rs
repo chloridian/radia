@@ -168,7 +168,6 @@ pub(crate) struct FavoritesUpdate {
     pub(crate) grid: Grid,
     pub(crate) agent_id: Uuid,
     pub(crate) session_id: Uuid,
-    pub(crate) username: String,
     pub(crate) result: Result<Vec<FavoriteLocation>, FavoritesError>,
 }
 
