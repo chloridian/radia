@@ -3,13 +3,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use cvars::{RENDER_DRAW_DISTANCE, SCENE_LOD_FACTOR};
 use math::{DQuat, DVec3};
 use render::scene;
 use world::WorldPose;
 
 use crate::agent_movement::{HeldControls, KeyBinding};
 
-pub(crate) const DEFAULT_DRAW_DISTANCE: f32 = 512.0;
 const FOCUS_TIME: Duration = Duration::from_millis(400);
 const FOLLOW_SMOOTHING_HALF_LIFE: f64 = 0.02;
 const MAX_FOLLOW_SMOOTH_DISTANCE: f64 = 50.0;
@@ -193,8 +193,8 @@ impl OrbitCamera {
             offset: DVec3::new(-4.0, 0.0, 2.0),
             minimum: 0.5,
             transition: None,
-            draw_distance: DEFAULT_DRAW_DISTANCE,
-            lod_factor: 1.0,
+            draw_distance: RENDER_DRAW_DISTANCE.default_value(),
+            lod_factor: SCENE_LOD_FACTOR.default_value(),
         }
     }
 

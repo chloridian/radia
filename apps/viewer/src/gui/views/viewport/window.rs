@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use cvars::{CvarRegistry, LOG_LEVEL, LOG_NOISY_NETWORK, Layer, RENDER_DRAW_DISTANCE, RENDER_SHOW_STATS, SCENE_LOD_FACTOR, ValueDomain};
 use futures::{StreamExt, channel::mpsc as async_mpsc};
 use prism::{
     Anchor, AnyElement, Bounds, Context, DevicePixels, DispatchPhase, Entity, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent,
@@ -46,7 +47,7 @@ use super::{
 };
 use crate::{
     agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
-    camera::{CameraMode, DEFAULT_DRAW_DISTANCE, FollowCamera, OrbitCamera, handle_keyboard_input},
+    camera::{CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input},
     gui::{scene as gui_scene, window_geometry},
     inventory::environments::EnvironmentMenu,
     logging::{LogControl, LogLevel},
@@ -114,6 +115,7 @@ pub(crate) struct SceneView {
     dirty: bool,
     ready: bool,
     failed: bool,
+    cvars: CvarRegistry,
     lod_factor: f32,
     draw_distance: f32,
     camera: Option<OrbitCamera>,
@@ -157,11 +159,15 @@ impl SceneView {
         );
 
         let (texture_sender, texture_receiver) = mpsc::sync_channel(2);
-        let lod_factor = 1.0;
-        let draw_distance = DEFAULT_DRAW_DISTANCE;
+        let cvars = CvarRegistry::new();
+        let lod_factor = cvars.get(SCENE_LOD_FACTOR);
+        let draw_distance = cvars.get(RENDER_DRAW_DISTANCE);
+        let show_stats = cvars.get(RENDER_SHOW_STATS);
+        let (lod_min, lod_max, lod_step) = f32_slider_bounds(SCENE_LOD_FACTOR.descriptor().domain);
+        let (draw_min, draw_max, draw_step) = f32_slider_bounds(RENDER_DRAW_DISTANCE.descriptor().domain);
 
-        let lod_slider = cx.new(|_| SliderState::new().min(0.25).max(4.0).step(0.05).default_value(lod_factor));
-        let draw_distance_slider = cx.new(|_| SliderState::new().min(32.0).max(1024.0).step(8.0).default_value(draw_distance));
+        let lod_slider = cx.new(|_| SliderState::new().min(lod_min).max(lod_max).step(lod_step).default_value(lod_factor));
+        let draw_distance_slider = cx.new(|_| SliderState::new().min(draw_min).max(draw_max).step(draw_step).default_value(draw_distance));
 
         let initial_sky = sky_options(None);
         let initial_water = water_options(None);
@@ -180,10 +186,14 @@ impl SceneView {
                 this.handle_focus_lost(window, cx);
             }
         }));
-        subscriptions.push(cx.subscribe(&lod_slider, |this, _, event: &SliderEvent, cx| {
+        subscriptions.push(cx.subscribe(&lod_slider, move |this, _, event: &SliderEvent, cx| {
             let SliderEvent::Change(value) = event else { return };
-            let next = value.end().clamp(0.25, 4.0);
+            let next = value.end().clamp(lod_min, lod_max);
             if (this.lod_factor - next).abs() > f32::EPSILON {
+                if let Err(error) = this.cvars.set(SCENE_LOD_FACTOR, Layer::Session, next) {
+                    tracing::warn!(%error, "failed to update scene.lod_factor CVar");
+                    return;
+                }
                 this.lod_factor = next;
                 if let Some(camera) = &mut this.camera {
                     camera.lod_factor = next;
@@ -192,10 +202,14 @@ impl SceneView {
                 cx.notify();
             }
         }));
-        subscriptions.push(cx.subscribe(&draw_distance_slider, |this, _, event: &SliderEvent, cx| {
+        subscriptions.push(cx.subscribe(&draw_distance_slider, move |this, _, event: &SliderEvent, cx| {
             let SliderEvent::Change(value) = event else { return };
-            let next = value.end().clamp(32.0, 1024.0);
+            let next = value.end().clamp(draw_min, draw_max);
             if (this.draw_distance - next).abs() > f32::EPSILON {
+                if let Err(error) = this.cvars.set(RENDER_DRAW_DISTANCE, Layer::Session, next) {
+                    tracing::warn!(%error, "failed to update render.draw_distance CVar");
+                    return;
+                }
                 this.draw_distance = next;
                 if let Some(camera) = &mut this.camera {
                     camera.draw_distance = next;
@@ -224,6 +238,10 @@ impl SceneView {
         }));
         subscriptions.push(cx.subscribe(&log_level_select, |this, _, event: &SelectEvent<Vec<LogLevelOption>>, cx| {
             if let SelectEvent::Confirm(Some(level)) = event {
+                if let Err(error) = this.cvars.set(LOG_LEVEL, Layer::Session, level.directive()) {
+                    tracing::warn!(%error, "failed to update log.level CVar");
+                    return;
+                }
                 this.log_control.set_level(*level);
                 cx.notify();
             }
@@ -270,6 +288,7 @@ impl SceneView {
             dirty: true,
             ready: false,
             failed: false,
+            cvars,
             lod_factor,
             draw_distance,
             camera: None,
@@ -288,7 +307,7 @@ impl SceneView {
             sky_options_cache: initial_sky,
             water_options_cache: initial_water,
             environment_menu: None,
-            show_stats: false,
+            show_stats,
             log_level_select,
             log_control: config.log_control,
             _subscriptions: subscriptions,
@@ -966,6 +985,10 @@ impl SceneView {
                                 Switch::new("show-stats-toggle").checked(show_stats).on_click(move |checked, _, cx| {
                                     let checked = *checked;
                                     view_for_stats.update(cx, |view, cx| {
+                                        if let Err(error) = view.cvars.set(RENDER_SHOW_STATS, Layer::Session, checked) {
+                                            tracing::warn!(%error, "failed to update render.show_stats CVar");
+                                            return;
+                                        }
                                         view.show_stats = checked;
                                         cx.notify();
                                     });
@@ -978,6 +1001,10 @@ impl SceneView {
                                 Switch::new("noisy-logs-toggle").checked(noisy_network).on_click(move |checked, _, cx| {
                                     let checked = *checked;
                                     view_for_noisy.update(cx, |view, cx| {
+                                        if let Err(error) = view.cvars.set(LOG_NOISY_NETWORK, Layer::Session, checked) {
+                                            tracing::warn!(%error, "failed to update log.noisy_network CVar");
+                                            return;
+                                        }
                                         view.log_control.set_noisy_network(checked);
                                         cx.notify();
                                     });
@@ -1195,4 +1222,11 @@ fn estimate_viewport_size(window: &Window) -> [u32; 2] {
 
 fn deadline_passed(deadline: Option<Instant>, now: Instant) -> bool {
     deadline.is_some_and(|deadline| now >= deadline)
+}
+
+fn f32_slider_bounds(domain: ValueDomain) -> (f32, f32, f32) {
+    match domain {
+        ValueDomain::F32 { min, max, step } => (min, max, step.unwrap_or(1.0)),
+        _ => unreachable!("slider CVar must use f32 domain"),
+    }
 }
