@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    mem,
     ops::Bound::{Excluded, Unbounded},
 };
 
@@ -66,8 +67,9 @@ pub(in crate::scene) struct MeshPlanner {
     meshes: MeshCache,
     targets: HashMap<Entity, MeshTarget>,
     target_users: HashMap<MeshKey, HashSet<Entity>>,
+    rejected: HashSet<Entity>,
+    last_retry_capacity_revision: Option<u64>,
     scan: ScanState,
-    deferred_switch: bool,
 }
 
 impl MeshPlanner {
@@ -77,8 +79,9 @@ impl MeshPlanner {
             meshes: MeshCache::new(budget),
             targets: HashMap::new(),
             target_users: HashMap::new(),
+            rejected: HashSet::new(),
+            last_retry_capacity_revision: None,
             scan: ScanState::Idle { dirty: false },
-            deferred_switch: false,
         }
     }
 
@@ -124,40 +127,119 @@ impl MeshPlanner {
     }
 
     pub(in crate::scene) fn has_work(&self) -> bool {
-        self.camera.is_some() && (!matches!(self.scan, ScanState::Idle { dirty: false }) || self.meshes.has_updates())
+        self.camera.is_some()
+            && (!matches!(self.scan, ScanState::Idle { dirty: false }) || self.meshes.has_updates() || self.has_capacity_retry())
     }
 
     pub(in crate::scene) fn waiting(&self) -> bool {
-        self.meshes.waiting() || self.targets.values().any(|target| !target.admitted)
+        self.meshes.waiting()
     }
 
     pub(in crate::scene) fn retry_admission(&mut self) -> bool {
-        let deferred = self.deferred_switch || self.targets.values().any(|target| !target.admitted);
-        if deferred {
-            self.invalidate_scan();
+        self.has_capacity_retry()
+    }
+
+    fn has_capacity_retry(&self) -> bool {
+        !self.rejected.is_empty() && self.last_retry_capacity_revision != Some(self.meshes.capacity_revision())
+    }
+
+    fn record_rejected(&mut self, entity: Entity) {
+        self.rejected.insert(entity);
+        self.last_retry_capacity_revision = Some(self.meshes.capacity_revision());
+    }
+
+    fn retry_rejected(&mut self, camera: Camera, mirror: &Mirror, changes: &mut Vec<MeshChange>) {
+        let candidates = mem::take(&mut self.rejected);
+        for entity in candidates {
+            let Some(object) = mirror.objects.get(&entity) else {
+                self.detach_target(entity);
+                continue;
+            };
+            if !mirror.object_visible(entity) {
+                if let Some(target) = self.detach_target(entity) {
+                    changes.push(MeshChange::Clear(entity, target.key));
+                }
+                continue;
+            }
+            self.reconcile_entity(camera, entity, object, changes);
         }
-        deferred
+        self.last_retry_capacity_revision = if self.rejected.is_empty() { None } else { Some(self.meshes.capacity_revision()) };
+    }
+
+    fn reconcile_entity(&mut self, camera: Camera, entity: Entity, object: &Object, changes: &mut Vec<MeshChange>) {
+        let desired = self.desired(camera, object);
+        let priority = object_priority(camera, object);
+        let current = self.targets.get(&entity).map(|target| target.key);
+        if current != desired {
+            if let Some(key) = desired {
+                let admitted = self.meshes.request(key, priority);
+                if admitted || current.is_none() {
+                    self.detach_target(entity);
+                    self.targets.insert(entity, MeshTarget { key, sent: None, admitted, priority });
+                    self.target_users.entry(key).or_default().insert(entity);
+                    if admitted {
+                        self.rejected.remove(&entity);
+                    } else {
+                        self.record_rejected(entity);
+                    }
+                } else {
+                    self.record_rejected(entity);
+                }
+            } else {
+                self.rejected.remove(&entity);
+                if let Some(target) = self.detach_target(entity) {
+                    changes.push(MeshChange::Clear(entity, target.key));
+                }
+            }
+        } else if let Some(target) = self.targets.get_mut(&entity) {
+            if !target.admitted {
+                target.admitted = self.meshes.request(target.key, priority);
+                if target.admitted {
+                    self.rejected.remove(&entity);
+                } else {
+                    self.record_rejected(entity);
+                }
+            } else {
+                self.rejected.remove(&entity);
+            }
+        } else {
+            self.rejected.remove(&entity);
+        }
+        if let Some(target) = self.targets.get_mut(&entity) {
+            target.priority = priority;
+            self.meshes.prioritize(target.key, target.priority);
+            let state = if target.admitted { self.meshes.get(target.key) } else { PreparedMesh::Capacity };
+            let stamp = mesh_stamp(&state);
+            if target.sent != Some(stamp) {
+                changes.push(MeshChange::Set(entity, target.key, state));
+                target.sent = Some(stamp);
+            }
+        }
     }
 
     pub(in crate::scene) fn step(&mut self, mirror: &Mirror, identities: &BTreeMap<Uuid, Entity>) -> Vec<MeshChange> {
         let Some(camera) = self.camera else {
             return Vec::new();
         };
+        let mut changes = Vec::new();
         let cursor = match self.scan {
             ScanState::Idle { dirty: false } => {
-                let mut changes = Vec::new();
+                if self.has_capacity_retry() {
+                    self.retry_rejected(camera, mirror, &mut changes);
+                }
                 self.publish_cache_updates(&mut changes);
                 return changes;
             }
             ScanState::Idle { dirty: true } => {
                 self.meshes.begin_priority_generation();
-                self.deferred_switch = false;
                 self.scan = ScanState::Scanning { cursor: None, rescan: false };
                 None
             }
             ScanState::Scanning { cursor, .. } => cursor,
         };
-        let mut changes = Vec::new();
+        if self.has_capacity_retry() {
+            self.retry_rejected(camera, mirror, &mut changes);
+        }
         let mut entries = identities.range((cursor.map_or(Unbounded, Excluded), Unbounded));
         let mut finished = false;
         for _ in 0..128 {
@@ -169,50 +251,14 @@ impl MeshPlanner {
                 *cursor = Some(*id);
             }
             if !mirror.object_visible(*entity) {
+                self.rejected.remove(entity);
                 if let Some(target) = self.detach_target(*entity) {
                     changes.push(MeshChange::Clear(*entity, target.key));
                 }
                 continue;
             }
             let object = &mirror.objects[entity];
-            let desired = self.desired(camera, object);
-            let priority = object_priority(camera, object);
-            let current = self.targets.get(entity).map(|target| target.key);
-            if current != desired {
-                if let Some(key) = desired {
-                    let admitted = self.meshes.request(key, priority);
-                    if admitted || current.is_none() {
-                        self.detach_target(*entity);
-                        self.targets.insert(*entity, MeshTarget { key, sent: None, admitted, priority });
-                        self.target_users.entry(key).or_default().insert(*entity);
-                    } else {
-                        self.deferred_switch = true;
-                    }
-                } else if let Some(target) = self.detach_target(*entity) {
-                    changes.push(MeshChange::Clear(*entity, target.key));
-                }
-            }
-            if current == desired
-                && let Some(target) = self.targets.get_mut(entity)
-                && !target.admitted
-            {
-                target.admitted = self.meshes.request(target.key, priority);
-            }
-            if let Some(target) = self.targets.get_mut(entity) {
-                target.priority = priority;
-                self.meshes.prioritize(target.key, target.priority);
-                let state = if target.admitted { self.meshes.get(target.key) } else { PreparedMesh::Capacity };
-                let stamp = match &state {
-                    PreparedMesh::Pending => Stamp::Pending,
-                    PreparedMesh::Ready(_) => Stamp::Ready,
-                    PreparedMesh::Failed(error) => Stamp::Failed(*error),
-                    PreparedMesh::Capacity => Stamp::Capacity,
-                };
-                if target.sent != Some(stamp) {
-                    changes.push(MeshChange::Set(*entity, target.key, state));
-                    target.sent = Some(stamp);
-                }
-            }
+            self.reconcile_entity(camera, *entity, object, &mut changes);
         }
         if finished {
             let dirty = match self.scan {
@@ -233,6 +279,7 @@ impl MeshPlanner {
     }
 
     fn detach_target(&mut self, entity: Entity) -> Option<MeshTarget> {
+        self.rejected.remove(&entity);
         let target = self.targets.remove(&entity)?;
         if target.admitted {
             self.meshes.release(target.key);
@@ -272,6 +319,9 @@ impl MeshPlanner {
                 if let Some(fallback) = fallback {
                     self.detach_target(entity);
                     let admitted = self.meshes.request(fallback, priority);
+                    if !admitted {
+                        self.record_rejected(entity);
+                    }
                     let mut target = MeshTarget { key: fallback, sent: None, admitted, priority };
                     let state = if admitted { self.meshes.get(fallback) } else { PreparedMesh::Capacity };
                     target.sent = Some(mesh_stamp(&state));
@@ -478,10 +528,12 @@ mod tests {
         let changes = planner.step(&mirror, &identities);
         apply_changes(&mut mirror, &changes);
         assert_matches!(mesh_state(&mirror.objects[&target]), Some((key, MeshStatus::Capacity)) if key == low);
-        assert!(planner.retry_admission());
-        assert!(planner.has_work());
+        assert!(!planner.retry_admission());
+        assert!(!planner.has_work());
 
         planner.remove(blocker);
+        assert!(planner.retry_admission());
+        assert!(planner.has_work());
         mirror.objects.remove(&blocker);
         identities.remove(&Uuid::from_u128(1));
         let changes = planner.step(&mirror, &identities);
@@ -520,9 +572,155 @@ mod tests {
         apply_changes(&mut mirror, &changes);
 
         assert_eq!(planner.targets[&target].key, high);
-        assert!(planner.retry_admission(), "a rejected detail switch is retried");
+        assert!(!planner.retry_admission(), "a rejected detail switch waits for capacity to free");
         assert_eq!(mirror.objects[&target].mesh().map(|(key, _)| key), Some(DrawnMeshKey::Prim(high)));
         assert_matches!(mesh_state(&mirror.objects[&target]), Some((key, MeshStatus::Ready)) if key == high);
+    }
+
+    #[test]
+    fn rejected_request_admitted_after_capacity_freed() {
+        let budget = Budget::default();
+        let high = MeshKey { shape: PrimShape::default(), detail: Detail::High };
+        let low = MeshKey { shape: PrimShape::default(), detail: Detail::Low };
+        let mut planner = MeshPlanner::new_with_cache_bytes(budget.clone(), cache_limit(high));
+        let (mut mirror, mut identities) =
+            fixture(&[(1, Vec3::new(100.0, 0.0, 0.0), Vec3::splat(40.0)), (2, Vec3::new(100.0, 0.0, 0.0), Vec3::ONE)], &budget);
+        let blocker = identities[&Uuid::from_u128(1)];
+        let target = identities[&Uuid::from_u128(2)];
+        identities.remove(&Uuid::from_u128(2));
+        planner.set_camera(camera(0.0, 512.0));
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        complete_mesh(&mut planner);
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+
+        identities.insert(Uuid::from_u128(2), target);
+        planner.invalidate();
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        assert!(!planner.targets[&target].admitted);
+
+        planner.remove(blocker);
+        mirror.objects.remove(&blocker);
+        identities.remove(&Uuid::from_u128(1));
+        assert!(planner.has_work());
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        assert!(planner.targets[&target].admitted);
+
+        complete_mesh(&mut planner);
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        assert_matches!(mesh_state(&mirror.objects[&target]), Some((key, MeshStatus::Ready)) if key == low);
+    }
+
+    #[test]
+    fn rejected_request_does_no_repeated_work_while_full() {
+        let budget = Budget::default();
+        let high = MeshKey { shape: PrimShape::default(), detail: Detail::High };
+        let mut planner = MeshPlanner::new_with_cache_bytes(budget.clone(), cache_limit(high));
+        let (mut mirror, mut identities) =
+            fixture(&[(1, Vec3::new(100.0, 0.0, 0.0), Vec3::splat(40.0)), (2, Vec3::new(100.0, 0.0, 0.0), Vec3::ONE)], &budget);
+        let target = identities[&Uuid::from_u128(2)];
+        identities.remove(&Uuid::from_u128(2));
+        planner.set_camera(camera(0.0, 512.0));
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        complete_mesh(&mut planner);
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+
+        identities.insert(Uuid::from_u128(2), target);
+        planner.invalidate();
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        assert!(!planner.targets[&target].admitted);
+        assert!(!planner.has_work());
+        assert!(!planner.retry_admission());
+        assert!(!planner.waiting());
+        assert!(planner.step(&mirror, &identities).is_empty());
+    }
+
+    #[test]
+    fn rejected_irrelevant_request_is_dropped_on_retry() {
+        let budget = Budget::default();
+        let high = MeshKey { shape: PrimShape::default(), detail: Detail::High };
+        let mut planner = MeshPlanner::new_with_cache_bytes(budget.clone(), cache_limit(high));
+        let (mut mirror, mut identities) =
+            fixture(&[(1, Vec3::new(100.0, 0.0, 0.0), Vec3::splat(40.0)), (2, Vec3::new(100.0, 0.0, 0.0), Vec3::ONE)], &budget);
+        let blocker = identities[&Uuid::from_u128(1)];
+        let target = identities[&Uuid::from_u128(2)];
+        identities.remove(&Uuid::from_u128(2));
+        planner.set_camera(camera(0.0, 512.0));
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        complete_mesh(&mut planner);
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+
+        identities.insert(Uuid::from_u128(2), target);
+        planner.invalidate();
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        assert!(!planner.targets[&target].admitted);
+
+        mirror.objects.remove(&target);
+        identities.remove(&Uuid::from_u128(2));
+        planner.remove(blocker);
+        mirror.objects.remove(&blocker);
+        identities.remove(&Uuid::from_u128(1));
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        assert!(planner.start().is_none());
+        assert!(!planner.targets.contains_key(&target));
+        assert!(!planner.retry_admission());
+    }
+
+    #[test]
+    fn rejected_lod_switch_keeps_displayed_mesh_and_retries_when_capacity_frees() {
+        let budget = Budget::default();
+        let low = MeshKey { shape: PrimShape::default(), detail: Detail::Low };
+        let medium = MeshKey { shape: PrimShape::default(), detail: Detail::Medium };
+        let high = MeshKey { shape: PrimShape::default(), detail: Detail::High };
+        let mut planner = MeshPlanner::new_with_cache_bytes(budget.clone(), cache_limit(medium) + cache_limit(high));
+        let (mut mirror, mut identities) =
+            fixture(&[(1, Vec3::new(0.0, 100.0, 0.0), Vec3::splat(13.0)), (2, Vec3::new(0.0, 100.0, 0.0), Vec3::splat(80.0))], &budget);
+        let target = identities[&Uuid::from_u128(1)];
+        let blocker = identities[&Uuid::from_u128(2)];
+        planner.set_camera(camera(-300.0, 1024.0));
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        complete_mesh(&mut planner);
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        complete_mesh(&mut planner);
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        assert_matches!(mesh_state(&mirror.objects[&target]), Some((key, MeshStatus::Ready)) if key == medium);
+        assert_matches!(mesh_state(&mirror.objects[&blocker]), Some((key, MeshStatus::Ready)) if key == high);
+
+        planner.set_camera(camera(-600.0, 1024.0));
+        while planner.has_work() {
+            let changes = planner.step(&mirror, &identities);
+            apply_changes(&mut mirror, &changes);
+        }
+        assert_eq!(planner.targets[&target].key, medium);
+        assert_eq!(mirror.objects[&target].mesh().map(|(key, _)| key), Some(DrawnMeshKey::Prim(medium)));
+        assert!(!planner.retry_admission());
+
+        planner.remove(blocker);
+        mirror.objects.remove(&blocker);
+        identities.remove(&Uuid::from_u128(2));
+        assert!(planner.retry_admission());
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        assert_eq!(planner.targets[&target].key, low);
+        assert!(planner.targets[&target].admitted);
+        complete_mesh(&mut planner);
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        assert_matches!(mesh_state(&mirror.objects[&target]), Some((key, MeshStatus::Ready)) if key == low);
     }
 
     #[test]

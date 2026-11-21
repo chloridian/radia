@@ -100,6 +100,7 @@ pub(in crate::scene) struct MeshCache {
     updated: Vec<MeshKey>,
     bytes: usize,
     cache_bytes: usize,
+    capacity_revision: u64,
     priority_generation: u64,
     clock: u64,
 }
@@ -118,9 +119,18 @@ impl MeshCache {
             updated: Vec::new(),
             bytes: 0,
             cache_bytes: CACHE_BYTES,
+            capacity_revision: 0,
             priority_generation: 0,
             clock: 0,
         }
+    }
+
+    pub(in crate::scene) fn capacity_revision(&self) -> u64 {
+        self.capacity_revision
+    }
+
+    fn bump_capacity_revision(&mut self) {
+        self.capacity_revision = self.capacity_revision.wrapping_add(1);
     }
 
     #[cfg(test)]
@@ -170,8 +180,10 @@ impl MeshCache {
 
     pub(in crate::scene) fn prioritize(&mut self, key: MeshKey, priority: u32) {
         let mut changed = false;
+        let mut lowered_ready = false;
         if let Some(entry) = self.entries.get_mut(&key) {
             if entry.priority_generation != self.priority_generation {
+                lowered_ready = matches!(entry.state, State::Ready { .. }) && priority < entry.priority;
                 entry.priority = priority;
                 entry.priority_generation = self.priority_generation;
                 changed = true;
@@ -182,6 +194,9 @@ impl MeshCache {
         }
         if changed {
             self.reindex(key);
+        }
+        if lowered_ready {
+            self.bump_capacity_revision();
         }
     }
 
@@ -278,6 +293,7 @@ impl MeshCache {
         }
         let remove = entry.wanted == 0
             && matches!(&entry.state, State::Queued { .. } | State::Running(_) | State::Blocked { .. } | State::Failed(_));
+        let became_unused_ready = entry.wanted == 0 && matches!(&entry.state, State::Ready { .. });
         if remove {
             if let Some(entry) = self.entries.get(&key)
                 && let State::Running(cancelled) = &entry.state
@@ -289,9 +305,13 @@ impl MeshCache {
             self.running.retain(|running| *running != key);
             self.entries.remove(&key);
             self.bytes -= ENTRY_BYTES;
+            self.bump_capacity_revision();
             self.shrink_if_sparse();
         } else {
             self.reindex(key);
+            if became_unused_ready {
+                self.bump_capacity_revision();
+            }
         }
     }
 
@@ -433,6 +453,7 @@ impl MeshCache {
             self.reindex(key);
             self.evicted.push(key);
         }
+        self.bump_capacity_revision();
         self.shrink_if_sparse();
         true
     }
