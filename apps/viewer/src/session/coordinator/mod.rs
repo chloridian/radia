@@ -18,7 +18,7 @@ use self::input::select_drain_input;
 pub(crate) use self::inventory_intake::apply_udp;
 pub(crate) use self::{
     driver::{CredentialPersistence, drain_session},
-    persistence::{WriteLock, save_favorite_store, write_lock},
+    persistence::{WriteLock, write_lock},
     presentation::{
         AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionEnd, SessionReadyUpdate, ViewerUpdate,
     },

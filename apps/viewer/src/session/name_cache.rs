@@ -365,6 +365,60 @@ impl NameCache {
             .map_err(NameCacheError::from)
     }
 
+    pub(crate) fn seed_verified_logins(
+        &self,
+        entries: &[(Grid, String, AvatarId)],
+        now_ms: u64,
+    ) -> Result<SqliteReceipt<()>, NameCacheError> {
+        let updated_at_ms = validate_timestamp(now_ms)?;
+        let mut candidates: HashMap<(&'static str, String), Option<AvatarId>> = HashMap::new();
+        for (grid, username, agent_id) in entries {
+            let Some(normalized) = normalize_username(username) else {
+                continue;
+            };
+            let key = (grid.id(), normalized);
+            candidates
+                .entry(key)
+                .and_modify(|existing| {
+                    if *existing != Some(*agent_id) {
+                        *existing = None;
+                    }
+                })
+                .or_insert(Some(*agent_id));
+        }
+        let mut unambiguous = Vec::new();
+        let mut grids = Vec::new();
+        for ((grid_id, normalized), agent_id) in candidates {
+            if let Some(agent_id) = agent_id {
+                if !grids.contains(&grid_id) {
+                    grids.push(grid_id);
+                }
+                unambiguous.push((grid_id, normalized, agent_id));
+            }
+        }
+        let rows = unambiguous.len().saturating_add(grids.len()).clamp(1, MAX_BATCH_ROWS);
+        let bytes = unambiguous
+            .iter()
+            .map(|(_, normalized, _)| 48usize.saturating_add(normalized.len()))
+            .sum::<usize>()
+            .saturating_add(64)
+            .min(MAX_BATCH_BYTES);
+        let batch = SqliteBatch::new(rows, bytes, move |transaction| {
+            for (grid_id, normalized, agent_id) in &unambiguous {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO verified_logins (grid_id, normalized_username, agent_id, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![grid_id, normalized.as_str(), agent_id.as_bytes().as_slice(), updated_at_ms],
+                )?;
+            }
+            for grid_id in &grids {
+                prune_verified_logins_for_grid(transaction, grid_id, MAX_VERIFIED_LOGINS_PER_GRID)?;
+            }
+            Ok(())
+        })?;
+        self.db.submit_batches(vec![batch]).map_err(NameCacheError::from)
+    }
+
     pub(crate) fn lookup_verified_agent_id(&self, grid: Grid, username: &str) -> Result<SqliteReceipt<Option<AvatarId>>, NameCacheError> {
         let grid_id = grid.id();
         let normalized = normalize_username(username);

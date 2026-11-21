@@ -940,12 +940,11 @@ fn snapshot_moves_confirm_only_matches() {
     }
 }
 
-fn favorites_update(username: &str) -> FavoritesUpdate {
+fn favorites_update(session_id: Uuid) -> FavoritesUpdate {
     FavoritesUpdate {
         grid: network::Grid::Agni,
         agent_id: Uuid::from_u128(1),
-        session_id: Uuid::from_u128(2),
-        username: username.to_owned(),
+        session_id,
         result: Err(FavoritesError::MissingFavoritesFolder),
     }
 }
@@ -953,6 +952,8 @@ fn favorites_update(username: &str) -> FavoritesUpdate {
 #[tokio::test(flavor = "current_thread")]
 async fn completed_favorites_refresh_is_superseded() {
     let (mailbox, mut receiver) = PresentationMailbox::new(19);
+    let old_session = Uuid::from_u128(2);
+    let new_session = Uuid::from_u128(3);
     let (old_started, old_started_rx) = oneshot::channel();
     let (finish_old, finish_old_rx) = oneshot::channel();
     let (old_finished, old_finished_rx) = oneshot::channel();
@@ -960,7 +961,7 @@ async fn completed_favorites_refresh_is_superseded() {
         old_started.send(()).expect("test is waiting for the old worker");
         finish_old_rx.await.expect("test releases the old worker");
         old_finished.send(()).expect("test is waiting for old completion");
-        favorites_update("old")
+        favorites_update(old_session)
     });
     let mut current = Some(old);
     old_started_rx.await.expect("old worker started");
@@ -974,7 +975,7 @@ async fn completed_favorites_refresh_is_superseded() {
     let new = tokio::spawn(async move {
         new_started.send(()).expect("test is waiting for the new worker");
         finish_new_rx.await.expect("test releases the new worker");
-        favorites_update("new")
+        favorites_update(new_session)
     });
     current = Some(new);
     new_started_rx.await.expect("new worker started");
@@ -983,7 +984,7 @@ async fn completed_favorites_refresh_is_superseded() {
     publish_favorites_refresh(&mut current, &mailbox, result);
 
     let snapshot = receiver.next().await.expect("owner published the current result");
-    assert_eq!(snapshot.favorites.as_ref().map(|update| update.username.as_str()), Some("new"));
+    assert_eq!(snapshot.favorites.as_ref().map(|update| update.session_id), Some(new_session));
     assert!(current.is_none());
 }
 

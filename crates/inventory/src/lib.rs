@@ -10,6 +10,8 @@ use std::{error::Error, fmt};
 pub use self::{
     cache::{
         InventoryCache, InventoryCacheError, InventoryCacheLoad, InventoryCacheRestore, InventoryCacheRestoreProgress, InventoryCacheWrite,
+        LoginLandmark, LoginLandmarkCache, LoginLandmarkImportSnapshot, MAX_LOGIN_LANDMARK_IMPORT_SOURCE_KEY_BYTES,
+        MAX_LOGIN_LANDMARK_NAME_BYTES, MAX_LOGIN_LANDMARK_SLURL_BYTES, MAX_LOGIN_LANDMARKS_PER_AGENT,
     },
     mutation::{FolderFetchCommit, InventoryChild, InventoryPreparationCancellation, MAX_FOLDER_FETCH_CHILDREN, PreparedFolderFetch},
     snapshot::InventorySnapshot,

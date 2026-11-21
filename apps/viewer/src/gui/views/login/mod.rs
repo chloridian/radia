@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-use futures::{channel::oneshot, future::join};
+use futures::{channel::oneshot, executor, future::join};
 use inventory::{CategoryKey, FolderType, InventorySnapshot};
 use network::{AgentSession, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
 use prism::{
@@ -330,11 +330,16 @@ impl LoginScreen {
         let login_task = remembered_login::load(request.grid, cx);
         let background = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
-            let favorites_task = background.spawn(async move { load_favorites.then(favorite_store::load) });
-            let (login, favorite_store) = join(login_task, favorites_task).await;
+            let import_task = background.spawn(async move {
+                if !load_favorites {
+                    return None;
+                }
+                Some(executor::block_on(favorite_store::import_legacy_default()))
+            });
+            let (login, import_result) = join(login_task, import_task).await;
             this.update_in(cx, |screen, window, cx| {
-                if let Some(favorite_store) = favorite_store {
-                    screen.favorites.load(favorite_store);
+                if let Some(import_result) = import_result {
+                    screen.favorites.apply_import_result(import_result);
                 }
                 screen.finish_credential_load(request, login, window, cx);
             })
@@ -356,10 +361,9 @@ impl LoginScreen {
                     Ok(login) => (login, None),
                     Err(error) => (None, Some(error)),
                 };
-                let username = login.as_ref().map(|login| login.username.as_str()).unwrap_or("");
-                let favorites = self.favorites.for_username(request.grid, username);
-                self.set_remembered_login(login, favorites, window, cx);
+                self.set_remembered_login(login, Vec::new(), window, cx);
                 self.status.finish_credential_load(login_warning);
+                self.refresh_favorites(cx);
                 cx.notify();
             }
             CredentialLoadCompletion::Superseded(next) => self.load_credentials(next, false, window, cx),
@@ -382,10 +386,31 @@ impl LoginScreen {
     }
 
     fn refresh_favorites(&mut self, cx: &mut Context<Self>) {
-        let username = self.username.read(cx).value();
-        if self.favorites.refresh_for_username(self.credential_load.grid(), &username) {
-            cx.notify();
+        let grid = self.credential_load.grid();
+        let username = self.username.read(cx).value().to_string();
+        let generation = self.favorites.next_lookup_generation();
+        if username.trim().is_empty() {
+            if self.favorites.apply_lookup_result(generation, Vec::new()) {
+                cx.notify();
+            }
+            return;
         }
+        let background = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let locations =
+                background.spawn(async move { executor::block_on(favorite_store::load_for_username_default(grid, &username)) }).await;
+            if let Err(error) = this.update(cx, |screen, cx| {
+                if screen.active_session.is_some() {
+                    return;
+                }
+                if screen.favorites.apply_lookup_result(generation, locations) {
+                    cx.notify();
+                }
+            }) {
+                tracing::debug!(%error, "login screen dropped before favorite lookup finished");
+            }
+        })
+        .detach();
     }
 
     fn set_remembered_login(
@@ -655,14 +680,12 @@ impl LoginScreen {
                 (!snapshot.is_complete(folder.key)).then_some(folder.key)
             })
         };
-        let Some(active) = self.active_session.as_ref() else { return };
-        let mailbox = active.presentation_mailbox.clone();
+        let Some(_active) = self.active_session.as_ref() else { return };
         self.login_phase = LoginPhase::Idle;
         self.status.message = None;
         self.status.reveal_credential_warning();
 
-        let username = self.username.read(cx).value();
-        self.favorites.prepare_session(session.grid, session.agent_id, &username, Some(mailbox), cx);
+        self.favorites.prepare_session(session.grid, session.agent_id, self.session_generation, cx);
         let scene_inventory_updates = inventory_updates.clone();
         if let Some(active) = &mut self.active_session {
             active.ready = Some(ReadySession { session: session.clone(), inventory_updates, inventory_fetch });

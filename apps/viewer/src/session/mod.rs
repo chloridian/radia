@@ -19,7 +19,7 @@ pub(crate) use self::{
     agent_motion::{AgentMotionPublisher, AgentMotionSample},
     coordinator::{
         AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionEnd,
-        SessionReadyUpdate, ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,
+        SessionReadyUpdate, ViewerUpdate, WriteLock, drain_session, write_lock,
     },
     experience_environment::EnvironmentInbox,
     inbound::{ChatMessage, display_message, format_avatar_name},

@@ -6,17 +6,18 @@ use std::{
     },
 };
 
+use futures::executor;
 use network::Grid;
 use prism::Context;
 use uuid::Uuid;
 
-use super::{LoginScreen, spawn::favorites_for_username};
+use super::LoginScreen;
 use crate::{
     inventory::{
         FavoriteLocation,
-        favorite_store::{self, FavoriteStore, FavoriteStoreError},
+        favorite_store::{self, FavoriteStoreError},
     },
-    session::{FavoritesUpdate, PresentationMailbox, ViewerUpdate, WriteLock, save_favorite_store, write_lock},
+    session::{FavoritesUpdate, PresentationMailbox, ViewerUpdate},
 };
 
 #[derive(Clone, Debug)]
@@ -39,11 +40,9 @@ impl Display for FavoriteWarning {
 pub(super) struct Favorites {
     locations: Vec<FavoriteLocation>,
     displayed: Vec<FavoriteLocation>,
-    store: FavoriteStore,
     storage_warning: Option<FavoriteWarning>,
     refresh_warning: Option<FavoriteWarning>,
-    loaded: bool,
-    write_lock: WriteLock,
+    lookup_generation: u64,
     save_generation: Arc<AtomicU64>,
 }
 
@@ -52,23 +51,15 @@ impl Favorites {
         Self {
             locations: Vec::new(),
             displayed: Vec::new(),
-            store: FavoriteStore::default(),
             storage_warning: None,
             refresh_warning: None,
-            loaded: false,
-            write_lock: write_lock(),
+            lookup_generation: 0,
             save_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    pub(super) fn load(&mut self, result: Result<FavoriteStore, FavoriteStoreError>) {
-        let (store, warning) = match result {
-            Ok(store) => (store, None),
-            Err(error) => (FavoriteStore::default(), Some(error)),
-        };
-        self.store = store;
-        self.loaded = warning.is_none();
-        self.storage_warning = warning.map(FavoriteWarning::Storage);
+    pub(super) fn apply_import_result(&mut self, result: Result<(), FavoriteStoreError>) {
+        self.storage_warning = result.err().map(FavoriteWarning::Storage);
     }
 
     pub(super) fn locations(&self) -> &[FavoriteLocation] {
@@ -83,67 +74,66 @@ impl Favorites {
         self.displayed.clone_from(&self.locations);
     }
 
-    pub(super) fn for_username(&self, grid: Grid, username: &str) -> Vec<FavoriteLocation> {
-        favorites_for_username(&self.store, grid, username)
-    }
-
     pub(super) fn set_locations(&mut self, locations: Vec<FavoriteLocation>) {
         self.locations.clone_from(&locations);
         self.displayed = locations;
     }
 
-    pub(super) fn refresh_for_username(&mut self, grid: Grid, username: &str) -> bool {
-        let locations = self.for_username(grid, username);
-        if locations == self.locations {
+    pub(super) fn next_lookup_generation(&mut self) -> u64 {
+        self.lookup_generation = self.lookup_generation.wrapping_add(1);
+        self.lookup_generation
+    }
+
+    pub(super) fn apply_lookup_result(&mut self, generation: u64, locations: Vec<FavoriteLocation>) -> bool {
+        if generation != self.lookup_generation || locations == self.locations {
             return false;
         }
         self.locations = locations;
         true
     }
 
-    pub(super) fn prepare_session(
-        &mut self,
-        grid: Grid,
-        agent_id: Uuid,
-        username: &str,
-        mailbox: Option<PresentationMailbox>,
-        cx: &mut Context<LoginScreen>,
-    ) {
-        let identity_changed = match self.store.remember_agent(grid, agent_id, username) {
-            Ok(changed) => changed,
-            Err(error) => {
-                tracing::warn!(%error, "could not remember favorite account");
-                self.storage_warning = Some(FavoriteWarning::Storage(error));
-                false
-            }
-        };
-        self.locations = self.store.favorites_for(grid, agent_id).to_vec();
+    pub(super) fn prepare_session(&mut self, grid: Grid, agent_id: Uuid, session_generation: u64, cx: &mut Context<LoginScreen>) {
         self.refresh_warning = None;
-        if identity_changed && self.loaded {
-            self.storage_warning = None;
-            self.schedule_save(mailbox, self.store.clone(), cx);
-        }
+        let background = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let locations =
+                background.spawn(async move { executor::block_on(favorite_store::load_for_agent_default(grid, agent_id)) }).await;
+            if let Err(error) = this.update(cx, |screen, cx| {
+                if screen.session_generation != session_generation {
+                    return;
+                }
+                if screen.favorites.locations != locations {
+                    screen.favorites.locations = locations;
+                    cx.notify();
+                }
+            }) {
+                tracing::debug!(%error, "login screen dropped before session favorites loaded");
+            }
+        })
+        .detach();
     }
 
     pub(super) fn apply_update(&mut self, update: FavoritesUpdate, mailbox: Option<PresentationMailbox>, cx: &mut Context<LoginScreen>) {
-        if let Err(error) = favorite_store::apply_favorites_refresh(
-            &mut self.locations,
-            &mut self.store,
-            update.grid,
-            update.agent_id,
-            &update.username,
-            update.result,
-        ) {
+        let favorites = match update.result {
+            Ok(favorites) => favorites,
+            Err(error) => {
+                let error = FavoriteStoreError::Favorites(error);
+                tracing::warn!(%error, "could not apply favorite inventory refresh");
+                self.refresh_warning = Some(FavoriteWarning::Refresh(error));
+                return;
+            }
+        };
+        if let Err(reason) = favorite_store::validate_favorites(&favorites) {
+            let error = FavoriteStoreError::InvalidRefreshedValues(reason);
             tracing::warn!(%error, "could not apply favorite inventory refresh");
             self.refresh_warning = Some(FavoriteWarning::Refresh(error));
             return;
         }
 
+        self.locations.clone_from(&favorites);
         self.refresh_warning = None;
-        if self.loaded {
-            self.storage_warning = None;
-            self.schedule_save(mailbox, self.store.clone(), cx);
-        }
+        self.storage_warning = None;
+        self.schedule_save(mailbox, update.grid, update.agent_id, favorites, cx);
     }
 
     pub(super) fn apply_saved(&mut self, saved: Option<(u64, Result<(), FavoriteStoreError>)>) {
@@ -165,16 +155,24 @@ impl Favorites {
         self.storage_warning.iter().chain(self.refresh_warning.iter()).map(ToString::to_string).collect()
     }
 
-    fn schedule_save(&self, mailbox: Option<PresentationMailbox>, store: FavoriteStore, cx: &mut Context<LoginScreen>) {
+    fn schedule_save(
+        &self,
+        mailbox: Option<PresentationMailbox>,
+        grid: Grid,
+        agent_id: Uuid,
+        favorites: Vec<FavoriteLocation>,
+        cx: &mut Context<LoginScreen>,
+    ) {
         let Some(mailbox) = mailbox else { return };
-        let write_lock = self.write_lock.clone();
         let save_generation = Arc::clone(&self.save_generation);
         let generation = save_generation.fetch_add(1, Ordering::AcqRel) + 1;
         cx.background_executor()
             .spawn(async move {
-                if let Some(result) = save_favorite_store(store, write_lock, save_generation, generation).await {
-                    mailbox.publish(ViewerUpdate::FavoriteStoreSaved { generation, result });
+                if save_generation.load(Ordering::Acquire) != generation {
+                    return;
                 }
+                let result = executor::block_on(favorite_store::replace_for_agent_default(grid, agent_id, &favorites));
+                mailbox.publish(ViewerUpdate::FavoriteStoreSaved { generation, result });
             })
             .detach();
     }
