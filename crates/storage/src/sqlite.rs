@@ -32,6 +32,7 @@ pub enum SqliteError {
     Busy,
     Corrupt,
     SchemaMismatch,
+    UnsupportedSchemaVersion,
     QueueFull,
     BatchTooLarge { rows: usize, bytes: usize },
     WorkerStopped,
@@ -45,6 +46,7 @@ impl fmt::Debug for SqliteError {
             Self::Busy => formatter.write_str("Busy"),
             Self::Corrupt => formatter.write_str("Corrupt"),
             Self::SchemaMismatch => formatter.write_str("SchemaMismatch"),
+            Self::UnsupportedSchemaVersion => formatter.write_str("UnsupportedSchemaVersion"),
             Self::QueueFull => formatter.write_str("QueueFull"),
             Self::BatchTooLarge { rows, bytes } => {
                 formatter.debug_struct("BatchTooLarge").field("rows", rows).field("bytes", bytes).finish()
@@ -62,6 +64,7 @@ impl fmt::Display for SqliteError {
             Self::Busy => formatter.write_str("SQLite database is busy"),
             Self::Corrupt => formatter.write_str("SQLite database is corrupt"),
             Self::SchemaMismatch => formatter.write_str("SQLite schema does not match the consumer"),
+            Self::UnsupportedSchemaVersion => formatter.write_str("SQLite schema version is newer than supported"),
             Self::QueueFull => formatter.write_str("SQLite worker queue is full"),
             Self::BatchTooLarge { rows, bytes } => write!(formatter, "SQLite batch exceeds limits: {rows} rows, {bytes} bytes"),
             Self::WorkerStopped => formatter.write_str("SQLite worker stopped"),
@@ -90,6 +93,7 @@ impl From<io::Error> for SqliteError {
 #[derive(Debug)]
 pub enum MigrationError {
     SchemaMismatch,
+    UnsupportedSchemaVersion,
     Sqlite(rusqlite::Error),
 }
 
@@ -505,8 +509,9 @@ fn recreate_database(path: &Path, migrate: &Migration, reason: RecoveryReason) -
     drop(connection);
     drop(exclusive);
     let shared = open_shared_lock(path)?;
-    let connection = open_connection(path)?;
+    let mut connection = open_connection(path)?;
     check_database(&connection)?;
+    run_migration(&mut connection, migrate)?;
     Ok(OpenedDatabase { connection, lock: shared, status: OpenStatus::Recreated(reason) })
 }
 
@@ -543,6 +548,7 @@ fn run_migration(connection: &mut Connection, migrate: &Migration) -> Result<(),
     match migrate(connection) {
         Ok(()) => Ok(()),
         Err(MigrationError::SchemaMismatch) => Err(SqliteError::SchemaMismatch),
+        Err(MigrationError::UnsupportedSchemaVersion) => Err(SqliteError::UnsupportedSchemaVersion),
         Err(MigrationError::Sqlite(error)) => Err(map_sqlite_error(error)),
     }
 }

@@ -262,6 +262,9 @@ fn migrate(connection: &mut Connection, definitions: &[(String, String)]) -> Res
         transaction.commit()?;
         return Ok(());
     }
+    if version > INDEX_VERSION {
+        return Err(MigrationError::UnsupportedSchemaVersion);
+    }
     if version != INDEX_VERSION {
         return Err(MigrationError::SchemaMismatch);
     }
@@ -452,6 +455,9 @@ pub(super) fn map_sqlite_error(error: SqliteError) -> StorageError {
         SqliteError::BatchTooLarge { .. } => StorageError::TooLarge,
         SqliteError::Corrupt | SqliteError::SchemaMismatch => {
             StorageError::Io(io::Error::new(io::ErrorKind::InvalidData, "asset cache index was recreated"))
+        }
+        SqliteError::UnsupportedSchemaVersion => {
+            StorageError::Io(io::Error::new(io::ErrorKind::Unsupported, "asset cache index schema version is newer than supported"))
         }
         SqliteError::Unavailable(error) => StorageError::Io(error),
         SqliteError::Sqlite(rusqlite::Error::SqliteFailure(details, _)) if details.code == ErrorCode::OutOfMemory => {

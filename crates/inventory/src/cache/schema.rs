@@ -124,6 +124,7 @@ pub(super) fn migrate(connection: &mut Connection, identity: &CacheIdentity) -> 
             }
             transaction.commit()?;
         }
+        version if version > SCHEMA_VERSION => return Err(MigrationError::UnsupportedSchemaVersion),
         _ => return Err(MigrationError::SchemaMismatch),
     }
     Ok(())
