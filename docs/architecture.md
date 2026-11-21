@@ -16,9 +16,9 @@ The session intake task is the sole owner of mutable World and inventory state. 
 
 `main` creates the Tokio service runtime and starts GPUI. Networking owns a separate runtime and thread. Asset fetching and scene reconciliation run as service tasks; decoding, geometry generation, inventory preparation, and expensive reclamation use blocking workers. Queues, byte reservations, cancellation, and generation checks bound in-flight work and prevent stale results from crossing lifecycle boundaries.
 
-The scene viewport runs inside GPUI on the shared `wgpu` device. It owns `SceneView` and renderer state, draws to an offscreen texture composited through GPUI's surface element, and handles input, cursor capture, and window lifecycle directly on the GPUI thread. Obsolete session results are canceled or retired before publication.
+The scene viewport runs inside GPUI on the shared `wgpu` device and queue. It owns `SceneView` and renderer state, submits its offscreen scene pass during `SceneView::render` before GPUI composites that texture through its surface element on the same queue, and handles input, cursor capture, and window lifecycle directly on the GPUI thread. Obsolete session results are canceled or retired before publication.
 
-Shutdown disconnects the session, awaits scene shutdown and retained session-drain tasks, and completes asset and cache cleanup before stopping the service runtime. Drain tasks remain owned across login attempts. GPUI releases its shared cache reference before final cache shutdown.
+Shutdown releases GPUI's shared cache reference, retires the scene viewport synchronously, closes windows, disconnects the session, and awaits retained session-drain tasks before quitting GPUI; `main` then completes asset cache shutdown before stopping the service runtime. Drain tasks remain owned across login attempts.
 
 ## Code map
 
