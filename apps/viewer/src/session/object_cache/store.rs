@@ -125,6 +125,7 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError>
             transaction.commit()?;
         }
         SCHEMA_VERSION => validate_current_schema(connection)?,
+        version if version > SCHEMA_VERSION => return Err(MigrationError::UnsupportedSchemaVersion),
         _ => return Err(MigrationError::SchemaMismatch),
     }
     connection.pragma_update(None, "max_page_count", MAX_DATABASE_PAGES)?;
@@ -631,8 +632,7 @@ mod tests {
     #[test]
     fn damaged_schema_recreates_database() {
         for (case, foreign_version, damage) in [
-            ("version 2", Some(2), ""),
-            ("version 7", Some(7), ""),
+            ("version -1", Some(-1), ""),
             ("missing totals trigger", None, "DROP TRIGGER object_entries_totals_insert;"),
             (
                 "no-op totals trigger",
@@ -664,6 +664,30 @@ mod tests {
             let connection = Connection::open(&path).expect("reopen recreated database");
             let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).expect("read schema version");
             assert_eq!(version, SCHEMA_VERSION, "{case}");
+        }
+    }
+
+    #[test]
+    fn newer_schema_version_fails_safely_and_preserves_contents() {
+        for future_version in [SCHEMA_VERSION + 1, 7] {
+            let directory = tempfile::tempdir().expect("create isolated cache directory");
+            let path = directory.path().join("objects.sqlite");
+            let connection = Connection::open(&path).expect("create isolated SQLite database");
+            connection
+                .execute_batch(
+                    "CREATE TABLE future_entries (local_id INTEGER PRIMARY KEY); INSERT INTO future_entries (local_id) VALUES (42);",
+                )
+                .expect("create future schema");
+            connection.pragma_update(None, "user_version", future_version).expect("set future schema version");
+            drop(connection);
+
+            assert_matches!(open_at(&path), Err(SqliteError::UnsupportedSchemaVersion));
+
+            let connection = Connection::open(&path).expect("reopen preserved database");
+            let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).expect("read schema version");
+            let local_id: i64 = connection.query_row("SELECT local_id FROM future_entries", [], |row| row.get(0)).expect("read future row");
+            assert_eq!(version, future_version);
+            assert_eq!(local_id, 42);
         }
     }
 
