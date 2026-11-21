@@ -2,7 +2,7 @@ use std::{error::Error, io, path::Path, str};
 
 use futures::executor::block_on;
 use rusqlite::{
-    Connection, Row, Transaction, TransactionBehavior, ffi,
+    Connection, Row, Transaction, ffi,
     ffi::{ErrorCode, SQLITE_SCHEMA},
     params,
     types::{Type, ValueRef},
@@ -12,7 +12,7 @@ use super::{
     Key, MAX_EXTENSION_BYTES, MAX_NAMESPACE_BYTES, MAX_QUEUED_WRITES, MAX_VALUE_BYTES, NamespaceId, NamespaceTable, StorageError,
     UnavailableReason, valid_extension, valid_namespace,
 };
-use crate::sqlite::{MAX_BATCH_ROWS, MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError};
+use crate::sqlite::{MAX_BATCH_ROWS, MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError, StorageClass};
 
 const INDEX_VERSION: i64 = 1;
 pub(super) const MAX_ENTRIES: usize = 262_144;
@@ -51,9 +51,10 @@ impl Index {
         }
         let namespace_bytes = namespace_bytes(namespaces)?;
         let migration_definitions = definitions.clone();
-        let (db, _status): (SqliteDb, OpenStatus) =
-            SqliteDb::open(path, move |connection| migrate(connection, &migration_definitions).map_err(map_index_migration_error))
-                .map_err(map_sqlite_error)?;
+        let (db, _status): (SqliteDb, OpenStatus) = SqliteDb::open(path, StorageClass::Cache, move |connection| {
+            migrate(connection, &migration_definitions).map_err(map_index_migration_error)
+        })
+        .map_err(map_sqlite_error)?;
         let index = Self { db: Some(db), namespace_count: definitions.len(), namespace_bytes };
         let records = index.load_records().map_err(map_sqlite_error)?;
         Ok((index, records))
@@ -239,7 +240,7 @@ fn migrate(connection: &mut Connection, definitions: &[(String, String)]) -> Res
             return Err(MigrationError::SchemaMismatch);
         }
         connection.pragma_update(None, "auto_vacuum", "FULL")?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = connection.savepoint()?;
         transaction.execute_batch(
             "CREATE TABLE namespaces (
                 namespace INTEGER PRIMARY KEY CHECK(namespace >= 0 AND namespace <= 255),
@@ -269,7 +270,7 @@ fn migrate(connection: &mut Connection, definitions: &[(String, String)]) -> Res
         return Err(MigrationError::SchemaMismatch);
     }
 
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let transaction = connection.savepoint()?;
     if !valid_schema(&transaction)? {
         return Err(MigrationError::SchemaMismatch);
     }
@@ -339,23 +340,23 @@ fn map_index_migration_error(error: MigrationError) -> MigrationError {
     }
 }
 
-fn valid_schema(transaction: &Transaction<'_>) -> Result<bool, rusqlite::Error> {
-    let mut tables = transaction.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
+fn valid_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
+    let mut tables = connection.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
     let names = tables.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
     if names != ["entries", "namespaces"] {
         return Ok(false);
     }
     let executable_objects: i64 =
-        transaction.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type IN ('view', 'trigger')", [], |row| row.get(0))?;
+        connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type IN ('view', 'trigger')", [], |row| row.get(0))?;
     if executable_objects != 0 {
         return Ok(false);
     }
     if !valid_columns(
-        transaction,
+        connection,
         "namespaces",
         &[("namespace", "INTEGER", 0, 1), ("directory", "TEXT", 1, 0), ("extension", "TEXT", 1, 0)],
     )? || !valid_columns(
-        transaction,
+        connection,
         "entries",
         &[
             ("namespace", "INTEGER", 1, 1),
@@ -369,12 +370,12 @@ fn valid_schema(transaction: &Transaction<'_>) -> Result<bool, rusqlite::Error> 
         return Ok(false);
     }
     let indexes: i64 =
-        transaction.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='entries'", [], |row| row.get(0))?;
+        connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='entries'", [], |row| row.get(0))?;
     Ok(indexes == 0)
 }
 
-fn valid_columns(transaction: &Transaction<'_>, table: &str, expected: &[(&str, &str, i64, i64)]) -> Result<bool, rusqlite::Error> {
-    let mut statement = transaction.prepare(&format!("PRAGMA table_info({table})"))?;
+fn valid_columns(connection: &Connection, table: &str, expected: &[(&str, &str, i64, i64)]) -> Result<bool, rusqlite::Error> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = statement
         .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(5)?)))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -384,8 +385,8 @@ fn valid_columns(transaction: &Transaction<'_>, table: &str, expected: &[(&str, 
         .eq(expected.iter().copied()))
 }
 
-fn insert_namespaces(transaction: &Transaction<'_>, definitions: &[(String, String)]) -> Result<(), rusqlite::Error> {
-    let mut statement = transaction.prepare("INSERT INTO namespaces(namespace, directory, extension) VALUES (?1, ?2, ?3)")?;
+fn insert_namespaces(connection: &Connection, definitions: &[(String, String)]) -> Result<(), rusqlite::Error> {
+    let mut statement = connection.prepare("INSERT INTO namespaces(namespace, directory, extension) VALUES (?1, ?2, ?3)")?;
     for (index, (directory, extension)) in definitions.iter().enumerate() {
         statement.execute(params![i64::try_from(index).map_err(|_| rusqlite::Error::InvalidQuery)?, directory, extension])?;
     }
@@ -458,6 +459,9 @@ pub(super) fn map_sqlite_error(error: SqliteError) -> StorageError {
         }
         SqliteError::UnsupportedSchemaVersion => {
             StorageError::Io(io::Error::new(io::ErrorKind::Unsupported, "asset cache index schema version is newer than supported"))
+        }
+        SqliteError::UnsupportedOperation => {
+            StorageError::Io(io::Error::new(io::ErrorKind::Unsupported, "asset cache index operation is unsupported"))
         }
         SqliteError::Unavailable(error) => StorageError::Io(error),
         SqliteError::Sqlite(rusqlite::Error::SqliteFailure(details, _)) if details.code == ErrorCode::OutOfMemory => {
