@@ -12,7 +12,7 @@ use protocol::{
     lludp::{MAX_PACKET_RETAINED_CAPACITY_BYTES, Message, Packet},
     messages::{ObjectUpdate, ObjectUpdateCompressed},
 };
-use storage::sqlite::{SqliteBatch, SqliteDb, SqliteError};
+use storage::sqlite::{MAX_BATCH_BYTES, MAX_BATCH_ROWS, SqliteBatch, SqliteDb, SqliteError, SqliteReceipt};
 use tokio::{
     runtime::Handle,
     sync::{mpsc::OwnedPermit, watch},
@@ -24,6 +24,9 @@ use super::{
     ObjectCacheSession, ScopeInvalidation,
     store::{make_delete_entries_batches, make_scope_delete_submission, make_write_batches},
 };
+
+const MAX_WRITE_SUBMIT_ATTEMPTS: usize = 32;
+const WRITE_RETRY_BACKOFF: Duration = Duration::from_millis(5);
 
 pub(super) struct CacheWriteJob {
     pub(super) operation: CacheWriteOperation,
@@ -76,8 +79,10 @@ impl CacheWriteWorker {
         let thread = Builder::new().name("object-cache-write".to_owned()).spawn(move || {
             let _stopped = WorkerStopped(stopped_sender);
             let mut invalidation_failed = false;
-            while let Ok(job) = receiver.recv() {
-                process_write_job(Arc::clone(&db), runtime.clone(), job, &mut invalidation_failed);
+            let mut next_job = None;
+            loop {
+                let Some(job) = next_job.take().or_else(|| receiver.recv().ok()) else { break };
+                next_job = process_write_job(Arc::clone(&db), runtime.clone(), job, &receiver, &mut invalidation_failed);
             }
         })?;
         Ok(Self { sender, thread, stopped })
@@ -132,7 +137,6 @@ impl ObjectCacheSession {
             || self.pending_writes.len() >= MAX_PENDING_CACHE_WRITES
             || next_bytes > MAX_PENDING_BYTES
         {
-            self.warn("object cache write queue is full; some objects will be refetched");
             self.count_dropped_write();
             return false;
         }
@@ -400,38 +404,132 @@ fn invalidation_scope(operation: &CacheWriteOperation) -> Option<&CacheScope> {
     }
 }
 
-fn process_write_job(db: Arc<SqliteDb>, runtime: Handle, job: CacheWriteJob, invalidation_failed: &mut bool) {
+struct CoalescedUpdate {
+    permit: OwnedPermit<ObjectCacheEvent>,
+    versions: CacheEntryVersions,
+    entries: Arc<[EncodedEntry]>,
+}
+
+fn process_write_job(
+    db: Arc<SqliteDb>,
+    runtime: Handle,
+    job: CacheWriteJob,
+    receiver: &std_mpsc::Receiver<CacheWriteJob>,
+    invalidation_failed: &mut bool,
+) -> Option<CacheWriteJob> {
     let CacheWriteJob { operation, permit } = job;
-    let Some(permit) = permit else { return };
+    let permit = permit?;
     match operation {
-        CacheWriteOperation::Update { simulator_id, scope, message, versions, last_used } => {
+        CacheWriteOperation::Update { simulator_id, scope, message, versions, mut last_used } => {
             if *invalidation_failed {
                 drop(permit.send(ObjectCacheEvent::WriteDropped { simulator_id, versions }));
-                return;
+                return None;
             }
-            let entries: Arc<[EncodedEntry]> = encode_entries(&message).into();
-            if entries.is_empty() {
-                drop(permit.send(ObjectCacheEvent::WriteApplied { simulator_id, scope, versions, entries }));
-                return;
+            let first_entries: Arc<[EncodedEntry]> = encode_entries(&message).into();
+            let mut merged_by_id: HashMap<u32, EncodedEntry> = HashMap::new();
+            let mut merged_bytes = 0usize;
+            for entry in first_entries.iter() {
+                merged_bytes = merged_bytes.saturating_add(entry.payload.len());
+                merged_by_id.insert(entry.local_id, entry.clone());
             }
-            let batches = match make_write_batches(scope.clone(), Arc::clone(&entries), last_used) {
-                Ok(batches) => batches,
-                Err(_) => {
-                    drop(permit.send(ObjectCacheEvent::WriteDropped { simulator_id, versions }));
-                    return;
+            let mut coalesced = vec![CoalescedUpdate { permit, versions, entries: first_entries }];
+            let mut deferred = None;
+
+            while let Ok(candidate) = receiver.try_recv() {
+                let can_coalesce = matches!(
+                    &candidate.operation,
+                    CacheWriteOperation::Update {
+                        simulator_id: next_simulator,
+                        scope: next_scope,
+                        ..
+                    } if *next_simulator == simulator_id && next_scope == &scope
+                ) && candidate.permit.is_some();
+                if !can_coalesce {
+                    deferred = Some(candidate);
+                    break;
                 }
-            };
-            match db.submit_batches(batches) {
+                let CacheWriteJob { operation, permit } = candidate;
+                let Some(next_permit) = permit else { continue };
+                let CacheWriteOperation::Update {
+                    simulator_id: next_simulator,
+                    scope: next_scope,
+                    message: next_message,
+                    versions: next_versions,
+                    last_used: next_last_used,
+                } = operation
+                else {
+                    unreachable!();
+                };
+                let next_entries: Arc<[EncodedEntry]> = encode_entries(&next_message).into();
+                let additional_bytes: usize = next_entries.iter().map(|entry| entry.payload.len()).sum();
+                let next_total_rows = merged_by_id.len().saturating_add(next_entries.len());
+                let next_total_bytes = merged_bytes.saturating_add(additional_bytes);
+                if next_total_rows > MAX_BATCH_ROWS || next_total_bytes > MAX_BATCH_BYTES {
+                    deferred = Some(CacheWriteJob {
+                        operation: CacheWriteOperation::Update {
+                            simulator_id: next_simulator,
+                            scope: next_scope,
+                            message: next_message,
+                            versions: next_versions,
+                            last_used: next_last_used,
+                        },
+                        permit: Some(next_permit),
+                    });
+                    break;
+                }
+                last_used = last_used.max(next_last_used);
+                for entry in next_entries.iter() {
+                    if let Some(previous) = merged_by_id.insert(entry.local_id, entry.clone()) {
+                        merged_bytes = merged_bytes.saturating_sub(previous.payload.len());
+                    }
+                    merged_bytes = merged_bytes.saturating_add(entry.payload.len());
+                }
+                coalesced.push(CoalescedUpdate { permit: next_permit, versions: next_versions, entries: next_entries });
+            }
+
+            if merged_by_id.is_empty() {
+                for update in coalesced {
+                    drop(update.permit.send(ObjectCacheEvent::WriteApplied {
+                        simulator_id,
+                        scope: scope.clone(),
+                        versions: update.versions,
+                        entries: update.entries,
+                    }));
+                }
+                return deferred;
+            }
+
+            let merged_entries: Arc<[EncodedEntry]> = merged_by_id.into_values().collect::<Vec<_>>().into();
+            match submit_update_batches(&db, &scope, &merged_entries, last_used) {
                 Ok(receipt) => {
                     drop(runtime.spawn(async move {
                         match receipt.wait().await {
-                            Ok(()) => drop(permit.send(ObjectCacheEvent::WriteApplied { simulator_id, scope, versions, entries })),
-                            Err(_) => drop(permit.send(ObjectCacheEvent::WriteDropped { simulator_id, versions })),
+                            Ok(()) => {
+                                for update in coalesced {
+                                    drop(update.permit.send(ObjectCacheEvent::WriteApplied {
+                                        simulator_id,
+                                        scope: scope.clone(),
+                                        versions: update.versions,
+                                        entries: update.entries,
+                                    }));
+                                }
+                            }
+                            Err(_) => {
+                                for update in coalesced {
+                                    drop(update.permit.send(ObjectCacheEvent::WriteDropped { simulator_id, versions: update.versions }));
+                                }
+                            }
                         }
                     }));
                 }
-                Err(_) => drop(permit.send(ObjectCacheEvent::WriteDropped { simulator_id, versions })),
+                Err(error) => {
+                    tracing::warn!(%error, "object cache write submission failed; some objects will be refetched");
+                    for update in coalesced {
+                        drop(update.permit.send(ObjectCacheEvent::WriteDropped { simulator_id, versions: update.versions }));
+                    }
+                }
             }
+            deferred
         }
         CacheWriteOperation::DeleteScope { scope, invalidation } => {
             let applied = submit_invalidation(&db, &runtime, || make_scope_delete_submission(scope.clone()).batches);
@@ -444,6 +542,7 @@ fn process_write_job(db: Arc<SqliteDb>, runtime: Handle, job: CacheWriteJob, inv
                 *invalidation_failed = true;
                 drop(permit.send(ObjectCacheEvent::InvalidationDropped));
             }
+            None
         }
         CacheWriteOperation::DeleteEntries { scope, entries } => {
             let mut local_ids = entries.keys().map(|(_, local_id)| *local_id).collect::<Vec<_>>();
@@ -462,6 +561,7 @@ fn process_write_job(db: Arc<SqliteDb>, runtime: Handle, job: CacheWriteJob, inv
                 *invalidation_failed = true;
                 drop(permit.send(ObjectCacheEvent::InvalidationDropped));
             }
+            None
         }
         #[cfg(test)]
         CacheWriteOperation::Panic => panic!("test cache writer failure"),
@@ -470,8 +570,28 @@ fn process_write_job(db: Arc<SqliteDb>, runtime: Handle, job: CacheWriteJob, inv
             started.send(()).expect("test observes stalled cache writer");
             release.recv().expect("test releases stalled cache writer");
             drop(permit.send(ObjectCacheEvent::InvalidationApplied));
+            None
         }
     }
+}
+
+fn submit_update_batches(
+    db: &SqliteDb,
+    scope: &CacheScope,
+    entries: &Arc<[EncodedEntry]>,
+    last_used: i64,
+) -> Result<SqliteReceipt<()>, SqliteError> {
+    for attempt in 0..MAX_WRITE_SUBMIT_ATTEMPTS {
+        let batches = make_write_batches(scope.clone(), Arc::clone(entries), last_used)?;
+        match db.submit_batches(batches) {
+            Ok(receipt) => return Ok(receipt),
+            Err(SqliteError::QueueFull | SqliteError::Busy) if attempt + 1 < MAX_WRITE_SUBMIT_ATTEMPTS => {
+                thread::sleep(WRITE_RETRY_BACKOFF);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(SqliteError::QueueFull)
 }
 
 fn submit_invalidation(db: &SqliteDb, runtime: &Handle, mut batches: impl FnMut() -> Vec<SqliteBatch>) -> bool {
@@ -554,6 +674,7 @@ mod tests {
 
     use network::{Grid, SimulatorId};
     use protocol::lludp::Message;
+    use storage::sqlite::MAX_QUEUED_BATCHES;
     use tokio::{runtime::Handle, time};
 
     use super::CacheWriteWorker;
@@ -673,5 +794,90 @@ mod tests {
         }
 
         time::timeout(Duration::from_secs(1), cache.close()).await.expect("cache close completes after writer panic");
+    }
+
+    #[tokio::test]
+    async fn login_burst_exceeding_sqlite_queue_persists_all_updates() {
+        let directory = tempfile::tempdir().expect("create isolated cache directory");
+        let path = directory.path().join("objects.sqlite");
+        let mut cache = open_cache(&path);
+        let burst_count = MAX_QUEUED_BATCHES + 32;
+
+        for local_id in 1..=u32::try_from(burst_count).expect("burst count fits u32") {
+            while cache.event_sender.capacity() == 0 {
+                let event = cache.next_event().await.expect("cache emits completion event");
+                assert!(cache.handle_event(event).is_none());
+            }
+            let mut message = fixture_message(vectors::OBJECT_UPDATE);
+            let Message::ObjectUpdate(update) = &mut message else {
+                panic!("object update fixture should be a full update");
+            };
+            update.objects.truncate(1);
+            update.objects[0].local_id = local_id;
+            cache.record_update(SIMULATOR, message);
+        }
+
+        flush(&mut cache).await;
+        assert_eq!(cache.dropped_writes(), 0);
+        assert!(!cache.is_degraded());
+        assert!(!cache.is_disabled());
+        let db = Arc::clone(cache.db.as_ref().expect("cache database is open"));
+        assert_eq!(cache_count(&db).await, burst_count);
+        cache.close().await;
+    }
+
+    #[tokio::test]
+    async fn overflow_marks_cache_degraded_without_disabling_subsequent_writes() {
+        let directory = tempfile::tempdir().expect("create isolated cache directory");
+        let path = directory.path().join("objects.sqlite");
+        let mut cache = open_cache(&path);
+
+        let (started_sender, started_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let permit = cache.event_sender.clone().try_reserve_owned().expect("reserve stalled writer completion");
+        assert_eq!(
+            cache
+                .submit_to_write_worker(CacheWriteJob {
+                    operation: CacheWriteOperation::WaitForRelease { started: started_sender, release: release_receiver },
+                    permit: Some(permit),
+                })
+                .ok(),
+            Some(true)
+        );
+        started_receiver.recv_timeout(Duration::from_secs(1)).expect("writer is stalled");
+
+        let overflow_count = super::MAX_PENDING_SUBMISSIONS * 2 + 2;
+        for local_id in 1..=u32::try_from(overflow_count).expect("overflow count fits u32") {
+            let mut message = fixture_message(vectors::OBJECT_UPDATE);
+            let Message::ObjectUpdate(update) = &mut message else {
+                panic!("object update fixture should be a full update");
+            };
+            update.objects.truncate(1);
+            update.objects[0].local_id = local_id;
+            cache.record_update(SIMULATOR, message);
+        }
+
+        assert!(cache.dropped_writes() > 0);
+        assert!(cache.is_degraded());
+        assert!(!cache.is_disabled());
+
+        release_sender.send(()).expect("release stalled writer");
+        flush(&mut cache).await;
+        let db = Arc::clone(cache.db.as_ref().expect("cache database is open"));
+        let persisted_before = cache_count(&db).await;
+
+        let mut follow_up = fixture_message(vectors::OBJECT_UPDATE);
+        let Message::ObjectUpdate(update) = &mut follow_up else {
+            panic!("object update fixture should be a full update");
+        };
+        update.objects.truncate(1);
+        update.objects[0].local_id = 900_001;
+        cache.record_update(SIMULATOR, follow_up);
+        flush(&mut cache).await;
+
+        assert_eq!(cache_count(&db).await, persisted_before + 1);
+        assert!(cache.is_degraded());
+        assert!(!cache.is_disabled());
+        cache.close().await;
     }
 }
