@@ -6,6 +6,7 @@ mod envelope;
 mod environment;
 mod material;
 pub mod mesh;
+mod prepared_texture;
 mod store;
 mod texture;
 
@@ -22,6 +23,7 @@ pub use self::{
         Filter, LegacyAlphaMode, LegacyMaterial, MaterialDescription, MaterialTexture, MinFilter, PbrAlphaMode, PbrMaterial, Sampler,
         TextureMapping, TextureRef, Wrap,
     },
+    prepared_texture::{PREPARED_TEXTURE_FORMAT_VERSION, PreparedTextureKey},
     store::{
         AdmissionError, CacheReadCompletion, CacheReadJob, DecodeInput, DecodeJob, Demand, Failure, FetchFailure, FetchJob, FetchResponse,
         Kind, LoadCompletion, LoadJob, MAX_ASSET_ROUTES, MAX_NON_MESH_FETCHES, MAX_RETRY_AFTER, MAX_TEXTURE_DECODES, Priority, Request,
