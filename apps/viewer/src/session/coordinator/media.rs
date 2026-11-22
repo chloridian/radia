@@ -1,10 +1,13 @@
 use std::{
+    cmp::Ordering,
     collections::{HashMap, VecDeque},
     future::pending,
     time::{Duration, Instant},
 };
 
+use math::DVec3;
 use network::{SimulatorId, capabilities::Client};
+use render::scene::Camera;
 use tracing::field;
 use utils::Summary;
 use world::{ApplyError, Entity};
@@ -91,6 +94,23 @@ impl WaitingObjectMedia {
         None
     }
 
+    fn pop_next(&mut self, world: &SessionWorld, camera: Option<Camera>) -> Option<ObjectMediaTarget> {
+        let Some(camera) = camera else {
+            return self.pop_front();
+        };
+        let mut best: Option<(usize, TargetPriority)> = None;
+        for (index, entity) in self.order.iter().enumerate() {
+            let Some(target) = self.targets.get(entity) else { continue };
+            let priority = target_priority(world, *target, camera);
+            if best.is_none_or(|(_, best_priority)| priority.cmp(&best_priority) == Ordering::Less) {
+                best = Some((index, priority));
+            }
+        }
+        let (index, _) = best?;
+        let entity = self.order.remove(index)?;
+        self.targets.remove(&entity)
+    }
+
     fn push_front(&mut self, target: ObjectMediaTarget) {
         self.order.push_front(target.binding.entity());
         self.targets.insert(target.binding.entity(), target);
@@ -100,6 +120,39 @@ impl WaitingObjectMedia {
         self.order.push_back(target.binding.entity());
         self.targets.insert(target.binding.entity(), target);
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TargetPriority {
+    known_position: bool,
+    visible: bool,
+    distance_sq: f64,
+}
+
+impl TargetPriority {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .known_position
+            .cmp(&self.known_position)
+            .then_with(|| other.visible.cmp(&self.visible))
+            .then_with(|| self.distance_sq.total_cmp(&other.distance_sq))
+    }
+}
+
+fn target_priority(world: &SessionWorld, target: ObjectMediaTarget, camera: Camera) -> TargetPriority {
+    let Some(local_position) = world.world().object(target.binding.entity()).and_then(|object| object.position()) else {
+        return TargetPriority { known_position: false, visible: false, distance_sq: f64::INFINITY };
+    };
+    let origin = world.world().region(target.binding.address().region()).and_then(|info| info.resolved_origin()).unwrap_or(DVec3::ZERO);
+    let position = origin + local_position.as_dvec3();
+    let offset = position - camera.position();
+    let distance_sq = offset.length_squared();
+    if !distance_sq.is_finite() {
+        return TargetPriority { known_position: false, visible: false, distance_sq: f64::INFINITY };
+    }
+    let draw_distance = camera.draw_distance();
+    let visible = offset.dot(camera.direction().as_dvec3()) >= 0.0 && distance_sq <= draw_distance * draw_distance;
+    TargetPriority { known_position: true, visible, distance_sq }
 }
 
 pub(super) enum ObjectMediaIntake {
@@ -277,7 +330,7 @@ impl ObjectMediaIntake {
         ObjectMediaApplyProgress::Complete
     }
 
-    pub(super) fn flush_step(&mut self, world: &mut SessionWorld) -> bool {
+    pub(super) fn flush_step(&mut self, world: &mut SessionWorld, camera: Option<Camera>) -> bool {
         let Self::Enabled { fetcher, clients, waiting, pending_flush, .. } = self else { return false };
         let mut work = 0usize;
         for _ in 0..MAX_MEDIA_FLUSH_BATCH {
@@ -285,7 +338,7 @@ impl ObjectMediaIntake {
                 return pending_flush.is_some() || Self::waiting_client_is_ready(clients, waiting);
             }
             if pending_flush.is_none() {
-                let Some(target) = waiting.pop_front() else { return false };
+                let Some(target) = waiting.pop_next(world, camera) else { return false };
                 *pending_flush = Some((target, ObjectMediaTargetCheck::default()));
             }
             let Some((target, check)) = pending_flush.as_mut() else { return false };
@@ -314,11 +367,7 @@ impl ObjectMediaIntake {
     }
 
     fn waiting_client_is_ready(clients: &HashMap<SimulatorId, Client>, waiting: &WaitingObjectMedia) -> bool {
-        waiting
-            .order
-            .front()
-            .and_then(|entity| waiting.targets.get(entity))
-            .is_some_and(|target| clients.contains_key(&target.simulator_id))
+        waiting.targets.values().any(|target| clients.contains_key(&target.simulator_id))
     }
 }
 
@@ -331,11 +380,15 @@ mod tests {
     };
 
     use futures::{StreamExt, channel::oneshot, stream};
+    use math::{DVec3, Vec3};
     use network::{Event, SimulatorId};
     use protocol::{lludp::Message::KillObject, messages::object::kill_object};
+    use render::scene::Camera;
     use tokio::{runtime::Handle, time};
     use uuid::Uuid;
-    use world::{Appearance, ApplyOutcome::Introduced, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, UpdateSource};
+    use world::{
+        Appearance, ApplyOutcome::Introduced, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, Pose, UpdateSource,
+    };
 
     use super::*;
     use crate::{
@@ -466,6 +519,65 @@ mod tests {
         assert_eq!(waiting.len(), 1);
         assert_eq!(waiting.pop_front(), Some(newer));
         assert_eq!(waiting.pop_front(), None);
+    }
+
+    fn positioned_media_target(
+        world: &mut SessionWorld,
+        simulator_id: SimulatorId,
+        local_id: u32,
+        object_id: Uuid,
+        position: Vec3,
+        order: u32,
+    ) -> ObjectMediaTarget {
+        let region = world.register_simulator(simulator_id, None).expect("register simulator");
+        let local_id = NonZeroU32::new(local_id).expect("nonzero local ID");
+        let source = UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0);
+        let observation = ObjectObservation {
+            appearance: FieldUpdate::Set(Appearance::Surface),
+            pose: Some(Pose { position: Some(position), ..Pose::default() }),
+            ..ObjectObservation::new(source, object_id, local_id, Kind::Object, ParentUpdate::Root)
+        };
+        let summary = world
+            .apply_object_batch(
+                simulator_id,
+                ObjectBatch {
+                    region,
+                    region_handle: None,
+                    blocks: vec![Some(ObjectOperation::Observe(observation))],
+                    invalid_blocks: 0,
+                    invalid_fields: 0,
+                },
+            )
+            .expect("object batch applies");
+        let result = summary.blocks[0].applied().expect("object is valid");
+        let Introduced(entity) = &result.outcome else { panic!("object is introduced") };
+        let binding = world.world().object_binding_target(*entity).expect("current object binding");
+        ObjectMediaTarget { simulator_id, binding, source, version: 1 }
+    }
+
+    #[test]
+    fn waiting_media_prioritizes_visible_and_nearby_targets() {
+        let simulator_id = simulator_id();
+        let mut world = SessionWorld::new(viewer_world_limits());
+        let far_visible = positioned_media_target(&mut world, simulator_id, 1, Uuid::from_u128(1), Vec3::new(0.0, 80.0, 0.0), 1);
+        let behind_near = positioned_media_target(&mut world, simulator_id, 2, Uuid::from_u128(2), Vec3::new(0.0, -5.0, 0.0), 2);
+        let near_visible = positioned_media_target(&mut world, simulator_id, 3, Uuid::from_u128(3), Vec3::new(0.0, 10.0, 0.0), 3);
+        let camera = Camera::new(DVec3::ZERO, Vec3::Y, 1.0, [1280, 720]).expect("valid camera");
+
+        let mut waiting = WaitingObjectMedia::default();
+        assert!(waiting.insert(far_visible));
+        assert!(waiting.insert(behind_near));
+        assert!(waiting.insert(near_visible));
+
+        assert_eq!(waiting.pop_next(&world, Some(camera)), Some(near_visible));
+        assert_eq!(waiting.pop_next(&world, Some(camera)), Some(far_visible));
+        assert_eq!(waiting.pop_next(&world, Some(camera)), Some(behind_near));
+        assert_eq!(waiting.pop_next(&world, Some(camera)), None);
+
+        assert!(waiting.insert(far_visible));
+        assert!(waiting.insert(near_visible));
+        assert_eq!(waiting.pop_next(&world, None), Some(far_visible));
+        assert_eq!(waiting.pop_next(&world, None), Some(near_visible));
     }
 
     #[tokio::test]

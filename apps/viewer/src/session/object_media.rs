@@ -1,13 +1,16 @@
 use std::{
-    collections::{HashMap, HashSet},
-    future::Future,
+    collections::{HashMap, HashSet, VecDeque},
+    future::{self, Future},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
 
 use futures::{FutureExt, channel::mpsc, pin_mut, sink::SinkExt, stream::StreamExt};
 use llsd::{Map, Value};
-use network::{SimulatorId, capabilities::Client};
+use network::{
+    Error as NetworkError, SimulatorId,
+    capabilities::{Client, ErrorKind as HttpErrorKind},
+};
 use tokio::{runtime::Handle, sync::watch, time};
 use tracing::Instrument;
 use uuid::Uuid;
@@ -19,8 +22,10 @@ use world::{
 const REQUEST_QUEUE_CAPACITY: usize = 64;
 const RESULT_QUEUE_CAPACITY: usize = 16;
 const RESPONSE_LIMIT_BYTES: usize = 256 * 1024;
-const MAX_FETCH_ATTEMPTS: u8 = 3;
-const RETRY_DELAY: Duration = Duration::from_millis(250);
+const MAX_FETCH_ATTEMPTS: u8 = 6;
+const MIN_REQUEST_SPACING: Duration = Duration::from_millis(50);
+const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ObjectMediaTarget {
@@ -170,12 +175,21 @@ impl ObjectMediaFetcher {
 enum FetchOutcome {
     Cancelled,
     Retired,
-    Complete(Result<ObjectMediaUpdate, FetchError>),
+    Complete(AttemptOutcome),
+}
+
+enum AttemptOutcome {
+    Success(ObjectMediaUpdate),
+    Retryable { error: FetchError, retry_after: Option<Duration>, throttled: bool },
+    Fatal(FetchError),
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FetchError {
     Capability,
+    HttpStatus(u16),
+    Timeout,
     Malformed,
     ObjectMismatch,
     Invalid(ObjectMediaError),
@@ -204,6 +218,88 @@ pub(super) fn response_is_stale(response_version: u32, requested_version: u32) -
     response_version < requested_version
 }
 
+struct QueuedRequest {
+    request: FetchRequest,
+    attempts: u8,
+}
+
+struct SimulatorPacing {
+    next_allowed: time::Instant,
+    consecutive_throttles: u32,
+}
+
+impl SimulatorPacing {
+    fn ready_at(&self) -> time::Instant {
+        self.next_allowed
+    }
+
+    fn record_success(&mut self, now: time::Instant) {
+        self.consecutive_throttles = 0;
+        self.next_allowed = now + MIN_REQUEST_SPACING;
+    }
+
+    fn record_fatal(&mut self, now: time::Instant) {
+        self.next_allowed = now + MIN_REQUEST_SPACING;
+    }
+
+    fn record_retryable(&mut self, now: time::Instant, retry_after: Option<Duration>, throttled: bool) {
+        if throttled {
+            self.consecutive_throttles = self.consecutive_throttles.saturating_add(1);
+        }
+        let backoff = exponential_backoff(self.consecutive_throttles.max(1));
+        let delay = retry_after.unwrap_or(backoff).min(MAX_RETRY_BACKOFF).max(MIN_REQUEST_SPACING);
+        self.next_allowed = now + delay;
+    }
+}
+
+fn exponential_backoff(attempt: u32) -> Duration {
+    let shift = attempt.saturating_sub(1).min(16);
+    INITIAL_RETRY_BACKOFF.saturating_mul(1u32 << shift).min(MAX_RETRY_BACKOFF)
+}
+
+fn select_next_request(
+    queued: &VecDeque<QueuedRequest>,
+    pacing: &HashMap<SimulatorId, SimulatorPacing>,
+    now: time::Instant,
+) -> Option<(usize, time::Instant)> {
+    let mut best: Option<(usize, time::Instant)> = None;
+    for (index, item) in queued.iter().enumerate() {
+        let ready_at = pacing.get(&item.request.target.simulator_id).map_or(now, SimulatorPacing::ready_at);
+        if ready_at <= now {
+            return Some((index, now));
+        }
+        if best.is_none_or(|(_, earliest)| ready_at < earliest) {
+            best = Some((index, ready_at));
+        }
+    }
+    best
+}
+
+fn drain_retired(
+    queued: &mut VecDeque<QueuedRequest>,
+    pacing: &mut HashMap<SimulatorId, SimulatorPacing>,
+    retirement: &Mutex<RetirementState>,
+) {
+    let mut index = 0;
+    while index < queued.len() {
+        let simulator_id = queued[index].request.target.simulator_id;
+        if is_retired(retirement, simulator_id) {
+            queued.remove(index);
+            pacing.remove(&simulator_id);
+            finish_request(retirement, simulator_id);
+        } else {
+            index += 1;
+        }
+    }
+    pacing.retain(|simulator_id, _| !is_retired(retirement, *simulator_id));
+}
+
+fn finish_all_queued(queued: &mut VecDeque<QueuedRequest>, retirement: &Mutex<RetirementState>) {
+    while let Some(item) = queued.pop_front() {
+        finish_request(retirement, item.request.target.simulator_id);
+    }
+}
+
 async fn run<F>(
     mut requests: mpsc::Receiver<FetchRequest>,
     mut results: mpsc::Sender<ObjectMediaResult>,
@@ -213,22 +309,98 @@ async fn run<F>(
 ) where
     F: Future<Output = ()> + Clone + Send + 'static,
 {
+    let mut queued = VecDeque::new();
+    let mut pacing = HashMap::<SimulatorId, SimulatorPacing>::new();
+    let mut requests_closed = false;
+
     loop {
-        let cancelled = cancellation.clone().fuse();
-        let request = requests.next().fuse();
-        pin_mut!(cancelled, request);
-        let request = futures::select! {
-            _ = cancelled => return,
-            request = request => request,
+        while !requests_closed {
+            match requests.try_recv() {
+                Ok(request) => {
+                    if is_retired(&retirement, request.target.simulator_id) {
+                        pacing.remove(&request.target.simulator_id);
+                        finish_request(&retirement, request.target.simulator_id);
+                    } else {
+                        queued.push_back(QueuedRequest { request, attempts: 0 });
+                    }
+                }
+                Err(mpsc::TryRecvError::Closed) => {
+                    requests_closed = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+            }
+        }
+
+        drain_retired(&mut queued, &mut pacing, &retirement);
+
+        let now = time::Instant::now();
+        let Some((index, ready_at)) = select_next_request(&queued, &pacing, now) else {
+            if requests_closed {
+                return;
+            }
+            let cancelled = cancellation.clone().fuse();
+            let retired_change = retirement_updates.changed().fuse();
+            let next_request = requests.next().fuse();
+            pin_mut!(cancelled, retired_change, next_request);
+            futures::select! {
+                _ = cancelled => return,
+                _ = retired_change => continue,
+                request = next_request => match request {
+                    Some(request) => {
+                        if is_retired(&retirement, request.target.simulator_id) {
+                            pacing.remove(&request.target.simulator_id);
+                            finish_request(&retirement, request.target.simulator_id);
+                        } else {
+                            queued.push_back(QueuedRequest { request, attempts: 0 });
+                        }
+                    }
+                    None => return,
+                },
+            }
+            continue;
         };
-        let Some(request) = request else { return };
-        if is_retired(&retirement, request.target.simulator_id) {
-            finish_request(&retirement, request.target.simulator_id);
+
+        if ready_at > now {
+            let cancelled = cancellation.clone().fuse();
+            let retired_change = retirement_updates.changed().fuse();
+            let sleep = time::sleep_until(ready_at).fuse();
+            let next_request =
+                async { if requests_closed { future::pending::<Option<FetchRequest>>().await } else { requests.next().await } }.fuse();
+            pin_mut!(cancelled, retired_change, sleep, next_request);
+            futures::select! {
+                _ = cancelled => {
+                    finish_all_queued(&mut queued, &retirement);
+                    return;
+                }
+                _ = retired_change => continue,
+                request = next_request => {
+                    match request {
+                        Some(request) => {
+                            if is_retired(&retirement, request.target.simulator_id) {
+                                pacing.remove(&request.target.simulator_id);
+                                finish_request(&retirement, request.target.simulator_id);
+                            } else {
+                                queued.push_back(QueuedRequest { request, attempts: 0 });
+                            }
+                        }
+                        None => requests_closed = true,
+                    }
+                    continue;
+                }
+                _ = sleep => {}
+            }
+        }
+
+        let Some(mut item) = queued.remove(index) else { continue };
+        let simulator_id = item.request.target.simulator_id;
+        if is_retired(&retirement, simulator_id) {
+            pacing.remove(&simulator_id);
+            finish_request(&retirement, simulator_id);
             continue;
         }
 
         let outcome = {
-            let fetch = fetch_with_retries(&request).fuse();
+            let fetch = fetch(&item.request).fuse();
             pin_mut!(fetch);
             loop {
                 let cancelled = cancellation.clone().fuse();
@@ -237,35 +409,65 @@ async fn run<F>(
                 futures::select! {
                     _ = cancelled => break FetchOutcome::Cancelled,
                     changed = retired_change => {
-                        if changed.is_err() || is_retired(&retirement, request.target.simulator_id) {
+                        if changed.is_err() || is_retired(&retirement, simulator_id) {
                             break FetchOutcome::Retired;
                         }
                     }
-                    update = fetch => break FetchOutcome::Complete(update),
+                    attempt = fetch => break FetchOutcome::Complete(attempt),
                 }
             }
         };
+
+        let now = time::Instant::now();
         let update = match outcome {
             FetchOutcome::Cancelled => {
-                finish_request(&retirement, request.target.simulator_id);
+                finish_request(&retirement, simulator_id);
+                finish_all_queued(&mut queued, &retirement);
                 return;
             }
             FetchOutcome::Retired => {
-                finish_request(&retirement, request.target.simulator_id);
+                pacing.remove(&simulator_id);
+                finish_request(&retirement, simulator_id);
                 continue;
             }
-            FetchOutcome::Complete(update) => update,
+            FetchOutcome::Complete(AttemptOutcome::Cancelled) => {
+                finish_request(&retirement, simulator_id);
+                continue;
+            }
+            FetchOutcome::Complete(AttemptOutcome::Success(update)) => {
+                pacing.entry(simulator_id).or_insert(SimulatorPacing { next_allowed: now, consecutive_throttles: 0 }).record_success(now);
+                Ok(update)
+            }
+            FetchOutcome::Complete(AttemptOutcome::Fatal(error)) => {
+                pacing.entry(simulator_id).or_insert(SimulatorPacing { next_allowed: now, consecutive_throttles: 0 }).record_fatal(now);
+                Err(error)
+            }
+            FetchOutcome::Complete(AttemptOutcome::Retryable { error, retry_after, throttled }) => {
+                pacing.entry(simulator_id).or_insert(SimulatorPacing { next_allowed: now, consecutive_throttles: 0 }).record_retryable(
+                    now,
+                    retry_after,
+                    throttled,
+                );
+                item.attempts = item.attempts.saturating_add(1);
+                if item.attempts < MAX_FETCH_ATTEMPTS {
+                    queued.push_back(item);
+                    continue;
+                }
+                Err(error)
+            }
         };
-        let result = ObjectMediaResult { target: request.target, update };
+
+        let result = ObjectMediaResult { target: item.request.target, update };
         let send = results.send(result).fuse();
         pin_mut!(send);
         let cancelled = cancellation.clone().fuse();
         pin_mut!(cancelled);
         if futures::select! { _ = cancelled => true, sent = send => sent.is_err() } {
-            finish_request(&retirement, request.target.simulator_id);
+            finish_request(&retirement, simulator_id);
+            finish_all_queued(&mut queued, &retirement);
             return;
         }
-        finish_request(&retirement, request.target.simulator_id);
+        finish_request(&retirement, simulator_id);
     }
 }
 
@@ -277,38 +479,61 @@ fn finish_request(retirement: &Mutex<RetirementState>, simulator_id: SimulatorId
     retirement.lock().unwrap_or_else(PoisonError::into_inner).finish(simulator_id);
 }
 
-async fn fetch_with_retries(request: &FetchRequest) -> Result<ObjectMediaUpdate, FetchError> {
-    let mut last_error = None;
-    for attempt in 0..MAX_FETCH_ATTEMPTS {
-        match fetch(request).await {
-            Ok(update) if update.version() >= request.target.version => return Ok(update),
-            Ok(update) => {
-                last_error = Some(FetchError::StaleVersion { requested: request.target.version, received: update.version() });
+fn classify_network_error(error: NetworkError, fallback: FetchError) -> AttemptOutcome {
+    match error {
+        NetworkError::CapabilityRequestCanceled | NetworkError::CapabilitySessionClosed | NetworkError::SessionClosed => {
+            AttemptOutcome::Cancelled
+        }
+        NetworkError::CapabilityHttp(error) => {
+            if error.kind == HttpErrorKind::Cancelled {
+                return AttemptOutcome::Cancelled;
             }
-            Err(error) => {
-                if matches!(error, FetchError::Malformed | FetchError::ObjectMismatch | FetchError::Invalid(_)) {
-                    return Err(error);
+            if let Some(status) = error.status {
+                let code = status.as_u16();
+                let fetch_error = FetchError::HttpStatus(code);
+                return if code == 429 || (500..600).contains(&code) {
+                    AttemptOutcome::Retryable { error: fetch_error, retry_after: error.retry_after, throttled: code == 429 || code == 503 }
+                } else {
+                    AttemptOutcome::Fatal(fetch_error)
+                };
+            }
+            match error.kind {
+                HttpErrorKind::Timeout => {
+                    AttemptOutcome::Retryable { error: FetchError::Timeout, retry_after: error.retry_after, throttled: false }
                 }
-                last_error = Some(error);
+                HttpErrorKind::InvalidResponse => AttemptOutcome::Fatal(FetchError::Malformed),
+                _ => AttemptOutcome::Retryable { error: FetchError::Transport, retry_after: error.retry_after, throttled: false },
             }
         }
-        if attempt + 1 < MAX_FETCH_ATTEMPTS {
-            time::sleep(RETRY_DELAY).await;
-        }
+        _ => AttemptOutcome::Retryable { error: fallback, retry_after: None, throttled: false },
     }
-    Err(last_error.expect("ObjectMedia fetch attempts are non-empty"))
 }
 
-async fn fetch(request: &FetchRequest) -> Result<ObjectMediaUpdate, FetchError> {
-    let mut grants = request.client.request_capabilities(&["ObjectMedia"]).await.map_err(|_| FetchError::Capability)?;
-    let capability = grants.remove("ObjectMedia").ok_or(FetchError::Capability)?;
+async fn fetch(request: &FetchRequest) -> AttemptOutcome {
+    let mut grants = match request.client.request_capabilities(&["ObjectMedia"]).await {
+        Ok(grants) => grants,
+        Err(error) => return classify_network_error(error, FetchError::Capability),
+    };
+    let Some(capability) = grants.remove("ObjectMedia") else {
+        return AttemptOutcome::Retryable { error: FetchError::Capability, retry_after: None, throttled: false };
+    };
 
     let mut payload = Map::new();
     payload.insert("verb".into(), Value::String("GET".into()));
     payload.insert("object_id".into(), Value::Uuid(request.target.binding.object_id()));
-    let response =
-        request.client.post_with_response_limit(&capability, &payload, RESPONSE_LIMIT_BYTES).await.map_err(|_| FetchError::Transport)?;
-    parse_response(&response, request.target.binding.object_id()).map_err(FetchError::from)
+    let response = match request.client.post_with_response_limit(&capability, &payload, RESPONSE_LIMIT_BYTES).await {
+        Ok(response) => response,
+        Err(error) => return classify_network_error(error, FetchError::Transport),
+    };
+    match parse_response(&response, request.target.binding.object_id()) {
+        Ok(update) if update.version() >= request.target.version => AttemptOutcome::Success(update),
+        Ok(update) => AttemptOutcome::Retryable {
+            error: FetchError::StaleVersion { requested: request.target.version, received: update.version() },
+            retry_after: None,
+            throttled: false,
+        },
+        Err(error) => AttemptOutcome::Fatal(FetchError::from(error)),
+    }
 }
 
 fn parse_response(response: &Value, expected_id: Uuid) -> Result<ObjectMediaUpdate, ParseError> {
@@ -425,9 +650,22 @@ pub(super) fn media_version(value: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
+    use std::{
+        assert_matches,
+        future::pending,
+        num::NonZeroU32,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
-    use llsd::{Map, Value};
+    use llsd::{Map, Value, xml};
+    use network::{SimulatorId, capabilities::Client};
+    use test_support::http_peer::LoopbackPeer;
+    use tokio::{runtime::Handle, time};
+    use url::Url;
     use uuid::Uuid;
     use world::{
         Appearance, FieldUpdate, Kind, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MediaControls, ObjectMediaError, ObjectObservation,
@@ -435,7 +673,8 @@ mod tests {
     };
 
     use super::{
-        FetchError, ObjectMediaTarget, PendingMedia, RetirementState, media_version, parse_entry, parse_response, response_is_stale,
+        FetchError, MAX_FETCH_ATTEMPTS, ObjectMediaFetcher, ObjectMediaTarget, PendingMedia, RetirementState, media_version, parse_entry,
+        parse_response, response_is_stale,
     };
     use crate::{
         session::{
@@ -597,5 +836,175 @@ mod tests {
         media.insert("whitelist".into(), Value::Array(vec![Value::String("x".repeat(MAX_MEDIA_WHITELIST_BYTES + 1))]));
         faces[0] = Value::Map(media);
         assert_eq!(FetchError::from(parse_response(&value, id).unwrap_err()), FetchError::Invalid(ObjectMediaError::WhitelistTooLarge));
+    }
+
+    async fn media_target(simulator_id: SimulatorId, local_id: u32, object_id: Uuid, version: u32) -> ObjectMediaTarget {
+        let mut world = SessionWorld::new(viewer_world_limits());
+        let region = world.register_simulator(simulator_id, None).expect("register simulator");
+        let local_id = NonZeroU32::new(local_id).expect("nonzero local ID");
+        let observation = ObjectObservation {
+            shape: FieldUpdate::Set(Shape::Prim(Default::default())),
+            appearance: FieldUpdate::Set(Appearance::Surface),
+            ..ObjectObservation::new(
+                UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0),
+                object_id,
+                local_id,
+                Kind::Object,
+                ParentUpdate::Root,
+            )
+        };
+        world
+            .apply_object_batch(
+                simulator_id,
+                ObjectBatch {
+                    region,
+                    region_handle: None,
+                    blocks: vec![Some(ObjectOperation::Observe(observation))],
+                    invalid_blocks: 0,
+                    invalid_fields: 0,
+                },
+            )
+            .expect("registered simulator");
+        world
+            .prepare_object_media(
+                simulator_id,
+                ObjectMediaRequest { source: UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0), object_id, local_id, version },
+            )
+            .await
+            .expect("current surface target")
+    }
+
+    fn grants_body(base: &Url) -> Vec<u8> {
+        let mut grants = Map::new();
+        grants.insert("ObjectMedia".into(), Value::String(base.join("object_media").expect("capability url").to_string()));
+        xml::to_vec(&Value::Map(grants)).expect("encode grants")
+    }
+
+    fn media_body(object_id: Uuid, version: u32) -> Vec<u8> {
+        let mut fields = Map::new();
+        fields.insert("object_id".into(), Value::Uuid(object_id));
+        fields.insert("object_media_version".into(), Value::String(format!("x-mv:{version}/00000000-0000-0000-0000-000000000001")));
+        fields.insert("object_media_data".into(), Value::Array(vec![Value::Map(Map::new())]));
+        xml::to_vec(&Value::Map(fields)).expect("encode media response")
+    }
+
+    #[tokio::test]
+    async fn honors_retry_after_on_429_and_503() {
+        for (status, retry_after_secs) in [(429u16, 1u64), (503u16, 1u64)] {
+            let sim = simulator_id();
+            let object_id = Uuid::from_u128(u128::from(status));
+            let target = media_target(sim, 10, object_id, 4).await;
+            let body = media_body(object_id, 4);
+            let peer = LoopbackPeer::new_with_headers(3, move |index, _, base| match index {
+                0 => (200, Vec::new(), grants_body(base)),
+                1 => (status, vec![("Retry-After".into(), retry_after_secs.to_string())], Vec::new()),
+                2 => (200, Vec::new(), body.clone()),
+                _ => unreachable!(),
+            });
+            let client = Client::new(peer.url().join("seed").expect("seed url")).expect("client");
+            let mut fetcher = ObjectMediaFetcher::new(Handle::current(), pending());
+            let started = time::Instant::now();
+            assert!(fetcher.enqueue(target, client));
+
+            let result = fetcher.next_result().await.expect("media result");
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed >= Duration::from_secs(retry_after_secs),
+                "status {status}: elapsed {elapsed:?} < retry-after {retry_after_secs}s"
+            );
+            assert_matches!(result.update, Ok(update) if update.version() == 4);
+            assert_eq!(peer.finish().len(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn per_simulator_throttle_does_not_block_other_simulator() {
+        let sim_a = SimulatorId::new(1);
+        let sim_b = SimulatorId::new(2);
+        let obj_a1 = Uuid::from_u128(101);
+        let obj_a2 = Uuid::from_u128(102);
+        let obj_b1 = Uuid::from_u128(201);
+        let target_a1 = media_target(sim_a, 11, obj_a1, 1).await;
+        let target_a2 = media_target(sim_a, 12, obj_a2, 1).await;
+        let target_b1 = media_target(sim_b, 21, obj_b1, 1).await;
+
+        let body_a1 = media_body(obj_a1, 1);
+        let body_a2 = media_body(obj_a2, 1);
+        let body_b1 = media_body(obj_b1, 1);
+
+        let a_hits = Arc::new(AtomicUsize::new(0));
+        let a_hits_peer = Arc::clone(&a_hits);
+        let peer_a = LoopbackPeer::new_with_headers(4, move |index, request, base| {
+            let text = String::from_utf8_lossy(request);
+            if index == 0 {
+                return (200, Vec::new(), grants_body(base));
+            }
+            let hit = a_hits_peer.fetch_add(1, Ordering::SeqCst);
+            if hit == 0 {
+                return (429, vec![("Retry-After".into(), "1".into())], Vec::new());
+            }
+            if text.contains(&obj_a1.to_string()) { (200, Vec::new(), body_a1.clone()) } else { (200, Vec::new(), body_a2.clone()) }
+        });
+        let peer_b = LoopbackPeer::new_with_headers(2, move |index, _, base| match index {
+            0 => (200, Vec::new(), grants_body(base)),
+            1 => (200, Vec::new(), body_b1.clone()),
+            _ => unreachable!(),
+        });
+
+        let client_a = Client::new(peer_a.url().join("seed").expect("seed url")).expect("client a");
+        let client_b = Client::new(peer_b.url().join("seed").expect("seed url")).expect("client b");
+        let mut fetcher = ObjectMediaFetcher::new(Handle::current(), pending());
+        let started = time::Instant::now();
+
+        assert!(fetcher.enqueue(target_a1, client_a.clone()));
+        assert!(fetcher.enqueue(target_a2, client_a));
+        assert!(fetcher.enqueue(target_b1, client_b));
+
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        for _ in 0..3 {
+            let result = fetcher.next_result().await.expect("media result");
+            assert!(result.update.is_ok());
+            completed.lock().expect("lock").push((result.target.simulator_id, started.elapsed()));
+        }
+
+        let completed = completed.lock().expect("lock");
+        assert_eq!(completed[0].0, sim_b);
+        assert!(completed[0].1 < Duration::from_secs(1), "simulator B must not wait on simulator A throttle");
+        assert_eq!(completed[1].0, sim_a);
+        assert!(completed[1].1 >= Duration::from_secs(1));
+        assert_eq!(completed[2].0, sim_a);
+        assert!(completed[2].1 >= Duration::from_secs(1));
+        assert_eq!(peer_a.finish().len(), 4);
+        assert_eq!(peer_b.finish().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn preserves_http_status_on_non_retryable_and_exhausted_failures() {
+        let sim = simulator_id();
+        let object_404 = Uuid::from_u128(404);
+        let target_404 = media_target(sim, 30, object_404, 1).await;
+        let peer_404 = LoopbackPeer::new_with_headers(2, |index, _, base| match index {
+            0 => (200, Vec::new(), grants_body(base)),
+            1 => (404, Vec::new(), Vec::new()),
+            _ => unreachable!(),
+        });
+        let client_404 = Client::new(peer_404.url().join("seed").expect("seed url")).expect("client 404");
+        let mut fetcher = ObjectMediaFetcher::new(Handle::current(), pending());
+        assert!(fetcher.enqueue(target_404, client_404));
+        let result = fetcher.next_result().await.expect("404 result");
+        assert_matches!(result.update, Err(FetchError::HttpStatus(404)));
+        assert_eq!(peer_404.finish().len(), 2);
+
+        let object_503 = Uuid::from_u128(503);
+        let target_503 = media_target(sim, 31, object_503, 1).await;
+        let peer_503 = LoopbackPeer::new_with_headers(usize::from(MAX_FETCH_ATTEMPTS) + 1, |index, _, base| match index {
+            0 => (200, Vec::new(), grants_body(base)),
+            _ => (503, vec![("Retry-After".into(), "0".into())], Vec::new()),
+        });
+        let client_503 = Client::new(peer_503.url().join("seed").expect("seed url")).expect("client 503");
+        assert!(fetcher.enqueue(target_503, client_503));
+        let result = fetcher.next_result().await.expect("503 result");
+        assert_matches!(result.update, Err(FetchError::HttpStatus(503)));
+        assert_eq!(peer_503.finish().len(), usize::from(MAX_FETCH_ATTEMPTS) + 1);
     }
 }

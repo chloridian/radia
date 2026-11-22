@@ -130,6 +130,10 @@ impl CameraUplink {
         self.camera.clone()
     }
 
+    pub(crate) fn latest_camera(&self) -> Option<Camera> {
+        *self.camera.borrow()
+    }
+
     pub(crate) fn movement_sender(&self) -> watch::Sender<Option<MovementObservation>> {
         self.movement.clone()
     }

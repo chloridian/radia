@@ -715,7 +715,7 @@ impl SessionDriver {
                 }
                 continue;
             }
-            let media_flush_pending = self.media.flush_step(&mut self.session_world);
+            let media_flush_pending = self.media.flush_step(&mut self.session_world, self.camera.latest_camera());
             if let Some(pending) = self.pending_media_apply.as_mut()
                 && matches!(self.media.advance_apply_result(&mut self.session_world, pending), ObjectMediaApplyProgress::Complete)
             {
