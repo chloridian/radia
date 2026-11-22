@@ -4,7 +4,7 @@ use std::{
     error::Error,
     fmt, fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Condvar, Mutex, PoisonError},
 };
 
 use cvars::{
@@ -78,6 +78,13 @@ struct SettingsState {
     fingerprint: FileFingerprint,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SaveWorker {
+    Idle,
+    Running,
+    RunningDirty,
+}
+
 type NamedPresets = Vec<(String, Vec<(String, CvarValue)>)>;
 
 pub struct SettingsStore {
@@ -86,6 +93,8 @@ pub struct SettingsStore {
     presets: NamedPresets,
     state: Mutex<SettingsState>,
     io_lock: Mutex<()>,
+    save_worker: Mutex<SaveWorker>,
+    save_idle: Condvar,
 }
 
 impl SettingsStore {
@@ -101,6 +110,8 @@ impl SettingsStore {
                 fingerprint: FileFingerprint::ABSENT,
             }),
             io_lock: Mutex::new(()),
+            save_worker: Mutex::new(SaveWorker::Idle),
+            save_idle: Condvar::new(),
         }
     }
 
@@ -124,6 +135,8 @@ impl SettingsStore {
                 fingerprint: FileFingerprint::ABSENT,
             }),
             io_lock: Mutex::new(()),
+            save_worker: Mutex::new(SaveWorker::Idle),
+            save_idle: Condvar::new(),
         };
         let report = store.reload();
         (store, report)
@@ -334,14 +347,41 @@ impl SettingsStore {
         Ok(ResetOutcome { revision, masked_by, pending_restart })
     }
 
+    pub fn wait_for_pending_save(&self) {
+        let guard = self.save_worker.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.save_idle.wait_while(guard, |worker| *worker != SaveWorker::Idle).unwrap_or_else(PoisonError::into_inner);
+    }
+
     fn schedule_save(self: &Arc<Self>) {
         let Some(runtime) = &self.runtime else {
             return;
         };
+        let mut worker = self.save_worker.lock().unwrap_or_else(PoisonError::into_inner);
+        match *worker {
+            SaveWorker::Idle => *worker = SaveWorker::Running,
+            SaveWorker::Running => {
+                *worker = SaveWorker::RunningDirty;
+                return;
+            }
+            SaveWorker::RunningDirty => return,
+        }
+        drop(worker);
+
         let store = Arc::clone(self);
         drop(runtime.spawn_blocking(move || {
-            if let Err(error) = store.save_sync() {
-                tracing::warn!(%error, "failed to save settings.toml");
+            loop {
+                if let Err(error) = store.save_sync() {
+                    tracing::warn!(%error, "failed to save settings.toml");
+                }
+                let mut worker = store.save_worker.lock().unwrap_or_else(PoisonError::into_inner);
+                match *worker {
+                    SaveWorker::RunningDirty => *worker = SaveWorker::Running,
+                    SaveWorker::Running | SaveWorker::Idle => {
+                        *worker = SaveWorker::Idle;
+                        store.save_idle.notify_all();
+                        return;
+                    }
+                }
             }
         }));
     }
@@ -361,15 +401,19 @@ pub fn default_settings_path() -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use std::{assert_matches, fs};
+    use std::{
+        assert_matches, fs,
+        sync::{Arc, PoisonError},
+    };
 
     use cvars::{
         ASSET_DISK_CACHE_CAPACITY_MIB, CvarError, LOG_LEVEL, LOG_NOISY_NETWORK, Layer, RENDER_DRAW_DISTANCE, RENDER_SHOW_STATS,
         SCENE_LOD_FACTOR,
     };
     use tempfile::tempdir;
+    use tokio::runtime::Builder;
 
-    use super::{SettingsError, SettingsStore};
+    use super::{SaveWorker, SettingsError, SettingsStore};
 
     #[test]
     fn load_preserves_comments_and_unknown_keys_across_saves() {
@@ -591,5 +635,42 @@ lod_factor = 999.0
         let cleared = fs::read_to_string(&path).expect("read cleared settings");
         assert!(cleared.contains("graphics_preset = \"low\""));
         assert!(!cleared.contains("draw_distance"));
+    }
+
+    #[test]
+    fn burst_of_global_sets_runs_one_save_worker_and_persists_final_value() {
+        let runtime = Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("runtime");
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        let (store, report) = SettingsStore::load_or_default(path.clone(), Some(runtime.handle().clone()));
+        report.expect("initial load");
+        let store = Arc::new(store);
+
+        let io_guard = store.io_lock.lock().unwrap_or_else(PoisonError::into_inner);
+        for i in 0..200_u16 {
+            store.set_global(RENDER_DRAW_DISTANCE, 64.0 + f32::from(i)).expect("set draw distance");
+        }
+        assert_eq!(*store.save_worker.lock().unwrap_or_else(PoisonError::into_inner), SaveWorker::RunningDirty);
+        drop(io_guard);
+
+        store.wait_for_pending_save();
+        assert_eq!(*store.save_worker.lock().unwrap_or_else(PoisonError::into_inner), SaveWorker::Idle);
+        let saved = fs::read_to_string(&path).expect("read saved settings");
+        assert!(saved.contains("draw_distance = 263.0"));
+    }
+
+    #[test]
+    fn wait_for_pending_save_returns_when_idle() {
+        let runtime = Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("runtime");
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        let (store, report) = SettingsStore::load_or_default(path, Some(runtime.handle().clone()));
+        report.expect("initial load");
+        store.wait_for_pending_save();
+        assert_eq!(*store.save_worker.lock().unwrap_or_else(PoisonError::into_inner), SaveWorker::Idle);
+
+        let in_memory = SettingsStore::in_memory();
+        in_memory.wait_for_pending_save();
+        assert_eq!(*in_memory.save_worker.lock().unwrap_or_else(PoisonError::into_inner), SaveWorker::Idle);
     }
 }

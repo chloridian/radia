@@ -96,6 +96,7 @@ fn main() -> io::Result<()> {
     } else {
         Ok(())
     };
+    settings.wait_for_pending_save();
     runtime.shutdown_background();
     cache_shutdown
 }
