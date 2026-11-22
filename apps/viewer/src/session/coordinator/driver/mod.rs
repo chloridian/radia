@@ -64,7 +64,7 @@ use crate::{
         name_cache::NameCache,
         object_cache::{CachedObjectContinuation, CachedObjectProgress, ObjectCacheEvent, ObjectCacheSession},
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
-        recovery::{RecoveryCompletion, RecoveryIntake, ScheduledRecovery, retryable_send_error, simulator_lost_error, warn_unrecovered},
+        recovery::{RecoveryCompletion, RecoveryIntake, ScheduledRecovery, retryable_send_error, simulator_lost_error},
         terrain::{DecodedTerrain, TerrainDecodeQueue},
         world::{
             IngestSummary, MAX_OBJECTS_PER_INTAKE_QUANTUM, ObjectBatchContinuation, ObjectBatchProgress, ObjectMediaPreparationProgress,
@@ -1999,11 +1999,11 @@ impl SessionDriver {
 
     fn handle_recovery_completion(&mut self, completion: RecoveryCompletion) {
         match completion {
-            RecoveryCompletion::Deadline { aged_out, due } => {
-                warn_unrecovered("age_limit", &aged_out);
+            RecoveryCompletion::Deadline { aged_out, due, checked_at } => {
+                self.recovery.record_aged_out(&aged_out, checked_at);
                 let (exhausted, recoveries): (Vec<_>, Vec<_>) = due.into_iter().partition(ScheduledRecovery::is_exhausted);
                 self.recovery.degrade_recoveries(&exhausted);
-                warn_unrecovered("send_limit", &exhausted);
+                self.recovery.record_send_limit(&exhausted, checked_at);
                 if let Err(oversized) = self.recovery.start_send(&self.session_handle, recoveries) {
                     self.recovery.degrade_recoveries(&oversized.recoveries);
                     if let Some(first) = oversized.recoveries.first() {
@@ -2018,7 +2018,9 @@ impl SessionDriver {
             RecoveryCompletion::Send { recoveries, result, completed_at } => {
                 let Some(first) = recoveries.first() else { return };
                 let simulator_id = first.simulator_id;
-                let region = first.key.region().get();
+                if self.session_world.region_for(simulator_id).is_none() {
+                    return;
+                }
                 match result {
                     Ok(()) => self.recovery.mark_sent(&recoveries, completed_at),
                     Err(error) if retryable_send_error(&error) => self.recovery.defer(&recoveries, completed_at),
@@ -2028,7 +2030,7 @@ impl SessionDriver {
                         } else {
                             self.recovery.degrade_recoveries(&recoveries);
                         }
-                        tracing::warn!(simulator = simulator_id.get(), region, %error, "could not request object updates");
+                        self.recovery.record_send_failed(&recoveries, error, completed_at);
                     }
                 }
             }
@@ -2046,7 +2048,7 @@ impl SessionDriver {
         if let Some(due) = self.dropped_pushes.flush() {
             due.report();
         }
-        self.recovery.flush_pressure();
+        self.recovery.flush_summaries();
         self.media.flush_summary();
         self.camera.flush_summary();
         self.session_world.flush_summaries();

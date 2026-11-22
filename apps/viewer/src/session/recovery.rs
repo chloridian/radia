@@ -14,6 +14,7 @@ use protocol::{
     messages::{CacheMissType, ObjectRequest, RequestAgentData, RequestMultipleObjects},
 };
 use tokio::{time, time::Instant};
+use tracing::field;
 use utils::Summary;
 use world::{LocalAddress, Region};
 
@@ -24,6 +25,7 @@ const RECOVERY_REQUEST_INTERVAL: Duration = Duration::from_millis(100);
 const RECOVERY_MAX_AGE: Duration = Duration::from_secs(60);
 const RECOVERY_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const RECOVERY_OVERFLOW_LOG_INTERVAL: Duration = Duration::from_secs(5);
+const RECOVERY_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_RECOVERY_DIAGNOSTIC_ADDRESSES: usize = 8;
 pub(super) const MAX_RECOVERY_OBJECTS_PER_REQUEST: usize = 255;
 const MAX_RECOVERY_TARGETS: usize = 65_536;
@@ -101,14 +103,14 @@ impl RecoveryRetryState {
 enum RecoveryEntry {
     Pending(ScheduledRecovery),
     InFlight(ScheduledRecovery),
-    Degraded { simulator_id: Option<SimulatorId> },
+    Degraded { simulator_id: Option<SimulatorId>, order: u64 },
 }
 
 impl RecoveryEntry {
     fn simulator_id(&self) -> Option<SimulatorId> {
         match self {
             Self::Pending(recovery) | Self::InFlight(recovery) => Some(recovery.simulator_id),
-            Self::Degraded { simulator_id } => *simulator_id,
+            Self::Degraded { simulator_id, .. } => *simulator_id,
         }
     }
 }
@@ -118,6 +120,7 @@ pub(super) struct RecoveryScheduler {
     max_targets: usize,
     max_bytes: usize,
     next_token: u64,
+    next_degraded_order: u64,
     pressure: Summary<RecoveryPressure>,
 }
 
@@ -127,11 +130,40 @@ impl RecoveryScheduler {
     }
 
     fn with_limits(max_targets: usize, max_bytes: usize) -> Self {
-        Self { entries: HashMap::new(), max_targets, max_bytes, next_token: 0, pressure: Summary::new(RECOVERY_OVERFLOW_LOG_INTERVAL) }
+        Self {
+            entries: HashMap::new(),
+            max_targets,
+            max_bytes,
+            next_token: 0,
+            next_degraded_order: 0,
+            pressure: Summary::new(RECOVERY_OVERFLOW_LOG_INTERVAL),
+        }
     }
 
     fn has_capacity(&self) -> bool {
         self.entries.len() < self.max_targets && self.entries.len().saturating_add(1).saturating_mul(RECOVERY_ENTRY_BYTES) <= self.max_bytes
+    }
+
+    fn next_degraded_order(&mut self) -> u64 {
+        self.next_degraded_order = self.next_degraded_order.wrapping_add(1);
+        self.next_degraded_order
+    }
+
+    fn evict_oldest_degraded(&mut self) -> bool {
+        let Some(oldest) = self
+            .entries
+            .iter()
+            .filter_map(|(address, entry)| match entry {
+                RecoveryEntry::Degraded { order, .. } => Some((*order, *address)),
+                _ => None,
+            })
+            .min_by_key(|(order, _)| *order)
+            .map(|(_, address)| address)
+        else {
+            return false;
+        };
+        self.entries.remove(&oldest);
+        true
     }
 
     fn is_degraded(&self, address: LocalAddress) -> bool {
@@ -152,15 +184,18 @@ impl RecoveryScheduler {
         now: Instant,
     ) -> Option<u64> {
         let has_capacity = self.has_capacity();
-        match self.entries.get_mut(&address) {
+        let needs_slot = match self.entries.get_mut(&address) {
             Some(RecoveryEntry::Degraded { .. }) => return None,
             Some(RecoveryEntry::Pending(current) | RecoveryEntry::InFlight(current)) if current.simulator_id == simulator_id => {
                 current.agent_data = agent_data;
                 current.cache_miss_type = cache_miss_type;
                 return Some(current.token);
             }
-            None if !has_capacity => return None,
-            _ => {}
+            None => true,
+            Some(_) => false,
+        };
+        if needs_slot && !has_capacity && !self.evict_oldest_degraded() {
+            return None;
         }
         let token = self.next_token.checked_add(1)?;
         self.next_token = token;
@@ -173,7 +208,8 @@ impl RecoveryScheduler {
 
     fn mark_degraded(&mut self, address: LocalAddress, simulator_id: Option<SimulatorId>) {
         if self.entries.contains_key(&address) || self.has_capacity() {
-            self.entries.insert(address, RecoveryEntry::Degraded { simulator_id });
+            let order = self.next_degraded_order();
+            self.entries.insert(address, RecoveryEntry::Degraded { simulator_id, order });
         }
     }
 
@@ -184,7 +220,8 @@ impl RecoveryScheduler {
     fn degrade_simulator(&mut self, simulator_id: SimulatorId) {
         for entry in self.entries.values_mut() {
             if entry.simulator_id() == Some(simulator_id) {
-                *entry = RecoveryEntry::Degraded { simulator_id: Some(simulator_id) };
+                self.next_degraded_order = self.next_degraded_order.wrapping_add(1);
+                *entry = RecoveryEntry::Degraded { simulator_id: Some(simulator_id), order: self.next_degraded_order };
             }
         }
     }
@@ -204,12 +241,18 @@ impl RecoveryScheduler {
     }
 
     fn take_due(&mut self, now: Instant) -> Vec<ScheduledRecovery> {
-        let Some(simulator_id) = self.entries.values().find_map(|entry| match entry {
-            RecoveryEntry::Pending(recovery) if recovery.retry.is_due(now) && !recovery.retry.is_expired(now) => {
-                Some(recovery.simulator_id)
-            }
-            _ => None,
-        }) else {
+        let Some(simulator_id) = self
+            .entries
+            .values()
+            .filter_map(|entry| match entry {
+                RecoveryEntry::Pending(recovery) if recovery.retry.is_due(now) && !recovery.retry.is_expired(now) => {
+                    Some((recovery.retry.deadline, recovery.token, recovery.simulator_id))
+                }
+                _ => None,
+            })
+            .min_by_key(|(deadline, token, _)| (*deadline, *token))
+            .map(|(_, _, simulator_id)| simulator_id)
+        else {
             return Vec::new();
         };
         self.entries
@@ -227,18 +270,20 @@ impl RecoveryScheduler {
     }
 
     fn take_expired(&mut self, now: Instant) -> Vec<ScheduledRecovery> {
-        self.entries
-            .values_mut()
-            .filter_map(|entry| {
-                let RecoveryEntry::Pending(recovery) = *entry else { return None };
-                if !recovery.retry.is_expired(now) {
-                    return None;
-                }
-                *entry = RecoveryEntry::Degraded { simulator_id: Some(recovery.simulator_id) };
-                Some(recovery)
-            })
-            .take(MAX_RECOVERY_OBJECTS_PER_REQUEST)
-            .collect()
+        let mut expired = Vec::new();
+        for entry in self.entries.values_mut() {
+            if expired.len() >= MAX_RECOVERY_OBJECTS_PER_REQUEST {
+                break;
+            }
+            let RecoveryEntry::Pending(recovery) = *entry else { continue };
+            if !recovery.retry.is_expired(now) {
+                continue;
+            }
+            self.next_degraded_order = self.next_degraded_order.wrapping_add(1);
+            *entry = RecoveryEntry::Degraded { simulator_id: Some(recovery.simulator_id), order: self.next_degraded_order };
+            expired.push(recovery);
+        }
+        expired
     }
 
     fn mark_sent(&mut self, recovery: ScheduledRecovery, now: Instant) {
@@ -255,7 +300,8 @@ impl RecoveryScheduler {
         if let Some(entry) = self.entries.get_mut(&recovery.key)
             && matches!(entry, RecoveryEntry::Pending(current) | RecoveryEntry::InFlight(current) if current.token == recovery.token)
         {
-            *entry = RecoveryEntry::Degraded { simulator_id: Some(recovery.simulator_id) };
+            self.next_degraded_order = self.next_degraded_order.wrapping_add(1);
+            *entry = RecoveryEntry::Degraded { simulator_id: Some(recovery.simulator_id), order: self.next_degraded_order };
         }
     }
 
@@ -318,8 +364,53 @@ impl RecoveryPressure {
     }
 }
 
+#[derive(Default)]
+struct RecoveryFailureSummary {
+    aged_out: u64,
+    send_limit: u64,
+    send_failed: u64,
+    simulator: Option<SimulatorId>,
+    region: Option<Region>,
+    local_ids: Vec<u32>,
+    last_error: Option<Error>,
+}
+
+impl RecoveryFailureSummary {
+    fn record_sample(&mut self, recoveries: &[ScheduledRecovery]) {
+        if let Some(first) = recoveries.first() {
+            self.simulator = Some(first.simulator_id);
+            self.region = Some(first.key.region());
+        }
+        for recovery in recoveries {
+            if self.local_ids.len() >= MAX_RECOVERY_DIAGNOSTIC_ADDRESSES {
+                break;
+            }
+            let local_id = recovery.key.local_id().get();
+            if !self.local_ids.contains(&local_id) {
+                self.local_ids.push(local_id);
+            }
+        }
+    }
+
+    fn report(self) {
+        let simulator = self.simulator.map(SimulatorId::get);
+        let region = self.region.map(|region| region.get());
+        let last_error = self.last_error.as_ref().map(field::display);
+        tracing::warn!(
+            simulator,
+            region,
+            aged_out = self.aged_out,
+            send_limit = self.send_limit,
+            send_failed = self.send_failed,
+            local_ids = ?self.local_ids,
+            last_error,
+            "object recovery failed; objects may remain missing"
+        );
+    }
+}
+
 pub(super) enum RecoveryCompletion {
-    Deadline { aged_out: Vec<ScheduledRecovery>, due: Vec<ScheduledRecovery> },
+    Deadline { aged_out: Vec<ScheduledRecovery>, due: Vec<ScheduledRecovery>, checked_at: Instant },
     Send { recoveries: Vec<ScheduledRecovery>, result: Result<(), Error>, completed_at: Instant },
 }
 
@@ -336,11 +427,17 @@ pub(super) struct RecoveryIntake {
     scheduler: RecoveryScheduler,
     next_send_at: Option<Instant>,
     in_flight: Option<PendingRecoverySend>,
+    failures: Summary<RecoveryFailureSummary>,
 }
 
 impl RecoveryIntake {
     pub(super) fn new() -> Self {
-        Self { scheduler: RecoveryScheduler::new(), next_send_at: None, in_flight: None }
+        Self {
+            scheduler: RecoveryScheduler::new(),
+            next_send_at: None,
+            in_flight: None,
+            failures: Summary::new(RECOVERY_FAILURE_LOG_INTERVAL),
+        }
     }
 
     pub(super) fn schedule(
@@ -389,6 +486,9 @@ impl RecoveryIntake {
     }
 
     pub(super) fn cancel_simulator(&mut self, simulator_id: SimulatorId) {
+        if self.in_flight.as_ref().is_some_and(|send| send.recoveries.iter().any(|recovery| recovery.simulator_id == simulator_id)) {
+            self.in_flight = None;
+        }
         self.scheduler.cancel_simulator(simulator_id);
     }
 
@@ -414,7 +514,7 @@ impl RecoveryIntake {
             .unwrap_or(now + RECOVERY_IDLE_WAIT);
         time::sleep_until(deadline).await;
         let now = Instant::now();
-        RecoveryCompletion::Deadline { aged_out: self.scheduler.take_expired(now), due: self.scheduler.take_due(now) }
+        RecoveryCompletion::Deadline { aged_out: self.scheduler.take_expired(now), due: self.scheduler.take_due(now), checked_at: now }
     }
 
     pub(super) fn start_send(
@@ -453,9 +553,49 @@ impl RecoveryIntake {
         }
     }
 
-    pub(super) fn flush_pressure(&mut self) {
+    pub(super) fn record_aged_out(&mut self, recoveries: &[ScheduledRecovery], now: Instant) {
+        if recoveries.is_empty() {
+            return;
+        }
+        if let Some(summary) = self.failures.record(now.into_std(), |summary| {
+            summary.aged_out = summary.aged_out.saturating_add(recoveries.len() as u64);
+            summary.record_sample(recoveries);
+        }) {
+            summary.report();
+        }
+    }
+
+    pub(super) fn record_send_limit(&mut self, recoveries: &[ScheduledRecovery], now: Instant) {
+        if recoveries.is_empty() {
+            return;
+        }
+        if let Some(summary) = self.failures.record(now.into_std(), |summary| {
+            summary.send_limit = summary.send_limit.saturating_add(recoveries.len() as u64);
+            summary.record_sample(recoveries);
+        }) {
+            summary.report();
+        }
+    }
+
+    pub(super) fn record_send_failed(&mut self, recoveries: &[ScheduledRecovery], error: Error, now: Instant) {
+        if recoveries.is_empty() {
+            return;
+        }
+        if let Some(summary) = self.failures.record(now.into_std(), |summary| {
+            summary.send_failed = summary.send_failed.saturating_add(recoveries.len() as u64);
+            summary.record_sample(recoveries);
+            summary.last_error = Some(error);
+        }) {
+            summary.report();
+        }
+    }
+
+    pub(super) fn flush_summaries(&mut self) {
         if let Some(pressure) = self.scheduler.pressure.flush() {
             pressure.report();
+        }
+        if let Some(failures) = self.failures.flush() {
+            failures.report();
         }
     }
 
@@ -475,24 +615,6 @@ impl RecoveryIntake {
     {
         self.in_flight = Some(PendingRecoverySend { recoveries, future: future.boxed() });
     }
-}
-
-pub(super) fn warn_unrecovered(reason: &'static str, recoveries: &[ScheduledRecovery]) {
-    if recoveries.is_empty() {
-        return;
-    }
-    let simulator = recoveries.first().map(|recovery| recovery.simulator_id.get());
-    let region = recoveries.first().map(|recovery| recovery.key.region().get());
-    let local_ids =
-        recoveries.iter().take(MAX_RECOVERY_DIAGNOSTIC_ADDRESSES).map(|recovery| recovery.key.local_id().get()).collect::<Vec<_>>();
-    tracing::warn!(
-        reason,
-        simulator,
-        region,
-        count = recoveries.len(),
-        local_ids = ?local_ids,
-        "object recovery stopped; objects may remain missing"
-    );
 }
 
 pub(super) fn retryable_send_error(error: &Error) -> bool {
@@ -532,9 +654,9 @@ mod tests {
     use world::{LocalAddress, Region};
 
     use super::{
-        MAX_RECOVERY_OBJECTS_PER_REQUEST, MAX_RECOVERY_REQUEST_BYTES, RECOVERY_ENTRY_BYTES, RECOVERY_IDLE_WAIT, RECOVERY_MAX_AGE,
-        RECOVERY_MAX_SENDS, RECOVERY_REQUEST_INTERVAL, RECOVERY_RETRY_INTERVAL, RecoveryCompletion, RecoveryIntake, RecoveryPressure,
-        RecoveryScheduler, recovery_request,
+        MAX_RECOVERY_DIAGNOSTIC_ADDRESSES, MAX_RECOVERY_OBJECTS_PER_REQUEST, MAX_RECOVERY_REQUEST_BYTES, RECOVERY_ENTRY_BYTES,
+        RECOVERY_FAILURE_LOG_INTERVAL, RECOVERY_IDLE_WAIT, RECOVERY_MAX_AGE, RECOVERY_MAX_SENDS, RECOVERY_REQUEST_INTERVAL,
+        RECOVERY_RETRY_INTERVAL, RecoveryCompletion, RecoveryIntake, RecoveryPressure, RecoveryScheduler, recovery_request,
     };
     use crate::{
         session::world::MAX_WORLD_ENTITIES,
@@ -727,9 +849,10 @@ mod tests {
         assert_eq!(expired[0].key, target);
         assert!(scheduler.take_due(now + RECOVERY_MAX_AGE).is_empty());
         assert!(scheduler.schedule(simulator, agent_data(), target, now).is_none());
-        assert!(scheduler.schedule(simulator, agent_data(), other, now).is_none(), "suppression uses bounded storage");
-        scheduler.cancel(target);
-        assert!(scheduler.schedule(simulator, agent_data(), other, now).is_some());
+        assert!(scheduler.schedule(simulator, agent_data(), other, now).is_some(), "new target evicts stale suppression");
+        assert!(!scheduler.is_degraded(target));
+        scheduler.cancel(other);
+        assert!(scheduler.schedule(simulator, agent_data(), target, now).is_some());
     }
 
     #[test]
@@ -760,7 +883,7 @@ mod tests {
             let second = address(regions[0], 2);
             let excess = address(regions[0], 3);
             assert!(scheduler.schedule(simulator, agent_data(), first, now).is_some());
-            scheduler.mark_degraded(second, Some(simulator));
+            assert!(scheduler.schedule(simulator, agent_data(), second, now).is_some());
             assert!(scheduler.schedule(simulator, agent_data(), excess, now).is_none());
             scheduler.mark_degraded(excess, Some(simulator));
             assert!(!scheduler.is_degraded(excess), "rejected work cannot allocate a suppression entry");
@@ -804,7 +927,7 @@ mod tests {
             Some(agent_data()),
         );
 
-        let RecoveryCompletion::Deadline { due, aged_out } = intake.next_completion().await else { panic!("first batch is due") };
+        let RecoveryCompletion::Deadline { due, aged_out, .. } = intake.next_completion().await else { panic!("first batch is due") };
         assert!(aged_out.is_empty());
         assert_eq!(due.len(), 1);
         let (send, sent) = oneshot::channel();
@@ -828,7 +951,7 @@ mod tests {
         assert!(futures::poll!(next_batch.as_mut()).is_pending());
         time::advance(Duration::from_millis(1)).await;
 
-        let RecoveryCompletion::Deadline { due, aged_out } = next_batch.await else { panic!("paced batch is due") };
+        let RecoveryCompletion::Deadline { due, aged_out, .. } = next_batch.await else { panic!("paced batch is due") };
         assert!(aged_out.is_empty());
         assert_eq!(due.len(), 1);
         assert_ne!(due[0].simulator_id, sent_simulator);
@@ -869,8 +992,142 @@ mod tests {
         assert!(futures::poll!(next.as_mut()).is_pending());
         time::advance(Duration::from_millis(1)).await;
 
-        let RecoveryCompletion::Deadline { aged_out, due } = next.await else { panic!("idle deadline is returned") };
+        let RecoveryCompletion::Deadline { aged_out, due, .. } = next.await else { panic!("idle deadline is returned") };
         assert!(aged_out.is_empty());
         assert!(due.is_empty());
+    }
+
+    #[test]
+    fn neighbor_and_primary_recoveries_dispatch_fairly() {
+        let (_region_world, regions) = registered_regions(2);
+        let primary = simulator_id();
+        let neighbor = simulator_id();
+        let now = Instant::now();
+        let mut scheduler = RecoveryScheduler::new();
+
+        let neighbor_target = address(regions[1], 10);
+        let primary_target = address(regions[0], 20);
+        assert!(scheduler.schedule(neighbor, agent_data(), neighbor_target, now).is_some());
+        assert!(scheduler.schedule(primary, agent_data(), primary_target, now + Duration::from_millis(10)).is_some());
+
+        let first = scheduler.take_due(now + Duration::from_millis(10));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].simulator_id, neighbor);
+        assert_eq!(first[0].key, neighbor_target);
+        scheduler.mark_sent(first[0], now + Duration::from_millis(10));
+
+        let second = scheduler.take_due(now + Duration::from_millis(10));
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].simulator_id, primary);
+        assert_eq!(second[0].key, primary_target);
+        scheduler.mark_sent(second[0], now + Duration::from_millis(10));
+
+        let retry_time = now + Duration::from_millis(10) + RECOVERY_RETRY_INTERVAL;
+        let third = scheduler.take_due(retry_time);
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].simulator_id, neighbor);
+    }
+
+    #[tokio::test]
+    async fn disconnect_clears_in_flight_send_for_retired_simulator() {
+        struct DropSignal(Option<oneshot::Sender<()>>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    sender.send(()).expect("drop signal receiver stays open");
+                }
+            }
+        }
+
+        let (_region_world, regions) = registered_regions(2);
+        let primary = simulator_id();
+        let neighbor = simulator_id();
+        let mut intake = RecoveryIntake::new();
+        let now = Instant::now();
+        assert!(intake.scheduler.schedule(neighbor, agent_data(), address(regions[1], 7), now).is_some());
+        let due = intake.scheduler.take_due(now);
+        assert_eq!(due.len(), 1);
+
+        let (signal, dropped) = oneshot::channel();
+        let signal = DropSignal(Some(signal));
+        intake.start_send_future(due, async move {
+            let _signal = signal;
+            future::pending::<Result<(), Error>>().await
+        });
+
+        intake.cancel_simulator(primary);
+        assert!(intake.in_flight.is_some());
+
+        intake.cancel_simulator(neighbor);
+        assert!(intake.in_flight.is_none());
+        dropped.await.expect("retired simulator drops its in-flight send");
+    }
+
+    #[test]
+    fn degraded_entries_suppress_repeats_and_evict_before_starving_pending() {
+        let (_region_world, regions) = registered_regions(1);
+        let simulator = simulator_id();
+        let stale_first = address(regions[0], 1);
+        let stale_second = address(regions[0], 2);
+        let fresh = address(regions[0], 3);
+        let mut now = Instant::now();
+        let mut scheduler = RecoveryScheduler::with_limits(2, 2 * RECOVERY_ENTRY_BYTES);
+
+        assert!(scheduler.schedule(simulator, agent_data(), stale_first, now).is_some());
+        for _ in 0..RECOVERY_MAX_SENDS {
+            let due = scheduler.take_due(now);
+            assert_eq!(due.len(), 1);
+            scheduler.mark_sent(due[0], now);
+            now += RECOVERY_RETRY_INTERVAL;
+        }
+        let exhausted = scheduler.take_due(now);
+        assert_eq!(exhausted.len(), 1);
+        assert!(exhausted[0].is_exhausted());
+        scheduler.degrade(exhausted[0]);
+        assert!(scheduler.schedule_with_type(simulator, agent_data(), stale_first, Full, now).is_none());
+
+        scheduler.mark_degraded(stale_second, Some(simulator));
+        assert!(scheduler.schedule_with_type(simulator, agent_data(), fresh, Full, now).is_some());
+        assert!(!scheduler.is_degraded(stale_first), "oldest degraded entry is evicted first");
+        assert!(scheduler.is_degraded(stale_second));
+
+        scheduler.cancel(stale_second);
+        assert!(!scheduler.is_degraded(stale_second));
+    }
+
+    #[test]
+    fn failure_summary_aggregates_counts_and_bounds_samples() {
+        let (_region_world, regions) = registered_regions(1);
+        let simulator = simulator_id();
+        let now = Instant::now();
+        let mut intake = RecoveryIntake::new();
+
+        for local_id in 1..=(MAX_RECOVERY_DIAGNOSTIC_ADDRESSES as u32 + 4) {
+            assert!(intake.scheduler.schedule(simulator, agent_data(), address(regions[0], local_id), now).is_some());
+        }
+        let batch = intake.scheduler.take_due(now);
+        assert_eq!(batch.len(), MAX_RECOVERY_DIAGNOSTIC_ADDRESSES + 4);
+
+        intake.record_aged_out(&batch[..2], now);
+        assert!(intake.failures.flush().is_none(), "first record flushes immediately");
+
+        let within_window = now + Duration::from_secs(1);
+        intake.record_aged_out(&batch[..3], within_window);
+        intake.record_send_limit(&batch[2..6], within_window);
+        intake.record_send_failed(&batch[4..], Error::SimulatorUnavailable, within_window);
+
+        let flushed = intake.failures.flush().expect("aggregated failures waiting in window");
+        assert_eq!(flushed.aged_out, 3);
+        assert_eq!(flushed.send_limit, 4);
+        assert_eq!(flushed.send_failed, (MAX_RECOVERY_DIAGNOSTIC_ADDRESSES + 4 - 4) as u64);
+        assert_eq!(flushed.simulator, Some(simulator));
+        assert_eq!(flushed.region, Some(regions[0]));
+        assert_eq!(flushed.local_ids.len(), MAX_RECOVERY_DIAGNOSTIC_ADDRESSES);
+        assert_matches!(flushed.last_error, Some(Error::SimulatorUnavailable));
+
+        let next_window = now + RECOVERY_FAILURE_LOG_INTERVAL + Duration::from_secs(2);
+        intake.record_send_limit(&batch[..1], next_window);
+        assert!(intake.failures.flush().is_none());
     }
 }
