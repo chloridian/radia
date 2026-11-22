@@ -1083,4 +1083,110 @@ mod tests {
         assert_eq!(world.parcel_bytes, 0);
         assert_eq!(world.check_invariants(), Ok(()));
     }
+
+    #[test]
+    fn stale_post_complete_overlay_part_is_rejected() {
+        let mut world = World::new(limits());
+        let region = world.register_region().unwrap();
+        complete_overlay(&mut world, region, 10, 0);
+        let before = world.parcel_state(region).unwrap().overlay.unwrap();
+
+        let applied =
+            world.observe_parcel_overlay(source(region, 5), ParcelOverlayObservation { sequence_id: 0, data: overlay_part(0x99) }).unwrap();
+        assert_eq!(applied, RegionApplied::unchanged());
+        assert_eq!(world.parcel_state(region).unwrap().overlay.unwrap(), before);
+        assert!(world.regions[&region].parcels.overlay.staging.is_none());
+        assert_eq!(world.check_invariants(), Ok(()));
+    }
+
+    #[test]
+    fn malformed_parcel_properties_keep_state_and_invariants() {
+        let mut world = World::new(limits());
+        let region = world.register_region().unwrap();
+        observe_properties(&mut world, region, 1, 1, 41, 0);
+        let before = world.parcel_state(region).unwrap().current.unwrap();
+
+        for request_result in [-2_i32, 2] {
+            assert_invalid_field(
+                world.observe_parcel_properties(
+                    source(region, 2 + request_result.unsigned_abs() as u64),
+                    ParcelPropertiesObservation { request_result, sequence_id: 2, properties: Some(properties(42, 0, bitmap(&[]))) },
+                ),
+                "parcel_request_result",
+            );
+        }
+
+        assert_invalid_field(ParcelBitmap::from_bytes(&[0; PARCEL_BITMAP_BYTES - 1]), "parcel_bitmap");
+
+        let mut bad_area = properties(42, 0, bitmap(&[]));
+        bad_area.area = 65_537;
+        assert_invalid_field(
+            world.observe_parcel_properties(
+                source(region, 10),
+                ParcelPropertiesObservation { request_result: 0, sequence_id: 3, properties: Some(bad_area) },
+            ),
+            "parcel_area",
+        );
+
+        let mut bad_landing = properties(42, 0, bitmap(&[]));
+        bad_landing.landing_point = Some(Vec3::new(f32::NAN, 0.0, 0.0));
+        assert_invalid_field(
+            world.observe_parcel_properties(
+                source(region, 11),
+                ParcelPropertiesObservation { request_result: 0, sequence_id: 4, properties: Some(bad_landing) },
+            ),
+            "parcel_landing_point",
+        );
+
+        let mut bad_pass_hours = properties(42, 0, bitmap(&[]));
+        bad_pass_hours.access.pass_hours = Some(f32::INFINITY);
+        assert_invalid_field(
+            world.observe_parcel_properties(
+                source(region, 12),
+                ParcelPropertiesObservation { request_result: 0, sequence_id: 5, properties: Some(bad_pass_hours) },
+            ),
+            "parcel_pass_hours",
+        );
+
+        assert_eq!(world.parcel_state(region).unwrap().current.unwrap(), before);
+        assert_eq!(world.check_invariants(), Ok(()));
+    }
+
+    #[test]
+    fn stale_region_flags_do_not_overwrite_newer() {
+        let mut world = World::new(limits());
+        let region = world.register_region().unwrap();
+        let _ = world.observe_region_flags(source(region, 10), Some(1 << 19), Some(1 << 32)).unwrap();
+        let stale = world.observe_region_flags(source(region, 5), Some(0), Some(0)).unwrap();
+        assert_eq!(stale, RegionApplied::unchanged());
+        let flags = world.parcel_state(region).unwrap().region_flags;
+        assert_eq!(flags, RegionFlags { low: Some(1 << 19), extended: Some(1 << 32) });
+        assert_eq!(world.check_invariants(), Ok(()));
+    }
+
+    #[test]
+    fn parcel_budget_exhausted_preserves_bytes_and_invariants() {
+        let mut world = World::new(limits());
+        let region = world.register_region().unwrap();
+        let original_bytes = world.parcel_bytes;
+        world.parcel_bytes = MAX_PARCEL_BYTES;
+
+        assert_eq!(
+            world.observe_parcel_overlay(source(region, 1), ParcelOverlayObservation { sequence_id: 0, data: overlay_part(1) }),
+            Err(ApplyError::ParcelBudgetExhausted)
+        );
+        assert_eq!(world.parcel_bytes, MAX_PARCEL_BYTES);
+
+        assert_eq!(
+            world.observe_parcel_properties(
+                source(region, 2),
+                ParcelPropertiesObservation { request_result: 0, sequence_id: 1, properties: Some(properties(41, 0, bitmap(&[]))) },
+            ),
+            Err(ApplyError::ParcelBudgetExhausted)
+        );
+        assert_eq!(world.parcel_bytes, MAX_PARCEL_BYTES);
+
+        world.parcel_bytes = original_bytes;
+        assert_eq!(world.check_invariants(), Ok(()));
+    }
 }

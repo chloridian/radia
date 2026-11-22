@@ -365,14 +365,16 @@ fn check_limit(limit: usize, maximum: usize) -> Result<(), ReadError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{assert_matches, num::NonZeroU32};
+    use std::{assert_matches, num::NonZeroU32, sync::Arc};
 
     use futures::{join, poll};
     use tokio::time;
     use uuid::Uuid;
     use world::{
         EnvironmentAssignment, EnvironmentScope, EnvironmentSource, Kind, MAX_ENVIRONMENT_SOURCE_BYTES, MAX_OBJECT_DETAIL_WORK_ITEMS,
-        ObjectDetailResult, ObjectObservation, OrderEvidence, ParcelLocalId, ParentUpdate, Region, UpdateSource, WorldLimits,
+        MAX_PARCEL_READ_BYTES, ObjectDetailResult, ObjectObservation, OrderEvidence, PARCEL_BITMAP_BYTES, PARCEL_OVERLAY_PART_BYTES,
+        PARCEL_OVERLAY_PARTS, ParcelAccessSettings, ParcelBitmap, ParcelFlags, ParcelLocalId, ParcelOverlayObservation,
+        ParcelPropertiesData, ParcelPropertiesObservation, ParentUpdate, Region, UpdateSource, WorldLimits,
     };
 
     use super::*;
@@ -447,6 +449,53 @@ mod tests {
             read.region_assignment.unwrap().source,
             EnvironmentSource::Inline(source) if source.len() == MAX_ENVIRONMENT_SOURCE_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn parcel_state_reads_fit_admission() {
+        let mut world = world();
+        let region = world.register_region().unwrap();
+        for part in 0..PARCEL_OVERLAY_PARTS {
+            let source = UpdateSource::new(region, (part + 1) as u32, OrderEvidence::Ordered((part + 1) as u64), 0);
+            let _ = world
+                .observe_parcel_overlay(
+                    source,
+                    ParcelOverlayObservation { sequence_id: part as i32, data: vec![0x20; PARCEL_OVERLAY_PART_BYTES] },
+                )
+                .unwrap();
+        }
+        let properties = ParcelPropertiesData {
+            local_id: ParcelLocalId::new(42).unwrap(),
+            name: Arc::from("Reader parcel"),
+            description: Arc::from("Reader parcel description"),
+            owner_id: Some(Uuid::from_u128(1)),
+            group_id: Some(Uuid::from_u128(2)),
+            group_owned: false,
+            area: 1024,
+            flags: ParcelFlags::from_bits(1 << 0),
+            bitmap: ParcelBitmap::from_bytes(&[0xff; PARCEL_BITMAP_BYTES]).unwrap(),
+            landing_point: None,
+            landing_look_at: None,
+            landing_type: Some(1),
+            music_url: Arc::from("https://music.invalid/stream"),
+            media_url: Arc::from("https://media.invalid/page"),
+            access: ParcelAccessSettings::default(),
+        };
+        let _ = world
+            .observe_parcel_properties(
+                UpdateSource::new(region, 10, OrderEvidence::Ordered(10), 0),
+                ParcelPropertiesObservation { request_result: 0, sequence_id: 1, properties: Some(properties) },
+            )
+            .unwrap();
+        let _ = world.observe_region_flags(UpdateSource::new(region, 11, OrderEvidence::Ordered(11), 0), Some(1 << 19), Some(0)).unwrap();
+
+        let mut service = WorldReadHost::new(&world, Handle::current());
+        let reader = service.reader();
+        let read = deliver(reader.parcel_state(region), &mut service, &world).await.unwrap().unwrap();
+        assert_eq!(read, world.parcel_state(region).unwrap());
+        assert!(read.retained_bytes() <= MAX_PARCEL_READ_BYTES);
+        let _ = world.retire_region(region).unwrap();
+        assert_eq!(deliver(reader.parcel_state(region), &mut service, &world).await.unwrap(), None);
     }
 
     #[tokio::test]
