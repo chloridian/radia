@@ -832,7 +832,7 @@ async fn parent_removal_batches_all_children() {
     let mut missing = children;
     let mut batches = 0;
     while !missing.is_empty() {
-        let RecoveryCompletion::Deadline { due, aged_out } = intake.next_completion().await else {
+        let RecoveryCompletion::Deadline { due, aged_out, .. } = intake.next_completion().await else {
             panic!("recovery intake is not sending while batches drain");
         };
         assert!(aged_out.is_empty());
