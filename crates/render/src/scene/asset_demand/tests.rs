@@ -91,7 +91,7 @@ fn mesh_scene(count: u32) -> (Budget, Mirror, BTreeMap<Uuid, Entity>) {
         );
         observation.pose = Some(world::Pose { position: Some(Vec3::new(10.0, 0.0, 0.0)), rotation: Some(math::Quat::IDENTITY) });
         observation.scale = Some(Vec3::ONE);
-        observation.shape = world::FieldUpdate::Set(world::Shape::Mesh { asset_id: asset, flags: world::SculptFlags::default() });
+        observation.shape = world::FieldUpdate::Set(world::Shape::Mesh { asset_id: asset, flags: SculptFlags::default() });
         let _applied = world.observe_object(observation).expect("fixture mesh applies");
     }
 
@@ -446,7 +446,7 @@ fn mesh_importance_keeps_its_ticket() {
     );
     observation.pose = Some(world::Pose { position: Some(Vec3::new(10.0, 0.0, 0.0)), rotation: Some(math::Quat::IDENTITY) });
     observation.scale = Some(Vec3::ONE);
-    observation.shape = world::FieldUpdate::Set(world::Shape::Mesh { asset_id: asset, flags: world::SculptFlags::default() });
+    observation.shape = world::FieldUpdate::Set(world::Shape::Mesh { asset_id: asset, flags: SculptFlags::default() });
     let _applied = world.observe_object(observation).expect("fixture mesh applies");
     let item = world.object_list_page(None, 1).expect("fixture object list").objects.into_iter().next().expect("fixture object");
     let detail = world.object_detail(item.entity).expect("fixture detail");
@@ -863,7 +863,7 @@ fn camera_scan_reaches_target() {
         );
         observation.pose = Some(world::Pose { position: Some(position), rotation: Some(math::Quat::IDENTITY) });
         observation.scale = Some(Vec3::ONE);
-        observation.shape = world::FieldUpdate::Set(world::Shape::Mesh { asset_id: mesh_asset, flags: world::SculptFlags::default() });
+        observation.shape = world::FieldUpdate::Set(world::Shape::Mesh { asset_id: mesh_asset, flags: SculptFlags::default() });
         let _applied = world.observe_object(observation).expect("fixture mesh applies");
     }
 

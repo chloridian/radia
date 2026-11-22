@@ -122,7 +122,7 @@ impl Reconciler {
         }
         if !blocked {
             if mem::take(&mut self.preparation.build_due)
-                && let Some(job) = self.preparation.meshes.start()
+                && let Some(job) = self.preparation.meshes.start().or_else(|| self.preparation.assets.start_sculpt())
             {
                 return ReconcileStep::Build(job);
             }
@@ -163,7 +163,7 @@ impl Reconciler {
                 self.preparation.build_due = true;
                 return ReconcileStep::Asset(event);
             }
-            if let Some(job) = self.preparation.meshes.start() {
+            if let Some(job) = self.preparation.meshes.start().or_else(|| self.preparation.assets.start_sculpt()) {
                 return ReconcileStep::Build(job);
             }
         }
@@ -227,7 +227,7 @@ impl Reconciler {
             || self.viewer.waiting()
         {
             ReconcileStep::Wait(now + Duration::from_millis(200))
-        } else if self.preparation.meshes.waiting() || surfaces_waiting {
+        } else if self.preparation.meshes.waiting() || self.preparation.assets.waiting_sculpt() || surfaces_waiting {
             ReconcileStep::Wait(now + POLL_DELAY)
         } else {
             ReconcileStep::Idle

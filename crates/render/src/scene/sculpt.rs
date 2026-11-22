@@ -1,6 +1,10 @@
-use std::{f32::consts::PI, sync::atomic::AtomicBool};
+use std::{
+    borrow::Cow,
+    f32::consts::PI,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
-use assets::{MAX_SOURCE_EDGE, mesh::Mesh};
+use assets::{Image, MAX_SOURCE_EDGE, PixelFormat, mesh::Mesh};
 use math::{Vec2, Vec3};
 use world::{SculptFlags, SculptType};
 
@@ -18,6 +22,20 @@ pub fn tessellate_sculpt(
     flags: SculptFlags,
     detail: Detail,
 ) -> Result<Mesh, MeshBuildError> {
+    tessellate_sculpt_cancellable(size, rgba, sculpt_type, flags, detail, &AtomicBool::new(false))
+}
+
+pub(in crate::scene) fn tessellate_sculpt_cancellable(
+    size: [u32; 2],
+    rgba: &[u8],
+    sculpt_type: SculptType,
+    flags: SculptFlags,
+    detail: Detail,
+    cancelled: &AtomicBool,
+) -> Result<Mesh, MeshBuildError> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(MeshBuildError::Cancelled);
+    }
     let [width, height] = size;
     if width == 0 || height == 0 || width > MAX_SOURCE_EDGE || height > MAX_SOURCE_EDGE {
         return Err(MeshBuildError::TooComplex);
@@ -52,6 +70,75 @@ pub fn tessellate_sculpt(
         }
     }
 
+    build_grid(&positions, rows, columns, reverse_horizontal, used_placeholder, sculpt_type, vertex_count, cancelled)
+}
+
+pub(in crate::scene) fn sculpt_placeholder_mesh() -> Result<Mesh, MeshBuildError> {
+    let rows = 5;
+    let columns = 5;
+    let positions = placeholder(rows, columns);
+    build_grid(&positions, rows, columns, false, true, SculptType::Sphere, rows * columns, &AtomicBool::new(false))
+}
+
+pub(in crate::scene) fn image_to_rgba<'a>(image: &'a Image, cancelled: &AtomicBool) -> Result<Cow<'a, [u8]>, MeshBuildError> {
+    pixels_to_rgba(image.size(), image.format(), image.pixels(), cancelled)
+}
+
+pub(in crate::scene) fn pixels_to_rgba<'a>(
+    size: [u32; 2],
+    format: PixelFormat,
+    pixels: &'a [u8],
+    cancelled: &AtomicBool,
+) -> Result<Cow<'a, [u8]>, MeshBuildError> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(MeshBuildError::Cancelled);
+    }
+    let [width, height] = size;
+    if width == 0 || height == 0 || width > MAX_SOURCE_EDGE || height > MAX_SOURCE_EDGE {
+        return Err(MeshBuildError::TooComplex);
+    }
+    let pixel_count = usize::try_from(width)
+        .ok()
+        .and_then(|width| usize::try_from(height).ok().and_then(|height| width.checked_mul(height)))
+        .ok_or(MeshBuildError::TooComplex)?;
+    let channels = format.channels();
+    let expected_bytes = pixel_count.checked_mul(channels).ok_or(MeshBuildError::TooComplex)?;
+    if pixels.len() != expected_bytes {
+        return Err(MeshBuildError::InvalidParameters);
+    }
+    if format == PixelFormat::Rgba8 {
+        return Ok(Cow::Borrowed(pixels));
+    }
+    let required_bytes = pixel_count.checked_mul(4).ok_or(MeshBuildError::TooComplex)?;
+    let mut rgba = vec![0; required_bytes];
+    let row_width = width as usize;
+    for (dest, src) in rgba.chunks_exact_mut(row_width * 4).zip(pixels.chunks_exact(row_width * channels)) {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(MeshBuildError::Cancelled);
+        }
+        for (src, dest) in src.chunks_exact(channels).zip(dest.as_chunks_mut::<4>().0) {
+            *dest = match format {
+                PixelFormat::Gray8 => [src[0], src[0], src[0], 255],
+                PixelFormat::GrayAlpha8 => [src[0], src[0], src[0], src[1]],
+                PixelFormat::Rgb8 => [src[0], src[1], src[2], 255],
+                PixelFormat::Rgba8 => [src[0], src[1], src[2], src[3]],
+            };
+        }
+    }
+    Ok(Cow::Owned(rgba))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_grid(
+    positions: &[Vec3],
+    rows: usize,
+    columns: usize,
+    reverse_horizontal: bool,
+    used_placeholder: bool,
+    sculpt_type: SculptType,
+    vertex_count: usize,
+    cancelled: &AtomicBool,
+) -> Result<Mesh, MeshBuildError> {
     let mut mesh = Builder::default();
     let start = mesh.begin_face();
     for row in 0..rows {
@@ -110,8 +197,7 @@ pub fn tessellate_sculpt(
         }
     }
 
-    let cancelled = AtomicBool::new(false);
-    let result = mesh.finish(&cancelled)?;
+    let result = mesh.finish(cancelled)?;
     debug_assert_eq!(result.vertices().len(), vertex_count);
     Ok(result)
 }

@@ -5,5 +5,6 @@ mod materials;
 mod mesh;
 mod publication;
 mod reconciler;
+mod sculpt;
 mod support;
 mod terrain;

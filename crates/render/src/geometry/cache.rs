@@ -1433,11 +1433,11 @@ impl GeometryRenderer {
             .and_then(Object::mesh)
             .and_then(|(key, _)| match key {
                 DrawnMeshKey::Asset { asset, .. } => Some(asset),
-                DrawnMeshKey::Prim(_) => None,
+                DrawnMeshKey::Prim(_) | DrawnMeshKey::Sculpt(_) | DrawnMeshKey::SculptPlaceholder => None,
             });
         let current_asset = object.mesh().and_then(|(key, _)| match key {
             DrawnMeshKey::Asset { asset, .. } => Some(asset),
-            DrawnMeshKey::Prim(_) => None,
+            DrawnMeshKey::Prim(_) | DrawnMeshKey::Sculpt(_) | DrawnMeshKey::SculptPlaceholder => None,
         });
         let asset_replaced = current_asset.is_some() && current_asset != previous_asset;
         if let Some(index) = old_index

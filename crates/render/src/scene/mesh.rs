@@ -13,12 +13,17 @@ use assets::{
 };
 use utils::AssetId;
 
-use crate::scene::{budget::Lease, mesh_cache::MeshKey};
+use crate::scene::{
+    budget::Lease,
+    mesh_cache::{MeshKey, SculptMeshKey},
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DrawnMeshKey {
     Prim(MeshKey),
     Asset { asset: AssetId, lod: MeshLod },
+    Sculpt(SculptMeshKey),
+    SculptPlaceholder,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

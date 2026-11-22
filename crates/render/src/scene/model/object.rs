@@ -1,7 +1,8 @@
 use std::{sync::Arc, time::Instant};
 
 use math::{Vec3, motion::RegionBounds};
-use world::{Kind, MotionUpdateKind, ObjectDetail, PrimShape, SculptFlags, Shape, WorldTransform, WorldTransformState};
+use utils::AssetId;
+use world::{Kind, MotionUpdateKind, ObjectDetail, PrimShape, SculptFlags, SculptType, Shape, WorldTransform, WorldTransformState};
 
 use crate::{
     material::FaceMaterial,
@@ -51,6 +52,10 @@ impl Object {
         self.mesh.as_ref().is_some_and(|(key, _)| match (self.geometry(), key) {
             (Geometry::Prim(shape), DrawnMeshKey::Prim(key)) => shape == key.shape,
             (Geometry::Mesh(asset), DrawnMeshKey::Asset { asset: mesh_asset, .. }) => asset == *mesh_asset,
+            (Geometry::Sculpt { asset_id, sculpt_type, flags }, DrawnMeshKey::Sculpt(key)) => {
+                asset_id == key.asset_id && sculpt_type == key.sculpt_type && flags == key.flags
+            }
+            (Geometry::Sculpt { .. }, DrawnMeshKey::SculptPlaceholder) => true,
             _ => false,
         })
     }
@@ -198,6 +203,7 @@ impl Object {
         match self.detail().shape {
             Some(Shape::Prim(shape)) => Geometry::Prim(shape),
             Some(Shape::Mesh { asset_id, .. }) => Geometry::Mesh(asset_id),
+            Some(Shape::Sculpt { asset_id, sculpt_type, flags }) => Geometry::Sculpt { asset_id, sculpt_type, flags },
             Some(shape) => Geometry::Unsupported(shape),
             None => Geometry::Missing,
         }
@@ -241,7 +247,8 @@ pub enum Placement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Geometry {
     Prim(PrimShape),
-    Mesh(utils::AssetId),
+    Mesh(AssetId),
+    Sculpt { asset_id: AssetId, sculpt_type: SculptType, flags: SculptFlags },
     Unsupported(Shape),
     Missing,
 }

@@ -1,12 +1,15 @@
-use std::assert_matches;
+use std::{assert_matches, sync::atomic::AtomicBool};
 
-use assets::mesh::{MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh};
+use assets::{
+    PixelFormat,
+    mesh::{MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh},
+};
 use math::{Vec2, Vec3};
 use proptest::{collection, prelude::*, sample};
 use utils::AssetId;
 use world::{SculptFlags, SculptType};
 
-use super::{Detail, MeshBuildError, tessellate_sculpt};
+use super::{Detail, MeshBuildError, pixels_to_rgba, sculpt_placeholder_mesh, tessellate_sculpt, tessellate_sculpt_cancellable};
 use crate::scene::SculptMeshKey;
 
 fn map(size: [u32; 2], pixel: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
@@ -318,4 +321,42 @@ fn malformed_maps_return_typed_errors() {
         tessellate_sculpt([8, 8], &[0; 255], SculptType::Sphere, SculptFlags::default(), Detail::Low).err(),
         Some(MeshBuildError::InvalidParameters)
     );
+}
+
+#[test]
+fn cancellable_tessellation_honors_flag() {
+    let rgba = sample_map();
+    let cancelled = AtomicBool::new(true);
+    assert_matches!(
+        tessellate_sculpt_cancellable([8, 8], &rgba, SculptType::Sphere, SculptFlags::default(), Detail::High, &cancelled).err(),
+        Some(MeshBuildError::Cancelled)
+    );
+}
+
+#[test]
+fn placeholder_mesh_is_valid_and_pickable() {
+    let mesh = sculpt_placeholder_mesh().expect("placeholder mesh builds");
+    assert_eq!(mesh.vertices().len(), 25);
+    assert_eq!(mesh.indices().len(), 96);
+    assert_eq!(mesh.faces().len(), 1);
+    assert_eq!(mesh.faces()[0].slot, 0);
+    assert_placeholder_normals(&mesh, SculptType::Sphere);
+}
+
+#[test]
+fn image_to_rgba_expands_all_pixel_formats() {
+    let cancelled = AtomicBool::new(false);
+    assert_eq!(
+        pixels_to_rgba([2, 1], PixelFormat::Gray8, &[10, 200], &cancelled).unwrap().as_ref(),
+        &[10, 10, 10, 255, 200, 200, 200, 255]
+    );
+    assert_eq!(
+        pixels_to_rgba([2, 1], PixelFormat::GrayAlpha8, &[10, 50, 200, 128], &cancelled).unwrap().as_ref(),
+        &[10, 10, 10, 50, 200, 200, 200, 128]
+    );
+    assert_eq!(pixels_to_rgba([2, 1], PixelFormat::Rgb8, &[1, 2, 3, 4, 5, 6], &cancelled).unwrap().as_ref(), &[1, 2, 3, 255, 4, 5, 6, 255]);
+    assert_eq!(pixels_to_rgba([1, 1], PixelFormat::Rgba8, &[7, 8, 9, 10], &cancelled).unwrap().as_ref(), &[7, 8, 9, 10]);
+
+    let cancelled = AtomicBool::new(true);
+    assert_matches!(pixels_to_rgba([2, 1], PixelFormat::Rgb8, &[1, 2, 3, 4, 5, 6], &cancelled).err(), Some(MeshBuildError::Cancelled));
 }
