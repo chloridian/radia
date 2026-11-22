@@ -7,7 +7,7 @@ use std::{
 use assets::mesh::MeshLod;
 use render::{
     material::AlphaBehavior,
-    scene::{AssetRequest, DrawnMeshKey, Geometry, MEMORY_BYTES, Object},
+    scene::{AssetRequest, DrawnMeshKey, Geometry, MEMORY_BYTES, Object, SceneView},
 };
 use test_support::{mesh, texture::GRAY_4096_J2C};
 use world::{FaceAppearance, SculptFlags, SurfaceAppearance};
@@ -1099,4 +1099,81 @@ fn many_meshes_share_bounded_state() {
     let teardown = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(teardown.released.contains(&request_lod(&work.requested, MeshLod::High).ticket));
     assert_eq!(view.object_count(), 0);
+}
+
+#[test]
+fn camera_path_streaming_does_not_flicker_under_memory_pressure() {
+    let assets = [AssetId::new(Uuid::from_u128(7901)), AssetId::new(Uuid::from_u128(7902)), AssetId::new(Uuid::from_u128(7903))];
+    let bytes = mesh::asset(&[0, 1, 2, 3], 1);
+    let mut world = world();
+    add_mesh(&mut world, 1, assets[0], 10.0);
+    add_mesh(&mut world, 2, assets[1], 12.0);
+    add_mesh(&mut world, 3, assets[2], 14.0);
+
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    let cameras = [
+        Camera::new(DVec3::new(0.0, 0.0, 0.0), Vec3::X, FRAC_PI_3, [1000, 1000]).unwrap(),
+        Camera::new(DVec3::new(4.0, 0.0, 0.0), Vec3::X, FRAC_PI_3, [1000, 1000]).unwrap(),
+        Camera::new(DVec3::new(7.5, 0.0, 0.0), Vec3::X, FRAC_PI_3, [1000, 1000]).unwrap(),
+    ];
+
+    scene.set_camera(cameras[0]);
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    for request in work.requested {
+        scene.complete_asset(request.ticket, prepared_asset(request.request, bytes.clone()));
+    }
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    for request in work.requested {
+        if matches!(request.request, Request::MeshLod(block) if block.lod() == MeshLod::Lowest) {
+            scene.complete_asset(request.ticket, prepared_asset(request.request, bytes.clone()));
+        }
+    }
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+
+    let mut seen_visible: HashSet<u128> = HashSet::new();
+    let mut dropped_after_visible: HashSet<u128> = HashSet::new();
+    let mut flickers = 0usize;
+    let observe_frame =
+        |view: &SceneView, seen_visible: &mut HashSet<u128>, dropped_after_visible: &mut HashSet<u128>, flickers: &mut usize| {
+            for object in view.objects() {
+                let id = object.detail().summary.id.as_u128();
+                let visible = object.mesh().is_some();
+                if visible {
+                    if dropped_after_visible.contains(&id) {
+                        *flickers += 1;
+                    }
+                    seen_visible.insert(id);
+                } else if seen_visible.contains(&id) {
+                    dropped_after_visible.insert(id);
+                }
+            }
+        };
+    observe_frame(&view, &mut seen_visible, &mut dropped_after_visible, &mut flickers);
+    assert_eq!(seen_visible.len(), 3, "all three in-view objects start visible");
+
+    for camera in &cameras[1..] {
+        scene.set_camera(*camera);
+        let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+        observe_frame(&view, &mut seen_visible, &mut dropped_after_visible, &mut flickers);
+        for request in work.requested {
+            scene.complete_asset(request.ticket, assets::Status::Failed { failure: assets::Failure::MemoryPressure, retry_at: None });
+        }
+        settle_materials(&mut scene, &mut view, &world, &mut now);
+        observe_frame(&view, &mut seen_visible, &mut dropped_after_visible, &mut flickers);
+    }
+
+    assert_eq!(flickers, 0, "in-view objects must not flicker Visible -> Hidden -> Visible");
+    assert!(dropped_after_visible.is_empty(), "already-visible objects must not disappear under transient memory pressure");
+    assert_eq!(scene.asset_mesh_budget_omitted(), 0, "objects that kept their drawn mesh are not omitted");
+
+    let blocked_asset = AssetId::new(Uuid::from_u128(7904));
+    add_mesh(&mut world, 4, blocked_asset, 11.0);
+    scene.notify_world_change();
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    for request in work.requested {
+        scene.complete_asset(request.ticket, assets::Status::Failed { failure: assets::Failure::MemoryPressure, retry_at: None });
+    }
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(scene.asset_mesh_budget_omitted(), 1, "unloaded object blocked by memory pressure is counted as omitted");
 }

@@ -211,8 +211,14 @@ struct MeshInfoBuild {
 pub(super) struct MeshDemandOrder {
     pub(super) mesh: MeshId,
     resident: bool,
-    pub(super) visible: bool,
+    pub(super) in_view: bool,
     priority: (f64, f64),
+}
+
+impl MeshDemandOrder {
+    pub(super) fn needs_upload(self) -> bool {
+        !self.resident && self.in_view
+    }
 }
 
 impl PartialEq for MeshDemandOrder {
@@ -232,8 +238,8 @@ impl PartialOrd for MeshDemandOrder {
 impl Ord for MeshDemandOrder {
     fn cmp(&self, other: &Self) -> Ordering {
         other
-            .visible
-            .cmp(&self.visible)
+            .needs_upload()
+            .cmp(&self.needs_upload())
             .then_with(|| other.resident.cmp(&self.resident))
             .then_with(|| other.priority.0.total_cmp(&self.priority.0))
             .then_with(|| self.priority.1.total_cmp(&other.priority.1))
@@ -1773,16 +1779,15 @@ impl GeometryRenderer {
         let demands = [Some(item), item.replacement.as_ref().map(|replacement| &replacement.item)].map(|candidate| {
             candidate.map(|candidate| {
                 let resident = self.meshes.contains_key(&candidate.mesh.id());
-                let viewed = !resident
-                    && WorldSphere::new(candidate.position, candidate.rotation, candidate.scale, candidate.info.bounds, camera)
-                        .is_some_and(|sphere| sphere.visible(candidate.shading, camera, frustum));
-                (candidate.mesh.clone(), candidate.terrain_composition.clone(), draw_priority(candidate, camera), resident, viewed)
+                let in_view = WorldSphere::new(candidate.position, candidate.rotation, candidate.scale, candidate.info.bounds, camera)
+                    .is_some_and(|sphere| sphere.visible(candidate.shading, camera, frustum));
+                (candidate.mesh.clone(), candidate.terrain_composition.clone(), draw_priority(candidate, camera), resident, in_view)
             })
         });
         let mut missing = false;
-        for (mesh, composition, priority, resident, viewed) in demands.into_iter().flatten() {
+        for (mesh, composition, priority, resident, in_view) in demands.into_iter().flatten() {
             self.stats.mesh_demand_items_visited += 1;
-            missing |= add_mesh_demand(&mut self.cache, &mut self.stats, &mesh, composition, priority, resident, viewed);
+            missing |= add_mesh_demand(&mut self.cache, &mut self.stats, &mesh, composition, priority, resident, in_view);
         }
         self.cache.nonresident_demands |= missing;
         missing
@@ -1796,11 +1801,11 @@ fn add_mesh_demand(
     composition: Option<Arc<[f32]>>,
     priority: (f64, f64),
     resident: bool,
-    viewed: bool,
+    in_view: bool,
 ) -> bool {
     let mesh_id = mesh.id();
     let Some(current) = cache.mesh_order_by_id.get(&mesh_id).copied() else {
-        let order = MeshDemandOrder { mesh: mesh_id, resident, visible: viewed, priority };
+        let order = MeshDemandOrder { mesh: mesh_id, resident, in_view, priority };
         cache.mesh_order.insert(order);
         cache.mesh_order_by_id.insert(mesh_id, order);
         cache.mesh_representatives.insert(mesh_id, mesh.clone());
@@ -1813,7 +1818,7 @@ fn add_mesh_demand(
     let next = MeshDemandOrder {
         mesh: mesh_id,
         resident,
-        visible: current.visible || viewed,
+        in_view: current.in_view || in_view,
         priority: if priority_improved { priority } else { current.priority },
     };
     if next != current {
