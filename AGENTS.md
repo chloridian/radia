@@ -88,6 +88,7 @@ Source has no comments or doc comments, and that includes safety comments on `un
 - Wait on completion signals, never on sleeps or polling. Use production timing constants; test-only timing values and short absence windows do not prove behavior. Test deadlines with a controlled clock or slow-runner-safe bounds, and use generous timeouts only as hang guards.
 - Integration tests are plain `tests/<name>.rs` files, auto-discovered by Cargo; no `[[test]]` entries. Only when one grows into several files does it become `tests/<name>/main.rs` with its submodules.
 - Use `assert_matches!` instead of `assert!(matches!(..))`, so failures print the actual value.
+- Keep test names short (`<subject>_<outcome>`, usually 2–5 words). Drop module/type/function names, setup, filler (`test_`, `should`, `when`, `returns`), and issue IDs; put details in assertion messages.
 - Ask before launching the gui viewer, driving a browser, or any computer use.
 
 ## Versioning
