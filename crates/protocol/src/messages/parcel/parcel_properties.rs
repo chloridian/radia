@@ -282,3 +282,104 @@ fn encode_parcel_data(data: &ParcelData, writer: &mut Writer<'_>) -> Result<bool
     writer.u8(u8::from(region_deny_transacted));
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches;
+
+    use super::*;
+
+    fn sample_properties() -> ParcelProperties {
+        ParcelProperties {
+            parcel_data: Box::new(ParcelData {
+                request_result: Some(0),
+                sequence_id: Some(7),
+                snap_selection: Some(false),
+                self_count: Some(1),
+                other_count: Some(2),
+                public_count: Some(3),
+                local_id: Some(42),
+                owner_id: Some(Uuid::from_u128(1)),
+                is_group_owned: Some(false),
+                auction_id: Some(9),
+                claim_date: Some(100),
+                claim_price: Some(200),
+                rent_price: Some(0),
+                aabb_min: Some(Vec3::new(0.0, 0.0, 0.0)),
+                aabb_max: Some(Vec3::new(64.0, 64.0, 20.0)),
+                bitmap: Some(vec![0xff; 512]),
+                area: Some(1024),
+                status: Some(1),
+                sim_wide_max_prims: Some(15000),
+                sim_wide_total_prims: Some(500),
+                max_prims: Some(500),
+                total_prims: Some(12),
+                owner_prims: Some(10),
+                group_prims: Some(1),
+                other_prims: Some(1),
+                selected_prims: Some(0),
+                parcel_prim_bonus: Some(1.0),
+                other_clean_time: Some(5),
+                parcel_flags: Some(0x3f),
+                sale_price: Some(0),
+                name: Some(b"Sample Parcel\0".to_vec()),
+                description: Some(b"Description\0".to_vec()),
+                music_url: Some(b"https://secret.invalid/music\0".to_vec()),
+                media_url: Some(b"https://secret.invalid/media\0".to_vec()),
+                media_id: Some(Uuid::from_u128(2)),
+                media_auto_scale: Some(1),
+                group_id: Some(Uuid::from_u128(3)),
+                pass_price: Some(10),
+                pass_hours: Some(2.5),
+                category: Some(4),
+                auth_buyer_id: Some(Uuid::from_u128(4)),
+                snapshot_id: Some(Uuid::from_u128(5)),
+                user_location: Some(Vec3::new(8.0, 12.0, 24.0)),
+                user_look_at: Some(Vec3::Z),
+                landing_type: Some(2),
+                region_push_override: Some(true),
+                region_deny_anonymous: Some(false),
+                region_deny_identified: Some(true),
+                region_deny_transacted: Some(false),
+            }),
+            age_verification_block: AgeVerificationBlock { region_deny_age_unverified: Some(true) },
+            region_allow_access_block: RegionAllowAccessBlock { region_allow_access_override: Some(true) },
+            parcel_environment_block: ParcelEnvironmentBlock {
+                parcel_environment_version: Some(3),
+                region_allow_environment_override: Some(true),
+            },
+        }
+    }
+
+    #[test]
+    fn parcel_properties_decodes_full_message_with_optional_blocks() {
+        let original = sample_properties();
+        let mut bytes = Vec::new();
+        let mut writer = Writer::new(&mut bytes);
+        original.encode(&mut writer).unwrap();
+
+        let mut reader = Reader::new(&bytes);
+        let decoded = ParcelProperties::decode(&mut reader).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn parcel_properties_rejects_truncated_payload() {
+        let original = sample_properties();
+        let mut bytes = Vec::new();
+        let mut writer = Writer::new(&mut bytes);
+        original.encode(&mut writer).unwrap();
+
+        let truncated = &bytes[..100];
+        let mut reader = Reader::new(truncated);
+        assert_matches!(ParcelProperties::decode(&mut reader), Err(_));
+    }
+
+    #[test]
+    fn parcel_properties_debug_redacts_urls() {
+        let sample = sample_properties();
+        let debug = format!("{:?}", sample.parcel_data);
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("secret.invalid"));
+    }
+}

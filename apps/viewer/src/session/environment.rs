@@ -350,9 +350,13 @@ impl EnvironmentIntake {
                             && world.observe_parcel_properties(source, observation).is_err()
                         {
                             self.record_parcel_rejection(world, simulator, region);
+                            return;
                         }
                     }
-                    Err(()) => self.record_parcel_rejection(world, simulator, region),
+                    Err(()) => {
+                        self.record_parcel_rejection(world, simulator, region);
+                        return;
+                    }
                 }
                 self.parcel(world, region, notice, true);
             }
@@ -947,6 +951,59 @@ mod tests {
         data.insert("MediaURL".into(), Value::String("m".repeat(MAX_PARCEL_URL_BYTES + 1)));
 
         assert_eq!(parcel_properties_value(&value), Err(()));
+    }
+
+    #[tokio::test]
+    async fn malformed_parcel_event_does_not_advance_selection() {
+        let mut world = SessionWorld::new(viewer_world_limits());
+        let simulator = simulator_id();
+        let region = world.register_simulator(simulator, None).unwrap();
+        let client = Client::new(Url::parse("http://127.0.0.1:1/").unwrap()).unwrap();
+        let mut intake = EnvironmentIntake::new(Handle::current());
+        intake.routes.insert(region, Route { client, parcel: None, parcel_order: None });
+
+        let valid = parcel_properties_event(1, 41, "Valid parcel");
+        intake.capability(&mut world, simulator, "ParcelProperties", &valid, Some(simulator));
+        assert_eq!(world.world().environment(region).unwrap().parcel.unwrap().parcel, ParcelLocalId::new(41).unwrap());
+
+        let mut oversized_url = parcel_properties_event(2, 42, "Oversized URL parcel");
+        let Value::Map(body) = &mut oversized_url else { panic!("event body must be a map") };
+        let Some(Value::Array(blocks)) = body.get_mut("ParcelData") else { panic!("parcel data block missing") };
+        let Some(Value::Map(data)) = blocks.first_mut() else { panic!("parcel data fields missing") };
+        data.insert("MediaURL".into(), Value::String("m".repeat(MAX_PARCEL_URL_BYTES + 1)));
+        intake.capability(&mut world, simulator, "ParcelProperties", &oversized_url, Some(simulator));
+        assert_eq!(world.world().environment(region).unwrap().parcel.unwrap().parcel, ParcelLocalId::new(41).unwrap());
+        assert_eq!(world.world().parcel_state(region).unwrap().current.unwrap().properties.local_id, ParcelLocalId::new(41).unwrap());
+
+        let mut invalid_area = parcel_properties_event(3, 43, "Invalid area parcel");
+        let Value::Map(body) = &mut invalid_area else { panic!("event body must be a map") };
+        let Some(Value::Array(blocks)) = body.get_mut("ParcelData") else { panic!("parcel data block missing") };
+        let Some(Value::Map(data)) = blocks.first_mut() else { panic!("parcel data fields missing") };
+        data.insert("Area".into(), Value::Integer(65_537));
+        intake.capability(&mut world, simulator, "ParcelProperties", &invalid_area, Some(simulator));
+        assert_eq!(world.world().environment(region).unwrap().parcel.unwrap().parcel, ParcelLocalId::new(41).unwrap());
+        assert_eq!(world.world().parcel_state(region).unwrap().current.unwrap().properties.local_id, ParcelLocalId::new(41).unwrap());
+    }
+
+    #[tokio::test]
+    async fn simulator_promoted_clears_previous_parcel() {
+        let mut world = SessionWorld::new(viewer_world_limits());
+        let first = simulator_id();
+        let second = SimulatorId::new(2);
+        let first_region = world.register_simulator(first, None).unwrap();
+        let _second_region = world.register_simulator(second, None).unwrap();
+        let client = Client::new(Url::parse("http://127.0.0.1:1/").unwrap()).unwrap();
+        let mut intake = EnvironmentIntake::new(Handle::current());
+        intake.routes.insert(first_region, Route { client: client.clone(), parcel: None, parcel_order: None });
+
+        let event = parcel_properties_event(1, 41, "Previous region parcel");
+        intake.capability(&mut world, first, "ParcelProperties", &event, Some(first));
+        assert!(world.world().parcel_state(first_region).unwrap().current.is_some());
+        assert!(world.world().environment(first_region).unwrap().parcel.is_some());
+
+        intake.simulator_promoted(&mut world, first, second, &client, Some(second));
+        assert!(world.world().parcel_state(first_region).unwrap().current.is_none());
+        assert!(world.world().environment(first_region).unwrap().parcel.is_none());
     }
 
     #[tokio::test]
