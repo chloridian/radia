@@ -93,7 +93,7 @@ impl GeometryRenderer {
         let unwanted = self.meshes.keys().find(|id| !self.cache.mesh_order_by_id.contains_key(*id) && evictable(id));
         let victim = unwanted
             .copied()
-            .or_else(|| self.cache.mesh_order.iter().rev().filter(|demand| !demand.visible).map(|demand| demand.mesh).find(evictable));
+            .or_else(|| self.cache.mesh_order.iter().rev().filter(|demand| !demand.in_view).map(|demand| demand.mesh).find(evictable));
         let Some((old, mesh)) = victim.and_then(|old| self.meshes.remove_entry(&old)) else { return MeshRetirement::CapacityBlocked };
         self.draw_list.evict(old);
         self.cache.admission_protected.remove(&old);

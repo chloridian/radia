@@ -604,7 +604,7 @@ impl GeometryRenderer {
         let mut budget = MESH_DEMANDS_PER_FRAME;
         while budget > 0 {
             let next = next_mesh_demand(&self.cache.mesh_order, self.mesh_admission.after);
-            let viewed_done = next.is_none_or(|demand| !demand.visible);
+            let viewed_done = next.is_none_or(|demand| !demand.needs_upload());
             if viewed_done && !self.mesh_admission.visible_ready {
                 if self.mesh_admission.pass_incomplete(revision, !self.retired.is_empty()) {
                     self.mesh_admission.restart(revision);
@@ -627,7 +627,7 @@ impl GeometryRenderer {
             self.mesh_admission.visits_this_frame += 1;
             self.stats.mesh_admission_items_visited += 1;
             if self.meshes.contains_key(&demand.mesh) {
-                if demand.visible {
+                if demand.in_view {
                     self.cache.admission_protected.insert(demand.mesh);
                 }
                 continue;
@@ -661,9 +661,9 @@ impl GeometryRenderer {
         let composition = self.cache.mesh_compositions.get(&mesh_id).cloned().flatten();
         self.stats.mesh_upload_attempts += 1;
         self.stats.mesh_upload_attempt_bytes += mesh.mesh().owned_bytes();
-        let eviction = demand.visible.then_some((camera, frustum));
+        let eviction = demand.in_view.then_some((camera, frustum));
         let outcome = self.upload_mesh(device, &mesh, composition.as_deref(), uploaded, eviction);
-        if demand.visible {
+        if demand.in_view {
             match outcome {
                 MeshUpload::Ready => {
                     self.cache.admission_protected.insert(mesh_id);

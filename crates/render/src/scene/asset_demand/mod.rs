@@ -213,6 +213,7 @@ pub(in crate::scene) struct AssetDemand {
     targets: HashMap<Entity, ObjectDemand>,
     rejected: VecDeque<RejectedObject>,
     rejected_entities: HashSet<Entity>,
+    mesh_budget_omitted: HashSet<Entity>,
     rejected_scan_remaining: usize,
     displaceable: Option<Displaceable>,
     displaced: Vec<Entity>,
@@ -241,6 +242,7 @@ impl AssetDemand {
             targets: HashMap::new(),
             rejected: VecDeque::new(),
             rejected_entities: HashSet::new(),
+            mesh_budget_omitted: HashSet::new(),
             rejected_scan_remaining: 0,
             displaceable: None,
             displaced: Vec::new(),
@@ -378,7 +380,12 @@ impl AssetDemand {
         if matches!(key.unit, AssetUnit::MeshHeader | AssetUnit::MeshLod(_)) { mesh_users } else { users }
     }
 
+    pub(in crate::scene) fn mesh_budget_omitted(&self) -> usize {
+        self.mesh_budget_omitted.len()
+    }
+
     pub(in crate::scene) fn remove(&mut self, entity: Entity) {
+        self.mesh_budget_omitted.remove(&entity);
         if let Some(target) = self.targets.remove(&entity) {
             self.rescan = true;
             self.faces -= target.faces;
@@ -745,10 +752,16 @@ impl AssetDemand {
             }
             self.remove(entity);
             self.queue_rejected(object.detail().summary.id, entity, count);
-            return (object.materials().is_some() || object.mesh().is_some()).then(|| MaterialChange {
+            let keep_mesh = priority == Priority::Visible && mesh_asset.is_some() && object.mesh_matches_geometry();
+            if mesh_asset.is_some() && !keep_mesh {
+                self.mesh_budget_omitted.insert(entity);
+            } else {
+                self.mesh_budget_omitted.remove(&entity);
+            }
+            return (object.materials().is_some() || (object.mesh().is_some() && !keep_mesh)).then(|| MaterialChange {
                 source: object.clone(),
                 materials: None,
-                mesh: if mesh_asset.is_some() { MeshPublication::Clear } else { MeshPublication::Keep },
+                mesh: if mesh_asset.is_some() && !keep_mesh { MeshPublication::Clear } else { MeshPublication::Keep },
             });
         }
         let mut faces = Vec::with_capacity(count);
@@ -822,13 +835,21 @@ impl AssetDemand {
         let region = object.detail().summary.address.region();
         self.deferred |= self.meshes.retry_pending(asset, &self.budget);
         let entity = object.detail().summary.entity;
+        self.mesh_budget_omitted.remove(&entity);
         let mut plan = self.meshes.request_plan(asset, entity, desired, current, priority);
         if plan.needs_header {
             let (resolution, content) =
                 self.observe(object.detail().summary.entity, region, Request::MeshHeader(asset), size, priority, importance, keys);
             if let Some(Content::MeshHeader(header)) = content {
                 self.meshes.set_header(asset, header);
-            } else if matches!(resolution, Resolution::Failed(_)) {
+            } else if let Resolution::Failed(failure) = resolution {
+                if failure == Failure::MemoryPressure {
+                    if current.is_some() {
+                        self.meshes.set_user_lods(asset, object.detail().summary.entity, Some(desired), [None; 2], current);
+                        return MeshResolution::Waiting;
+                    }
+                    self.mesh_budget_omitted.insert(entity);
+                }
                 self.meshes.set_user_lods(asset, object.detail().summary.entity, Some(desired), [None; 2], None);
                 return MeshResolution::Failed;
             }
@@ -838,11 +859,21 @@ impl AssetDemand {
                 return MeshResolution::Waiting;
             }
         }
-        let mut failed = false;
+        let mut permanent_failure = false;
+        let mut memory_pressure = false;
         for request in plan.requests {
             let (resolution, content) = self.observe(object.detail().summary.entity, region, request, size, priority, importance, keys);
-            let request_failed = matches!(resolution, Resolution::Failed(_));
-            failed |= request_failed;
+            let request_failed = match resolution {
+                Resolution::Failed(Failure::MemoryPressure) => {
+                    memory_pressure = true;
+                    true
+                }
+                Resolution::Failed(_) => {
+                    permanent_failure = true;
+                    true
+                }
+                _ => false,
+            };
             if request_failed
                 && priority == Priority::Background
                 && let Request::MeshLod(block) = request
@@ -859,7 +890,12 @@ impl AssetDemand {
             }
         }
         let resolution = match self.meshes.resolve(asset, desired, current) {
-            MeshResolution::Waiting if failed => MeshResolution::Failed,
+            MeshResolution::Waiting if permanent_failure => MeshResolution::Failed,
+            MeshResolution::Waiting if memory_pressure && current.is_some() => MeshResolution::Waiting,
+            MeshResolution::Waiting if memory_pressure => {
+                self.mesh_budget_omitted.insert(entity);
+                MeshResolution::Failed
+            }
             resolution => resolution,
         };
         let published = match &resolution {

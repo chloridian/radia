@@ -149,6 +149,17 @@ impl SceneView {
         if self.session.is_active() { self.mirror.viewer_environment.as_ref() } else { None }
     }
 
+    pub fn scene_mesh_capacity_omitted(&self) -> usize {
+        if !self.session.is_active() {
+            return 0;
+        }
+        self.mirror
+            .objects
+            .values()
+            .filter(|object| object.mesh().is_none() && matches!(object.preparation, Some((_, super::PreparedMesh::Capacity))))
+            .count()
+    }
+
     pub(in crate::scene) fn new(session: SceneLifetime) -> Self {
         Self {
             session,

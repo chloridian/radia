@@ -265,6 +265,10 @@ impl Reconciler {
         self.recovery.status
     }
 
+    pub fn asset_mesh_budget_omitted(&self) -> usize {
+        self.preparation.assets.mesh_budget_omitted()
+    }
+
     pub fn notify_world_change(&mut self) {
         self.world.changes.notify();
         if let ReadState::InFlight { world_changed, .. } = &mut self.world.read {

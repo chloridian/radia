@@ -2267,3 +2267,62 @@ fn draws_during_scene_churn(overflow: bool, membership: bool) {
         "quiet incremental rendering matches a clean build: {mismatch_count} pixels differ, first={first_mismatch:?}"
     );
 }
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_streaming_under_memory_pressure_does_not_flicker)'"]
+fn gpu_streaming_under_memory_pressure_does_not_flicker() {
+    let assets = [AssetId::new(Uuid::from_u128(9_951)), AssetId::new(Uuid::from_u128(9_952)), AssetId::new(Uuid::from_u128(9_953))];
+    let bytes = mesh::asset_with_lod_geometry(&[(3, 8, 65_535, 196_605)]);
+    let asset_bytes = HashMap::from([(assets[0], bytes.clone()), (assets[1], bytes.clone()), (assets[2], bytes)]);
+    let initial_objects =
+        [(1, assets[0], Vec3::new(3.0, 0.0, 0.0)), (2, assets[1], Vec3::new(5.0, 0.0, 0.0)), (3, assets[2], Vec3::new(-6.0, 0.0, 0.0))];
+    let (mut world, mut scene, mut view, camera, requests) = mesh_scene(&initial_objects, None);
+    complete_mesh_requests(&world, &mut scene, &mut view, &asset_bytes, requests);
+
+    let (device, queue) = vulkan_device();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    geometry.memory = Arc::new(Accounting::default());
+    prepare_until_current(&device, &queue, &mut geometry, &view, camera);
+    let initial_meshes: Vec<MeshId> = view
+        .objects()
+        .filter(|object| matches!(object.placement(), Placement::Ready(transform) if transform.pose.position.x > 0.0))
+        .filter_map(|object| object.mesh().map(|(_, mesh)| mesh.id()))
+        .collect();
+    assert_eq!(initial_meshes.len(), 2);
+    for mesh_id in &initial_meshes {
+        assert!(geometry.meshes.contains_key(mesh_id), "initial in-view meshes are resident");
+    }
+
+    move_mesh_object(&mut world, 3, 20, Vec3::new(2.0, 0.0, 0.0), [255, 255, 255, 255]);
+    scene.notify_world_change();
+    let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    complete_mesh_requests(&world, &mut scene, &mut view, &asset_bytes, requests);
+
+    let mut flickers = 0usize;
+    let mut ever_evicted = false;
+    let cameras = [
+        camera,
+        Camera::new(DVec3::new(0.1, 0.0, 0.0), Vec3::X, FRAC_PI_3, [128, 128]).expect("test camera"),
+        Camera::new(DVec3::new(0.2, 0.0, 0.0), Vec3::X, FRAC_PI_3, [128, 128]).expect("test camera"),
+    ];
+    for step_camera in cameras {
+        for _ in 0..8 {
+            let before: Vec<bool> = initial_meshes.iter().map(|id| geometry.meshes.contains_key(id)).collect();
+            prepare_frame(&device, &queue, &mut geometry, &view, step_camera);
+            assert_draws_resident(&geometry);
+            for (index, mesh_id) in initial_meshes.iter().enumerate() {
+                let resident = geometry.meshes.contains_key(mesh_id);
+                if before[index] && !resident {
+                    ever_evicted = true;
+                    flickers += 1;
+                }
+            }
+        }
+    }
+
+    assert!(!ever_evicted, "already-resident in-view meshes must not be evicted under GPU memory pressure");
+    assert_eq!(flickers, 0, "already-resident in-view meshes must not flicker");
+    assert!(geometry.stats.mesh_budget_blocked > 0, "over-budget mesh omission must be counted");
+    assert!(geometry.stats.omitted_faces > 0, "omitted faces must be reported");
+    assert_eq!(geometry.stats.omission_reason, Some(OmissionReason::MeshMemoryBudget));
+}
