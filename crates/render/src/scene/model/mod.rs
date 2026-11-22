@@ -353,8 +353,15 @@ impl Mirror {
                         MeshPublication::Keep => {}
                         MeshPublication::Clear => object.mesh = None,
                         MeshPublication::Set(key, mesh) => {
-                            if matches!((object.geometry(), key), (Geometry::Mesh(asset), DrawnMeshKey::Asset { asset: mesh_asset, .. }) if asset == *mesh_asset)
-                            {
+                            let matches = match (object.geometry(), key) {
+                                (Geometry::Mesh(asset), DrawnMeshKey::Asset { asset: mesh_asset, .. }) => asset == *mesh_asset,
+                                (Geometry::Sculpt { asset_id, sculpt_type, flags }, DrawnMeshKey::Sculpt(sculpt)) => {
+                                    asset_id == sculpt.asset_id && sculpt_type == sculpt.sculpt_type && flags == sculpt.flags
+                                }
+                                (Geometry::Sculpt { .. }, DrawnMeshKey::SculptPlaceholder) => true,
+                                _ => false,
+                            };
+                            if matches {
                                 object.mesh = Some((*key, mesh.clone()));
                             }
                         }

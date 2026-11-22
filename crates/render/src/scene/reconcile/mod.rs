@@ -355,6 +355,13 @@ impl Reconciler {
     pub fn complete_mesh(&mut self, completion: MeshCompletion) {
         match completion.0 {
             Completion::Prim(completion) => self.preparation.meshes.complete(completion),
+            Completion::Sculpt(completion) => {
+                for entity in self.preparation.assets.complete_sculpt(completion) {
+                    if let Some(object) = self.state.mirror.objects.get(&entity) {
+                        self.preparation.assets.invalidate(object);
+                    }
+                }
+            }
             Completion::Surface(completion) => {
                 if let Some(surface) = self.preparation.surfaces.complete(completion) {
                     self.publication.dirty.surfaces.insert((surface.region, surface.kind));

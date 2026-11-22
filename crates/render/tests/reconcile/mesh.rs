@@ -46,7 +46,7 @@ fn request_header(work: &[AssetRequest]) -> AssetRequest {
 fn asset_lod(object: &Object) -> Option<(AssetId, MeshLod)> {
     match object.mesh().map(|(key, _)| key) {
         Some(DrawnMeshKey::Asset { asset, lod }) => Some((asset, lod)),
-        Some(DrawnMeshKey::Prim(_)) | None => None,
+        Some(DrawnMeshKey::Prim(_) | DrawnMeshKey::Sculpt(_) | DrawnMeshKey::SculptPlaceholder) | None => None,
     }
 }
 
@@ -922,18 +922,19 @@ fn changes_release_stale_fetches() {
     assert_eq!(asset_lod(object).map(|(id, _)| id), Some(second_asset));
 
     let mut patch = world::ObjectPatch::new(source(&world, 0, 12), NonZeroU32::new(1).unwrap());
-    patch.shape = FieldUpdate::Set(Shape::Sculpt {
-        asset_id: AssetId::new(Uuid::from_u128(704)),
-        sculpt_type: world::SculptType::Sphere,
-        flags: SculptFlags::default(),
-    });
+    let sculpt_asset = AssetId::new(Uuid::from_u128(704));
+    patch.shape =
+        FieldUpdate::Set(Shape::Sculpt { asset_id: sculpt_asset, sculpt_type: world::SculptType::Sphere, flags: SculptFlags::default() });
     let _ = world.patch_object(patch).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert!(work.requested.is_empty());
+    assert!(work.requested.iter().any(|req| matches!(req.request, Request::Texture { id, .. } if id == sculpt_asset)));
     let object = view.objects().next().unwrap();
-    assert_matches!(object.geometry(), Geometry::Unsupported(Shape::Sculpt { .. }));
-    assert!(object.mesh().is_none());
+    assert_matches!(
+        object.geometry(),
+        Geometry::Sculpt { asset_id, sculpt_type: world::SculptType::Sphere, .. } if asset_id == sculpt_asset
+    );
+    assert_matches!(object.mesh().map(|(key, _)| key), Some(DrawnMeshKey::SculptPlaceholder));
 }
 
 #[test]

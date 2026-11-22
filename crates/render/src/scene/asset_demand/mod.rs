@@ -1,4 +1,5 @@
 mod mesh;
+mod sculpt;
 
 use std::{
     array,
@@ -18,13 +19,22 @@ use assets::{
 use math::DVec3;
 use utils::AssetId;
 use uuid::Uuid;
-use world::{Entity, FaceAppearance, Region};
+use world::{Entity, FaceAppearance, Region, SculptFlags, SculptType};
 
-pub(in crate::scene) use self::mesh::MeshPublication;
-use self::mesh::{MeshAssets, MeshResolution};
+pub(in crate::scene) use self::{
+    mesh::MeshPublication,
+    sculpt::{SculptCompletion, SculptJob},
+};
+use self::{
+    mesh::{MeshAssets, MeshResolution},
+    sculpt::{SculptAssets, SculptResolution},
+};
 use crate::{
     material::{self, AssetState, FaceMaterial, FaceParams, Resolution},
-    scene::{Budget, Camera, DrawnMeshKey, Geometry, MAX_OBJECTS, Object, Placement, budget::Lease, model::Mirror},
+    scene::{
+        Budget, Camera, Detail, DrawnMeshKey, Geometry, MAX_OBJECTS, MeshJob, Object, Placement, SculptMeshKey, budget::Lease,
+        model::Mirror, planning::Work,
+    },
 };
 
 const MAX_TARGETS: usize = MAX_OBJECTS;
@@ -209,6 +219,7 @@ pub(in crate::scene) struct AssetDemand {
     dirty: BTreeMap<Uuid, Entity>,
     entries: HashMap<AssetKey, Entry>,
     meshes: MeshAssets,
+    sculpts: SculptAssets,
     tickets: HashMap<AssetTicket, AssetKey>,
     targets: HashMap<Entity, ObjectDemand>,
     rejected: VecDeque<RejectedObject>,
@@ -238,6 +249,7 @@ impl AssetDemand {
             dirty: BTreeMap::new(),
             entries: HashMap::new(),
             meshes: MeshAssets::default(),
+            sculpts: SculptAssets::default(),
             tickets: HashMap::new(),
             targets: HashMap::new(),
             rejected: VecDeque::new(),
@@ -384,8 +396,21 @@ impl AssetDemand {
         self.mesh_budget_omitted.len()
     }
 
+    pub(in crate::scene) fn start_sculpt(&mut self) -> Option<MeshJob> {
+        self.sculpts.start(&self.budget).map(|job| MeshJob(Work::Sculpt(job)))
+    }
+
+    pub(in crate::scene) fn complete_sculpt(&mut self, completion: SculptCompletion) -> Vec<Entity> {
+        self.sculpts.complete(completion)
+    }
+
+    pub(in crate::scene) fn waiting_sculpt(&self) -> bool {
+        self.sculpts.waiting()
+    }
+
     pub(in crate::scene) fn remove(&mut self, entity: Entity) {
         self.mesh_budget_omitted.remove(&entity);
+        self.sculpts.remove_entity(entity);
         if let Some(target) = self.targets.remove(&entity) {
             self.rescan = true;
             self.faces -= target.faces;
@@ -562,6 +587,7 @@ impl AssetDemand {
         }
         self.entries.clear();
         self.meshes.clear();
+        self.sculpts.clear();
         self.tickets.clear();
         self.targets.clear();
         self.rejected.clear();
@@ -668,7 +694,7 @@ impl AssetDemand {
                     || changes.iter().any(|change| change.source.detail().summary.entity == entity))
             {
                 let mesh = match object.geometry() {
-                    Geometry::Mesh(_) => MeshPublication::Clear,
+                    Geometry::Mesh(_) | Geometry::Sculpt { .. } => MeshPublication::Clear,
                     _ => MeshPublication::Keep,
                 };
                 changes.push(MaterialChange { source: object.clone(), materials: None, mesh });
@@ -692,10 +718,14 @@ impl AssetDemand {
                 self.entries.get(key)?.users.get(&AssetUser::Object(entity)).map(|demand| (key.resource.id, demand.size))
             })
             .collect();
-        let mesh_asset = match object.geometry() {
-            Geometry::Mesh(asset) => Some(asset),
-            _ => None,
+        let (mesh_asset, sculpt) = match object.geometry() {
+            Geometry::Mesh(asset) => (Some(asset), None),
+            Geometry::Sculpt { asset_id, sculpt_type, flags } => (None, Some((asset_id, sculpt_type, flags))),
+            _ => (None, None),
         };
+        if sculpt.is_none() {
+            self.sculpts.remove_entity(entity);
+        }
         let (interested, importance) = match (mesh_asset, object.placement()) {
             (Some(_), Placement::Ready(transform)) => {
                 camera.mesh_importance(transform.pose.position, transform.scale).map_or((false, 0), |importance| (true, importance))
@@ -733,10 +763,12 @@ impl AssetDemand {
         }
         let mesh_resolution = if let (Some(asset), Some(tracked_asset)) = (mesh_asset, tracked_asset) {
             Some(self.resolve_mesh(camera, object, asset, tracked_asset, size, priority, importance, &mut keys))
+        } else if let Some((asset_id, sculpt_type, flags)) = sculpt {
+            Some(self.resolve_sculpt(camera, object, asset_id, sculpt_type, flags, priority, &mut keys))
         } else {
             mesh_asset.map(|_| MeshResolution::Failed)
         };
-        let publication = mesh::publication(object, mesh_asset, mesh_resolution);
+        let publication = mesh::publication(object, mesh_asset.is_some() || sculpt.is_some(), mesh_resolution);
         let slots = mesh::material_slots(object, mesh_asset.is_some(), publication.mesh.as_ref(), priority);
         let count = slots.len();
         let excess = self.faces.saturating_sub(previous_faces).saturating_add(count).saturating_sub(MAX_FACES);
@@ -905,6 +937,59 @@ impl AssetDemand {
         };
         self.meshes.set_user_lods(asset, object.detail().summary.entity, Some(desired), plan.retained, published);
         resolution
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_sculpt(
+        &mut self,
+        camera: Camera,
+        object: &Object,
+        asset_id: AssetId,
+        sculpt_type: SculptType,
+        flags: SculptFlags,
+        priority: Priority,
+        keys: &mut HashSet<AssetKey>,
+    ) -> MeshResolution {
+        let entity = object.detail().summary.entity;
+        let region = object.detail().summary.address.region();
+        let map_size = TextureSize::new(64);
+        let (_, content) = self.observe(entity, region, Request::Texture { id: asset_id, size: map_size }, map_size, priority, 0, keys);
+        let placeholder = self.sculpts.placeholder(&self.budget);
+        let Some(Content::Texture(texture)) = content else {
+            self.sculpts.remove_entity(entity);
+            return placeholder.map_or(MeshResolution::Waiting, |mesh| MeshResolution::Ready(DrawnMeshKey::SculptPlaceholder, mesh));
+        };
+        let Some(info) = texture.info() else {
+            self.sculpts.remove_entity(entity);
+            return placeholder.map_or(MeshResolution::Waiting, |mesh| MeshResolution::Ready(DrawnMeshKey::SculptPlaceholder, mesh));
+        };
+        let Placement::Ready(transform) = object.placement() else {
+            self.sculpts.detach_key(entity);
+            return placeholder.map_or(MeshResolution::Waiting, |mesh| MeshResolution::Ready(DrawnMeshKey::SculptPlaceholder, mesh));
+        };
+        let radius = 3.0 * transform.scale.as_dvec3().abs().max_element();
+        let previous = self.sculpts.previous_detail(entity);
+        let detail = camera.detail(transform.pose.position, radius, previous).unwrap_or(Detail::Lowest);
+        let sculpt_priority = camera.importance(transform.pose.position, radius).unwrap_or(0);
+        let key = SculptMeshKey { asset_id, sculpt_type, flags, detail, map_size: info.size, discard_level: info.discard };
+        match self.sculpts.request(entity, key, &texture, sculpt_priority) {
+            SculptResolution::Ready(drawn_key, mesh) => MeshResolution::Ready(drawn_key, mesh),
+            SculptResolution::Pending => {
+                let has_generated = matches!(
+                    object.mesh(),
+                    Some((DrawnMeshKey::Sculpt(current), _))
+                        if current.asset_id == asset_id && current.sculpt_type == sculpt_type && current.flags == flags
+                );
+                if has_generated {
+                    MeshResolution::Waiting
+                } else {
+                    placeholder.map_or(MeshResolution::Waiting, |mesh| MeshResolution::Ready(DrawnMeshKey::SculptPlaceholder, mesh))
+                }
+            }
+            SculptResolution::Placeholder => {
+                placeholder.map_or(MeshResolution::Waiting, |mesh| MeshResolution::Ready(DrawnMeshKey::SculptPlaceholder, mesh))
+            }
+        }
     }
 
     fn observe(

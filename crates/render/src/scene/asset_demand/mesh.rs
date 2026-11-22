@@ -69,21 +69,21 @@ pub(super) struct MeshPublicationResult {
     pub(super) mesh: Option<SharedMesh>,
 }
 
-pub(super) fn publication(object: &Object, asset: Option<AssetId>, resolution: Option<MeshResolution>) -> MeshPublicationResult {
-    match (asset, resolution) {
-        (Some(_), Some(MeshResolution::Ready(key, mesh))) => {
+pub(super) fn publication(object: &Object, has_mesh_or_sculpt: bool, resolution: Option<MeshResolution>) -> MeshPublicationResult {
+    match (has_mesh_or_sculpt, resolution) {
+        (true, Some(MeshResolution::Ready(key, mesh))) => {
             let current = object.mesh().is_some_and(|(current_key, current)| current_key == key && current.id() == mesh.id());
             let publication = if current { MeshPublication::Keep } else { MeshPublication::Set(key, mesh.clone()) };
             MeshPublicationResult { publication, mesh: Some(mesh) }
         }
-        (Some(_), Some(MeshResolution::Empty | MeshResolution::Failed)) | (Some(_), None) => {
+        (true, Some(MeshResolution::Empty | MeshResolution::Failed)) | (true, None) => {
             MeshPublicationResult { publication: MeshPublication::Clear, mesh: None }
         }
-        (Some(_), Some(MeshResolution::Waiting)) => {
+        (true, Some(MeshResolution::Waiting)) => {
             let mesh = object.mesh_matches_geometry().then(|| object.mesh().map(|(_, mesh)| mesh.clone())).flatten();
             MeshPublicationResult { publication: MeshPublication::Keep, mesh }
         }
-        (None, _) if object.mesh_matches_geometry() => {
+        (false, _) if object.mesh_matches_geometry() => {
             let mesh = object.mesh().map(|(_, mesh)| mesh.clone());
             MeshPublicationResult { publication: MeshPublication::Keep, mesh }
         }
