@@ -205,6 +205,7 @@ mod tests {
     use crate::texture::{
         CompressionQuality, Conversion, PixelSource, allocation_bytes,
         fixtures::{descriptor, loaded, loaded_fixture},
+        max_jobs,
     };
 
     fn vulkan_device() -> (Device, Queue) {
@@ -306,8 +307,8 @@ mod tests {
         let failed = loaded(101, true);
         textures.request(&failed, 8, Priority::Visible);
         let mut completion = textures.next_conversion_job().unwrap().run(CompressionQuality::Fast);
-        let Conversion::Ready(pixels) = completion.data else { panic!("fixture must prepare") };
-        completion.data = Conversion::Failed { failure: Failure::Malformed, _work: pixels._work };
+        let Conversion::Ready(_) = completion.data else { panic!("fixture must prepare") };
+        completion.data = Conversion::Failed(Failure::Malformed);
         textures.complete(completion);
         assert_eq!(textures.failure(), Some(Failure::Malformed));
         assert!(failed.image().is_some(), "a failed upload must not acknowledge or release CPU pixels");
@@ -332,7 +333,10 @@ mod tests {
         textures.request(&pending, 10, Priority::Visible);
         let late = textures.next_conversion_job().unwrap();
         drop(textures);
-        assert!(matches!(late.run(CompressionQuality::Fast).data, Conversion::Failed { failure: Failure::Cancelled, .. }));
+        let Conversion::Failed(failure) = late.run(CompressionQuality::Fast).data else {
+            panic!("cancelled job must fail");
+        };
+        assert_eq!(failure, Failure::Cancelled);
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
         assert_eq!(stats.textures.load(Ordering::Acquire), 0, "shutdown releases GPU resources while live asset handles remain valid");
         assert!(live.info().is_some());
@@ -422,6 +426,66 @@ mod tests {
         assert_eq!(upload_row(&textures, higher), higher_before);
 
         drop(handles);
+        textures.release_resources();
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(work_released_on_complete)'"]
+    fn work_released_on_complete() {
+        let (device, queue) = vulkan_device();
+        let mut textures = Textures::new(&device, &queue);
+        let limit = max_jobs();
+        let handles: Vec<_> = (200..200 + limit as u128 + 1).map(|id| loaded(id, true)).collect();
+        for texture in &handles[..limit] {
+            textures.request(texture, 1, Priority::Visible);
+        }
+        assert_eq!(textures.state().jobs, limit);
+        textures.request(&handles[limit], 1, Priority::Visible);
+        assert_eq!(textures.state().jobs, limit);
+
+        let mut jobs = Vec::with_capacity(limit);
+        while let Some(job) = textures.next_conversion_job() {
+            jobs.push(job);
+        }
+        assert_eq!(jobs.len(), limit);
+        for job in jobs {
+            textures.complete(job.run(CompressionQuality::Fast));
+        }
+        assert_eq!(textures.state().jobs, 0, "work leases release on complete before GPU submission");
+
+        textures.request(&handles[limit], 1, Priority::Visible);
+        assert_eq!(textures.state().jobs, 1, "new conversion job acquires work slot while prepared uploads wait");
+        let next = textures.next_conversion_job().expect("new job admitted immediately");
+        assert_eq!(next.id, handles[limit].id());
+        textures.complete(next.run(CompressionQuality::Fast));
+        submit(&mut textures, &device, &queue, 1);
+
+        drop(handles);
+        textures.release_resources();
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(visible_jobs_dispatch_first)'"]
+    fn visible_jobs_dispatch_first() {
+        let (device, queue) = vulkan_device();
+        let mut textures = Textures::new(&device, &queue);
+        let background = loaded(300, true);
+        let visible = loaded(301, true);
+        textures.request(&background, 1, Priority::Background);
+        textures.request(&visible, 1, Priority::Visible);
+
+        let first = textures.next_conversion_job().expect("visible job dispatches first");
+        let second = textures.next_conversion_job().expect("background job dispatches second");
+        assert_eq!(first.id, visible.id());
+        assert_eq!(second.id, background.id());
+
+        textures.complete(first.run(CompressionQuality::Fast));
+        textures.complete(second.run(CompressionQuality::Fast));
+        submit(&mut textures, &device, &queue, 1);
+
+        drop((background, visible));
         textures.release_resources();
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
     }
