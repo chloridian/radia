@@ -174,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_times_track_interval_and_work() {
+    fn tracks_interval_and_work() {
         let mut times = FrameTimes::default();
         assert!(times.metrics().is_none());
 

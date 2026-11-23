@@ -889,7 +889,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn honors_retry_after_on_429_and_503() {
+    async fn retry_after_honored() {
         for (status, retry_after_secs) in [(429u16, 1u64), (503u16, 1u64)] {
             let sim = simulator_id();
             let object_id = Uuid::from_u128(u128::from(status));
@@ -918,7 +918,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn per_simulator_throttle_does_not_block_other_simulator() {
+    async fn throttle_isolates_simulators() {
         let sim_a = SimulatorId::new(1);
         let sim_b = SimulatorId::new(2);
         let obj_a1 = Uuid::from_u128(101);
@@ -979,7 +979,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preserves_http_status_on_non_retryable_and_exhausted_failures() {
+    async fn failure_preserves_http_status() {
         let sim = simulator_id();
         let object_404 = Uuid::from_u128(404);
         let target_404 = media_target(sim, 30, object_404, 1).await;

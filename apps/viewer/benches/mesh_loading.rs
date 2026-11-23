@@ -118,28 +118,28 @@ fn measure_once(
 }
 
 #[divan::bench]
-fn mesh_loading_cold_nearest_10_ready(bencher: divan::Bencher) {
+fn cold_nearest_10(bencher: divan::Bencher) {
     let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
     let mesh_assets = mesh_assets();
     bencher.bench_local(|| black_box(measure_once(&runtime, &mesh_assets, CacheMode::Cold, Metric::Nearest, None)));
 }
 
 #[divan::bench]
-fn mesh_loading_cold_all_ready(bencher: divan::Bencher) {
+fn cold_all(bencher: divan::Bencher) {
     let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
     let mesh_assets = mesh_assets();
     bencher.bench_local(|| black_box(measure_once(&runtime, &mesh_assets, CacheMode::Cold, Metric::All, None)));
 }
 
 #[divan::bench]
-fn mesh_loading_cold_textures_ready(bencher: divan::Bencher) {
+fn cold_textures(bencher: divan::Bencher) {
     let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
     let mesh_assets = mesh_assets();
     bencher.bench_local(|| black_box(measure_once(&runtime, &mesh_assets, CacheMode::Cold, Metric::Textures, None)));
 }
 
 #[divan::bench]
-fn mesh_loading_warm_nearest_10_ready(bencher: divan::Bencher) {
+fn warm_nearest_10(bencher: divan::Bencher) {
     let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
     let mesh_assets = mesh_assets();
     let (_directory, cache) = prepare_warm_cache(&runtime, &mesh_assets);
@@ -147,7 +147,7 @@ fn mesh_loading_warm_nearest_10_ready(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn mesh_loading_warm_all_ready(bencher: divan::Bencher) {
+fn warm_all(bencher: divan::Bencher) {
     let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
     let mesh_assets = mesh_assets();
     let (_directory, cache) = prepare_warm_cache(&runtime, &mesh_assets);
@@ -155,7 +155,7 @@ fn mesh_loading_warm_all_ready(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn mesh_loading_warm_textures_ready(bencher: divan::Bencher) {
+fn warm_textures(bencher: divan::Bencher) {
     let runtime = Builder::new_current_thread().enable_all().build().expect("build benchmark runtime");
     let mesh_assets = mesh_assets();
     let (_directory, cache) = prepare_warm_cache(&runtime, &mesh_assets);

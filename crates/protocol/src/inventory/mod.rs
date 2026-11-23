@@ -693,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn library_children_accept_nil_omitted_and_linden_owners() {
+    fn library_accepts_nil_linden_owners() {
         let library_owner = Uuid::from_u128(1);
         let linden_owner = Uuid::from_u128(999);
         let root = Uuid::from_u128(2);

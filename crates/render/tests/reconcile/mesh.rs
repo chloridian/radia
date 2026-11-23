@@ -1103,7 +1103,7 @@ fn many_meshes_share_bounded_state() {
 }
 
 #[test]
-fn camera_path_streaming_does_not_flicker_under_memory_pressure() {
+fn pressure_streaming_no_flicker() {
     let assets = [AssetId::new(Uuid::from_u128(7901)), AssetId::new(Uuid::from_u128(7902)), AssetId::new(Uuid::from_u128(7903))];
     let bytes = mesh::asset(&[0, 1, 2, 3], 1);
     let mut world = world();

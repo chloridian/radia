@@ -1725,7 +1725,7 @@ async fn owner_refresh_reconciles_deep_folders() {
 }
 
 #[tokio::test]
-async fn library_fetch_accepts_nil_and_linden_owners() {
+async fn library_accepts_nil_linden_owners() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let personal = InventoryOwner::new(Uuid::from_u128(100));
@@ -1792,7 +1792,7 @@ async fn library_fetch_accepts_nil_and_linden_owners() {
 }
 
 #[tokio::test]
-async fn malformed_response_preserves_decode_error_cause() {
+async fn malformed_response_keeps_cause() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let capability = CapabilityUrl::parse(peer.url("/ais").as_str()).expect("valid AIS URL");
@@ -1809,7 +1809,7 @@ async fn malformed_response_preserves_decode_error_cause() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn retry_after_honors_pacing_and_preserves_status_on_exhaustion() {
+async fn retry_after_paces_and_preserves_status() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let capability = CapabilityUrl::parse(peer.url("/ais").as_str()).expect("valid AIS URL");
@@ -1852,7 +1852,7 @@ async fn retry_after_honors_pacing_and_preserves_status_on_exhaustion() {
 }
 
 #[test]
-fn timeout_and_cancellation_causes_are_preserved() {
+fn timeout_cancel_keep_cause() {
     assert_eq!(classify_request_error(network::Error::CapabilityRequestCanceled), RequestFailure::Cancelled);
     assert_eq!(classify_request_error(network::Error::CapabilitySessionClosed), RequestFailure::Cancelled);
     assert_eq!(retry_delay(0, Some(Duration::from_secs(86_400))), MAX_RETRY_AFTER);

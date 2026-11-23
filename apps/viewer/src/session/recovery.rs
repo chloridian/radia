@@ -998,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn neighbor_and_primary_recoveries_dispatch_fairly() {
+    fn recoveries_dispatch_fairly() {
         let (_region_world, regions) = registered_regions(2);
         let primary = simulator_id();
         let neighbor = simulator_id();
@@ -1029,7 +1029,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnect_clears_in_flight_send_for_retired_simulator() {
+    async fn disconnect_clears_in_flight() {
         struct DropSignal(Option<oneshot::Sender<()>>);
 
         impl Drop for DropSignal {
@@ -1065,7 +1065,7 @@ mod tests {
     }
 
     #[test]
-    fn degraded_entries_suppress_repeats_and_evict_before_starving_pending() {
+    fn degraded_suppresses_and_evicts() {
         let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
         let stale_first = address(regions[0], 1);
@@ -1097,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_summary_aggregates_counts_and_bounds_samples() {
+    fn summary_bounds_samples() {
         let (_region_world, regions) = registered_regions(1);
         let simulator = simulator_id();
         let now = Instant::now();

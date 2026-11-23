@@ -783,7 +783,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decode_failure_records_known_schema_name_and_error() {
+    fn known_schema_records_failure() {
         let mut rejections = PacketRejections::default();
         let now = time::Instant::now();
         let window = rejections
@@ -803,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_failure_formats_unknown_message_id_without_schema() {
+    fn unknown_id_formats_failure() {
         let mut rejections = PacketRejections::default();
         let now = time::Instant::now();
         let unknown_id = MessageId::low(0xfff0);
@@ -819,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_failure_samples_are_bounded_and_aggregate_repeats() {
+    fn failure_samples_bounded() {
         let mut rejections = PacketRejections::default();
         let start = time::Instant::now();
         assert_matches!(rejections.record_decode_failure_at(start, OBJECT_UPDATE, &LLUdpError::TruncatedPacket), Some(_));
@@ -847,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn non_decode_rejection_categories_remain_unchanged() {
+    fn other_rejections_unchanged() {
         let mut rejections = PacketRejections::default();
         let start = time::Instant::now();
         let first = rejections.record_at(start, RejectionKind::FrameInspection).expect("first reports immediately");

@@ -954,7 +954,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_parcel_event_does_not_advance_selection() {
+    async fn malformed_event_keeps_selection() {
         let mut world = SessionWorld::new(viewer_world_limits());
         let simulator = simulator_id();
         let region = world.register_simulator(simulator, None).unwrap();
@@ -1025,7 +1025,11 @@ mod tests {
         intake.queued.clear();
         intake.order.clear();
         intake.complete(&mut world, Completion { request: old, result: decode(RESPONSE.as_bytes(), scope()) });
-        assert_eq!(world.world().environment(region).unwrap().parcel.unwrap().assignment, None, "late A results cannot survive A → B → A");
+        assert_eq!(
+            world.world().environment(region).unwrap().parcel.unwrap().assignment,
+            None,
+            "late A results cannot survive A â†’ B â†’ A"
+        );
         intake.parcel(&mut world, region, ParcelNotice { sequence: 0, overrides: false, ..notice }, true);
         let parcel = world.world().environment(region).unwrap().parcel.unwrap();
         assert_eq!(parcel.assignment.unwrap().source, EnvironmentSource::Inherit, "disabling parcel overrides clears active settings");

@@ -1085,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_post_complete_overlay_part_is_rejected() {
+    fn stale_overlay_part_rejected() {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
         complete_overlay(&mut world, region, 10, 0);
@@ -1100,7 +1100,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_parcel_properties_keep_state_and_invariants() {
+    fn malformed_properties_keep_invariants() {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
         observe_properties(&mut world, region, 1, 1, 41, 0);
@@ -1153,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_region_flags_do_not_overwrite_newer() {
+    fn stale_flags_ignored() {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
         let _ = world.observe_region_flags(source(region, 10), Some(1 << 19), Some(1 << 32)).unwrap();
@@ -1165,7 +1165,7 @@ mod tests {
     }
 
     #[test]
-    fn parcel_budget_exhausted_preserves_bytes_and_invariants() {
+    fn budget_exhaustion_preserves_invariants() {
         let mut world = World::new(limits());
         let region = world.register_region().unwrap();
         let original_bytes = world.parcel_bytes;

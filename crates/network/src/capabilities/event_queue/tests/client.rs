@@ -759,7 +759,7 @@ async fn primary_404_keeps_session() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn role_change_during_in_flight_poll_redelivers_events_without_gap() {
+async fn role_change_redelivers_without_gap() {
     const SECOND_BATCH: &str = "<llsd><map><key>id</key><integer>6</integer><key>events</key><array><map><key>message</key><string>Third</string></map></array></map></llsd>";
     const THIRD_BATCH: &str = "<llsd><map><key>id</key><integer>7</integer><key>events</key><array><map><key>message</key><string>Fourth</string></map></array></map></llsd>";
 
@@ -834,7 +834,7 @@ async fn role_change_during_in_flight_poll_redelivers_events_without_gap() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn genuine_event_queue_loss_still_reports_gap() {
+async fn genuine_loss_reports_gap() {
     let mut harness = EventQueueHarness::seeded(
         "/events",
         CLIENT_EVENT_CAPACITY,

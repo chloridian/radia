@@ -72,7 +72,7 @@ mod tests {
     }
 
     #[test]
-    fn flush_drains_pending_regardless_of_interval() {
+    fn flush_drains_immediately() {
         let start = Instant::now();
         let mut summary = Summary::new(INTERVAL);
         assert_eq!(summary.flush(), None);

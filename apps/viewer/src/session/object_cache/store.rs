@@ -670,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_schema_version_fails_safely_and_preserves_contents() {
+    fn newer_schema_preserves_contents() {
         for future_version in [SCHEMA_VERSION + 1, 7] {
             let directory = tempfile::tempdir().expect("create isolated cache directory");
             let path = directory.path().join("objects.sqlite");

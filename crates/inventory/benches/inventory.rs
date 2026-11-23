@@ -193,7 +193,7 @@ mod benches {
     use super::*;
 
     #[divan::bench]
-    fn build_100k_items_and_snapshot(bencher: divan::Bencher) {
+    fn build_snapshot_100k(bencher: divan::Bencher) {
         bencher.with_inputs(item_children).bench_local_values(|children| {
             let mut inventory = root_inventory();
             let folder = inventory.roots().personal();
@@ -205,13 +205,13 @@ mod benches {
     }
 
     #[divan::bench]
-    fn snapshot_100k_items(bencher: divan::Bencher) {
+    fn snapshot_100k(bencher: divan::Bencher) {
         let inventory = item_inventory();
         bencher.bench_local(|| black_box(inventory.snapshot()));
     }
 
     #[divan::bench]
-    fn apply_one_item_delta_100k(bencher: divan::Bencher) {
+    fn item_delta_100k(bencher: divan::Bencher) {
         let (mut inventory, delta_a, delta_b) = one_item_deltas();
         let mut use_a = false;
         bencher
@@ -227,7 +227,7 @@ mod folder_fetch_delete {
     use super::*;
 
     #[divan::bench]
-    fn folder_fetch_delete_prepare_delete_100k_worker(bencher: divan::Bencher) {
+    fn delete_prepare_100k(bencher: divan::Bencher) {
         bencher.with_inputs(item_inventory).bench_local_values(|inventory| {
             let snapshot = inventory.snapshot();
             let prepared = snapshot
@@ -238,7 +238,7 @@ mod folder_fetch_delete {
     }
 
     #[divan::bench]
-    fn folder_fetch_delete_model_only_commit_and_direct_drop_delete_100k(bencher: divan::Bencher) {
+    fn delete_commit_100k(bencher: divan::Bencher) {
         bencher.with_inputs(|| prepared_fetch_fixture(false)).bench_local_values(|(mut inventory, before, prepared)| {
             let changes = inventory.commit_folder_fetch(prepared).expect("delete transaction should commit");
             black_box(changes);
@@ -248,7 +248,7 @@ mod folder_fetch_delete {
     }
 
     #[divan::bench]
-    fn folder_fetch_delete_prepare_replace_100k_worker(bencher: divan::Bencher) {
+    fn replace_prepare_100k(bencher: divan::Bencher) {
         bencher.with_inputs(item_inventory).bench_local_values(|inventory| {
             let snapshot = inventory.snapshot();
             let prepared = snapshot
@@ -264,7 +264,7 @@ mod folder_fetch_delete {
     }
 
     #[divan::bench]
-    fn folder_fetch_delete_model_only_commit_and_direct_drop_replace_100k(bencher: divan::Bencher) {
+    fn replace_commit_100k(bencher: divan::Bencher) {
         bencher.with_inputs(|| prepared_fetch_fixture(true)).bench_local_values(|(mut inventory, before, prepared)| {
             let changes = inventory.commit_folder_fetch(prepared).expect("replacement transaction should commit");
             black_box(changes);
@@ -278,7 +278,7 @@ mod cache {
     use super::*;
 
     #[divan::bench]
-    fn cache_warm_read_apply_100k(bencher: divan::Bencher) {
+    fn cache_warm_apply_100k(bencher: divan::Bencher) {
         let directory = tempdir().expect("benchmark cache directory");
         let path = populate_cache(directory.path());
         let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", owner().id(), None).expect("benchmark cache open");
@@ -304,7 +304,7 @@ mod folder_restore {
     use super::*;
 
     #[divan::bench]
-    fn cache_folder_restore_prepare_restore_10k_folders(bencher: divan::Bencher) {
+    fn cache_restore_10k(bencher: divan::Bencher) {
         const FOLDERS: usize = 10_000;
 
         let directory = tempdir().expect("folder restore cache directory");

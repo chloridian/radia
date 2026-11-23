@@ -223,7 +223,7 @@ fn lifecycle_retire_linksets_65k(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn lifecycle_delete_deep_chain_65k_depth256(bencher: divan::Bencher) {
+fn lifecycle_delete_deep_65k(bencher: divan::Bencher) {
     const PROFILE_COUNT: usize = 65_536;
     const DEEP_CHAIN: usize = 4_096;
     bencher.counter(ItemsCount::new(DEEP_CHAIN as u64)).with_inputs(|| deep_linked_scene(PROFILE_COUNT, DEEP_CHAIN)).bench_local_values(

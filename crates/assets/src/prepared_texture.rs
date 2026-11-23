@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_cache_hit_produces_bit_identical_pixels() {
+    fn cache_hit_matches_pixels() {
         let directory = tempdir().expect("tempdir");
         let cache = Arc::new(AssetCache::open(directory.path(), 64 * 1024 * 1024).expect("open cache"));
         let id = AssetId::new(Uuid::from_u128(10));
@@ -211,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_cache_invalidates_on_key_changes() {
+    fn key_change_invalidates_cache() {
         let decoded = texture::decode(RGBA_J2C, TextureSize::default(), || false).expect("decode fixture");
         let source_hash = storage::sha256(RGBA_J2C);
         let key = PreparedTextureKey::new(source_hash, TextureSize::default());
@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_on_disk_prepared_entry_is_deleted_and_falls_back_to_encoded_payload() {
+    fn corrupt_entry_falls_back() {
         let directory = tempdir().expect("tempdir");
         let cache = Arc::new(AssetCache::open(directory.path(), 64 * 1024 * 1024).expect("open cache"));
         let id = AssetId::new(Uuid::from_u128(11));
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn truncated_prepared_entry_is_deleted_and_falls_back_to_encoded_payload() {
+    fn truncated_entry_falls_back() {
         let directory = tempdir().expect("tempdir");
         let cache = Arc::new(AssetCache::open(directory.path(), 64 * 1024 * 1024).expect("open cache"));
         let id = AssetId::new(Uuid::from_u128(13));
@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_quota_eviction_never_displaces_encoded_payloads() {
+    fn quota_eviction_keeps_encoded() {
         let directory = tempdir().expect("tempdir");
         let cache = Arc::new(
             AssetCache::open_with_prepared_limit(directory.path(), 64 * 1024 * 1024, storage::MIN_SIZE_LIMIT)

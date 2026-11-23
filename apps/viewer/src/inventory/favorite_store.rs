@@ -436,7 +436,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn safe_import_seeds_names_and_landmarks_and_removes_source() {
+    async fn import_seeds_and_removes_source() {
         let dir = tempdir().expect("tempdir");
         let json_path = login_locations_path_under(dir.path());
         fs::create_dir_all(json_path.parent().expect("parent")).expect("create parent");
@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn interrupted_import_between_databases_is_idempotent_and_preserves_authoritative_names() {
+    async fn interrupted_import_is_idempotent() {
         let dir = tempdir().expect("tempdir");
         let json_path = login_locations_path_under(dir.path());
         fs::create_dir_all(json_path.parent().expect("parent")).expect("create parent");
@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_preserves_existing_sqlite_snapshots_and_marker_blocks_reimport_after_empty_refresh() {
+    async fn import_preserves_snapshot_and_marker() {
         let dir = tempdir().expect("tempdir");
         let json_path = login_locations_path_under(dir.path());
         fs::create_dir_all(json_path.parent().expect("parent")).expect("create parent");
@@ -535,7 +535,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_and_oversized_source_files_are_retained_without_writes() {
+    async fn malformed_sources_stay_untouched() {
         let dir = tempdir().expect("tempdir");
         let (landmarks, _) = LoginLandmarkCache::open_at_root(dir.path()).expect("open landmarks");
         let (names, _) = NameCache::open(dir.path().join("names.sqlite")).expect("open names");
@@ -568,7 +568,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambiguous_username_is_not_seeded_and_invalid_refresh_keeps_snapshot() {
+    async fn ambiguous_username_skips_seed() {
         let dir = tempdir().expect("tempdir");
         let json_path = login_locations_path_under(dir.path());
         fs::create_dir_all(json_path.parent().expect("parent")).expect("create parent");
@@ -605,7 +605,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clearing_inventory_cache_clears_login_landmarks() {
+    async fn clear_cache_clears_landmarks() {
         let dir = tempdir().expect("tempdir");
         let agent_id = Uuid::from_u128(50);
         let (landmarks, _) = LoginLandmarkCache::open_at_root(dir.path()).expect("open landmarks");

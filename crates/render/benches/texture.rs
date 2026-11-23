@@ -42,21 +42,21 @@ fn bench_mipmaps(bencher: divan::Bencher, edge: u32, alpha: bool, quality: Compr
 }
 
 #[divan::bench(args = EDGES)]
-fn texture_compression_bc1_with_mips(bencher: divan::Bencher, edge: u32) {
+fn texture_compression_bc1(bencher: divan::Bencher, edge: u32) {
     bench_mipmaps(bencher, edge, false, CompressionQuality::Fast);
 }
 
 #[divan::bench(args = EDGES)]
-fn texture_compression_bc3_with_mips(bencher: divan::Bencher, edge: u32) {
+fn texture_compression_bc3(bencher: divan::Bencher, edge: u32) {
     bench_mipmaps(bencher, edge, true, CompressionQuality::Fast);
 }
 
 #[divan::bench(args = EDGES)]
-fn texture_compression_bc7_opaque_with_mips(bencher: divan::Bencher, edge: u32) {
+fn texture_compression_bc7_opaque(bencher: divan::Bencher, edge: u32) {
     bench_mipmaps(bencher, edge, false, CompressionQuality::High);
 }
 
 #[divan::bench(args = EDGES)]
-fn texture_compression_bc7_alpha_with_mips(bencher: divan::Bencher, edge: u32) {
+fn texture_compression_bc7_alpha(bencher: divan::Bencher, edge: u32) {
     bench_mipmaps(bencher, edge, true, CompressionQuality::High);
 }

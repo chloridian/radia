@@ -131,7 +131,7 @@ mod demand_reconcile {
     use super::*;
 
     #[divan::bench(args = RECONCILE_COUNTS)]
-    fn store_demand_reconcile_turn(bencher: divan::Bencher, count: usize) {
+    fn store_reconcile_turn(bencher: divan::Bencher, count: usize) {
         bencher
             .counter(ItemsCount::new(count as u64))
             .with_inputs(|| {
@@ -147,7 +147,7 @@ mod demand_reconcile {
     }
 
     #[divan::bench(args = RECONCILE_COUNTS)]
-    fn store_demand_reconcile_admission_during_churn(bencher: divan::Bencher, count: usize) {
+    fn store_reconcile_churn(bencher: divan::Bencher, count: usize) {
         bencher.counter(ItemsCount::new(count as u64)).with_inputs(|| dirty_progress_fixture(count)).bench_local_refs(
             |((store, _, _, now, _), eligible, churn)| {
                 let mut turns = 0;
@@ -170,7 +170,7 @@ mod demand_reconcile {
     }
 
     #[divan::bench(args = RECONCILE_COUNTS)]
-    fn store_demand_reconcile_zero_interest_drain(bencher: divan::Bencher, count: usize) {
+    fn store_zero_interest_drain(bencher: divan::Bencher, count: usize) {
         bencher
             .counter(ItemsCount::new(count as u64))
             .with_inputs(|| {
@@ -186,7 +186,7 @@ mod demand_reconcile {
     }
 
     #[divan::bench(args = RECONCILE_COUNTS)]
-    fn store_demand_reconcile_zero_interest_turn(bencher: divan::Bencher, count: usize) {
+    fn store_zero_interest_turn(bencher: divan::Bencher, count: usize) {
         bencher
             .counter(ItemsCount::new(count as u64))
             .with_inputs(|| {
@@ -200,7 +200,7 @@ mod demand_reconcile {
     }
 
     #[divan::bench(args = RECONCILE_COUNTS)]
-    fn store_demand_reconcile_priority_churn_drain(bencher: divan::Bencher, count: usize) {
+    fn store_priority_drain(bencher: divan::Bencher, count: usize) {
         bencher
             .counter(ItemsCount::new(count as u64))
             .with_inputs(|| {
@@ -219,7 +219,7 @@ mod demand_reconcile {
     }
 
     #[divan::bench(args = RECONCILE_COUNTS)]
-    fn store_demand_reconcile_priority_churn_turn(bencher: divan::Bencher, count: usize) {
+    fn store_priority_turn(bencher: divan::Bencher, count: usize) {
         bencher
             .counter(ItemsCount::new(count as u64))
             .with_inputs(|| {

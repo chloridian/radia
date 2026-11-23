@@ -352,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn parcel_properties_decodes_full_message_with_optional_blocks() {
+    fn decodes_full_optional_blocks() {
         let original = sample_properties();
         let mut bytes = Vec::new();
         let mut writer = Writer::new(&mut bytes);

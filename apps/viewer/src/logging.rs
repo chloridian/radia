@@ -333,7 +333,7 @@ mod tests {
     use super::{LogLevel, build_filter, filter_spec};
 
     #[test]
-    fn filter_directives_match_levels_and_noisy_network() {
+    fn directives_match_levels() {
         for level in LogLevel::ALL {
             for noisy in [false, true] {
                 let spec = filter_spec(level, noisy);

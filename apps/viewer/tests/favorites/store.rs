@@ -4,7 +4,7 @@ use tempfile::tempdir;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn scopes_landmarks_by_grid_and_agent_and_preserves_order() {
+async fn landmarks_scoped_and_ordered() {
     let dir = tempdir().expect("tempdir");
     let (cache, _) = LoginLandmarkCache::open_at_root(dir.path()).expect("open login landmark cache");
     let agni_agent = Uuid::from_u128(1);

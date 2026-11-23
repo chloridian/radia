@@ -797,7 +797,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_burst_exceeding_sqlite_queue_persists_all_updates() {
+    async fn login_burst_persists_all() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let path = directory.path().join("objects.sqlite");
         let mut cache = open_cache(&path);
@@ -827,7 +827,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overflow_marks_cache_degraded_without_disabling_subsequent_writes() {
+    async fn overflow_degrades_keeps_writing() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let path = directory.path().join("objects.sqlite");
         let mut cache = open_cache(&path);

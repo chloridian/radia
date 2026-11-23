@@ -12,7 +12,7 @@ use crate::{
 const SIZE: [u32; 2] = [1000, 500];
 
 #[test]
-fn range_extends_draw_distance_for_surfaces_only() {
+fn range_extends_surfaces_only() {
     let camera =
         Camera::new(DVec3::ZERO, Vec3::X, 1.0, SIZE).expect("fixture camera").with_quality(32.0, 1.0).expect("fixture draw distance");
     let point = Bounds { min: Vec3::ZERO, max: Vec3::ZERO };

@@ -386,7 +386,7 @@ fn shared_textures_follow_camera() {
 }
 
 #[test]
-fn pbr_texture_demand_tracks_uv_scale() {
+fn demand_tracks_uv_scale() {
     let cases = [
         ("composed magnification needs more detail", [4.0, 3.0], [0.1, 0.15], Ordering::Greater),
         ("composed repeats need less detail", [0.5, 0.4], [8.0, 6.0], Ordering::Less),

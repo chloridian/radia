@@ -601,7 +601,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedded_defaults_and_descriptors_are_available_without_io() {
+    fn defaults_load_without_io() {
         let registry = CvarRegistry::new();
         let snapshot = registry.snapshot();
 
@@ -620,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn five_layer_precedence_and_clear_fallback_are_deterministic() {
+    fn layer_precedence_is_deterministic() {
         let mut registry = CvarRegistry::new();
         let initial_revision = registry.revision();
 
@@ -659,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_out_of_bounds_non_finite_and_mismatched_types() {
+    fn validation_rejects_invalid_values() {
         let mut registry = CvarRegistry::new();
 
         assert_matches!(
@@ -690,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_is_atomic_on_error() {
+    fn batch_apply_is_atomic() {
         let mut registry = CvarRegistry::new();
         let before = registry.revision();
 
@@ -718,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_required_preserves_startup_value_and_tracks_pending() {
+    fn restart_required_tracks_pending() {
         let mut registry = CvarRegistry::new();
         let id = RENDER_DRAW_DISTANCE.id();
         registry.startup_locked[id.0] = Some((CvarValue::F32(512.0), Layer::Default));
@@ -751,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn enum_and_bool_cvars_validate_values_and_update_layers() {
+    fn enum_and_bool_validate() {
         let mut registry = CvarRegistry::new();
 
         assert_eq!(LOG_LEVEL.default_value(), "info");
@@ -777,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn noop_writes_and_masked_lower_layers_do_not_advance_revision() {
+    fn noop_writes_keep_revision() {
         let mut registry = CvarRegistry::new();
         let initial = registry.revision();
 
@@ -804,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn by_name_and_search_match_descriptors_and_respect_visibility() {
+    fn search_respects_visibility() {
         assert_eq!(by_name("render.draw_distance").map(|descriptor| descriptor.id), Some(RENDER_DRAW_DISTANCE.id()));
         assert_eq!(by_name("does.not.exist"), None);
 
@@ -856,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn bundled_graphics_presets_resolve_and_apply_expected_values() {
+    fn graphics_presets_apply() {
         let cases = [
             ("low", 128.0_f32, 512_i64, 0.75_f32),
             ("medium", 256.0_f32, 1024_i64, 1.0_f32),

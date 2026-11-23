@@ -11,7 +11,7 @@ fn resource() -> Resource {
 }
 
 #[divan::bench]
-fn asset_cache_texture_cold_fetch_decode(bencher: divan::Bencher) {
+fn asset_cache_texture_cold_decode(bencher: divan::Bencher) {
     bencher
         .with_inputs(|| {
             let mut store = Store::new(Budget::default());
@@ -29,7 +29,7 @@ fn asset_cache_texture_cold_fetch_decode(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn asset_cache_texture_warm_disk_read_decode(bencher: divan::Bencher) {
+fn asset_cache_texture_warm_decode(bencher: divan::Bencher) {
     let directory = tempdir().expect("benchmark cache directory");
     let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).expect("open benchmark cache"));
     cache.put_complete(Request::new(resource()), RGBA_J2C.to_vec()).expect("seed benchmark cache");
@@ -55,7 +55,7 @@ fn asset_cache_texture_warm_disk_read_decode(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn asset_cache_texture_warm_512_prepared_hit(bencher: divan::Bencher) {
+fn asset_cache_texture_warm_hit(bencher: divan::Bencher) {
     let directory = tempdir().expect("benchmark cache directory");
     let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).expect("open benchmark cache"));
     let request = Request::Texture { id: AssetId::new(Uuid::from_u128(2)), size: TextureSize::new(512) };

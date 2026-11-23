@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn encoding_over_message_bound_is_rejected() {
+    fn oversized_encoding_rejected() {
         let local_id = NonZeroU32::new(7).unwrap();
         let encodings: Vec<_> = (1..=45).map(|faces| encode_payload(local_id, &full_overrides(faces))).collect();
         let fitting = encodings.iter().take_while(|encoding| encoding.is_some()).count();

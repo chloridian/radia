@@ -1017,7 +1017,7 @@ async fn favorites_shutdown_reaps_worker() {
 }
 
 #[test]
-fn decode_rejection_coverage_loss_aggregates_and_flushes() {
+fn coverage_loss_aggregates() {
     let simulator = test_helpers::simulator_id();
     let mut summary = Summary::<DecodeRejectionLosses>::new(DECODE_REJECTION_LOSS_REPORT_INTERVAL);
     let start = Instant::now();
