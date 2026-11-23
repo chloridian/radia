@@ -334,7 +334,7 @@ fn cancellable_tessellation_honors_flag() {
 }
 
 #[test]
-fn placeholder_mesh_is_valid_and_pickable() {
+fn placeholder_is_pickable() {
     let mesh = sculpt_placeholder_mesh().expect("placeholder mesh builds");
     assert_eq!(mesh.vertices().len(), 25);
     assert_eq!(mesh.indices().len(), 96);
@@ -344,7 +344,7 @@ fn placeholder_mesh_is_valid_and_pickable() {
 }
 
 #[test]
-fn image_to_rgba_expands_all_pixel_formats() {
+fn rgba_expands_pixel_formats() {
     let cancelled = AtomicBool::new(false);
     assert_eq!(
         pixels_to_rgba([2, 1], PixelFormat::Gray8, &[10, 200], &cancelled).unwrap().as_ref(),

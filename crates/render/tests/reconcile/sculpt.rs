@@ -29,7 +29,7 @@ fn request_texture(work: &[AssetRequest], asset_id: AssetId) -> AssetRequest {
 }
 
 #[test]
-fn sculpt_publishes_placeholder_then_upgrades_to_generated_mesh() {
+fn placeholder_upgrades_to_mesh() {
     let sculpt_map = AssetId::new(Uuid::from_u128(901));
     let mut world = world();
     add_sculpt(&mut world, 1, sculpt_map, SculptType::Sphere, SculptFlags::default(), 2.0);
@@ -88,7 +88,7 @@ fn sculpt_map_failure_keeps_placeholder() {
 }
 
 #[test]
-fn shared_sculpt_map_deduplicates_and_releases_on_last_user() {
+fn shared_map_deduplicates() {
     let sculpt_map = AssetId::new(Uuid::from_u128(903));
     let mut world = world();
     add_sculpt(&mut world, 1, sculpt_map, SculptType::Sphere, SculptFlags::default(), 2.0);
@@ -130,7 +130,7 @@ fn shared_sculpt_map_deduplicates_and_releases_on_last_user() {
 }
 
 #[test]
-fn sculpt_shape_changes_release_old_demand_and_reject_stale_completions() {
+fn shape_change_releases_stale() {
     let first_map = AssetId::new(Uuid::from_u128(904));
     let second_map = AssetId::new(Uuid::from_u128(905));
     let mut world = world();
@@ -196,7 +196,7 @@ fn sculpt_shape_changes_release_old_demand_and_reject_stale_completions() {
 }
 
 #[test]
-fn region_retire_releases_sculpt_demand_and_clears_object() {
+fn region_retire_releases_demand() {
     let sculpt_map = AssetId::new(Uuid::from_u128(906));
     let mut world = world();
     let region = world_region(&world, 0);
@@ -219,7 +219,7 @@ fn region_retire_releases_sculpt_demand_and_clears_object() {
 }
 
 #[test]
-fn mixed_mesh_and_sculpt_stay_within_budget() {
+fn mixed_stays_within_budget() {
     let budget = Budget::default();
     let mesh_asset = AssetId::new(Uuid::from_u128(907));
     let sculpt_map = AssetId::new(Uuid::from_u128(908));

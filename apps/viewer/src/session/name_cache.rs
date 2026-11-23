@@ -693,7 +693,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn avatar_and_group_round_trip_persists_and_isolates_grids() {
+    async fn round_trip_isolates_grids() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("names.sqlite");
         let (cache, status) = NameCache::open(&path).expect("open name cache");
@@ -736,7 +736,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verified_login_normalizes_usernames_and_updates_on_reauth() {
+    async fn verified_login_normalizes_username() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("names.sqlite");
         let (cache, _) = NameCache::open(&path).expect("open name cache");
@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_and_schema_mismatch_self_heal_while_newer_version_is_preserved() {
+    fn corrupt_heals_newer_preserved() {
         let dir = tempdir().expect("tempdir");
 
         let corrupt_path = dir.path().join("corrupt.sqlite");
@@ -832,7 +832,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_inputs_are_rejected_and_corrupt_rows_are_discarded_on_read() {
+    async fn invalid_rejected_corrupt_discarded() {
         assert_eq!(AvatarId::new(Uuid::nil()), None);
         assert_eq!(GroupId::new(Uuid::nil()), None);
 
@@ -883,7 +883,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn per_grid_pruning_evicts_oldest_entries_without_touching_other_grids() {
+    async fn grid_pruning_isolates_grids() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("names.sqlite");
         let (cache, _) = NameCache::open(&path).expect("open name cache");

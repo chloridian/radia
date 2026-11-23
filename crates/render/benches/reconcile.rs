@@ -13,7 +13,7 @@ mod initial {
     use super::*;
 
     #[divan::bench]
-    fn scene_reconcile_initial_first_full_view_batch_10k_4_regions(bencher: divan::Bencher) {
+    fn scene_initial_10k(bencher: divan::Bencher) {
         bencher.with_inputs(|| support::scene_world(OBJECTS, REGIONS)).bench_local_values(|(world, _)| {
             support::first_full_view_batch(&world, OBJECTS);
             hint::black_box(world.object_count());
@@ -25,7 +25,7 @@ mod diagnostic {
     use super::*;
 
     #[divan::bench]
-    fn scene_diagnostic_count_tracked_scene_records_10k_4_regions(bencher: divan::Bencher) {
+    fn scene_count_records_10k(bencher: divan::Bencher) {
         let (world, _) = support::scene_world(OBJECTS, REGIONS);
         let (_reconciler, view, _now) = support::settle(&world, OBJECTS);
         bencher.bench_local(|| hint::black_box(&view).tracked_object_count());
@@ -36,7 +36,7 @@ mod incremental {
     use super::*;
 
     #[divan::bench]
-    fn scene_reconcile_incremental_pose_1_percent_10k_4_regions(bencher: divan::Bencher) {
+    fn scene_incremental_pose_10k(bencher: divan::Bencher) {
         let (mut world, rows) = support::scene_world(OBJECTS, REGIONS);
         let (mut reconciler, mut view, mut now) = support::settle(&world, OBJECTS);
         let mut order = 2_000_000;
@@ -54,7 +54,7 @@ mod mesh_lod {
     use super::*;
 
     #[divan::bench(args = MESH_COUNTS)]
-    fn scene_mesh_lod_lookup_camera_change_distinct_assets(bencher: divan::Bencher, count: usize) {
+    fn scene_mesh_lod_lookup(bencher: divan::Bencher, count: usize) {
         bencher.counter(ItemsCount::new(count as u64)).with_inputs(|| support::ready_distinct_mesh_scene(count)).bench_local_values(
             |(mut reconciler, mut view, world, mut now)| {
                 let work = support::request_distinct_mesh_refinement(&mut reconciler, &mut view, &world, &mut now);

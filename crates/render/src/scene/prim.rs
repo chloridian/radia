@@ -1158,7 +1158,7 @@ mod tests {
     }
 
     #[test]
-    fn test_curve_matches_reference() {
+    fn curve_matches_reference() {
         let mesh = generate_at(
             PrimShape { path_curve: 0x40, profile_curve: 0, path_scale_x: 150, path_scale_y: 125, path_twist: 50, ..PrimShape::default() },
             Detail::Lowest,

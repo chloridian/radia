@@ -64,11 +64,11 @@ fn run(bencher: divan::Bencher, case: DecodeCase) {
 }
 
 #[divan::bench(args = ONE_WORKER)]
-fn texture_assets_decode_gray_4096_one_worker(bencher: divan::Bencher, case: DecodeCase) {
+fn texture_assets_decode_4096_1w(bencher: divan::Bencher, case: DecodeCase) {
     run(bencher, case);
 }
 
 #[divan::bench(args = TWO_WORKERS)]
-fn texture_assets_decode_gray_4096_two_workers(bencher: divan::Bencher, case: DecodeCase) {
+fn texture_assets_decode_4096_2w(bencher: divan::Bencher, case: DecodeCase) {
     run(bencher, case);
 }

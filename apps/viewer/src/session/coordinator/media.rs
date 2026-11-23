@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn waiting_media_prioritizes_visible_and_nearby_targets() {
+    fn prioritizes_visible_nearby_media() {
         let simulator_id = simulator_id();
         let mut world = SessionWorld::new(viewer_world_limits());
         let far_visible = positioned_media_target(&mut world, simulator_id, 1, Uuid::from_u128(1), Vec3::new(0.0, 80.0, 0.0), 1);

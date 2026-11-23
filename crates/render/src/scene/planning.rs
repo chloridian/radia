@@ -582,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_request_admitted_after_capacity_freed() {
+    fn rejected_request_admitted_later() {
         let budget = Budget::default();
         let high = MeshKey { shape: PrimShape::default(), detail: Detail::High };
         let low = MeshKey { shape: PrimShape::default(), detail: Detail::Low };
@@ -620,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_request_does_no_repeated_work_while_full() {
+    fn rejected_request_skips_work() {
         let budget = Budget::default();
         let high = MeshKey { shape: PrimShape::default(), detail: Detail::High };
         let mut planner = MeshPlanner::new_with_cache_bytes(budget.clone(), cache_limit(high));
@@ -647,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_irrelevant_request_is_dropped_on_retry() {
+    fn irrelevant_rejection_dropped() {
         let budget = Budget::default();
         let high = MeshKey { shape: PrimShape::default(), detail: Detail::High };
         let mut planner = MeshPlanner::new_with_cache_bytes(budget.clone(), cache_limit(high));
@@ -682,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_lod_switch_keeps_displayed_mesh_and_retries_when_capacity_frees() {
+    fn rejected_lod_retries_later() {
         let budget = Budget::default();
         let low = MeshKey { shape: PrimShape::default(), detail: Detail::Low };
         let medium = MeshKey { shape: PrimShape::default(), detail: Detail::Medium };

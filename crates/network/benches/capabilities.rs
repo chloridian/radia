@@ -116,7 +116,7 @@ struct CapabilityRequest {
 }
 
 #[divan::bench]
-fn capability_discovery_three_capabilities(bencher: divan::Bencher) {
+fn capability_discover_three(bencher: divan::Bencher) {
     let server = LoopbackServer::start(|address| {
         format!(
             "<?xml version=\"1.0\"?><llsd><map><key>EventQueueGet</key><uri>http://{address}/events</uri><key>FetchInventory2</key><uri>http://{address}/inventory</uri><key>GetTexture</key><uri>http://{address}/texture</uri></map></llsd>"
@@ -135,7 +135,7 @@ fn capability_discovery_three_capabilities(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn capability_post_xml_request_response(bencher: divan::Bencher) {
+fn capability_post_xml(bencher: divan::Bencher) {
     const RESPONSE_LIMIT_BYTES: usize = 4096;
 
     let server = LoopbackServer::start(|_| {

@@ -217,7 +217,7 @@ fn repair_waits_for_other_process() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn connection_settings_applied_on_create_reopen_recreate_and_discard() -> Result<(), Box<dyn Error>> {
+fn connection_settings_persist() -> Result<(), Box<dyn Error>> {
     const TEST_MAX_PAGES: i64 = 4096;
     fn migrate_with_settings(connection: &mut Connection) -> Result<(), MigrationError> {
         connection.execute_batch("CREATE TABLE IF NOT EXISTS values_table (value INTEGER PRIMARY KEY)")?;
@@ -265,7 +265,7 @@ fn connection_settings_applied_on_create_reopen_recreate_and_discard() -> Result
 }
 
 #[test]
-fn newer_schema_version_fails_safely_and_preserves_contents() -> Result<(), Box<dyn Error>> {
+fn newer_schema_preserves_contents() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let path = directory.path().join("future.sqlite");
     let connection = Connection::open(&path)?;
@@ -288,7 +288,7 @@ fn newer_schema_version_fails_safely_and_preserves_contents() -> Result<(), Box<
 }
 
 #[test]
-fn storage_classes_enforce_synchronous_and_recovery_rules() -> Result<(), Box<dyn Error>> {
+fn storage_classes_enforce_rules() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     for (storage_class, expected_synchronous) in [(StorageClass::Persistent, 2_i64), (StorageClass::Journal, 1_i64)] {
         let valid_path = directory.path().join(format!("valid-{expected_synchronous}.sqlite"));
@@ -337,7 +337,7 @@ fn storage_classes_enforce_synchronous_and_recovery_rules() -> Result<(), Box<dy
 }
 
 #[test]
-fn failed_migration_rolls_back_schema_and_user_version() -> Result<(), Box<dyn Error>> {
+fn failed_migration_rolls_back() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let path = directory.path().join("rollback.sqlite");
     let (db, status) = SqliteDb::open(&path, StorageClass::Persistent, versioned_migration(1))?;
@@ -370,7 +370,7 @@ fn failed_migration_rolls_back_schema_and_user_version() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn stats_track_queue_rejections_failed_writes_and_recoveries() -> Result<(), Box<dyn Error>> {
+fn stats_track_write_outcomes() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let path = directory.path().join("stats.sqlite");
     fs::write(&path, b"corrupt database")?;

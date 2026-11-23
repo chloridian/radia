@@ -110,7 +110,7 @@ fn camera_recovery_progresses() {
 }
 
 #[test]
-fn mesh_info_resumes_within_byte_limit() {
+fn info_resumes_within_limit() {
     let (_scene, view, _) = fixtures::scene(255);
     let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
     let indices = mesh.mesh().indices().len();

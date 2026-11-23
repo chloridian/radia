@@ -431,7 +431,7 @@ mod scene_updates {
     }
 
     #[divan::bench]
-    fn updates_avatar_visual_params_10_avatars(bencher: divan::Bencher) {
+    fn updates_visual_params_10(bencher: divan::Bencher) {
         let mut scene = populated_scene_with_avatars(10_000, 11, false);
         let mut order = INITIAL_ORDER + PER_REGION as u64 + 1;
         let param = AvatarVisualParamIndex::new(0).unwrap();
@@ -559,7 +559,7 @@ mod scene_updates {
     }
 
     #[divan::bench]
-    fn updates_stale_with_content_10k(bencher: divan::Bencher) {
+    fn updates_stale_content_10k(bencher: divan::Bencher) {
         bencher.counter(ItemsCount::new(10_000_u64)).with_inputs(content_scene).bench_local_refs(|scene| {
             for row in &scene.rows {
                 let mut patch = ObjectPatch::new(source(row.region, row.order - 1), row.local_id);
@@ -572,7 +572,7 @@ mod scene_updates {
     }
 
     #[divan::bench]
-    fn updates_transform_with_content_10k(bencher: divan::Bencher) {
+    fn updates_transform_content_10k(bencher: divan::Bencher) {
         bencher
             .counter(ItemsCount::new(10_000_u64))
             .with_inputs(|| (content_scene(), INITIAL_ORDER + PER_REGION as u64 + 1, false))

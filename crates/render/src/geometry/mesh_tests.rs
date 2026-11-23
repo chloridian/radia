@@ -1700,7 +1700,7 @@ fn gpu_invisible_face_allows_mesh() {
 
 #[test]
 #[ignore = "requires a Vulkan adapter"]
-fn gpu_instance_buffer_grows_at_layout_commit() {
+fn instance_buffer_grows_on_commit() {
     let (device, queue) = vulkan_device();
     let camera = |draw_distance: f64, direction: Vec3| {
         Camera::new(DVec3::ZERO, direction, 1.0, [128, 128]).unwrap().with_quality(draw_distance, 1.0).unwrap()
@@ -2270,7 +2270,7 @@ fn draws_during_scene_churn(overflow: bool, membership: bool) {
 
 #[test]
 #[ignore = "requires a Vulkan adapter; run with cargo nextest run -p render --run-ignored only -E 'test(gpu_streaming_under_memory_pressure_does_not_flicker)'"]
-fn gpu_streaming_under_memory_pressure_does_not_flicker() {
+fn pressure_streaming_no_flicker() {
     let assets = [AssetId::new(Uuid::from_u128(9_951)), AssetId::new(Uuid::from_u128(9_952)), AssetId::new(Uuid::from_u128(9_953))];
     let bytes = mesh::asset_with_lod_geometry(&[(3, 8, 65_535, 196_605)]);
     let asset_bytes = HashMap::from([(assets[0], bytes.clone()), (assets[1], bytes.clone()), (assets[2], bytes)]);

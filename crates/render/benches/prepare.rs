@@ -328,7 +328,7 @@ mod benches {
     use super::*;
 
     #[divan::bench]
-    fn geometry_prepare_unchanged_static_camera(bencher: divan::Bencher) {
+    fn static_camera(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         let mut fixture = Fixture::settled(&device, &queue, 1, 50, 0, 50.0, 512.0);
         let camera = camera_at(50.0, 0.0, 512.0);
@@ -348,7 +348,7 @@ mod benches {
     }
 
     #[divan::bench]
-    fn geometry_prepare_camera_walk_025_multi_region(bencher: divan::Bencher) {
+    fn camera_walk_multi_region(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         let mut fixture = Fixture::settled(&device, &queue, 7, 50, 0, 896.0, 1024.0);
         let mut generation = 0usize;
@@ -370,7 +370,7 @@ mod benches {
     }
 
     #[divan::bench]
-    fn geometry_prepare_camera_culling_rotation_3000_stable(bencher: divan::Bencher) {
+    fn cull_rotation_3k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         let fixture = Fixture::settled_with_objects(&device, &queue, OBJECTS, 1, 50, 0, 128.0, 128.0);
         let cameras = [camera_yaw_at(128.0, -0.001, 128.0), camera_yaw_at(128.0, 0.001, 128.0)];
@@ -378,7 +378,7 @@ mod benches {
     }
 
     #[divan::bench]
-    fn geometry_prepare_camera_culling_rotation_10000_stable(bencher: divan::Bencher) {
+    fn cull_rotation_10k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         let fixture = Fixture::settled_with_objects(&device, &queue, 10_000, 1, 50, 0, 128.0, 128.0);
         let cameras = [camera_yaw_at(128.0, -0.001, 128.0), camera_yaw_at(128.0, 0.001, 128.0)];
@@ -386,7 +386,7 @@ mod benches {
     }
 
     #[divan::bench]
-    fn geometry_prepare_camera_culling_rotation_87k_faces_half_blended(bencher: divan::Bencher) {
+    fn cull_rotation_87k_blended(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         let (mut world, rows) = support::live_prepare_world_with_regions(OBJECTS_87K_FACES, 50, TEXTURES, 1);
         support::blend_alternate_objects(&mut world, &rows);
@@ -397,19 +397,19 @@ mod benches {
     }
 
     #[divan::bench]
-    fn geometry_prepare_camera_culling_edge_sweep_3000(bencher: divan::Bencher) {
+    fn cull_edge_sweep_3k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         camera_edge_sweep(bencher, &device, &queue, OBJECTS, "camera_culling_edge_sweep_3000");
     }
 
     #[divan::bench]
-    fn geometry_prepare_camera_culling_edge_sweep_10000(bencher: divan::Bencher) {
+    fn cull_edge_sweep_10k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         camera_edge_sweep(bencher, &device, &queue, 10_000, "camera_culling_edge_sweep_10000");
     }
 
     #[divan::bench]
-    fn geometry_prepare_one_pose_change(bencher: divan::Bencher) {
+    fn one_pose_change(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         let mut fixture = Fixture::settled(&device, &queue, 1, 50, 0, 50.0, 512.0);
         let camera = camera_at(50.0, 0.0, 512.0);
@@ -430,17 +430,17 @@ mod benches {
     }
 
     #[divan::bench]
-    fn geometry_prepare_stationary_one_reprepare_50_meshes(bencher: divan::Bencher) {
+    fn stationary_50_meshes(bencher: divan::Bencher) {
         run_reprepare(bencher, 50, "stationary_one_reprepare_50_meshes");
     }
 
     #[divan::bench]
-    fn geometry_prepare_one_reprepare_3000_unique_meshes(bencher: divan::Bencher) {
+    fn reprepare_3k_meshes(bencher: divan::Bencher) {
         run_reprepare(bencher, OBJECTS, "one_reprepare_3000_unique_meshes");
     }
 
     #[divan::bench]
-    fn geometry_prepare_camera_change_128_distinct_mesh_assets(bencher: divan::Bencher) {
+    fn camera_change_128_meshes(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         let (_reconciler, view, _world, _now) = support::ready_distinct_mesh_scene(128);
         let camera = Camera::new(DVec3::ZERO, Vec3::X, PI / 3.0, SIZE).expect("mesh preparation camera");
@@ -468,7 +468,7 @@ mod benches {
     }
 
     #[divan::bench]
-    fn geometry_prepare_animated_500_objects(bencher: divan::Bencher) {
+    fn animated_500(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         let mut fixture = Fixture::settled(&device, &queue, 1, 50, ANIMATED_OBJECTS, 50.0, 512.0);
         let camera = camera_at(50.0, 0.0, 512.0);
@@ -489,55 +489,55 @@ mod benches {
     }
 
     #[divan::bench]
-    fn geometry_prepare_live_walk_reprepare_pose4_texture_arrivals(bencher: divan::Bencher) {
+    fn live_walk_textures(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         run_live_mix(bencher, &device, &queue);
     }
 
     #[divan::bench]
-    fn geometry_prepare_history_loss_rebuild_1000(bencher: divan::Bencher) {
+    fn history_loss_1k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         history_loss(bencher, &device, &queue, 1_000, false);
     }
 
     #[divan::bench]
-    fn geometry_prepare_history_loss_rebuild_16000(bencher: divan::Bencher) {
+    fn history_loss_16k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         history_loss(bencher, &device, &queue, 16_000, false);
     }
 
     #[divan::bench]
-    fn geometry_prepare_history_loss_rebuild_65000(bencher: divan::Bencher) {
+    fn history_loss_65k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         history_loss(bencher, &device, &queue, 65_000, false);
     }
 
     #[divan::bench]
-    fn geometry_prepare_history_loss_layout_rebuild_1000(bencher: divan::Bencher) {
+    fn history_loss_layout_1k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         history_loss(bencher, &device, &queue, 1_000, true);
     }
 
     #[divan::bench]
-    fn geometry_prepare_history_loss_layout_rebuild_16000(bencher: divan::Bencher) {
+    fn history_loss_layout_16k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         history_loss(bencher, &device, &queue, 16_000, true);
     }
 
     #[divan::bench]
-    fn geometry_prepare_history_loss_layout_rebuild_65000(bencher: divan::Bencher) {
+    fn history_loss_layout_65k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         history_loss(bencher, &device, &queue, 65_000, true);
     }
 
     #[divan::bench]
-    fn geometry_prepare_region_load_progress_5000(bencher: divan::Bencher) {
+    fn region_load_5k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         region_load_progress(bencher, &device, &queue, 5_000);
     }
 
     #[divan::bench]
-    fn geometry_prepare_region_load_progress_65000(bencher: divan::Bencher) {
+    fn region_load_65k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         region_load_progress(bencher, &device, &queue, 65_000);
     }

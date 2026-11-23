@@ -319,7 +319,7 @@ fn overflow_omits_until_in_budget() {
 }
 
 #[test]
-fn moved_faces_cull_by_their_pose() {
+fn moved_faces_cull_by_pose() {
     let (_region_world, region) = registered_region();
     let (_scene, view, _) = fixtures::scene(255);
     let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();

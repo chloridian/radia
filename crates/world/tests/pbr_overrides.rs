@@ -314,7 +314,7 @@ fn crossing_consumes_retained_override() {
 }
 
 #[test]
-fn full_region_evicts_oldest_retained_override() {
+fn full_region_evicts_oldest() {
     let (mut world, region) = with_region();
     for local in 1..=1025 {
         early_override(&mut world, source(region, u64::from(local)), local, snapshot(1, 0.5));

@@ -141,7 +141,7 @@ fn relations_parent_resolution(bencher: divan::Bencher, size: SceneSize) {
 }
 
 #[divan::bench]
-fn relations_single_region_parent_65k(bencher: divan::Bencher) {
+fn relations_parent_65k(bencher: divan::Bencher) {
     const COUNT: usize = 65_536;
     let (mut verification, roots) = child_first_scene(COUNT, COUNT);
     let applied = verification.observe_object(root_observation(roots[0], COUNT as u64 + 1)).expect("root arrival");
@@ -160,7 +160,7 @@ fn relations_single_region_parent_65k(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn relations_single_region_resolution_batch_65k(bencher: divan::Bencher) {
+fn relations_resolve_batch_65k(bencher: divan::Bencher) {
     const COUNT: usize = 65_536;
     bencher
         .with_inputs(|| {
@@ -174,7 +174,7 @@ fn relations_single_region_resolution_batch_65k(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn relations_single_region_resolution_total_65k(bencher: divan::Bencher) {
+fn relations_resolve_total_65k(bencher: divan::Bencher) {
     const COUNT: usize = 65_536;
     bencher.with_inputs(|| child_first_scene(COUNT, COUNT)).bench_local_refs(|(world, roots)| {
         let _ = black_box(world.observe_object(root_observation(roots[0], COUNT as u64 + 1)).expect("root arrival"));
@@ -185,7 +185,7 @@ fn relations_single_region_resolution_total_65k(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn relations_deep_parent_fanout_65k(bencher: divan::Bencher) {
+fn relations_deep_fanout_65k(bencher: divan::Bencher) {
     const OBJECT_COUNT: usize = 65_536;
     const CHILD_COUNT: usize = 32_767;
     let (mut verification, region) = deep_parent_fanout_scene();

@@ -688,7 +688,7 @@ fn inventory_water_keeps_local_sky() {
 }
 
 #[test]
-fn split_sky_and_water_override_independently() {
+fn sky_and_water_override_independently() {
     let mut world = world();
     let region = region(&world, 0);
     add_region_environment(

@@ -416,7 +416,7 @@ mod tests {
     use super::{SaveWorker, SettingsError, SettingsStore};
 
     #[test]
-    fn load_preserves_comments_and_unknown_keys_across_saves() {
+    fn save_preserves_comments_and_unknowns() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("settings.toml");
         let original = "\
@@ -447,7 +447,7 @@ note = \"keep me\"
     }
 
     #[test]
-    fn invalid_known_value_rejects_candidate_atomically_and_leaves_file_untouched() {
+    fn invalid_value_leaves_file() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("settings.toml");
         let malformed_value = "\
@@ -467,7 +467,7 @@ lod_factor = 999.0
     }
 
     #[test]
-    fn reload_keeps_last_valid_config_on_malformed_file_or_unknown_preset() {
+    fn malformed_reload_keeps_valid() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("settings.toml");
         fs::write(&path, "[render]\ndraw_distance = 320.0\n").expect("write valid settings");
@@ -486,7 +486,7 @@ lod_factor = 999.0
     }
 
     #[test]
-    fn external_edit_conflict_aborts_save_without_clobbering() {
+    fn external_conflict_aborts_save() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("settings.toml");
         fs::write(&path, "[render]\ndraw_distance = 256.0\n").expect("write initial");
@@ -502,7 +502,7 @@ lod_factor = 999.0
     }
 
     #[test]
-    fn reset_removes_only_target_key_and_reports_masked_higher_layer() {
+    fn reset_reports_higher_mask() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("settings.toml");
         fs::write(&path, "[render]\ndraw_distance = 256.0\n[scene]\nlod_factor = 2.0\n").expect("write initial");
@@ -522,7 +522,7 @@ lod_factor = 999.0
     }
 
     #[test]
-    fn session_only_and_session_overrides_never_write_to_disk() {
+    fn session_overrides_skip_disk() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("settings.toml");
         let (store, result) = SettingsStore::load_or_default(path.clone(), None);
@@ -543,7 +543,7 @@ lod_factor = 999.0
     }
 
     #[test]
-    fn restart_required_tracks_pending_restart_after_startup_lock() {
+    fn restart_required_tracks_pending() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("settings.toml");
         let (store, result) = SettingsStore::load_or_default(path.clone(), None);
@@ -561,7 +561,7 @@ lod_factor = 999.0
     }
 
     #[test]
-    fn oversize_settings_file_is_rejected_without_modification() {
+    fn oversize_file_rejected() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("settings.toml");
         let oversized = vec![b'#'; super::document::MAX_SETTINGS_BYTES + 16];
@@ -574,7 +574,7 @@ lod_factor = 999.0
     }
 
     #[test]
-    fn caller_supplied_presets_layer_below_global_and_higher_layers() {
+    fn caller_presets_layer_below_global() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("settings.toml");
         fs::write(&path, "graphics_preset = \"medium\"\n[scene]\nlod_factor = 1.5\n").expect("write preset settings");
@@ -600,7 +600,7 @@ lod_factor = 999.0
     }
 
     #[test]
-    fn bundled_presets_track_custom_overrides_and_clear_cleanly() {
+    fn presets_track_custom_overrides() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("settings.toml");
         fs::write(&path, "graphics_preset = \"medium\"\n[render]\ndraw_distance = 384.0\n").expect("write preset and override");
@@ -638,7 +638,7 @@ lod_factor = 999.0
     }
 
     #[test]
-    fn burst_of_global_sets_runs_one_save_worker_and_persists_final_value() {
+    fn burst_sets_coalesce_save() {
         let runtime = Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("runtime");
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("settings.toml");
@@ -660,7 +660,7 @@ lod_factor = 999.0
     }
 
     #[test]
-    fn wait_for_pending_save_returns_when_idle() {
+    fn pending_save_wait_idle() {
         let runtime = Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("runtime");
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("settings.toml");

@@ -86,7 +86,7 @@ fn lludp_packets_decode(bencher: divan::Bencher, case: PacketCase) {
 }
 
 #[divan::bench]
-fn lludp_rejections_zerocode_over_limit(bencher: divan::Bencher) {
+fn lludp_reject_zerocode_limit(bencher: divan::Bencher) {
     let wire = wire(PacketCase { name: "oversized", data: PacketData::OversizedZeroCoded, objects: None });
     assert!(Packet::decode(&wire).is_err(), "invalid packet fixture must be rejected");
     bencher.counter(BytesCount::new(wire.len())).bench(|| black_box(Packet::decode(black_box(wire.as_slice()))));
