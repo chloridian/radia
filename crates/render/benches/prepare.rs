@@ -1,15 +1,19 @@
 use std::{
+    collections::HashMap,
     f64::consts::PI,
     hint::black_box,
     time::{Duration, Instant},
 };
 
+use assets::{Budget as AssetBudget, Content, Kind as AssetKind, LoadJob, Priority, Request, Resource, Status, Store, TextureHandle};
 use futures::executor::block_on;
 use math::{DVec3, Vec3};
 use render::{
-    GeometryPrepare,
+    CompressionQuality, GeometryPrepare,
     scene::{Camera, DrawnMeshKey, Reconciler, SceneView},
 };
+use test_support::texture::GRAY_4096_J2C;
+use utils::AssetId;
 use wgpu::{Device, DeviceDescriptor, PowerPreference, Queue, RequestAdapterOptions, TextureFormat};
 use world::World;
 
@@ -115,7 +119,7 @@ fn complete_texture_work(prepare: &mut GeometryPrepare, limit: usize) -> usize {
     let mut completed = 0;
     while completed < limit {
         let Some(job) = prepare.next_texture_job() else { break };
-        prepare.complete_texture(job.run(render::CompressionQuality::Fast));
+        prepare.complete_texture(job.run(CompressionQuality::Fast));
         completed += 1;
     }
     completed
@@ -495,6 +499,12 @@ mod benches {
     }
 
     #[divan::bench]
+    fn shared_texture_walk_stages(bencher: divan::Bencher) {
+        let (device, queue) = gpu();
+        run_shared_texture_walk_stages(bencher, &device, &queue);
+    }
+
+    #[divan::bench]
     fn history_loss_1k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         history_loss(bencher, &device, &queue, 1_000, false);
@@ -625,4 +635,123 @@ fn run_live_mix(bencher: divan::Bencher, device: &Device, queue: &Queue) {
     });
     assert!(faces_patched > 0);
     report("live_walk_reprepare_pose4_texture_arrivals", fixture.prepare.stats());
+}
+
+fn run_shared_texture_walk_stages(bencher: divan::Bencher, device: &Device, queue: &Queue) {
+    const WALK_OBJECTS: usize = 256;
+    const SHARED_TEXTURES: usize = 32;
+    let (world, _rows) = support::live_prepare_world_with_regions(WALK_OBJECTS, 1, SHARED_TEXTURES, 1);
+    let camera = camera_at(64.0, 0.0, 512.0);
+    let mut stage1_fetch = Duration::ZERO;
+    let mut stage2_decode = Duration::ZERO;
+    let mut stage3_convert = Duration::ZERO;
+    let mut stage4_upload = Duration::ZERO;
+    let mut total_frames = 0usize;
+    let mut total_jobs = 0usize;
+    let mut max_prepare_ms = 0.0f64;
+    let mut samples = 0usize;
+
+    bencher.bench_local(|| {
+        let mut store = Store::new(AssetBudget::default());
+        let route = store.register_route().expect("benchmark route");
+        let now = Instant::now();
+        let mut demands = Vec::with_capacity(SHARED_TEXTURES);
+        let mut textures = HashMap::<AssetId, TextureHandle>::with_capacity(SHARED_TEXTURES);
+
+        let mut fetch_time = Duration::ZERO;
+        let request_start = Instant::now();
+        for index in 0..SHARED_TEXTURES {
+            let id = support::texture_asset(index);
+            let demand = store
+                .request(route, Request::new(Resource { id, kind: AssetKind::Texture }), Priority::Visible, now)
+                .expect("benchmark texture request");
+            demands.push((id, demand));
+        }
+        fetch_time += request_start.elapsed();
+        let mut decode_time = Duration::ZERO;
+        let mut pending_decodes = Vec::new();
+        while demands.iter().any(|(_, demand)| !matches!(demand.status(), Status::Ready(_))) {
+            let fetch_start = Instant::now();
+            while let Some(job) = store.next_job(now) {
+                if let LoadJob::Fetch(fetch) = job {
+                    let input = fetch.complete(Ok(GRAY_4096_J2C.to_vec())).expect("fixture fetch fits");
+                    pending_decodes.push(input);
+                }
+            }
+            fetch_time += fetch_start.elapsed();
+
+            let decode_start = Instant::now();
+            let mut active = Vec::new();
+            let mut remaining = Vec::new();
+            for input in pending_decodes.drain(..) {
+                match store.start_decode(input) {
+                    Ok(job) => active.push(job),
+                    Err(input) => remaining.push(input),
+                }
+            }
+            pending_decodes = remaining;
+            for job in active {
+                store.complete(job.run(), now);
+            }
+            decode_time += decode_start.elapsed();
+        }
+        stage1_fetch += fetch_time;
+        stage2_decode += decode_time;
+
+        for (id, demand) in &demands {
+            let Status::Ready(Content::Texture(handle)) = demand.status() else { panic!("shared texture decoded") };
+            textures.insert(*id, handle);
+        }
+
+        let (_reconciler, view, _now) = support::settle_with_textures(&world, WALK_OBJECTS, camera, &textures);
+        let mut prepare = GeometryPrepare::new(device, queue, TextureFormat::Rgba8UnormSrgb);
+        let mut frames = 0usize;
+        let mut jobs_done = 0usize;
+        let mut convert_time = Duration::ZERO;
+        let mut upload_time = Duration::ZERO;
+        let mut step_index = 0usize;
+        loop {
+            let walk_camera = camera_at(64.0 + (step_index % 64) as f64 * 0.5, step_index as f64, 512.0);
+            step_index += 1;
+            let sample = prepare_sample(&mut prepare, device, queue, &view, walk_camera);
+            upload_time += sample.wall;
+            max_prepare_ms = max_prepare_ms.max(sample.wall.as_secs_f64() * 1_000.0);
+            frames += 1;
+
+            let convert_start = Instant::now();
+            let mut batch = Vec::new();
+            while let Some(job) = prepare.next_texture_job() {
+                batch.push(job);
+            }
+            for job in batch {
+                prepare.complete_texture(job.run(CompressionQuality::Fast));
+                jobs_done += 1;
+            }
+            convert_time += convert_start.elapsed();
+
+            if !sample.stats.rebuild_pending && sample.stats.pending_meshes == 0 && sample.stats.pending_textures == 0 {
+                break;
+            }
+            assert!(frames < 512, "shared texture walk converges within 512 frames");
+        }
+        stage3_convert += convert_time;
+        stage4_upload += upload_time;
+        total_frames += frames;
+        total_jobs += jobs_done;
+        samples += 1;
+        black_box((frames, jobs_done));
+    });
+
+    let denom = samples.max(1) as f64;
+    eprintln!(
+        "shared_texture_walk_stages (256 objs, 32 textures): fetch={:.2}ms decode={:.2}ms convert={:.2}ms upload={:.2}ms frames={:.1} jobs={:.1} mean_prepare={:.2}ms max_prepare={:.2}ms",
+        stage1_fetch.as_secs_f64() * 1_000.0 / denom,
+        stage2_decode.as_secs_f64() * 1_000.0 / denom,
+        stage3_convert.as_secs_f64() * 1_000.0 / denom,
+        stage4_upload.as_secs_f64() * 1_000.0 / denom,
+        total_frames as f64 / denom,
+        total_jobs as f64 / denom,
+        stage4_upload.as_secs_f64() * 1_000.0 / total_frames.max(1) as f64,
+        max_prepare_ms,
+    );
 }

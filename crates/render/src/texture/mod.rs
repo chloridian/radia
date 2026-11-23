@@ -10,6 +10,7 @@ use std::{
         Arc, OnceLock, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -33,7 +34,8 @@ pub use self::compression::CompressionQuality;
 const DEFAULT_SOFT_CAP: usize = 1024 * 1024 * 1024;
 const STAGING_BYTES: usize = 48 * 1024 * 1024;
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
-const MAX_JOBS: usize = 2;
+const MIN_JOBS: usize = 2;
+const MAX_JOBS_CAP: usize = 6;
 const FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const TERRAIN_ALPHA_RAMP_WIDTH: u32 = 256;
 pub(crate) const TERRAIN_ALPHA_RAMP: &[u8; 256] = include_bytes!("../terrain_alpha_ramp.r8");
@@ -62,6 +64,11 @@ fn raw_channel_view_formats(format: TextureFormat) -> &'static [TextureFormat] {
     }
 }
 
+fn max_jobs() -> usize {
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(|| thread::available_parallelism().map(usize::from).unwrap_or(4).clamp(MIN_JOBS, MAX_JOBS_CAP))
+}
+
 #[derive(Default)]
 struct Accounting {
     gpu: AtomicUsize,
@@ -79,7 +86,8 @@ impl Accounting {
     }
 
     fn work(self: &Arc<Self>) -> Option<Work> {
-        self.jobs.try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_JOBS).then_some(n + 1)).ok()?;
+        let limit = max_jobs();
+        self.jobs.try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < limit).then_some(n + 1)).ok()?;
         Some(Work(self.clone()))
     }
 }
@@ -145,18 +153,18 @@ pub struct TextureCompletion {
     life: Arc<()>,
     data: Conversion,
     revision: u64,
+    _work: Work,
 }
 
 enum Conversion {
     Ready(UploadPixels),
-    Failed { failure: Failure, _work: Work },
+    Failed(Failure),
 }
 
 struct UploadPixels {
     size: [u32; 2],
     data: UploadData,
     _staging: Lease,
-    _work: Work,
 }
 
 impl UploadPixels {
@@ -357,7 +365,8 @@ pub(crate) struct Textures {
     lifecycle: u64,
     completed: Vec<(WeakTexture, u64)>,
     retiring: Arc<AtomicUsize>,
-    jobs: VecDeque<TextureJob>,
+    visible_jobs: VecDeque<TextureJob>,
+    background_jobs: VecDeque<TextureJob>,
     retired: Vec<GpuTexture>,
     staged: Vec<Upload>,
     pixels: Vec<UploadPixels>,
@@ -603,7 +612,8 @@ impl Textures {
             lifecycle: 0,
             completed: Vec::new(),
             retiring: Arc::new(AtomicUsize::new(0)),
-            jobs: VecDeque::new(),
+            visible_jobs: VecDeque::new(),
+            background_jobs: VecDeque::new(),
             retired: Vec::new(),
             staged: Vec::new(),
             pixels: Vec::new(),
@@ -699,22 +709,17 @@ impl Textures {
         }
         entry.revision = info.revision;
         entry.evicted = false;
-        self.jobs.push_back(TextureJob {
-            id,
-            input,
-            texture: texture.downgrade(),
-            revision: info.revision,
-            cancelled,
-            life,
-            staging,
-            work,
-            compress,
-        });
+        let job = TextureJob { id, input, texture: texture.downgrade(), revision: info.revision, cancelled, life, staging, work, compress };
+        if priority == Priority::Visible {
+            self.visible_jobs.push_back(job);
+        } else {
+            self.background_jobs.push_back(job);
+        }
         self.changed(id);
     }
 
     pub(crate) fn next_conversion_job(&mut self) -> Option<TextureJob> {
-        self.jobs.pop_front()
+        self.visible_jobs.pop_front().or_else(|| self.background_jobs.pop_front())
     }
 
     pub(crate) fn complete(&mut self, completion: TextureCompletion) {
@@ -729,7 +734,7 @@ impl Textures {
         }
         match completion.data {
             Conversion::Ready(pixels) => entry.state = TextureUploadState::Prepared(pixels),
-            Conversion::Failed { failure, .. } => {
+            Conversion::Failed(failure) => {
                 entry.state = if failure == Failure::Cancelled { TextureUploadState::Dormant } else { TextureUploadState::Failed(failure) };
                 if failure != Failure::Cancelled
                     && let Some(due) = self.conversion_failures.record(Instant::now(), |failures| {
@@ -774,7 +779,8 @@ impl Textures {
             self.retire_entry(id, false);
             self.entries.remove(&id);
         }
-        self.jobs.retain(|job| job.texture.is_alive() && !job.cancelled.load(Ordering::Acquire));
+        self.visible_jobs.retain(|job| job.texture.is_alive() && !job.cancelled.load(Ordering::Acquire));
+        self.background_jobs.retain(|job| job.texture.is_alive() && !job.cancelled.load(Ordering::Acquire));
     }
 
     fn trim(&mut self, epoch: u64) {
@@ -1216,5 +1222,16 @@ mod tests {
         assert!(memory.reserve(usize::MAX).is_none());
         drop(held);
         assert!(memory.reserve(STAGING_BYTES).is_some());
+    }
+
+    #[test]
+    fn work_lease_bounded() {
+        let memory = Arc::new(Accounting::default());
+        let limit = max_jobs();
+        assert!((MIN_JOBS..=MAX_JOBS_CAP).contains(&limit));
+        let mut held: Vec<_> = (0..limit).map(|_| memory.work().expect("work slot within limit")).collect();
+        assert!(memory.work().is_none());
+        held.pop();
+        assert!(memory.work().is_some());
     }
 }

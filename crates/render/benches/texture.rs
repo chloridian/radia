@@ -1,6 +1,10 @@
-use std::hint::black_box;
+use std::{hint::black_box, time::Instant};
 
+use assets::{Budget, Content, Kind, LoadJob, Priority, Request, Resource, Status, Store};
 use divan::counter::ItemsCount;
+use test_support::texture::RGBA_J2C;
+use utils::AssetId;
+use uuid::Uuid;
 
 #[path = "../src/texture/compression.rs"]
 #[allow(unused_imports)]
@@ -59,4 +63,50 @@ fn texture_compression_bc7_opaque(bencher: divan::Bencher, edge: u32) {
 #[divan::bench(args = EDGES)]
 fn texture_compression_bc7_alpha(bencher: divan::Bencher, edge: u32) {
     bench_mipmaps(bencher, edge, true, CompressionQuality::High);
+}
+
+#[divan::bench]
+fn streaming_shared_pool(bencher: divan::Bencher) {
+    const POOL_SIZE: usize = 16;
+    bencher.counter(ItemsCount::new(POOL_SIZE as u64)).bench_local(|| {
+        let mut store = Store::new(Budget::default());
+        let route = store.register_route().expect("benchmark route");
+        let now = Instant::now();
+        let mut demands = Vec::with_capacity(POOL_SIZE);
+        for index in 0..POOL_SIZE {
+            let id = AssetId::new(Uuid::from_u128(200_000 + index as u128));
+            let demand = store
+                .request(route, Request::new(Resource { id, kind: Kind::Texture }), Priority::Visible, now)
+                .expect("benchmark texture request");
+            demands.push(demand);
+        }
+        let mut pending = Vec::new();
+        while demands.iter().any(|demand| !matches!(demand.status(), Status::Ready(_))) {
+            while let Some(job) = store.next_job(now) {
+                if let LoadJob::Fetch(fetch) = job {
+                    pending.push(fetch.complete(Ok(RGBA_J2C.to_vec())).expect("fixture fits"));
+                }
+            }
+            let mut active = Vec::new();
+            let mut remaining = Vec::new();
+            for input in pending.drain(..) {
+                match store.start_decode(input) {
+                    Ok(job) => active.push(job),
+                    Err(input) => remaining.push(input),
+                }
+            }
+            pending = remaining;
+            for job in active {
+                store.complete(job.run(), now);
+            }
+        }
+        let mut encoded_bytes = 0usize;
+        for demand in &demands {
+            let Status::Ready(Content::Texture(handle)) = demand.status() else { panic!("texture decoded") };
+            let image = handle.image().expect("decoded image");
+            let encoded = texture_compression::encode(image.pixels(), image.size(), CompressionQuality::Fast, || false).expect("encode");
+            encoded_bytes += encoded.levels[0].bytes.len();
+        }
+        black_box(encoded_bytes);
+    });
 }

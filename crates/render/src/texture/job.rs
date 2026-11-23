@@ -41,10 +41,10 @@ impl TextureJob {
             Ok((size, data))
         });
         let data = match result {
-            Ok((size, data)) => Conversion::Ready(UploadPixels { size, data, _staging: self.staging, _work: self.work }),
-            Err(failure) => Conversion::Failed { failure, _work: self.work },
+            Ok((size, data)) => Conversion::Ready(UploadPixels { size, data, _staging: self.staging }),
+            Err(failure) => Conversion::Failed(failure),
         };
-        TextureCompletion { id: self.id, revision: self.revision, cancelled: self.cancelled, life: self.life, data }
+        TextureCompletion { id: self.id, revision: self.revision, cancelled: self.cancelled, life: self.life, data, _work: self.work }
     }
 }
 
@@ -69,7 +69,7 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
 
     use super::*;
-    use crate::texture::{Accounting, STAGING_BYTES, fixtures::loaded};
+    use crate::texture::{Accounting, STAGING_BYTES, fixtures::loaded, max_jobs};
 
     #[test]
     fn completion_retains_only_work() {
@@ -89,7 +89,7 @@ mod tests {
                 work: memory.work().unwrap(),
                 compress: false,
             };
-            let other = memory.work().unwrap();
+            let others: Vec<_> = (1..max_jobs()).map(|_| memory.work().unwrap()).collect();
             assert!(memory.work().is_none());
             let completion = job.run(CompressionQuality::Fast);
             match &completion.data {
@@ -102,7 +102,7 @@ mod tests {
                     }
                     assert!(memory.reserve(STAGING_BYTES).is_none());
                 }
-                Conversion::Failed { failure, .. } => {
+                Conversion::Failed(failure) => {
                     assert!(cancelled);
                     assert_eq!(*failure, Failure::Cancelled);
                     assert!(memory.reserve(STAGING_BYTES).is_some());
@@ -110,7 +110,7 @@ mod tests {
             }
             assert!(memory.work().is_none(), "queued completions retain admission through delivery");
             drop(completion);
-            drop(other);
+            drop(others);
             assert!(memory.work().is_some());
             assert!(memory.reserve(STAGING_BYTES).is_some());
         }

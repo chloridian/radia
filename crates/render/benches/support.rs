@@ -744,7 +744,7 @@ fn prim_shape(index: usize) -> PrimShape {
     }
 }
 
-fn texture_asset(index: usize) -> AssetId {
+pub fn texture_asset(index: usize) -> AssetId {
     AssetId::new(Uuid::from_u128(DEFAULT_TEXTURE_ID + index as u128))
 }
 
