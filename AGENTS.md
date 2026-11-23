@@ -7,6 +7,7 @@ The legacy viewer is a reference for protocol behavior, content compatibility, a
 1. **Responsive**. Radia handles simulator traffic, streams assets, updates scenes, runs the gui, and renders without any workload starving the others. Budget latency, frame time, allocations, copies, and synchronization. Design for long sessions and large scenes.
 2. **Hostile input**. Simulator data, assets, and user-created content are untrusted. Malformed, unusual, and very complex content must not crash, stall, or exhaust the memory of the viewer. Valid but strange legacy content must still work.
 3. **Simple**. The smallest model that makes correct behavior unsurprising wins.
+4. **Permissions**. Enforce Second Life content permissions strictly. Verify effective permissions (creator, owner, base, group, and next-owner) before allowing any export, copy, modify, transfer, or raw asset access, including in UI actions, debug/inspector tools, and persistence paths. Treat missing, stale, or uncertain permissions as denied, and never allow exporting or exposing content without verified rights.
 
 ## Working style
 
@@ -82,7 +83,7 @@ Source has no comments or doc comments, and that includes safety comments on `un
 
 - Use [rust-testing](.agents/skills/rust-testing/SKILL.md) for all Rust test work.
 - Smallest proof first. Run tests and clippy for the crates you touched. Run the workspace-wide suite only when asked, because CI owns it.
-- Spend tests where running the viewer will not expose the bug: untrusted wire and asset input, concurrency, cancellation and ordering, `World` and cache invariants with their reverse transitions, recovery paths, and regressions likely to return. Visual output, gui layout, and straight-line plumbing are verified live; for them, adding no test is a complete answer.
+- Spend tests where running the viewer will not expose the bug: untrusted wire and asset input, permission enforcement, concurrency, cancellation and ordering, `World` and cache invariants with their reverse transitions, recovery paths, and regressions likely to return. Visual output, gui layout, and straight-line plumbing are verified live; for them, adding no test is a complete answer.
 - Test behavior through public APIs. Skip tests that assert callback wiring or mirror the implementation. Extend an existing test or harness before adding a new one.
 - Use property-based or stateful tests where operations interact (reordering, reparenting, stale updates, ID reuse). Generators must be domain-valid and failures reproducible.
 - Wait on completion signals, never on sleeps or polling. Use production timing constants; test-only timing values and short absence windows do not prove behavior. Test deadlines with a controlled clock or slow-runner-safe bounds, and use generous timeouts only as hang guards.
