@@ -89,7 +89,9 @@ impl Reconciler {
                     let bytes = size_of::<RegionSummary>() + summary.info.name.as_ref().map_or(0, String::capacity) + 32;
                     let old = self.state.mirror.regions.get(&region);
                     let old_exists = old.is_some();
-                    let origin_changed = old.is_some_and(|old| old.summary().info.resolved_origin() != summary.info.resolved_origin());
+                    let old_origin = old.and_then(|old| old.summary().info.resolved_origin());
+                    let new_origin = summary.info.resolved_origin();
+                    let origin_changed = old.is_some_and(|_| old_origin != new_origin);
                     let terrain_settings_changed = old.is_none_or(|old| old.summary().terrain_settings != summary.terrain_settings);
                     let old_textures = old.and_then(|old| old.summary().terrain_settings).map(|settings| *settings.detail_textures());
                     let old_handles = old.map(|old| old.terrain_textures().clone());
@@ -112,7 +114,7 @@ impl Reconciler {
                     self.state.mirror.regions.insert(region, data);
                     self.world.environments.insert(region);
                     if spatial_changed {
-                        self.preparation.surfaces.regions(&self.state.mirror);
+                        self.preparation.surfaces.region_changed(&self.state.mirror, region, old_origin, new_origin);
                     }
                     if terrain_settings_changed || origin_changed {
                         self.preparation.assets.invalidate_region(region);
@@ -362,6 +364,7 @@ impl Reconciler {
     }
 
     fn retire(&mut self, region: Region) {
+        let old_origin = self.state.mirror.regions.get(&region).and_then(|old| old.summary().info.resolved_origin());
         if let Some(old) = self.state.mirror.regions.remove(&region) {
             self.state.bytes -= region_bytes(&old);
         }
@@ -385,13 +388,13 @@ impl Reconciler {
         self.state.mirror.water.remove(&region);
         self.state.mirror.surfaces.retain(|(r, _), _| *r != region);
         self.preparation.surfaces.retire(region);
-        self.preparation.surfaces.regions(&self.state.mirror);
+        self.preparation.surfaces.region_changed(&self.state.mirror, region, old_origin, None);
         self.world.terrain.remove(&region);
         if self.world.terrain_page.is_some_and(|(active, _)| active == region) {
             self.world.terrain_page = None;
         }
         self.state.mirror.apply(Change::Retire(region));
-        self.preparation.meshes.invalidate();
+        self.preparation.meshes.retire(region, &self.state.mirror);
         self.preparation.assets.invalidate_all();
         self.publication.dirty.regions.remove(&region);
         self.publication.dirty.water.remove(&region);

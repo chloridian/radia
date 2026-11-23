@@ -5,7 +5,7 @@ use std::{
 };
 
 use uuid::Uuid;
-use world::Entity;
+use world::{Entity, Region};
 
 use crate::scene::{
     Budget, Camera, Detail, Geometry, MeshBuildError, MeshKey, Object, Placement, PreparedMesh,
@@ -111,6 +111,20 @@ impl MeshPlanner {
         if self.detach_target(entity).is_some() {
             self.invalidate_scan();
         }
+    }
+
+    pub(in crate::scene) fn retire(&mut self, region: Region, mirror: &Mirror) {
+        let retired = self
+            .targets
+            .keys()
+            .copied()
+            .filter(|entity| mirror.objects.get(entity).is_none_or(|object| object.detail().summary.address.region() == region))
+            .collect::<Vec<_>>();
+        for entity in retired {
+            self.detach_target(entity);
+        }
+        self.rejected.retain(|entity| mirror.objects.get(entity).is_some_and(|object| object.detail().summary.address.region() != region));
+        self.invalidate_scan();
     }
 
     pub(in crate::scene) fn reset(&mut self, budget: Budget) {

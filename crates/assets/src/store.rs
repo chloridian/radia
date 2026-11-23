@@ -597,6 +597,15 @@ impl AssetEntry {
             .max()
             .unwrap_or(Priority::Background)
     }
+    fn effective_importance(&self) -> u16 {
+        self.views
+            .values()
+            .flat_map(|view| &view.leases)
+            .filter_map(Weak::upgrade)
+            .map(|lease| lease.importance.load(Ordering::Acquire))
+            .max()
+            .unwrap_or(0)
+    }
     fn requested_size(&self) -> Option<TextureSize> {
         self.views.values().flat_map(|view| &view.leases).filter_map(Weak::upgrade).filter_map(|lease| lease.size()).max()
     }
@@ -1005,6 +1014,10 @@ impl Store {
 
     pub fn priority(&self, input: &DecodeInput) -> Priority {
         self.entries.get(&input.job.key).map_or(Priority::Background, AssetEntry::effective_priority)
+    }
+
+    pub fn importance(&self, input: &DecodeInput) -> u16 {
+        self.entries.get(&input.job.key).map_or(0, AssetEntry::effective_importance)
     }
 
     pub fn register_route(&mut self) -> Result<Route, AdmissionError> {

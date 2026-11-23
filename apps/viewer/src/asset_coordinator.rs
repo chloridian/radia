@@ -25,7 +25,7 @@ use network::{
 };
 use tokio::{
     runtime::Handle,
-    sync::{mpsc, mpsc::error::TrySendError, watch},
+    sync::{mpsc, watch},
     task::{AbortHandle, JoinError, JoinHandle},
     time,
 };
@@ -365,18 +365,23 @@ impl AssetHandle {
             return Err(RequestError::Closed);
         }
         let (reply, response) = oneshot::channel();
-        self.requests.try_send(DemandRequest { region, resource, priority, importance, reply }).map_err(|error| match error {
-            TrySendError::Closed(_) => RequestError::Closed,
-            TrySendError::Full(_) if self.active.load(Ordering::Acquire) => RequestError::Busy,
-            TrySendError::Full(_) => RequestError::Closed,
-        })?;
-        let response = response.fuse();
         let deadline = {
             let _entered = self.runtime.enter();
             time::sleep(Duration::from_secs(1))
         }
         .fuse();
-        pin_mut!(response, deadline);
+        pin_mut!(deadline);
+        let permit = {
+            let reserve = self.requests.reserve().fuse();
+            pin_mut!(reserve);
+            futures::select_biased! {
+                permit = reserve => permit.map_err(|_| RequestError::Closed)?,
+                _ = deadline => return Err(if self.active.load(Ordering::Acquire) { RequestError::Busy } else { RequestError::Closed }),
+            }
+        };
+        permit.send(DemandRequest { region, resource, priority, importance, reply });
+        let response = response.fuse();
+        pin_mut!(response);
         let result = futures::select_biased! {
             result = response => result.map_err(|_| RequestError::Closed)?,
             _ = deadline => return Err(if self.active.load(Ordering::Acquire) { RequestError::Busy } else { RequestError::Closed }),
@@ -631,7 +636,7 @@ async fn run(
         while let Some(job) = fetches.pop_front() {
             spawn_fetch(job, &transports, &runtime, &mut jobs);
         }
-        waiting.make_contiguous().sort_by_key(|input| Reverse(store.priority(input)));
+        waiting.make_contiguous().sort_by_key(|input| Reverse((store.priority(input), store.importance(input))));
         for _ in 0..waiting.len() {
             let input = waiting.pop_front().expect("queued decode input");
             if input.is_cancelled() {
@@ -2145,5 +2150,29 @@ mod tests {
         let reopened = AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap();
         assert_matches!(reopened.lookup(Request::new(resource(Kind::Texture))), AssetLookup::Hit(_));
         reopened.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn burst_requests_avoid_busy() {
+        let peer = LoopbackPeer::new(0, |_, _, _| (503, Vec::new()));
+        let service = AssetCoordinator::new(Handle::current(), pending(), None);
+        let (_region_world, region) = test_helpers::registered_region();
+        service.register(region, Client::new(peer.url().join("seed").unwrap()).unwrap());
+        let handle = service.handle();
+        let mut tasks = Vec::new();
+        for index in 0..(COMMANDS * 2) {
+            let handle = handle.clone();
+            let id = AssetId::new(Uuid::from_u128(10_000 + index as u128));
+            tasks.push(tokio::spawn(async move {
+                handle
+                    .request_with_importance(region, Request::new(Resource { kind: Kind::Texture, id }), Priority::Visible, index as u16)
+                    .await
+            }));
+        }
+        for task in tasks {
+            let result = task.await.unwrap();
+            assert!(result.is_ok(), "burst request should await channel capacity instead of failing with Busy: {:?}", result.err());
+        }
+        service.stop().await;
     }
 }

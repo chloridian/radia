@@ -133,13 +133,62 @@ impl SurfaceJobs {
         }
     }
 
-    pub(in crate::scene) fn regions(&mut self, mirror: &Mirror) {
-        for &(region, patch) in mirror.patches.keys() {
-            self.invalidate((SurfaceKind::Terrain(patch), region));
-        }
-        for (&region, height) in &mirror.water {
-            if height.is_some() {
+    pub(in crate::scene) fn region_changed(
+        &mut self,
+        mirror: &Mirror,
+        region: Region,
+        old_origin: Option<DVec3>,
+        new_origin: Option<DVec3>,
+    ) {
+        let moved = old_origin.is_some() && new_origin.is_some() && old_origin != new_origin;
+        if moved {
+            self.terrain_settings(mirror, region);
+            if mirror.water.get(&region).copied().flatten().is_some() {
                 self.region_water(region);
+            }
+        }
+        for origin in [old_origin, new_origin].into_iter().flatten() {
+            self.invalidate_adjacent_borders(mirror, region, origin);
+        }
+    }
+
+    fn invalidate_adjacent_borders(&mut self, mirror: &Mirror, changed_region: Region, changed_origin: DVec3) {
+        if !changed_origin.is_finite() {
+            return;
+        }
+        let region_size = world::TERRAIN_REGION_SIZE as f64;
+        for (&other_region, other_data) in &mirror.regions {
+            if other_region == changed_region {
+                continue;
+            }
+            let Some(other_origin) = other_data.summary().info.resolved_origin() else {
+                continue;
+            };
+            let dx = (changed_origin.x - other_origin.x) / region_size;
+            let dy = (changed_origin.y - other_origin.y) / region_size;
+            if (dx != -1.0 && dx != 0.0 && dx != 1.0) || (dy != -1.0 && dy != 0.0 && dy != 1.0) || (dx == 0.0 && dy == 0.0) {
+                continue;
+            }
+            let dx = dx as i32;
+            let dy = dy as i32;
+            let xs: &[u8] = match dx {
+                -1 => &[0],
+                1 => &[15],
+                _ => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            };
+            let ys: &[u8] = match dy {
+                -1 => &[0],
+                1 => &[15],
+                _ => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            };
+            for &x in xs {
+                for &y in ys {
+                    if let Some(patch) = TerrainPatchId::new(x, y)
+                        && mirror.patches.contains_key(&(other_region, patch))
+                    {
+                        self.invalidate((SurfaceKind::Terrain(patch), other_region));
+                    }
+                }
             }
         }
     }

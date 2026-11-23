@@ -673,3 +673,51 @@ fn abandoned_terrain_work_retries() {
     drop(view);
     assert_eq!(budget.charged_bytes(), 0);
 }
+
+#[test]
+fn retire_invalidates_only_border_patches() {
+    let mut world = world();
+    let east = world.register_region().unwrap();
+    let _ = world.patch_region(east, RegionInfo { origin: Some(DVec3::new(256.0, 0.0, 0.0)), ..RegionInfo::default() }).unwrap();
+    let _ = world.observe_terrain_patch(source(&world, 0, 1), TerrainPatch::new(5, 5, Box::new([2.0; 256])).unwrap()).unwrap();
+    let _ = world.observe_terrain_patch(source(&world, 0, 2), TerrainPatch::new(15, 5, Box::new([3.0; 256])).unwrap()).unwrap();
+    let _ = world
+        .observe_terrain_patch(
+            world::UpdateSource::new(east, 1, world::OrderEvidence::Ordered(1), 0),
+            TerrainPatch::new(0, 5, Box::new([4.0; 256])).unwrap(),
+        )
+        .unwrap();
+
+    let budget = Budget::default();
+    let (mut scene, mut view) = Reconciler::new(budget.clone());
+    let mut now = Instant::now();
+    settle(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(view.surfaces().count(), 3);
+
+    let _ = world.retire_region(east).unwrap();
+    scene.notify_world_change();
+    let mut builds = 0usize;
+    for _ in 0..10_000 {
+        match scene.poll(now) {
+            ReconcileStep::Read(job) => {
+                let result = reply(&world, &job);
+                scene.complete_read(job, result, now);
+            }
+            ReconcileStep::Build(job) => {
+                builds += 1;
+                scene.complete_mesh(job.run());
+            }
+            ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
+            ReconcileStep::Continue => {}
+            ReconcileStep::Wait(at) => now = at,
+            ReconcileStep::Idle => break,
+            ReconcileStep::Asset(_) | ReconcileStep::Closed => panic!("unexpected step"),
+        }
+    }
+    assert_eq!(builds, 1, "retiring an east neighbor should rebuild only the east border patch");
+    assert_eq!(view.surfaces().count(), 2);
+    scene.close();
+    drop(scene);
+    drop(view);
+    assert_eq!(budget.charged_bytes(), 0);
+}
