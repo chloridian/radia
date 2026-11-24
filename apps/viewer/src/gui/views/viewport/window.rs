@@ -605,6 +605,7 @@ impl SceneView {
             render_stats: renderer.stats(),
             gpu_timings: renderer.gpu_timings(),
             viewport_size: self.viewport_size,
+            frame_spikes: self.frame_times.spikes(),
         };
         self.render_stats.send_replace(snapshot);
     }
@@ -664,7 +665,7 @@ impl SceneView {
             ViewportQuery::CameraState { reply } => {
                 let mode = match self.camera_mode {
                     CameraMode::Follow => "follow",
-                    CameraMode::Orbit => "orbit",
+                    CameraMode::Free => "free",
                 };
                 let snapshot = match self.last_camera {
                     Some(camera) => {
@@ -915,7 +916,8 @@ impl SceneView {
                             && agent_pose.is_some_and(|agent_pose| self.follow_camera.moving(agent_pose, completed)))
                         || (self.camera_mode == CameraMode::Free && self.camera.as_ref().is_some_and(|camera| camera.moving(completed)));
                     if presented {
-                        self.frame_times.record(completed, game_work, render_work);
+                        let gpu_timings = self.renderer.as_ref().and_then(Renderer::gpu_timings);
+                        self.frame_times.record(completed, game_work, render_work, gpu_timings);
                         self.publish_render_stats();
                         self.last_camera = observation;
                         self.next_frame =

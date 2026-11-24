@@ -11,6 +11,45 @@ use crate::{
 };
 
 pub const VIEWPORT_QUERY_CAPACITY: usize = 8;
+pub const FRAME_SPIKE_CAPACITY: usize = 32;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrameSpike {
+    pub frame_ms: f64,
+    pub game_ms: f64,
+    pub render_ms: f64,
+    pub gpu_timings_ms: Option<(f64, f64)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrameSpikeRing {
+    entries: [Option<FrameSpike>; FRAME_SPIKE_CAPACITY],
+    head: usize,
+    len: usize,
+}
+
+impl FrameSpikeRing {
+    pub fn push(&mut self, spike: FrameSpike) {
+        self.entries[self.head] = Some(spike);
+        self.head = (self.head + 1) % FRAME_SPIKE_CAPACITY;
+        if self.len < FRAME_SPIKE_CAPACITY {
+            self.len += 1;
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = FrameSpike> + '_ {
+        let start = if self.len == FRAME_SPIKE_CAPACITY { self.head } else { 0 };
+        (0..self.len).filter_map(move |offset| self.entries[(start + offset) % FRAME_SPIKE_CAPACITY])
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 pub struct RenderStatsSnapshot {
@@ -21,6 +60,7 @@ pub struct RenderStatsSnapshot {
     pub render_stats: Stats,
     pub gpu_timings: Option<(f64, f64)>,
     pub viewport_size: [u32; 2],
+    pub frame_spikes: FrameSpikeRing,
 }
 
 #[derive(Clone, Debug, Default)]

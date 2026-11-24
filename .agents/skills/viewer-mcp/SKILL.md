@@ -21,7 +21,7 @@ Startup prints `MCP server listening on http://127.0.0.1:<port>`. The default en
 | Tool | Answers |
 |---|---|
 | `world` | Active regions, bounded object lists, or single object properties by UUID (`query`: `summary`, `regions`, `objects`, `object`). |
-| `stats` | Frame timing (`fps`, `frame_ms`, `game_ms`, `render_ms`, `gpu_timings_ms`), `render::Stats`, `AssetQueueStats`, and memory stats. |
+| `stats` | Frame timing (`fps`, `frame_ms`, `game_ms`, `render_ms`, `gpu_timings_ms`), last 32 frame spikes (>2x median), `render::Stats`, `AssetQueueStats`, and memory stats. |
 | `cache` | Object cache write-queue depth/capacity, busy/full drops, handshake state, and asset disk cache hit/miss/eviction counts. |
 | `inventory` | Inventory folder fetch counts (`pending`, `in_flight`, `done`, `failed`) and a bounded list of failed folders (UUIDs, retry state, typed error; no items or asset IDs). |
 | `network` | Per-region circuit packet counts/rates, unacked/resent counts, throttle settings, `EventQueueGet` state, and capability names + last status (no URLs or session IDs). |
@@ -41,7 +41,7 @@ Startup prints `MCP server listening on http://127.0.0.1:<port>`. The default en
 - Strictly bound to `127.0.0.1`.
 - Concurrency capped at 4 in-flight requests (`HTTP 429` when saturated).
 - Request body capped at 64 KiB (`HTTP 413`); JSON responses capped at 512 KiB; PNG responses capped at 8 MiB.
-- Never exposes texture/asset UUIDs, capability URLs, session tokens, or credentials.
+- Never exposes texture, material, or environment asset UUIDs, inventory item lists or names, capability or seed URLs, session IDs, tokens, passwords, or credentials.
 
 ## Adding a new tool
 

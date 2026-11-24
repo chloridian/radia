@@ -1,7 +1,11 @@
 use std::time::{Duration, Instant};
 
+use crate::inspection::{FrameSpike, FrameSpikeRing};
+
 const SMOOTHING_ALPHA: f64 = 0.15;
 const STALE_FRAME_GAP: Duration = Duration::from_secs(1);
+const MEDIAN_WINDOW: usize = 64;
+const MIN_MEDIAN_SAMPLES: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MetricStatus {
@@ -18,28 +22,66 @@ pub(super) struct FrameMetrics {
     pub(super) render_ms: f64,
 }
 
-#[derive(Default)]
 pub(super) struct FrameTimes {
     last_presented: Option<Instant>,
     frametime_ms: Option<f64>,
     game_ms: Option<f64>,
     render_ms: Option<f64>,
+    recent_ms: [f64; MEDIAN_WINDOW],
+    recent_head: usize,
+    recent_len: usize,
+    spikes: FrameSpikeRing,
+}
+
+impl Default for FrameTimes {
+    fn default() -> Self {
+        Self {
+            last_presented: None,
+            frametime_ms: None,
+            game_ms: None,
+            render_ms: None,
+            recent_ms: [0.0; MEDIAN_WINDOW],
+            recent_head: 0,
+            recent_len: 0,
+            spikes: FrameSpikeRing::default(),
+        }
+    }
 }
 
 impl FrameTimes {
-    pub(super) fn record(&mut self, presented: Instant, game_work: Duration, render_work: Duration) {
+    pub(super) fn record(&mut self, presented: Instant, game_work: Duration, render_work: Duration, gpu_timings_ms: Option<(f64, f64)>) {
         let game_ms = game_work.as_secs_f64() * 1000.0;
         let render_ms = render_work.as_secs_f64() * 1000.0;
-        if let Some(previous) = self.last_presented {
+        let sample_ms = if let Some(previous) = self.last_presented {
             let delta = presented.saturating_duration_since(previous);
             if delta > Duration::ZERO && delta <= STALE_FRAME_GAP {
-                let sample_ms = delta.as_secs_f64() * 1000.0;
-                self.frametime_ms = Some(smooth(self.frametime_ms, sample_ms));
+                let sample = delta.as_secs_f64() * 1000.0;
+                self.frametime_ms = Some(smooth(self.frametime_ms, sample));
+                Some(sample)
             } else if delta > STALE_FRAME_GAP {
-                self.frametime_ms = Some(game_ms + render_ms);
+                let sample = game_ms + render_ms;
+                self.frametime_ms = Some(sample);
+                Some(sample)
+            } else {
+                None
             }
         } else {
-            self.frametime_ms = Some(game_ms + render_ms);
+            let sample = game_ms + render_ms;
+            self.frametime_ms = Some(sample);
+            Some(sample)
+        };
+        if let Some(sample_ms) = sample_ms {
+            if let Some(median) = self.median_ms()
+                && median > 0.0
+                && sample_ms > 2.0 * median
+            {
+                self.spikes.push(FrameSpike { frame_ms: sample_ms, game_ms, render_ms, gpu_timings_ms });
+            }
+            self.recent_ms[self.recent_head] = sample_ms;
+            self.recent_head = (self.recent_head + 1) % MEDIAN_WINDOW;
+            if self.recent_len < MEDIAN_WINDOW {
+                self.recent_len += 1;
+            }
         }
         self.last_presented = Some(presented);
         self.game_ms = Some(smooth(self.game_ms, game_ms));
@@ -50,6 +92,20 @@ impl FrameTimes {
         let frametime_ms = self.frametime_ms?;
         let fps = if frametime_ms > 0.0 { 1000.0 / frametime_ms } else { 0.0 };
         Some(FrameMetrics { fps, frametime_ms, game_ms: self.game_ms?, render_ms: self.render_ms? })
+    }
+
+    pub(super) fn spikes(&self) -> FrameSpikeRing {
+        self.spikes
+    }
+
+    fn median_ms(&self) -> Option<f64> {
+        if self.recent_len < MIN_MEDIAN_SAMPLES {
+            return None;
+        }
+        let mut scratch = self.recent_ms;
+        let slice = &mut scratch[..self.recent_len];
+        let (_, median, _) = slice.select_nth_unstable_by(self.recent_len / 2, f64::total_cmp);
+        Some(*median)
     }
 }
 
@@ -144,6 +200,7 @@ pub(super) fn next_frame_deadline(deadline: Instant, completed: Instant, interva
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inspection::FRAME_SPIKE_CAPACITY;
 
     #[test]
     fn metric_thresholds_match_vw306_boundaries() {
@@ -179,12 +236,39 @@ mod tests {
         assert!(times.metrics().is_none());
 
         let start = Instant::now();
-        times.record(start, Duration::from_millis(2), Duration::from_millis(4));
-        times.record(start + Duration::from_millis(16), Duration::from_millis(2), Duration::from_millis(4));
+        times.record(start, Duration::from_millis(2), Duration::from_millis(4), None);
+        times.record(start + Duration::from_millis(16), Duration::from_millis(2), Duration::from_millis(4), None);
         let metrics = times.metrics().expect("metrics available after presenting");
         assert!(metrics.fps > 0.0);
         assert!((metrics.game_ms - 2.0).abs() < 0.01);
         assert!((metrics.render_ms - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn records_frame_spikes_in_bounded_ring() {
+        let mut times = FrameTimes::default();
+        let mut now = Instant::now();
+        for _ in 0..8 {
+            times.record(now, Duration::from_millis(2), Duration::from_millis(4), Some((1.0, 2.0)));
+            now += Duration::from_millis(10);
+        }
+        assert!(times.spikes().is_empty());
+
+        for spike_index in 0..40 {
+            let spike_ms = 25 + spike_index;
+            now += Duration::from_millis(spike_ms);
+            times.record(now, Duration::from_millis(5), Duration::from_millis(20), Some((3.0, 4.0)));
+            for _ in 0..3 {
+                now += Duration::from_millis(10);
+                times.record(now, Duration::from_millis(2), Duration::from_millis(4), Some((1.0, 2.0)));
+            }
+        }
+
+        let spikes = times.spikes().iter().collect::<Vec<_>>();
+        assert_eq!(spikes.len(), FRAME_SPIKE_CAPACITY);
+        assert!((spikes[0].frame_ms - 33.0).abs() < 0.1);
+        assert!((spikes[31].frame_ms - 64.0).abs() < 0.1);
+        assert_eq!(spikes[31].gpu_timings_ms, Some((3.0, 4.0)));
     }
 
     #[test]
