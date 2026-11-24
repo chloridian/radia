@@ -1,4 +1,8 @@
-use network::{CircuitMotionStatus, capabilities::CapabilityDiagnostics, default_throttle_rates};
+use network::{
+    CircuitMotionStatus,
+    capabilities::{CapabilityDiagnostics, CapabilityLastStatus},
+    default_throttle_rates,
+};
 use serde_json::{Value, json};
 use world::Region;
 
@@ -33,6 +37,16 @@ struct RegionNetworkSnapshot {
     capabilities: Option<CapabilityDiagnostics>,
 }
 
+fn format_capability_status(status: CapabilityLastStatus) -> Value {
+    match status {
+        CapabilityLastStatus::Http(code) => Value::from(code.to_string()),
+        CapabilityLastStatus::Cancelled => Value::from("cancelled"),
+        CapabilityLastStatus::SessionClosed => Value::from("session_closed"),
+        CapabilityLastStatus::Transport(kind) => Value::from(format!("{kind:?}")),
+        CapabilityLastStatus::Error => Value::from("error"),
+    }
+}
+
 fn format_network_snapshot(regions: &[RegionNetworkSnapshot], limit: usize) -> Value {
     let throttle = default_throttle_rates();
     let throttle_json = json!({
@@ -63,9 +77,9 @@ fn format_network_snapshot(regions: &[RegionNetworkSnapshot], limit: usize) -> V
                         .take(limit)
                         .map(|cap| {
                             json!({
-                                "name": cap.name,
+                                "name": cap.name.as_ref(),
                                 "granted": cap.granted,
-                                "last_status": cap.last_status,
+                                "last_status": cap.last_status.map(format_capability_status),
                             })
                         })
                         .collect::<Vec<_>>();
@@ -126,11 +140,14 @@ fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     use network::{
         CircuitMotionStatus, CircuitStats,
-        capabilities::{CapabilityDiagnostics, CapabilityRequestStatus, EventQueueState, EventQueueStatus},
+        capabilities::{CapabilityDiagnostics, CapabilityLastStatus, CapabilityRequestStatus, EventQueueState, EventQueueStatus},
     };
     use world::{World, WorldLimits};
 
@@ -173,8 +190,16 @@ mod tests {
             capabilities: Some(CapabilityDiagnostics {
                 event_queue: EventQueueStatus { state: EventQueueState::Connected, last_status: Some(200) },
                 capabilities: vec![
-                    CapabilityRequestStatus { name: "FetchInventory2".to_owned(), granted: true, last_status: Some("200".to_owned()) },
-                    CapabilityRequestStatus { name: "GetMesh2".to_owned(), granted: true, last_status: Some("503".to_owned()) },
+                    CapabilityRequestStatus {
+                        name: Arc::from("FetchInventory2"),
+                        granted: true,
+                        last_status: Some(CapabilityLastStatus::Http(200)),
+                    },
+                    CapabilityRequestStatus {
+                        name: Arc::from("GetMesh2"),
+                        granted: true,
+                        last_status: Some(CapabilityLastStatus::Http(503)),
+                    },
                 ],
             }),
         }];

@@ -10,7 +10,7 @@ pub(crate) use self::{
     event_queue::{EVENT_QUEUE_NAME, EventQueueExit, EventQueueRoleHandle, EventQueueTask},
 };
 pub use self::{
-    client::{CapabilityDiagnostics, CapabilityRequestStatus, CapabilityUrl, Client, ContentRange, RangeResponse},
+    client::{CapabilityDiagnostics, CapabilityLastStatus, CapabilityRequestStatus, CapabilityUrl, Client, ContentRange, RangeResponse},
     event_queue::{EventQueueState, EventQueueStatus},
 };
 pub use crate::http::{Error, ErrorKind, RedirectPolicy};

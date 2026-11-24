@@ -39,11 +39,20 @@ use crate::{
     http::{self, RedirectPolicy, validate_http_url},
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapabilityLastStatus {
+    Http(u16),
+    Cancelled,
+    SessionClosed,
+    Transport(http::ErrorKind),
+    Error,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityRequestStatus {
-    pub name: String,
+    pub name: Arc<str>,
     pub granted: bool,
-    pub last_status: Option<String>,
+    pub last_status: Option<CapabilityLastStatus>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -667,19 +676,16 @@ impl Client {
         Ok(EventQueueTask::new(task, completion, role))
     }
     fn record_response_status(&self, url: &CapabilityUrl, result: Result<reqwest::StatusCode, &Error>) {
-        let Some(name) = url.name.as_deref() else { return };
+        let Some(name) = url.name.as_ref() else { return };
         let status = match result {
-            Ok(code) => code.as_u16().to_string(),
-            Err(Error::CapabilityHttp(error)) => {
-                if let Some(code) = error.status {
-                    code.as_u16().to_string()
-                } else {
-                    format!("{:?}", error.kind)
-                }
-            }
-            Err(Error::CapabilityRequestCanceled) => "cancelled".to_owned(),
-            Err(Error::CapabilitySessionClosed) => "session_closed".to_owned(),
-            Err(_) => "error".to_owned(),
+            Ok(code) => CapabilityLastStatus::Http(code.as_u16()),
+            Err(Error::CapabilityHttp(error)) => match error.status {
+                Some(code) => CapabilityLastStatus::Http(code.as_u16()),
+                None => CapabilityLastStatus::Transport(error.kind),
+            },
+            Err(Error::CapabilityRequestCanceled) => CapabilityLastStatus::Cancelled,
+            Err(Error::CapabilitySessionClosed) => CapabilityLastStatus::SessionClosed,
+            Err(_) => CapabilityLastStatus::Error,
         };
         self.grants.record_status(name, status);
     }
@@ -688,7 +694,7 @@ impl Client {
 #[derive(Default)]
 struct GrantCache {
     grants: Mutex<HashMap<String, Option<CapabilityUrl>>>,
-    last_statuses: Mutex<HashMap<String, String>>,
+    last_statuses: Mutex<HashMap<Arc<str>, CapabilityLastStatus>>,
     discovery: sync::Mutex<()>,
 }
 
@@ -713,9 +719,13 @@ impl GrantCache {
         granted(&grants, names)
     }
 
-    fn record_status(&self, name: &str, status: String) {
+    fn record_status(&self, name: &Arc<str>, status: CapabilityLastStatus) {
         let mut statuses = self.last_statuses.lock().unwrap_or_else(PoisonError::into_inner);
-        statuses.insert(name.to_owned(), status);
+        if let Some(slot) = statuses.get_mut(name.as_ref()) {
+            *slot = status;
+        } else {
+            statuses.insert(Arc::clone(name), status);
+        }
     }
 
     fn snapshot(&self) -> Vec<CapabilityRequestStatus> {
@@ -724,9 +734,9 @@ impl GrantCache {
         let mut items = grants
             .iter()
             .map(|(name, url)| CapabilityRequestStatus {
-                name: name.clone(),
+                name: Arc::from(name.as_str()),
                 granted: url.is_some(),
-                last_status: statuses.get(name).cloned(),
+                last_status: statuses.get(name.as_str()).copied(),
             })
             .collect::<Vec<_>>();
         items.sort_unstable_by(|left, right| left.name.cmp(&right.name));
