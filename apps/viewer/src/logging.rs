@@ -152,7 +152,7 @@ impl LogControl {
         {
             return Err(LogFilterError(format!("invalid log target `{target_name}`")));
         }
-        let spec = {
+        let (spec, console_filter, file_filter) = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             let next_level = level.unwrap_or(state.level);
             let mut next_overrides = state.target_overrides.clone();
@@ -167,17 +167,14 @@ impl LogControl {
                 }
             }
             let spec = filter_spec(next_level, state.noisy_network, &next_overrides);
-            let _ = EnvFilter::try_new(&spec).map_err(|error| LogFilterError(format!("invalid log filter: {error}")))?;
+            let console_filter = try_build_filter(&spec)?;
+            let file_filter = self.reload_file.is_some().then(|| try_build_filter(&spec)).transpose()?;
             state.level = next_level;
             state.target_overrides = next_overrides;
-            spec
+            (spec, console_filter, file_filter)
         };
-        if let Ok(console_filter) = EnvFilter::try_new(&spec) {
-            (self.reload_console)(console_filter);
-        }
-        if let Some(reload_file) = &self.reload_file
-            && let Ok(file_filter) = EnvFilter::try_new(&spec)
-        {
+        (self.reload_console)(console_filter);
+        if let (Some(reload_file), Some(file_filter)) = (&self.reload_file, file_filter) {
             reload_file(file_filter);
         }
         Ok(spec)
@@ -481,6 +478,10 @@ fn filter_spec(level: LogLevel, noisy_network: bool, overrides: &BTreeMap<String
         spec.push_str(target_level.directive());
     }
     spec
+}
+
+fn try_build_filter(spec: &str) -> Result<EnvFilter, LogFilterError> {
+    EnvFilter::try_new(spec).map_err(|error| LogFilterError(format!("invalid log filter: {error}")))
 }
 
 fn build_filter(level: LogLevel, noisy_network: bool, overrides: &BTreeMap<String, LogLevel>) -> EnvFilter {
