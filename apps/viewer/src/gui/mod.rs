@@ -18,6 +18,7 @@ use tokio::{runtime::Handle, task::JoinHandle};
 
 use crate::{
     gui::{views::login::LoginScreen, window_geometry::restore_bounds},
+    inspection::ViewerInspectionPublisher,
     logging::LogControl,
     settings::SettingsStore,
 };
@@ -32,6 +33,7 @@ struct AppLifecycle {
     asset_cache: Option<Arc<AssetCache>>,
     log_control: LogControl,
     settings: Arc<SettingsStore>,
+    inspection: Option<ViewerInspectionPublisher>,
 }
 
 impl Global for AppLifecycle {}
@@ -99,7 +101,18 @@ pub(crate) fn settings(cx: &App) -> Arc<SettingsStore> {
     cx.try_global::<AppLifecycle>().map_or_else(|| Arc::new(SettingsStore::in_memory()), |lifecycle| Arc::clone(&lifecycle.settings))
 }
 
-pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>, log_control: LogControl, settings: Arc<SettingsStore>) {
+pub(crate) fn inspection(cx: &App) -> Option<ViewerInspectionPublisher> {
+    cx.try_global::<AppLifecycle>().and_then(|lifecycle| lifecycle.inspection.clone())
+}
+
+pub fn init(
+    cx: &mut App,
+    services: Handle,
+    asset_cache: Option<Arc<AssetCache>>,
+    log_control: LogControl,
+    settings: Arc<SettingsStore>,
+    inspection: Option<ViewerInspectionPublisher>,
+) {
     let session_lifecycle = Arc::new(SessionLifecycle::default());
     cx.set_app_identity("org.radia.viewer", "Radia");
     cx.set_keyring_label("Radia");
@@ -115,6 +128,7 @@ pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<AssetCache>>
         lifecycle.asset_cache = asset_cache;
         lifecycle.log_control = log_control;
         lifecycle.settings = settings;
+        lifecycle.inspection = inspection;
     }
 
     let (main_window, login) =
@@ -150,6 +164,7 @@ fn install_lifecycle(session_lifecycle: Arc<SessionLifecycle>, cx: &mut App) {
         asset_cache: None,
         log_control: LogControl::noop(),
         settings: Arc::new(SettingsStore::in_memory()),
+        inspection: None,
     });
 }
 

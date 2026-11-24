@@ -8,20 +8,21 @@ use prism::{
 };
 use prism_tokio::Tokio;
 use render::scene::Camera;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::AssetHandle,
     gui::{
-        AppLifecycle, log_control, login_options, settings,
+        AppLifecycle, inspection, log_control, login_options, settings,
         views::{
             chat::ChatScreen,
             viewport::{SceneView, SceneViewConfig, ViewportError},
         },
         window_geometry,
     },
+    inspection::{RenderStatsSnapshot, SessionInspection, VIEWPORT_QUERY_CAPACITY},
     scene_feed::SceneSources,
     session::{AgentMotionSample, EnvironmentInbox, SessionEnd},
     world_reader::WorldReader,
@@ -71,6 +72,9 @@ impl State {
 }
 
 pub(super) fn shutdown(cx: &mut App) {
+    if let Some(publisher) = inspection(cx) {
+        publisher.set_session(None);
+    }
     let view = cx.global_mut::<AppLifecycle>().scene.scene_view.take();
     if let Some(view) = view {
         view.update(cx, |scene, _| scene.retire());
@@ -106,7 +110,29 @@ pub(crate) fn start_session(
     let runtime = Tokio::handle(cx);
     let logs = log_control(cx);
     let settings = settings(cx);
-    let config = SceneViewConfig { generation, sources, agent_id, camera, movement, agent_motion, runtime, log_control: logs, settings };
+    let (render_stats_tx, render_stats_rx) = watch::channel(RenderStatsSnapshot::default());
+    let (viewport_queries_tx, viewport_queries_rx) = mpsc::channel(VIEWPORT_QUERY_CAPACITY);
+    if let Some(publisher) = inspection(cx) {
+        publisher.set_session(Some(SessionInspection {
+            world: reader.clone(),
+            assets: assets.clone(),
+            render_stats: render_stats_rx,
+            viewport_queries: viewport_queries_tx,
+        }));
+    }
+    let config = SceneViewConfig {
+        generation,
+        sources,
+        agent_id,
+        camera,
+        movement,
+        agent_motion,
+        runtime,
+        log_control: logs,
+        settings,
+        render_stats: render_stats_tx,
+        viewport_queries: viewport_queries_rx,
+    };
 
     let minimum = size(px(460.), px(300.));
     let options = WindowOptions {

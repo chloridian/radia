@@ -83,7 +83,7 @@ fn main() -> io::Result<()> {
             limits: Some(render::required_limits()),
             backends: None,
         }));
-        gui::init(cx, services, gui_cache, log_control, gui_settings);
+        gui::init(cx, services, gui_cache, log_control, gui_settings, None);
     });
     let cache_shutdown = if let Some(cache) = asset_cache {
         Arc::try_unwrap(cache)

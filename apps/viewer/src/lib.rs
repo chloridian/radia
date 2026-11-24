@@ -2,6 +2,7 @@ mod agent_movement;
 pub mod asset_coordinator;
 pub(crate) mod camera;
 pub mod gui;
+pub mod inspection;
 pub mod inventory;
 pub mod logging;
 mod remembered_login;

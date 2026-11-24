@@ -35,7 +35,10 @@ use prism::{
 };
 use prism_wgpu::WgpuContextHandle;
 use render::{CompressionQuality, FrameInput, Renderer, TextureCompletion, scene};
-use tokio::{runtime::Handle, sync::watch};
+use tokio::{
+    runtime::Handle,
+    sync::{mpsc as tokio_mpsc, watch},
+};
 use tracing::Instrument;
 use utils::Summary;
 use uuid::Uuid;
@@ -52,6 +55,7 @@ use crate::{
     agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
     camera::{CameraConfig, CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input},
     gui::{scene as gui_scene, window_geometry},
+    inspection::{RenderStatsSnapshot, SceneQuerySummary, ViewportQuery},
     inventory::environments::EnvironmentMenu,
     logging::{LogControl, LogLevel},
     scene_feed::{SceneFeed, SceneSources},
@@ -76,6 +80,8 @@ pub(crate) struct SceneViewConfig {
     pub(crate) runtime: Handle,
     pub(crate) log_control: LogControl,
     pub(crate) settings: Arc<SettingsStore>,
+    pub(crate) render_stats: watch::Sender<RenderStatsSnapshot>,
+    pub(crate) viewport_queries: tokio_mpsc::Receiver<ViewportQuery>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -111,6 +117,7 @@ pub(crate) struct SceneView {
     viewport_size: [u32; 2],
     scale_factor: f32,
     frame_times: FrameTimes,
+    render_stats: watch::Sender<RenderStatsSnapshot>,
     next_frame: Instant,
     next_environment: Option<Instant>,
     next_sky: Option<Instant>,
@@ -254,6 +261,19 @@ impl SceneView {
             }
         }));
 
+        let mut viewport_queries = config.viewport_queries;
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(query) = viewport_queries.recv().await {
+                if query.is_closed() {
+                    continue;
+                }
+                if this.update(cx, |view, _| view.handle_viewport_query(query)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         cx.spawn_in(window, async move |this, cx| {
             while wake_rx.next().await.is_some() {
                 if this
@@ -288,6 +308,7 @@ impl SceneView {
             viewport_size: initial_size,
             scale_factor,
             frame_times: FrameTimes::default(),
+            render_stats: config.render_stats,
             next_frame: Instant::now(),
             next_environment: None,
             next_sky: None,
@@ -573,6 +594,62 @@ impl SceneView {
         }
     }
 
+    fn publish_render_stats(&self) {
+        let Some(renderer) = &self.renderer else { return };
+        let metrics = self.frame_times.metrics();
+        let snapshot = RenderStatsSnapshot {
+            frame_ms: metrics.map_or(0.0, |m| m.frametime_ms),
+            game_ms: metrics.map_or(0.0, |m| m.game_ms),
+            render_ms: metrics.map_or(0.0, |m| m.render_ms),
+            fps: metrics.map_or(0.0, |m| m.fps),
+            render_stats: renderer.stats(),
+            gpu_timings: renderer.gpu_timings(),
+            viewport_size: self.viewport_size,
+        };
+        self.render_stats.send_replace(snapshot);
+    }
+
+    fn handle_viewport_query(&self, query: ViewportQuery) {
+        if query.is_closed() {
+            return;
+        }
+        match query {
+            ViewportQuery::SceneQuery { reply } => {
+                let summary = SceneQuerySummary {
+                    viewport_size: self.viewport_size,
+                    scene_sequence: self.feed.as_ref().map_or(0, |feed| feed.view.sequence()),
+                    ready: self.ready,
+                    has_camera: self.last_camera.is_some(),
+                };
+                drop(reply.send(summary));
+            }
+            ViewportQuery::ExplainObject { entity, reply } => {
+                let result =
+                    self.renderer.as_ref().zip(self.feed.as_ref()).map(|(renderer, feed)| renderer.explain_object(&feed.view, entity));
+                drop(reply.send(result));
+            }
+            ViewportQuery::PixelPick { x, y, reply } => {
+                let result = match (self.renderer.as_ref(), self.last_camera) {
+                    (Some(renderer), Some(camera)) => {
+                        let [width, height] = self.viewport_size;
+                        if width == 0 || height == 0 {
+                            Ok(None)
+                        } else {
+                            let ray = camera.ray([f64::from(x), f64::from(y)], self.viewport_size);
+                            renderer.pick_detailed(camera, ray)
+                        }
+                    }
+                    _ => Ok(None),
+                };
+                drop(reply.send(result));
+            }
+            ViewportQuery::BeginScreenshot { reply } => {
+                let readback = self.renderer.as_ref().and_then(Renderer::begin_capture_rgba);
+                drop(reply.send(readback));
+            }
+        }
+    }
+
     fn agent_pose(&mut self) -> Option<world::WorldPose> {
         self.feed.as_mut()?.camera_pose()
     }
@@ -803,6 +880,7 @@ impl SceneView {
                         || (self.camera_mode == CameraMode::Free && self.camera.as_ref().is_some_and(|camera| camera.moving(completed)));
                     if presented {
                         self.frame_times.record(completed, game_work, render_work);
+                        self.publish_render_stats();
                         self.last_camera = observation;
                         self.next_frame =
                             if self.dirty { next_frame_deadline(scheduled_deadline, completed, frame_interval) } else { completed };
