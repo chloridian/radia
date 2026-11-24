@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use world::{MAX_WORLD_CHANGE_PAGE_ITEMS, WorldChange, WorldChangeClasses, WorldChangeCursor, WorldChangeRecord, WorldEntityRemovalReason};
 
-use crate::mcp::server::RadiaServer;
+use crate::mcp::server::Handler;
 
 const DEFAULT_LIMIT: usize = 50;
 
@@ -36,7 +36,7 @@ pub struct ChangesOutput {
 }
 
 #[tool_router(router = changes_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "changes",
         title = "World Changes",

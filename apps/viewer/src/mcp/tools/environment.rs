@@ -8,7 +8,7 @@ use world::{EnvironmentAssignment, EnvironmentRead, EnvironmentSource};
 
 use crate::{
     inspection::{EnvironmentOverrideSummary, ViewportQuery},
-    mcp::server::RadiaServer,
+    mcp::server::Handler,
 };
 
 #[derive(Serialize, JsonSchema)]
@@ -52,7 +52,7 @@ pub struct EnvironmentOutput {
 }
 
 #[tool_router(router = environment_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "environment",
         title = "Region Environment",

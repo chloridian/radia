@@ -6,7 +6,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{inspection::ViewerInspectionHandle, logging::LogLevel, mcp::server::RadiaServer};
+use crate::{inspection::ViewerInspectionHandle, logging::LogLevel, mcp::server::Handler};
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 256;
@@ -40,7 +40,7 @@ pub struct LogsOutput {
 }
 
 #[tool_router(router = logs_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "logs",
         title = "Recent Logs",

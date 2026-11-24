@@ -48,7 +48,7 @@ use super::{
 use crate::inspection::ViewerInspectionHandle;
 
 #[derive(Clone, Copy, Debug)]
-pub struct McpServerConfig {
+pub struct Config {
     pub port: u16,
     pub max_concurrent_requests: usize,
     pub max_sessions: usize,
@@ -58,7 +58,7 @@ pub struct McpServerConfig {
     pub request_timeout: Duration,
 }
 
-impl Default for McpServerConfig {
+impl Default for Config {
     fn default() -> Self {
         Self {
             port: 0,
@@ -72,14 +72,14 @@ impl Default for McpServerConfig {
     }
 }
 
-pub struct McpServer {
+pub struct Server {
     addr: SocketAddr,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
 
-impl McpServer {
-    pub fn start(handle: ViewerInspectionHandle, config: McpServerConfig, runtime: &Handle) -> io::Result<Self> {
+impl Server {
+    pub fn start(handle: ViewerInspectionHandle, config: Config, runtime: &Handle) -> io::Result<Self> {
         let bind_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
         let std_listener = StdTcpListener::bind(bind_addr)?;
         std_listener.set_nonblocking(true)?;
@@ -89,7 +89,7 @@ impl McpServer {
         let (shutdown, mut shutdown_rx) = watch::channel(false);
 
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_requests.max(1)));
-        let server_handler = RadiaServer::new(handle, config, semaphore);
+        let server_handler = Handler::new(handle, config, semaphore);
         let mut http_config = StreamableHttpServerConfig::default();
         http_config.legacy_session_mode = true;
         http_config.json_response = false;
@@ -131,16 +131,16 @@ impl McpServer {
 }
 
 #[derive(Clone)]
-pub(super) struct RadiaServer {
+pub(super) struct Handler {
     pub(super) handle: ViewerInspectionHandle,
-    pub(super) config: McpServerConfig,
+    pub(super) config: Config,
     semaphore: Arc<Semaphore>,
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
 }
 
-impl RadiaServer {
-    fn new(handle: ViewerInspectionHandle, config: McpServerConfig, semaphore: Arc<Semaphore>) -> Self {
+impl Handler {
+    fn new(handle: ViewerInspectionHandle, config: Config, semaphore: Arc<Semaphore>) -> Self {
         Self { handle, config, semaphore, tool_router: tools::build_tool_router(), prompt_router: prompts::build_prompt_router() }
     }
 
@@ -157,7 +157,7 @@ pub(super) fn response_too_large_error() -> ErrorData {
 
 #[tool_handler(router = self.tool_router)]
 #[prompt_handler(router = self.prompt_router)]
-impl ServerHandler for RadiaServer {
+impl ServerHandler for Handler {
     fn get_info(&self) -> ServerConfig {
         let capabilities = ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().enable_completions().build();
         ServerConfig::new(capabilities)
@@ -356,7 +356,7 @@ mod tests {
     use uuid::Uuid;
     use world::{World, WorldLimits};
 
-    use super::{McpServer, McpServerConfig};
+    use super::{Config, Server};
     use crate::{
         asset_coordinator::AssetCoordinator,
         inspection::{
@@ -441,7 +441,7 @@ mod tests {
             message: "sample warning".to_owned(),
         });
         let (_pub, handle) = inspection_channel(logs);
-        let server = McpServer::start(handle, McpServerConfig::default(), &Handle::current()).expect("start server");
+        let server = Server::start(handle, Config::default(), &Handle::current()).expect("start server");
         let addr = server.addr();
         let client = Client::new();
 
@@ -502,7 +502,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_tool_returns_error() {
         let (_pub, handle) = inspection_channel(RecentLogs::default());
-        let server = McpServer::start(handle, McpServerConfig::default(), &Handle::current()).expect("start server");
+        let server = Server::start(handle, Config::default(), &Handle::current()).expect("start server");
         let addr = server.addr();
         let client = Client::new();
         let (session_id, _) = open_session(&client, addr).await;
@@ -524,7 +524,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_bad_host_and_origin() {
         let (_pub, handle) = inspection_channel(RecentLogs::default());
-        let server = McpServer::start(handle, McpServerConfig::default(), &Handle::current()).expect("start server");
+        let server = Server::start(handle, Config::default(), &Handle::current()).expect("start server");
         let addr = server.addr();
         let client = Client::new();
         let body = init_payload().to_string();
@@ -581,8 +581,8 @@ mod tests {
             message: "x".repeat(200),
         });
         let (_pub, handle) = inspection_channel(logs);
-        let config = McpServerConfig { max_request_bytes: 256, max_response_bytes: 128, ..McpServerConfig::default() };
-        let server = McpServer::start(handle, config, &Handle::current()).expect("start server");
+        let config = Config { max_request_bytes: 256, max_response_bytes: 128, ..Config::default() };
+        let server = Server::start(handle, config, &Handle::current()).expect("start server");
         let addr = server.addr();
         let client = Client::new();
         let (session_id, _) = open_session(&client, addr).await;
@@ -610,8 +610,8 @@ mod tests {
     #[tokio::test]
     async fn session_cap_rejects_excess_and_concurrent_sessions() {
         let (_pub, handle) = inspection_channel(RecentLogs::default());
-        let config = McpServerConfig { max_sessions: 2, ..McpServerConfig::default() };
-        let server = McpServer::start(handle, config, &Handle::current()).expect("start server");
+        let config = Config { max_sessions: 2, ..Config::default() };
+        let server = Server::start(handle, config, &Handle::current()).expect("start server");
         let addr = server.addr();
         let client = Client::new();
 
@@ -644,7 +644,7 @@ mod tests {
             message: "resource check".to_owned(),
         });
         let (_pub, handle) = inspection_channel(logs);
-        let server = McpServer::start(handle, McpServerConfig::default(), &Handle::current()).expect("start server");
+        let server = Server::start(handle, Config::default(), &Handle::current()).expect("start server");
         let addr = server.addr();
         let client = Client::new();
         let (session_id, _) = open_session(&client, addr).await;
@@ -690,7 +690,7 @@ mod tests {
     #[tokio::test]
     async fn prompts_list_get_and_missing_arg() {
         let (_pub, handle) = inspection_channel(RecentLogs::default());
-        let server = McpServer::start(handle, McpServerConfig::default(), &Handle::current()).expect("start server");
+        let server = Server::start(handle, Config::default(), &Handle::current()).expect("start server");
         let addr = server.addr();
         let client = Client::new();
         let (session_id, _) = open_session(&client, addr).await;
@@ -787,8 +787,8 @@ mod tests {
             },
         }));
 
-        let config = McpServerConfig { max_concurrent_requests: 1, ..McpServerConfig::default() };
-        let server = McpServer::start(handle, config, &runtime).expect("start server");
+        let config = Config { max_concurrent_requests: 1, ..Config::default() };
+        let server = Server::start(handle, config, &runtime).expect("start server");
         let addr = server.addr();
         let client = Client::new();
         let (session_id, _) = open_session(&client, addr).await;

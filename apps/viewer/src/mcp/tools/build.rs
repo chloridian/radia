@@ -4,7 +4,7 @@ use rmcp::{ErrorData, handler::server::wrapper::Json, tool, tool_router};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::mcp::server::RadiaServer;
+use crate::mcp::server::Handler;
 
 #[derive(Serialize, JsonSchema)]
 pub struct BuildTarget {
@@ -38,7 +38,7 @@ pub struct BuildOutput {
 }
 
 #[tool_router(router = build_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "build",
         title = "Viewer Build Info",

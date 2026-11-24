@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use world::{ObjectDetail, ObjectDetailResult, WorldRevision};
 
 use super::{ShapeOutput, format_shape, lookup_object_entity};
-use crate::{inspection::ViewerInspectionHandle, mcp::server::RadiaServer};
+use crate::{inspection::ViewerInspectionHandle, mcp::server::Handler};
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 100;
@@ -75,7 +75,7 @@ pub enum WorldOutput {
 }
 
 #[tool_router(router = world_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "world",
         title = "World Query",

@@ -26,31 +26,31 @@ use serde::Serialize;
 use uuid::Uuid;
 use world::{Entity, SculptType, Shape};
 
-use super::server::RadiaServer;
+use super::server::Handler;
 use crate::world_reader::WorldReader;
 
-pub(super) fn build_tool_router() -> ToolRouter<RadiaServer> {
-    RadiaServer::build_router()
-        + RadiaServer::cache_router()
-        + RadiaServer::camera_router()
-        + RadiaServer::changes_router()
-        + RadiaServer::environment_router()
-        + RadiaServer::explain_object_router()
-        + RadiaServer::inventory_router()
-        + RadiaServer::logs_router()
-        + RadiaServer::network_router()
-        + RadiaServer::pick_router()
-        + RadiaServer::queues_router()
-        + RadiaServer::region_router()
-        + RadiaServer::screenshot_router()
-        + RadiaServer::set_camera_router()
-        + RadiaServer::set_log_level_router()
-        + RadiaServer::set_setting_router()
-        + RadiaServer::settings_router()
-        + RadiaServer::stats_router()
-        + RadiaServer::textures_router()
-        + RadiaServer::wait_for_router()
-        + RadiaServer::world_router()
+pub(super) fn build_tool_router() -> ToolRouter<Handler> {
+    Handler::build_router()
+        + Handler::cache_router()
+        + Handler::camera_router()
+        + Handler::changes_router()
+        + Handler::environment_router()
+        + Handler::explain_object_router()
+        + Handler::inventory_router()
+        + Handler::logs_router()
+        + Handler::network_router()
+        + Handler::pick_router()
+        + Handler::queues_router()
+        + Handler::region_router()
+        + Handler::screenshot_router()
+        + Handler::set_camera_router()
+        + Handler::set_log_level_router()
+        + Handler::set_setting_router()
+        + Handler::settings_router()
+        + Handler::stats_router()
+        + Handler::textures_router()
+        + Handler::wait_for_router()
+        + Handler::world_router()
 }
 
 pub(super) async fn lookup_object_entity(world: &WorldReader, id_str: &str) -> Result<Option<Entity>, String> {

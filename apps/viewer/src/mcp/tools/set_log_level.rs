@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     logging::{LogControl, LogLevel},
-    mcp::server::RadiaServer,
+    mcp::server::Handler,
 };
 
 #[derive(Clone, Copy, Deserialize, JsonSchema)]
@@ -72,7 +72,7 @@ fn apply_log_level(control: &LogControl, args: &SetLogLevelArgs) -> Result<SetLo
 }
 
 #[tool_router(router = set_log_level_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "set_log_level",
         title = "Set Log Level",

@@ -2,7 +2,7 @@ use rmcp::{ErrorData, handler::server::wrapper::Json, tool, tool_router};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::mcp::server::RadiaServer;
+use crate::mcp::server::Handler;
 
 #[derive(Serialize, JsonSchema)]
 pub struct ObjectCacheHandshakeOutput {
@@ -85,7 +85,7 @@ pub struct CacheOutput {
 }
 
 #[tool_router(router = cache_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "cache",
         title = "Cache Statistics",

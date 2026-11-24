@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use crate::{inspection::ViewportQuery, mcp::server::RadiaServer};
+use crate::{inspection::ViewportQuery, mcp::server::Handler};
 
 #[derive(Deserialize, JsonSchema)]
 pub struct PickArgs {
@@ -46,7 +46,7 @@ pub struct PickOutput {
 }
 
 #[tool_router(router = pick_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "pick",
         title = "Viewport Pick",

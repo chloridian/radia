@@ -2,7 +2,7 @@ use rmcp::{ErrorData, handler::server::wrapper::Json, tool, tool_router};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::{inspection::BoundedQueueStats, mcp::server::RadiaServer};
+use crate::{inspection::BoundedQueueStats, mcp::server::Handler};
 
 #[derive(Serialize, JsonSchema)]
 pub struct QueueStatsOutput {
@@ -99,7 +99,7 @@ fn queue_output(stats: BoundedQueueStats) -> QueueStatsOutput {
 }
 
 #[tool_router(router = queues_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "queues",
         title = "Subsystem Queues",

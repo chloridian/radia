@@ -11,7 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::time::{self, MissedTickBehavior};
 
-use crate::mcp::server::RadiaServer;
+use crate::mcp::server::Handler;
 
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 const MAX_TIMEOUT_MS: u64 = 30_000;
@@ -104,7 +104,7 @@ where
 }
 
 #[tool_router(router = wait_for_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "wait_for",
         title = "Wait For Event",

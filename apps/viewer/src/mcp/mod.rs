@@ -6,7 +6,7 @@ mod tools;
 
 use std::time::Duration;
 
-pub use self::server::{McpServer, McpServerConfig};
+pub use self::server::{Config, Server};
 
 pub const DEFAULT_PORT: u16 = 47100;
 pub const MAX_CONCURRENT_REQUESTS: usize = 4;

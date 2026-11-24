@@ -6,7 +6,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{inspection::InventoryFetchStats, mcp::server::RadiaServer};
+use crate::{inspection::InventoryFetchStats, mcp::server::Handler};
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
@@ -48,7 +48,7 @@ pub struct InventoryOutput {
 }
 
 #[tool_router(router = inventory_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "inventory",
         title = "Inventory Fetch Status",

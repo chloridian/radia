@@ -6,7 +6,7 @@ use world::{ParcelFlags, ParcelRead};
 
 use crate::{
     inspection::{RegionSimStats, ViewerInspectionHandle},
-    mcp::server::RadiaServer,
+    mcp::server::Handler,
 };
 
 #[derive(Serialize, JsonSchema)]
@@ -30,7 +30,7 @@ pub struct RegionOutput {
 }
 
 #[tool_router(router = region_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "region",
         title = "Region & Parcel Stats",

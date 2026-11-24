@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use tokio::sync::oneshot;
 
-use crate::{inspection::ViewportQuery, mcp::server::RadiaServer};
+use crate::{inspection::ViewportQuery, mcp::server::Handler};
 
 #[derive(Serialize, JsonSchema)]
 pub struct CameraStateOutput {
@@ -34,7 +34,7 @@ pub struct CameraOutput {
 }
 
 #[tool_router(router = camera_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "camera",
         title = "Camera State",

@@ -13,11 +13,11 @@ use wgpu::{MapMode, PollType};
 
 use crate::{
     inspection::{ViewerInspectionHandle, ViewportQuery},
-    mcp::{png::encode_rgba_png, server::RadiaServer},
+    mcp::{png::encode_rgba_png, server::Handler},
 };
 
 #[tool_router(router = screenshot_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "screenshot",
         title = "Viewport Screenshot",

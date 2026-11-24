@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     inspection::{CameraModeRequest, SetCameraRequest, ViewportQuery},
-    mcp::server::RadiaServer,
+    mcp::server::Handler,
 };
 
 #[derive(Deserialize, JsonSchema)]
@@ -62,7 +62,7 @@ fn parse_request(args: SetCameraArgs) -> Result<SetCameraRequest, String> {
 }
 
 #[tool_router(router = set_camera_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "set_camera",
         title = "Set Camera",

@@ -11,7 +11,7 @@ use world::{ObjectDetail, ObjectDetailResult};
 use super::{ShapeOutput, format_shape, lookup_object_entity};
 use crate::{
     inspection::{ViewerInspectionHandle, ViewportQuery},
-    mcp::server::RadiaServer,
+    mcp::server::Handler,
 };
 
 #[derive(Deserialize, JsonSchema)]
@@ -77,7 +77,7 @@ pub struct ExplainObjectOutput {
 }
 
 #[tool_router(router = explain_object_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "explain_object",
         title = "Explain Object",

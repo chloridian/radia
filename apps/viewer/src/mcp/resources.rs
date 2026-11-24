@@ -6,7 +6,7 @@ use rmcp::{
 
 use super::{
     MAX_PNG_RESPONSE_BYTES,
-    server::{RadiaServer, response_too_large_error},
+    server::{Handler, response_too_large_error},
     tools::{
         explain_object::explain_object_data, logs::logs_data, region::region_data, screenshot::capture_screenshot_base64,
         settings::settings_data, stats::stats_data, world_query::world_summary_data,
@@ -69,7 +69,7 @@ pub fn resource_for_tool(tool_name: &str) -> Option<Resource> {
     static_resources().into_iter().find(|resource| resource.name == tool_name)
 }
 
-pub async fn read_resource(server: &RadiaServer, uri: &str, context: RequestContext<RoleServer>) -> Result<ReadResourceResult, ErrorData> {
+pub async fn read_resource(server: &Handler, uri: &str, context: RequestContext<RoleServer>) -> Result<ReadResourceResult, ErrorData> {
     let max_json = server.config.max_response_bytes;
     match uri {
         "viewer://world" => {

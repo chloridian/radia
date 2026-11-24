@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{inspection::ViewerInspectionHandle, mcp::server::RadiaServer};
+use crate::{inspection::ViewerInspectionHandle, mcp::server::Handler};
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 500;
@@ -45,7 +45,7 @@ pub struct SettingsOutput {
 }
 
 #[tool_router(router = settings_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "settings",
         title = "Viewer Settings",

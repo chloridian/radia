@@ -12,7 +12,7 @@ use viewer::{
     gui,
     inspection::inspection_channel,
     logging::{self, LogLevel},
-    mcp::{DEFAULT_PORT, McpServer, McpServerConfig},
+    mcp,
     settings::{SettingsStore, default_settings_path},
 };
 
@@ -43,7 +43,7 @@ struct CliOptions {
 
 impl Default for CliOptions {
     fn default() -> Self {
-        Self { mcp: false, mcp_port: DEFAULT_PORT }
+        Self { mcp: false, mcp_port: mcp::DEFAULT_PORT }
     }
 }
 
@@ -72,7 +72,7 @@ fn main() -> io::Result<()> {
     let services = runtime.handle().clone();
     let (inspection_publisher, mcp_server) = if cli.mcp {
         let (publisher, handle) = inspection_channel(recent_logs);
-        let server = McpServer::start(handle, McpServerConfig { port: cli.mcp_port, ..McpServerConfig::default() }, &services)?;
+        let server = mcp::Server::start(handle, mcp::Config { port: cli.mcp_port, ..mcp::Config::default() }, &services)?;
         println!("MCP server listening on http://{}", server.addr());
         (Some(publisher), Some(server))
     } else {

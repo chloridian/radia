@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use world::Region;
 
-use crate::mcp::server::RadiaServer;
+use crate::mcp::server::Handler;
 
 const DEFAULT_LIMIT: usize = 32;
 const MAX_LIMIT: usize = 100;
@@ -91,7 +91,7 @@ struct RegionNetworkSnapshot {
 }
 
 #[tool_router(router = network_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "network",
         title = "Network Diagnostics",

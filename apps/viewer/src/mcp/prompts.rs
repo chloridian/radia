@@ -7,7 +7,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{resources::OBJECT_URI_TEMPLATE, server::RadiaServer};
+use super::{resources::OBJECT_URI_TEMPLATE, server::Handler};
 use crate::inspection::ViewerInspectionHandle;
 
 pub const MAX_COMPLETION_VALUES: usize = 50;
@@ -19,7 +19,7 @@ pub struct DiagnoseObjectArgs {
 }
 
 #[prompt_router]
-impl RadiaServer {
+impl Handler {
     #[prompt(name = "diagnose_scene", description = "Diagnose objects present in World but missing from the renderer, or an empty scene.")]
     async fn diagnose_scene(&self) -> Result<GetPromptResult, ErrorData> {
         Ok(GetPromptResult::new(vec![PromptMessage::new_text(
@@ -75,8 +75,8 @@ impl RadiaServer {
     }
 }
 
-pub fn build_prompt_router() -> PromptRouter<RadiaServer> {
-    RadiaServer::prompt_router()
+pub fn build_prompt_router() -> PromptRouter<Handler> {
+    Handler::prompt_router()
 }
 
 pub async fn complete(request: &CompleteRequestParams, handle: &ViewerInspectionHandle) -> CompleteResult {

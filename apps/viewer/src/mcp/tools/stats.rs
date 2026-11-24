@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     inspection::{FRAME_SPIKE_CAPACITY, ViewerInspectionHandle},
-    mcp::server::RadiaServer,
+    mcp::server::Handler,
 };
 
 #[derive(Deserialize, JsonSchema)]
@@ -88,7 +88,7 @@ pub struct StatsOutput {
 }
 
 #[tool_router(router = stats_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "stats",
         title = "Viewer Stats",

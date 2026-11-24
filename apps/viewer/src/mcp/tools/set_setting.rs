@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::settings::cvar_value_to_json;
-use crate::{mcp::server::RadiaServer, settings::SettingsStore};
+use crate::{mcp::server::Handler, settings::SettingsStore};
 
 #[derive(Deserialize, JsonSchema)]
 pub struct SetSettingArgs {
@@ -69,7 +69,7 @@ fn apply_setting(settings: &Arc<SettingsStore>, name: &str, raw_value: &Value) -
 }
 
 #[tool_router(router = set_setting_router, vis = "pub(super)")]
-impl RadiaServer {
+impl Handler {
     #[tool(
         name = "set_setting",
         title = "Set Setting",
