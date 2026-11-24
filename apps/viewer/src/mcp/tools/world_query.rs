@@ -37,6 +37,7 @@ pub struct WorldArgs {
 pub struct WorldRegionSummaryOutput {
     pub region: u64,
     pub name: Option<String>,
+    pub water_height: Option<f32>,
     pub object_count: usize,
 }
 
@@ -45,6 +46,7 @@ pub struct WorldRegionItemOutput {
     pub region: u64,
     pub name: Option<String>,
     pub handle: Option<u64>,
+    pub water_height: Option<f32>,
     pub object_count: usize,
 }
 
@@ -129,6 +131,7 @@ impl Handler {
                         region: region.region.get(),
                         name: region.info.name,
                         handle: region.info.handle.map(RegionHandle::get),
+                        water_height: region.water_height,
                         object_count: region.object_count,
                     })
                     .collect();
@@ -203,7 +206,12 @@ fn format_world_summary(revision: WorldRevision, page: RegionPage) -> WorldOutpu
     let regions = page
         .regions
         .into_iter()
-        .map(|region| WorldRegionSummaryOutput { region: region.region.get(), name: region.info.name, object_count: region.object_count })
+        .map(|region| WorldRegionSummaryOutput {
+            region: region.region.get(),
+            name: region.info.name,
+            water_height: region.water_height,
+            object_count: region.object_count,
+        })
         .collect::<Vec<_>>();
     WorldOutput::Summary { active_session: true, revision: revision.get(), region_count: regions.len(), object_count, regions }
 }
@@ -266,6 +274,7 @@ mod tests {
             ParentUpdate::Root,
         );
         drop(world.observe_object(obs_b).expect("observe region b object"));
+        drop(world.observe_water_height(source_a, 20.0).expect("observe water height"));
 
         let page = world.region_page(None, 32).expect("region page");
         let output = serde_json::to_value(format_world_summary(world.revision(), page)).expect("serialize summary");
@@ -274,8 +283,10 @@ mod tests {
         let regions = output["regions"].as_array().expect("regions array");
         assert_eq!(regions.len(), 2);
         assert_eq!(regions[0]["region"], region_a.get());
+        assert_eq!(regions[0]["water_height"], 20.0);
         assert_eq!(regions[0]["object_count"], 2);
         assert_eq!(regions[1]["region"], region_b.get());
+        assert!(regions[1]["water_height"].is_null());
         assert_eq!(regions[1]["object_count"], 1);
     }
 

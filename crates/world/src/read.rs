@@ -100,6 +100,7 @@ pub struct RegionSummary {
     pub region: Region,
     pub info: RegionInfo,
     pub terrain_settings: Option<TerrainSettings>,
+    pub water_height: Option<f32>,
     pub object_count: usize,
 }
 
@@ -484,6 +485,7 @@ impl World {
                 region: *region,
                 info: info.clone(),
                 terrain_settings: state.terrain.settings(),
+                water_height: state.terrain.water_height(),
                 object_count: self.region_object_count_upper_bound(*region),
             });
         }
