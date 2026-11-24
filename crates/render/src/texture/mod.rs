@@ -64,7 +64,7 @@ fn raw_channel_view_formats(format: TextureFormat) -> &'static [TextureFormat] {
     }
 }
 
-fn max_jobs() -> usize {
+pub(crate) fn max_jobs() -> usize {
     static MAX: OnceLock<usize> = OnceLock::new();
     *MAX.get_or_init(|| thread::available_parallelism().map(usize::from).unwrap_or(4).clamp(MIN_JOBS, MAX_JOBS_CAP))
 }

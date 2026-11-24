@@ -163,7 +163,7 @@ impl SceneView {
             },
         );
 
-        let (texture_sender, texture_receiver) = mpsc::sync_channel(2);
+        let (texture_sender, texture_receiver) = mpsc::sync_channel(render::max_texture_jobs());
         let settings = config.settings;
         let snapshot = settings.snapshot();
         let lod_factor = snapshot.get(SCENE_LOD_FACTOR);
