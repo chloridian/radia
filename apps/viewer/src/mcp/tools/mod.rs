@@ -8,6 +8,7 @@ mod logs;
 mod network_stats;
 mod pick;
 mod screenshot;
+mod settings;
 mod stats;
 mod textures;
 mod wait_for;
@@ -49,6 +50,7 @@ pub const TOOLS: &[ToolSpec] = &[
     textures::SPEC,
     environment::SPEC,
     camera::SPEC,
+    settings::SPEC,
     logs::SPEC,
     screenshot::SPEC,
     explain_object::SPEC,

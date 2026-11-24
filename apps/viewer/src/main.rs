@@ -102,6 +102,9 @@ fn main() -> io::Result<()> {
         log_control.apply_startup_settings(level, settings.get(LOG_NOISY_NETWORK));
     }
     settings.lock_startup_values();
+    if let Some(publisher) = &inspection_publisher {
+        publisher.set_settings(Arc::clone(&settings));
+    }
 
     let cache_limit_bytes = u64::try_from(settings.get(ASSET_DISK_CACHE_CAPACITY_MIB)).unwrap_or(1024).saturating_mul(1024 * 1024);
     let asset_cache = match AssetCache::open_default_with_limit(cache_limit_bytes) {
