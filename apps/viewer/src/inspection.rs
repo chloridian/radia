@@ -1,5 +1,6 @@
 use render::{CaptureReadback, ObjectExplanation, PickDetail, PickError, Stats};
 use tokio::sync::{mpsc, oneshot, watch};
+use uuid::Uuid;
 use world::Entity;
 
 use crate::{asset_coordinator::AssetHandle, logging::RecentLogs, world_reader::WorldReader};
@@ -67,9 +68,30 @@ pub struct ObjectCacheStats {
     pub loaded_bytes: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FailedInventoryFolder {
+    pub folder_id: Uuid,
+    pub owner_id: Uuid,
+    pub retry_state: &'static str,
+    pub error_kind: &'static str,
+    pub error: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InventoryFetchStats {
+    pub folders_known: usize,
+    pub folders_pending: usize,
+    pub folders_in_flight: usize,
+    pub folders_done: usize,
+    pub folders_failed: usize,
+    pub background_done: bool,
+    pub failed_folders: Vec<FailedInventoryFolder>,
+}
+
 #[derive(Clone)]
 pub struct SessionDiagnostics {
     pub object_cache: watch::Receiver<ObjectCacheStats>,
+    pub inventory: watch::Receiver<InventoryFetchStats>,
 }
 
 #[derive(Clone)]

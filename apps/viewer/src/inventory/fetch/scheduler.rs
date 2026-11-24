@@ -2,6 +2,10 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
     fmt, iter,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -134,6 +138,7 @@ pub(crate) struct InventoryFetchController {
     events_tx: mpsc::Sender<InventoryFetchEvent>,
     events_rx: mpsc::Receiver<InventoryFetchEvent>,
     status_tx: watch::Sender<InventoryLoadingStatus>,
+    in_flight_count: Arc<AtomicUsize>,
     refresh_receiver: Option<watch::Receiver<u64>>,
     stop_tx: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
@@ -152,6 +157,7 @@ impl InventoryFetchController {
             events_tx,
             events_rx,
             status_tx,
+            in_flight_count: Arc::new(AtomicUsize::new(0)),
             refresh_receiver: Some(refresh_receiver),
             stop_tx: None,
             task: None,
@@ -160,6 +166,10 @@ impl InventoryFetchController {
 
     pub(crate) fn handle(&self) -> InventoryFetchHandle {
         self.handle.clone()
+    }
+
+    pub(crate) fn in_flight_count(&self) -> usize {
+        self.in_flight_count.load(Ordering::Relaxed)
     }
 
     pub(crate) fn publish(&self, status: InventoryLoadingStatus) {
@@ -187,6 +197,7 @@ impl InventoryFetchController {
             model,
             requests,
             self.events_tx.clone(),
+            Arc::clone(&self.in_flight_count),
             refresh_receiver,
             cancellation,
             stop_rx,
@@ -245,16 +256,32 @@ struct JobCompletion {
     result: Result<Vec<FolderFetch>, InventoryFetchError>,
 }
 
+struct InFlightGauge(Arc<AtomicUsize>);
+
+impl InFlightGauge {
+    fn set(&self, count: usize) {
+        self.0.store(count, Ordering::Relaxed);
+    }
+}
+
+impl Drop for InFlightGauge {
+    fn drop(&mut self) {
+        self.0.store(0, Ordering::Relaxed);
+    }
+}
+
 async fn run_scheduler(
     client: Client,
     snapshot: InventorySnapshot,
     model: watch::Receiver<Option<InventorySnapshot>>,
     mut requests: mpsc::Receiver<ForegroundRequest>,
     events: mpsc::Sender<InventoryFetchEvent>,
+    in_flight_count: Arc<AtomicUsize>,
     mut refresh_incomplete: watch::Receiver<u64>,
     cancellation: Cancellation,
     mut stop: oneshot::Receiver<()>,
 ) {
+    let in_flight_gauge = InFlightGauge(in_flight_count);
     let discovered = match discover(&client, cancellation.clone(), &mut stop).await {
         Ok(discovered) => discovered,
         Err(InventoryFetchError::Cancelled) => return,
@@ -296,6 +323,7 @@ async fn run_scheduler(
     let mut background_done = false;
 
     loop {
+        in_flight_gauge.set(in_flight.len());
         while let Ok(request) = requests.try_recv() {
             queue_foreground_request(request, &mut foreground, &mut foreground_queued, &mut foreground_completions);
         }

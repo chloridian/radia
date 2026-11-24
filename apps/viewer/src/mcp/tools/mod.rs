@@ -1,5 +1,6 @@
 mod cache;
 mod explain_object;
+mod inventory_fetch;
 mod logs;
 mod pick;
 mod screenshot;
@@ -33,8 +34,17 @@ pub struct ToolSpec {
     pub max_response_bytes: usize,
 }
 
-pub const TOOLS: &[ToolSpec] =
-    &[world_query::SPEC, stats::SPEC, cache::SPEC, logs::SPEC, screenshot::SPEC, explain_object::SPEC, pick::SPEC, wait_for::SPEC];
+pub const TOOLS: &[ToolSpec] = &[
+    world_query::SPEC,
+    stats::SPEC,
+    cache::SPEC,
+    inventory_fetch::SPEC,
+    logs::SPEC,
+    screenshot::SPEC,
+    explain_object::SPEC,
+    pick::SPEC,
+    wait_for::SPEC,
+];
 
 pub fn find_tool(name: &str) -> Option<&'static ToolSpec> {
     TOOLS.iter().find(|tool| tool.name == name)

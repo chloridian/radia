@@ -51,7 +51,7 @@ use super::{
 };
 use crate::{
     asset_coordinator::AssetCoordinator,
-    inspection::{ObjectCacheStats, SessionDiagnostics},
+    inspection::{InventoryFetchStats, ObjectCacheStats, SessionDiagnostics},
     inventory::{
         FolderApplyOutcome, FolderFetch, InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError,
         InventoryFetchEvent, MoveExpectation,
@@ -443,9 +443,10 @@ struct SessionDriver {
     rejected_inventory_blocks: Summary<inventory_sync::InventoryRejections>,
     inventory_fetch_failures: Summary<inventory_sync::InventoryFetchFailures>,
     inventory_fetch: InventoryFetchController,
+    inventory_fetch_stats: watch::Sender<InventoryFetchStats>,
     inventory_edits: InventoryEditController,
     inventory_pending_moves: HashMap<InventoryNodeKey, (MoveExpectation, tokio_oneshot::Sender<()>)>,
-    inventory_failed: HashSet<CategoryKey>,
+    inventory_failed: HashMap<CategoryKey, InventoryFetchError>,
     pending_folder_preparation: Option<PendingFolderPreparation>,
     pending_owner_refresh: Option<PendingOwnerRefresh>,
     deferred_inventory: VecDeque<(DeferredInventoryEvent, usize)>,
@@ -629,6 +630,7 @@ impl SessionDriver {
         let (inventory_changes, _) = watch::channel(None);
         let inventory_edits = InventoryEditController::new();
         let inventory_fetch = InventoryFetchController::new(inventory_edits.handle());
+        let (inventory_fetch_stats, _) = watch::channel(InventoryFetchStats::default());
         let inventory_cache = InventoryCacheSession::new(&runtime);
         let mut object_cache = ObjectCacheSession::new(credentials.grid);
         object_cache.start(&runtime);
@@ -674,9 +676,10 @@ impl SessionDriver {
             rejected_inventory_blocks: Summary::new(inventory_sync::INVENTORY_FAILURE_REPORT_INTERVAL),
             inventory_fetch_failures: Summary::new(inventory_sync::INVENTORY_FAILURE_REPORT_INTERVAL),
             inventory_fetch,
+            inventory_fetch_stats,
             inventory_edits,
             inventory_pending_moves: HashMap::new(),
-            inventory_failed: HashSet::new(),
+            inventory_failed: HashMap::new(),
             pending_folder_preparation: None,
             pending_owner_refresh: None,
             deferred_inventory: VecDeque::new(),
@@ -718,6 +721,20 @@ impl SessionDriver {
                     false
                 } else {
                     *current = cache_stats;
+                    true
+                }
+            });
+            let in_flight = self.inventory_fetch.in_flight_count();
+            self.inventory_fetch_stats.send_if_modified(|current| {
+                if current.folders_in_flight == in_flight {
+                    false
+                } else {
+                    current.folders_in_flight = in_flight;
+                    current.folders_pending = current
+                        .folders_known
+                        .saturating_sub(current.folders_done)
+                        .saturating_sub(in_flight)
+                        .saturating_sub(current.folders_failed);
                     true
                 }
             });
@@ -1888,7 +1905,10 @@ impl SessionDriver {
             inventory_updates: self.inventory_changes.subscribe(),
             inventory_fetch: self.inventory.as_ref().map(|_| self.inventory_fetch.handle()),
             world_reader: self.reads.reader(),
-            diagnostics: SessionDiagnostics { object_cache: self.object_cache_stats.subscribe() },
+            diagnostics: SessionDiagnostics {
+                object_cache: self.object_cache_stats.subscribe(),
+                inventory: self.inventory_fetch_stats.subscribe(),
+            },
         }));
     }
 
