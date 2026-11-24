@@ -89,7 +89,7 @@ pub async fn read_resource(server: &RadiaServer, uri: &str, context: RequestCont
             encode_json_resource(uri, &data, max_json)
         }
         "viewer://logs" => {
-            let data = logs_data(&server.handle, None, None).map_err(|msg| ErrorData::internal_error(msg, None))?;
+            let data = logs_data(&server.handle, None, None);
             encode_json_resource(uri, &data, max_json)
         }
         "viewer://screenshot" => {

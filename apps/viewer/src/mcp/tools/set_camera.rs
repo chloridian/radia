@@ -14,8 +14,8 @@ use crate::{
 
 #[derive(Deserialize, JsonSchema)]
 pub struct SetCameraArgs {
-    #[schemars(description = "Target local camera mode: 'follow' or 'free'.")]
-    pub mode: Option<String>,
+    #[schemars(description = "Target local camera mode.")]
+    pub mode: Option<CameraModeRequest>,
     #[schemars(description = "Free camera world position [x, y, z].")]
     pub position: Option<[f64; 3]>,
     #[schemars(description = "Free camera world focus point [x, y, z].")]
@@ -40,12 +40,7 @@ fn validate_vec3(values: [f64; 3], field: &str) -> Result<[f64; 3], String> {
 }
 
 fn parse_request(args: SetCameraArgs) -> Result<SetCameraRequest, String> {
-    let mode = match args.mode.as_deref() {
-        None => None,
-        Some("follow") => Some(CameraModeRequest::Follow),
-        Some("free") => Some(CameraModeRequest::Free),
-        Some(other) => return Err(format!("invalid camera mode: {other}")),
-    };
+    let mode = args.mode;
     let position = args.position.map(|v| validate_vec3(v, "position")).transpose()?;
     let look_at = args.look_at.map(|v| validate_vec3(v, "look_at")).transpose()?;
 
@@ -106,12 +101,13 @@ mod tests {
     #[test]
     fn set_camera_validates_inputs() {
         assert!(parse_request(SetCameraArgs { mode: None, position: None, look_at: None }).is_err());
-        assert!(parse_request(SetCameraArgs { mode: Some("orbit".to_owned()), position: None, look_at: None }).is_err());
-        assert!(parse_request(SetCameraArgs { mode: Some("follow".to_owned()), position: Some([1.0, 2.0, 3.0]), look_at: None }).is_err());
+        assert!(
+            parse_request(SetCameraArgs { mode: Some(CameraModeRequest::Follow), position: Some([1.0, 2.0, 3.0]), look_at: None }).is_err()
+        );
         assert!(parse_request(SetCameraArgs { mode: None, position: Some([1.0, 2.0, 3.0]), look_at: Some([1.0, 2.0, 3.0]) }).is_err());
 
         let valid = parse_request(SetCameraArgs {
-            mode: Some("free".to_owned()),
+            mode: Some(CameraModeRequest::Free),
             position: Some([128.0, 128.0, 30.0]),
             look_at: Some([128.0, 138.0, 25.0]),
         })

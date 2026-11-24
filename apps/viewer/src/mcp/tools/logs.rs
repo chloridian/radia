@@ -11,12 +11,19 @@ use crate::{inspection::ViewerInspectionHandle, logging::LogLevel, mcp::server::
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 256;
 
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LogsLevelFilter {
+    Warn,
+    Error,
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct LogsArgs {
     #[schemars(description = "Maximum number of log entries to return (1..=256).")]
     pub limit: Option<usize>,
-    #[schemars(description = "Minimum log level filter: 'warn' or 'error'.")]
-    pub level: Option<String>,
+    #[schemars(description = "Minimum log level filter.")]
+    pub level: Option<LogsLevelFilter>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -41,17 +48,15 @@ impl RadiaServer {
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     pub(crate) async fn logs(&self, Parameters(args): Parameters<LogsArgs>) -> Result<Json<LogsOutput>, ErrorData> {
-        let output = logs_data(&self.handle, args.limit, args.level.as_deref()).map_err(|msg| ErrorData::invalid_params(msg, None))?;
-        Ok(Json(output))
+        Ok(Json(logs_data(&self.handle, args.limit, args.level)))
     }
 }
 
-pub(in crate::mcp) fn logs_data(handle: &ViewerInspectionHandle, limit: Option<usize>, level: Option<&str>) -> Result<LogsOutput, String> {
+pub(in crate::mcp) fn logs_data(handle: &ViewerInspectionHandle, limit: Option<usize>, level: Option<LogsLevelFilter>) -> LogsOutput {
     let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let min_level = match level {
-        Some("error") => Some(LogLevel::Error),
-        Some("warn") | None => Some(LogLevel::Warn),
-        Some(other) => return Err(format!("unsupported level filter: {other}")),
+        Some(LogsLevelFilter::Error) => Some(LogLevel::Error),
+        Some(LogsLevelFilter::Warn) | None => Some(LogLevel::Warn),
     };
     let entries = handle
         .recent_logs()
@@ -64,5 +69,5 @@ pub(in crate::mcp) fn logs_data(handle: &ViewerInspectionHandle, limit: Option<u
             message: entry.message,
         })
         .collect();
-    Ok(LogsOutput { entries })
+    LogsOutput { entries }
 }

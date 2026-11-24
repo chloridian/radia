@@ -11,14 +11,38 @@ use crate::{
     mcp::server::RadiaServer,
 };
 
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetLogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+    Clear,
+}
+
+impl TargetLogLevel {
+    fn into_option(self) -> Option<LogLevel> {
+        match self {
+            Self::Error => Some(LogLevel::Error),
+            Self::Warn => Some(LogLevel::Warn),
+            Self::Info => Some(LogLevel::Info),
+            Self::Debug => Some(LogLevel::Debug),
+            Self::Trace => Some(LogLevel::Trace),
+            Self::Clear => None,
+        }
+    }
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct SetLogLevelArgs {
-    #[schemars(description = "Global log level: error, warn, info, debug, or trace.")]
-    pub level: Option<String>,
+    #[schemars(description = "Global log level.")]
+    pub level: Option<LogLevel>,
     #[schemars(description = "Rust tracing target name for a per-target override.")]
     pub target: Option<String>,
-    #[schemars(description = "Per-target log level: error, warn, info, debug, trace, or clear.")]
-    pub target_level: Option<String>,
+    #[schemars(description = "Per-target log level, or 'clear' to remove the override.")]
+    pub target_level: Option<TargetLogLevel>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -28,19 +52,10 @@ pub struct SetLogLevelOutput {
 }
 
 fn apply_log_level(control: &LogControl, args: &SetLogLevelArgs) -> Result<SetLogLevelOutput, String> {
-    let level = match args.level.as_deref() {
-        Some(text) => Some(LogLevel::from_directive(text).ok_or_else(|| format!("invalid log level `{text}`"))?),
-        None => None,
-    };
     let target = match args.target.as_deref() {
         Some(name) => {
-            let level_raw = args.target_level.as_deref().ok_or_else(|| "target_level is required when target is specified".to_owned())?;
-            let target_level = if level_raw == "clear" {
-                None
-            } else {
-                Some(LogLevel::from_directive(level_raw).ok_or_else(|| format!("invalid target_level `{level_raw}`"))?)
-            };
-            Some((name, target_level))
+            let level = args.target_level.ok_or_else(|| "target_level is required when target is specified".to_owned())?;
+            Some((name, level.into_option()))
         }
         None => {
             if args.target_level.is_some() {
@@ -49,10 +64,10 @@ fn apply_log_level(control: &LogControl, args: &SetLogLevelArgs) -> Result<SetLo
             None
         }
     };
-    if level.is_none() && target.is_none() {
+    if args.level.is_none() && target.is_none() {
         return Err("at least one of level or target is required".to_owned());
     }
-    let filter = control.set_filter(level, target).map_err(|e| e.to_string())?;
+    let filter = control.set_filter(args.level, target).map_err(|e| e.to_string())?;
     Ok(SetLogLevelOutput { level: control.level().label().to_ascii_lowercase(), filter })
 }
 
@@ -75,7 +90,7 @@ impl RadiaServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{SetLogLevelArgs, apply_log_level};
+    use super::{SetLogLevelArgs, TargetLogLevel, apply_log_level};
     use crate::logging::{LogControl, LogLevel};
 
     #[test]
@@ -83,17 +98,19 @@ mod tests {
         let control = LogControl::noop();
         let initial_filter = control.filter();
 
-        assert!(apply_log_level(&control, &SetLogLevelArgs { level: Some("verbose".into()), target: None, target_level: None }).is_err());
         assert!(
             apply_log_level(
                 &control,
-                &SetLogLevelArgs { level: None, target: Some("render,viewer=trace".into()), target_level: Some("debug".into()) },
+                &SetLogLevelArgs { level: None, target: Some("render,viewer=trace".into()), target_level: Some(TargetLogLevel::Debug) },
             )
             .is_err()
         );
         assert!(
-            apply_log_level(&control, &SetLogLevelArgs { level: None, target: Some(String::new()), target_level: Some("debug".into()) })
-                .is_err()
+            apply_log_level(
+                &control,
+                &SetLogLevelArgs { level: None, target: Some(String::new()), target_level: Some(TargetLogLevel::Debug) },
+            )
+            .is_err()
         );
         assert!(apply_log_level(&control, &SetLogLevelArgs { level: None, target: Some("render".into()), target_level: None }).is_err());
         assert!(apply_log_level(&control, &SetLogLevelArgs { level: None, target: None, target_level: None }).is_err());
@@ -101,16 +118,18 @@ mod tests {
 
         let updated = apply_log_level(
             &control,
-            &SetLogLevelArgs { level: Some("debug".into()), target: Some("render".into()), target_level: Some("trace".into()) },
+            &SetLogLevelArgs { level: Some(LogLevel::Debug), target: Some("render".into()), target_level: Some(TargetLogLevel::Trace) },
         )
         .expect("valid filter");
         assert_eq!(control.level(), LogLevel::Debug);
         assert_eq!(updated.level, "debug");
         assert!(updated.filter.contains("render=trace"));
 
-        let cleared =
-            apply_log_level(&control, &SetLogLevelArgs { level: None, target: Some("render".into()), target_level: Some("clear".into()) })
-                .expect("clear target");
+        let cleared = apply_log_level(
+            &control,
+            &SetLogLevelArgs { level: None, target: Some("render".into()), target_level: Some(TargetLogLevel::Clear) },
+        )
+        .expect("clear target");
         assert!(!cleared.filter.contains("render=trace"));
     }
 }

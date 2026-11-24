@@ -9,6 +9,8 @@ use std::{
 use network::{CircuitMotionStatus, CircuitStats, SessionHandle, SimulatorId, capabilities::Client as CapabilityClient};
 use protocol::messages::SimStats;
 use render::{CaptureReadback, ObjectExplanation, PickDetail, PickError, Stats};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use tokio::sync::{
     mpsc::{self, error::TrySendError},
     oneshot, watch,
@@ -122,7 +124,8 @@ pub struct CameraStateSnapshot {
     pub lod_factor: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CameraModeRequest {
     Follow,
     Free,

@@ -17,10 +17,28 @@ const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 const MAX_TIMEOUT_MS: u64 = 30_000;
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitCondition {
+    WorldRevision,
+    AssetQueueEmpty,
+    TextureEvent,
+}
+
+impl WaitCondition {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WorldRevision => "world_revision",
+            Self::AssetQueueEmpty => "asset_queue_empty",
+            Self::TextureEvent => "texture_event",
+        }
+    }
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct WaitForArgs {
-    #[schemars(description = "Condition to wait for: 'world_revision', 'asset_queue_empty', or 'texture_event'.")]
-    pub condition: String,
+    #[schemars(description = "Condition to wait for.")]
+    pub condition: WaitCondition,
     #[schemars(description = "Target World revision (required when condition='world_revision').")]
     pub revision: Option<u64>,
     #[schemars(description = "Timeout in milliseconds (1..=30000).")]
@@ -32,7 +50,7 @@ pub struct WaitForOutput {
     pub satisfied: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timed_out: Option<bool>,
-    pub condition: String,
+    pub condition: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,8 +122,9 @@ impl RadiaServer {
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).clamp(1, MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
 
-        match args.condition.as_str() {
-            "world_revision" => {
+        let condition_name = args.condition.as_str();
+        match args.condition {
+            WaitCondition::WorldRevision => {
                 let Some(target) = args.revision else {
                     return Err(ErrorData::invalid_params("revision is required for condition=world_revision", None));
                 };
@@ -115,12 +134,12 @@ impl RadiaServer {
                     return Ok(Json(WaitForOutput {
                         satisfied: true,
                         timed_out: None,
-                        condition: args.condition,
+                        condition: condition_name,
                         revision: Some(current.get()),
                         event: None,
                     }));
                 }
-                let waited = await_with_cancellation_and_progress(&args.condition, timeout, &context, async {
+                let waited = await_with_cancellation_and_progress(condition_name, timeout, &context, async {
                     loop {
                         let rev = world.changed().await.map_err(|e| format!("world watch closed: {e}"))?;
                         if rev.get() >= target {
@@ -133,7 +152,7 @@ impl RadiaServer {
                     WaitOutcome::Ready(Ok(rev)) => Ok(Json(WaitForOutput {
                         satisfied: true,
                         timed_out: None,
-                        condition: args.condition,
+                        condition: condition_name,
                         revision: Some(rev),
                         event: None,
                     })),
@@ -144,25 +163,25 @@ impl RadiaServer {
                         Ok(Json(WaitForOutput {
                             satisfied: false,
                             timed_out: Some(true),
-                            condition: args.condition,
+                            condition: condition_name,
                             revision: Some(latest),
                             event: None,
                         }))
                     }
                 }
             }
-            "asset_queue_empty" => {
+            WaitCondition::AssetQueueEmpty => {
                 let mut watch = session.assets.queue_stats_watch();
                 if watch.borrow_and_update().is_empty() {
                     return Ok(Json(WaitForOutput {
                         satisfied: true,
                         timed_out: None,
-                        condition: args.condition,
+                        condition: condition_name,
                         revision: None,
                         event: None,
                     }));
                 }
-                let waited = await_with_cancellation_and_progress(&args.condition, timeout, &context, async {
+                let waited = await_with_cancellation_and_progress(condition_name, timeout, &context, async {
                     loop {
                         watch.changed().await.map_err(|_| "asset queue watch closed".to_owned())?;
                         if watch.borrow_and_update().is_empty() {
@@ -173,23 +192,23 @@ impl RadiaServer {
                 .await;
                 match waited {
                     WaitOutcome::Ready(Ok(())) => {
-                        Ok(Json(WaitForOutput { satisfied: true, timed_out: None, condition: args.condition, revision: None, event: None }))
+                        Ok(Json(WaitForOutput { satisfied: true, timed_out: None, condition: condition_name, revision: None, event: None }))
                     }
                     WaitOutcome::Ready(Err(error)) => Err(ErrorData::internal_error(error, None)),
                     WaitOutcome::Cancelled => Err(ErrorData::new(ErrorCode(-32000), "wait_for cancelled", None)),
                     WaitOutcome::TimedOut => Ok(Json(WaitForOutput {
                         satisfied: false,
                         timed_out: Some(true),
-                        condition: args.condition,
+                        condition: condition_name,
                         revision: None,
                         event: None,
                     })),
                 }
             }
-            "texture_event" => {
+            WaitCondition::TextureEvent => {
                 let mut watch = session.assets.texture_events();
                 let initial = *watch.borrow_and_update();
-                let waited = await_with_cancellation_and_progress(&args.condition, timeout, &context, async {
+                let waited = await_with_cancellation_and_progress(condition_name, timeout, &context, async {
                     watch.changed().await.map_err(|_| "texture event watch closed".to_owned())?;
                     Ok(*watch.borrow_and_update())
                 })
@@ -198,7 +217,7 @@ impl RadiaServer {
                     WaitOutcome::Ready(Ok(event)) => Ok(Json(WaitForOutput {
                         satisfied: true,
                         timed_out: None,
-                        condition: args.condition,
+                        condition: condition_name,
                         revision: None,
                         event: Some(event),
                     })),
@@ -207,13 +226,12 @@ impl RadiaServer {
                     WaitOutcome::TimedOut => Ok(Json(WaitForOutput {
                         satisfied: false,
                         timed_out: Some(true),
-                        condition: args.condition,
+                        condition: condition_name,
                         revision: None,
                         event: Some(initial),
                     })),
                 }
             }
-            other => Err(ErrorData::invalid_params(format!("unknown wait_for condition: {other}"), None)),
         }
     }
 }

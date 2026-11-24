@@ -13,10 +13,20 @@ use crate::{inspection::ViewerInspectionHandle, mcp::server::RadiaServer};
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 100;
 
+#[derive(Clone, Copy, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorldQueryKind {
+    #[default]
+    Summary,
+    Regions,
+    Objects,
+    Object,
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct WorldArgs {
-    #[schemars(description = "Query mode: 'summary', 'regions', 'objects', or 'object'. Defaults to 'summary'.")]
-    pub query: Option<String>,
+    #[schemars(description = "Query mode. Defaults to 'summary'.")]
+    pub query: Option<WorldQueryKind>,
     #[schemars(description = "Maximum number of items to return (1..=100).")]
     pub limit: Option<usize>,
     #[schemars(description = "Object UUID (required when query='object').")]
@@ -73,11 +83,11 @@ impl RadiaServer {
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     pub(crate) async fn world(&self, Parameters(args): Parameters<WorldArgs>) -> Result<Json<WorldOutput>, ErrorData> {
-        let query = args.query.as_deref().unwrap_or("summary");
+        let query = args.query.unwrap_or_default();
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
         let output = match query {
-            "summary" => world_summary_data(&self.handle).await.map_err(|msg| ErrorData::internal_error(msg, None))?,
-            "regions" => {
+            WorldQueryKind::Summary => world_summary_data(&self.handle).await.map_err(|msg| ErrorData::internal_error(msg, None))?,
+            WorldQueryKind::Regions => {
                 let Some(session) = self.handle.session() else {
                     return Ok(Json(WorldOutput::Inactive { active_session: false }));
                 };
@@ -99,7 +109,7 @@ impl RadiaServer {
                     .collect();
                 WorldOutput::Regions { revision: revision.get(), regions, has_more: page.next.is_some() }
             }
-            "objects" => {
+            WorldQueryKind::Objects => {
                 let Some(session) = self.handle.session() else {
                     return Ok(Json(WorldOutput::Inactive { active_session: false }));
                 };
@@ -123,7 +133,7 @@ impl RadiaServer {
                     .collect();
                 WorldOutput::Objects { revision: revision.get(), objects, has_more: page.next.is_some() }
             }
-            "object" => {
+            WorldQueryKind::Object => {
                 let Some(session) = self.handle.session() else {
                     return Ok(Json(WorldOutput::Inactive { active_session: false }));
                 };
@@ -150,7 +160,6 @@ impl RadiaServer {
                 };
                 WorldOutput::ObjectDetail(format_object_detail(revision, &detail))
             }
-            other => return Err(ErrorData::invalid_params(format!("unknown world query: {other}"), None)),
         };
         Ok(Json(output))
     }
