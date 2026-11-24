@@ -1545,6 +1545,8 @@ impl SessionDriver {
                 if let Some(region) = self.session_world.region_for(simulator_id) {
                     self.assets.register(region, capabilities.clone());
                 }
+                self.simulator_capabilities.insert(simulator_id, capabilities.clone());
+                self.publish_network_diagnostics();
                 self.media.set_client(simulator_id, capabilities);
                 ControlFlow::Continue(())
             }
@@ -1871,11 +1873,15 @@ impl SessionDriver {
             region_name,
             &self.mailbox,
         );
+        let is_region_handshake = matches!(message, Message::RegionHandshake(_));
         self.object_cache.record_update(simulator_id, message);
         if self.primary_simulator == Some(simulator_id) {
             self.camera.region_origin_changed(primary_origin_before, self.primary_region_origin());
         }
         self.publish_region_motion();
+        if is_region_handshake {
+            self.publish_network_diagnostics();
+        }
     }
 
     fn on_primary_changed(
