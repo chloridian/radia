@@ -23,7 +23,9 @@ bench = false
 tracy = ["dep:tracing-tracy"]
 
 [dependencies]
+base64.workspace = true
 dirs.workspace = true
+flate2.workspace = true
 futures.workspace = true
 prism.workspace = true
 prism-tokio.workspace = true

@@ -34,7 +34,7 @@ impl AssetSource for ViewerAssets {
 }
 
 fn main() -> io::Result<()> {
-    let (_logging, log_control) = logging::init();
+    let (_logging, log_control, _recent_logs) = logging::init();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), os = OS, "viewer started");
     let runtime = Builder::new_multi_thread().enable_all().thread_name("radia-service").build()?;
     let services = runtime.handle().clone();

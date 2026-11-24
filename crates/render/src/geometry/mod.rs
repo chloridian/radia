@@ -1,5 +1,6 @@
 mod cache;
 mod draw_list;
+mod explain;
 mod frame;
 mod instance;
 mod items;
@@ -29,7 +30,6 @@ use wgpu::{
 };
 use world::{Entity, WorldTransform};
 
-pub use self::pick::PickError;
 use self::{
     cache::FrameCache,
     draw_list::{DrawList, INDIRECT_DRAW_BYTES, ViewDraws},
@@ -37,6 +37,10 @@ use self::{
     items::ItemIndex,
     mesh::GpuMesh,
     storage::Storage,
+};
+pub use self::{
+    explain::{FaceExplanation, MeshResidency, ObjectExplanation, VisibilityStatus},
+    pick::{PickDetail, PickError},
 };
 use crate::{
     pipeline::{FACE_INDEX_BYTES, Pipeline, Sky, SurfacePipelines, VoidWater},

@@ -329,12 +329,21 @@ pub struct AssetHandle {
     budget: Budget,
     textures: assets::TextureEvents,
     routes: watch::Receiver<()>,
+    queue_stats: watch::Receiver<assets::AssetQueueStats>,
     cache: Option<Arc<AssetCache>>,
 }
 
 impl AssetHandle {
     pub fn texture_events(&self) -> watch::Receiver<u64> {
         self.textures.subscribe()
+    }
+
+    pub fn queue_stats(&self) -> assets::AssetQueueStats {
+        *self.queue_stats.borrow()
+    }
+
+    pub fn queue_stats_watch(&self) -> watch::Receiver<assets::AssetQueueStats> {
+        self.queue_stats.clone()
     }
 
     pub async fn request_with_importance(
@@ -435,6 +444,7 @@ impl AssetCoordinator {
         let (requests, receiver) = mpsc::channel(COMMANDS);
         let (controls, control_receiver) = mpsc::channel(COMMANDS);
         let (routes, route_events) = watch::channel(());
+        let (queue_stats_tx, queue_stats_rx) = watch::channel(assets::AssetQueueStats::default());
         let active = Arc::new(AtomicBool::new(true));
         let store = cache.as_ref().map_or_else(|| Store::new(budget.clone()), |cache| Store::with_cache(budget.clone(), Arc::clone(cache)));
         let handle = AssetHandle {
@@ -444,10 +454,11 @@ impl AssetCoordinator {
             budget,
             textures: store.texture_events(),
             routes: route_events,
+            queue_stats: queue_stats_rx,
             cache,
         };
         let worker = runtime.clone().spawn(
-            run(store, receiver, control_receiver, routes, active, runtime, cancelled, write_spawner, shutdown_drain_hook)
+            run(store, receiver, control_receiver, routes, queue_stats_tx, active, runtime, cancelled, write_spawner, shutdown_drain_hook)
                 .in_current_span(),
         );
         Self { handle, controls, worker }
@@ -598,6 +609,7 @@ async fn run(
     mut requests: mpsc::Receiver<DemandRequest>,
     mut controls: mpsc::Receiver<RouteCommand>,
     routes: watch::Sender<()>,
+    queue_stats: watch::Sender<assets::AssetQueueStats>,
     active: Arc<AtomicBool>,
     runtime: Handle,
     cancelled: impl Future<Output = ()>,
@@ -617,6 +629,15 @@ async fn run(
         if !active.load(Ordering::Acquire) {
             break;
         }
+        let stats = store.queue_stats();
+        queue_stats.send_if_modified(|current| {
+            if *current == stats {
+                false
+            } else {
+                *current = stats;
+                true
+            }
+        });
         let now = Instant::now();
         while let Some(job) = fetches.pop_front() {
             spawn_fetch(job, &transports, &runtime, &mut jobs);

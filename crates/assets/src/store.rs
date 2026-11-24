@@ -954,9 +954,44 @@ impl Drop for Store {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AssetQueueStats {
+    pub queued_mesh: usize,
+    pub queued_legacy_material: usize,
+    pub queued_other: usize,
+    pub running_fetches: usize,
+    pub running_cache_reads: usize,
+    pub running_texture_decodes: usize,
+    pub running_other_decodes: usize,
+}
+
+impl AssetQueueStats {
+    pub fn is_empty(self) -> bool {
+        self.queued_mesh == 0
+            && self.queued_legacy_material == 0
+            && self.queued_other == 0
+            && self.running_fetches == 0
+            && self.running_cache_reads == 0
+            && self.running_texture_decodes == 0
+            && self.running_other_decodes == 0
+    }
+}
+
 impl Store {
     pub fn texture_events(&self) -> TextureEvents {
         self.textures.clone()
+    }
+
+    pub fn queue_stats(&self) -> AssetQueueStats {
+        AssetQueueStats {
+            queued_mesh: self.candidate_queues[0].len(),
+            queued_legacy_material: self.candidate_queues[1].len(),
+            queued_other: self.candidate_queues[2].len(),
+            running_fetches: self.running_fetches.iter().sum(),
+            running_cache_reads: self.running_cache_reads,
+            running_texture_decodes: self.running_texture_decodes,
+            running_other_decodes: self.running_other_decodes,
+        }
     }
 
     pub fn new(budget: Budget) -> Self {

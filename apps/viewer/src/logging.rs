@@ -1,26 +1,33 @@
 use std::{
     backtrace::Backtrace,
-    env,
+    collections::VecDeque,
+    env, fmt as std_fmt,
     fs::{self, OpenOptions},
     io::{self, IsTerminal},
     panic,
     path::Path,
     sync::{Arc, Mutex, PoisonError},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use time::{Duration, OffsetDateTime, UtcOffset, format_description};
-use tracing::field;
+use tracing::{
+    Event, Level, Subscriber,
+    field::{self, Field, Visit},
+};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
     EnvFilter, Layer,
     fmt::{self, time::OffsetTime},
-    layer::SubscriberExt,
+    layer::{Context, SubscriberExt},
     reload,
     util::SubscriberInitExt,
 };
 
 const LOG_DIR: &str = "target/logs";
 const MAX_LOGS: usize = 20;
+const RECENT_LOG_CAPACITY: usize = 256;
+const MAX_LOG_TEXT_CHARS: usize = 512;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LogLevel {
@@ -144,7 +151,150 @@ impl LogControl {
     }
 }
 
-pub fn init() -> (Option<WorkerGuard>, LogControl) {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecentLogEntry {
+    pub timestamp_ms: u64,
+    pub level: LogLevel,
+    pub target: String,
+    pub message: String,
+}
+
+#[derive(Clone)]
+pub struct RecentLogs {
+    entries: Arc<Mutex<VecDeque<RecentLogEntry>>>,
+    capacity: usize,
+}
+
+impl Default for RecentLogs {
+    fn default() -> Self {
+        Self::with_capacity(RECENT_LOG_CAPACITY)
+    }
+}
+
+impl RecentLogs {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self { entries: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))), capacity }
+    }
+
+    pub fn push(&self, entry: RecentLogEntry) {
+        if self.capacity == 0 {
+            return;
+        }
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if entries.len() >= self.capacity {
+            entries.pop_front();
+        }
+        entries.push_back(entry);
+    }
+
+    pub fn snapshot(&self, limit: usize, min_level: Option<LogLevel>) -> Vec<RecentLogEntry> {
+        let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let filtered = entries.iter().filter(|entry| match min_level {
+            Some(LogLevel::Error) => entry.level == LogLevel::Error,
+            Some(LogLevel::Warn) | None => matches!(entry.level, LogLevel::Warn | LogLevel::Error),
+            Some(_) => true,
+        });
+        let all: Vec<RecentLogEntry> = filtered.cloned().collect();
+        if all.len() <= limit { all } else { all[all.len() - limit..].to_vec() }
+    }
+}
+
+struct RecentLogLayer {
+    logs: RecentLogs,
+}
+
+impl<S: Subscriber> Layer<S> for RecentLogLayer {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let metadata = event.metadata();
+        let level = match *metadata.level() {
+            Level::ERROR => LogLevel::Error,
+            Level::WARN => LogLevel::Warn,
+            _ => return,
+        };
+        let mut visitor = RecentLogVisitor::default();
+        event.record(&mut visitor);
+        let timestamp_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        self.logs.push(RecentLogEntry {
+            timestamp_ms,
+            level,
+            target: truncate_chars(metadata.target(), 128),
+            message: truncate_chars(&visitor.finish(), MAX_LOG_TEXT_CHARS),
+        });
+    }
+}
+
+#[derive(Default)]
+struct RecentLogVisitor {
+    message: String,
+    fields: String,
+}
+
+impl RecentLogVisitor {
+    fn finish(self) -> String {
+        if self.fields.is_empty() {
+            self.message
+        } else if self.message.is_empty() {
+            self.fields
+        } else {
+            format!("{} ({})", self.message, self.fields)
+        }
+    }
+
+    fn append_field(&mut self, name: &str, value: &str) {
+        if is_sensitive_field(name) {
+            return;
+        }
+        if name == "message" {
+            self.message = value.to_owned();
+            return;
+        }
+        if !self.fields.is_empty() {
+            self.fields.push_str(", ");
+        }
+        self.fields.push_str(name);
+        self.fields.push('=');
+        self.fields.push_str(value);
+    }
+}
+
+impl Visit for RecentLogVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std_fmt::Debug) {
+        self.append_field(field.name(), &format!("{value:?}"));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.append_field(field.name(), value);
+    }
+}
+
+fn is_sensitive_field(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("secret")
+        || lower.contains("token")
+        || lower.contains("password")
+        || lower.contains("cookie")
+        || lower.contains("authorization")
+        || lower.contains("credential")
+        || lower.contains("capability")
+        || lower.contains("session_id")
+        || lower.contains("circuit_code")
+        || lower == "url"
+        || lower.ends_with("_url")
+}
+
+fn truncate_chars(input: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (index, ch) in input.chars().enumerate() {
+        if index >= max_chars {
+            out.push_str("...");
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+pub fn init() -> (Option<WorkerGuard>, LogControl, RecentLogs) {
     let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
     let json_timer = OffsetTime::new(
         offset,
@@ -198,7 +348,9 @@ pub fn init() -> (Option<WorkerGuard>, LogControl) {
         .with_writer(io::stderr)
         .with_filter(console_filter);
 
-    let subscriber = tracing_subscriber::registry().with(console).with(json);
+    let recent_logs = RecentLogs::default();
+    let recent_layer = RecentLogLayer { logs: recent_logs.clone() };
+    let subscriber = tracing_subscriber::registry().with(console).with(json).with(recent_layer);
 
     #[cfg(feature = "tracy")]
     let subscriber = subscriber.with(tracing_tracy::TracyLayer::default());
@@ -236,7 +388,7 @@ pub fn init() -> (Option<WorkerGuard>, LogControl) {
         reload_file: file_reload,
     };
 
-    (guard, control)
+    (guard, control, recent_logs)
 }
 
 fn filter_spec(level: LogLevel, noisy_network: bool) -> String {
@@ -330,7 +482,52 @@ fn prune_logs(dir: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogLevel, build_filter, filter_spec};
+    use tracing::subscriber::with_default;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use super::{LogLevel, RecentLogLayer, RecentLogs, build_filter, filter_spec};
+
+    #[test]
+    fn recent_logs_captures_warn_and_error_with_bound() {
+        let logs = RecentLogs::with_capacity(2);
+        let subscriber = tracing_subscriber::registry().with(RecentLogLayer { logs: logs.clone() });
+        with_default(subscriber, || {
+            tracing::debug!("ignored debug");
+            tracing::info!("ignored info");
+            tracing::warn!(url = "https://cap.example/secret", "first warning");
+            tracing::error!("first error");
+            tracing::warn!("second warning");
+        });
+        let entries = logs.snapshot(10, None);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].level, LogLevel::Error);
+        assert!(entries[0].message.contains("first error"));
+        assert_eq!(entries[1].level, LogLevel::Warn);
+        assert!(entries[1].message.contains("second warning"));
+        let errors_only = logs.snapshot(10, Some(LogLevel::Error));
+        assert_eq!(errors_only.len(), 1);
+        assert_eq!(errors_only[0].level, LogLevel::Error);
+    }
+
+    #[test]
+    fn recent_logs_omits_sensitive_fields() {
+        let logs = RecentLogs::with_capacity(4);
+        let subscriber = tracing_subscriber::registry().with(RecentLogLayer { logs: logs.clone() });
+        with_default(subscriber, || {
+            tracing::warn!(
+                capability_url = "https://cap.example/abc",
+                session_id = "secret-session",
+                detail = "visible-detail",
+                "sanitized warning"
+            );
+        });
+        let entries = logs.snapshot(4, None);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].message.contains("sanitized warning"));
+        assert!(entries[0].message.contains("visible-detail"));
+        assert!(!entries[0].message.contains("cap.example"));
+        assert!(!entries[0].message.contains("secret-session"));
+    }
 
     #[test]
     fn directives_match_levels() {
