@@ -1,9 +1,8 @@
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
-use uuid::Uuid;
 use world::ObjectDetailResult;
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolContent, ToolFuture, ToolSpec, lookup_object_entity};
 use crate::{
     inspection::{ViewerInspectionHandle, ViewportQuery},
     mcp::MAX_JSON_RESPONSE_BYTES,
@@ -35,22 +34,7 @@ fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
         let Some(id_str) = args.get("object_id").and_then(Value::as_str) else {
             return Err("object_id is required".to_owned());
         };
-        let target_id = Uuid::parse_str(id_str).map_err(|e| format!("invalid object_id: {e}"))?;
-
-        let mut cursor = None;
-        let mut found_entity = None;
-        for _ in 0..32 {
-            let page = session.world.objects(cursor, 100).await.map_err(|e| format!("objects scan failed: {e}"))?;
-            if let Some(item) = page.objects.into_iter().find(|item| item.id == target_id) {
-                found_entity = Some(item.entity);
-                break;
-            }
-            cursor = page.next;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        let Some(entity) = found_entity else {
+        let Some(entity) = lookup_object_entity(&session.world, id_str).await? else {
             return Ok(ToolContent::Json(json!({ "found": false, "object_id": id_str })));
         };
 

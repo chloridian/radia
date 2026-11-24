@@ -14,6 +14,7 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, mpsc::error::TrySendError, watch},
     time,
 };
+use uuid::Uuid;
 use world::{
     Entity, EnvironmentRead, MAX_ENVIRONMENT_READ_BYTES, MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS,
     MAX_OBJECT_PAGE_ITEMS, MAX_PARCEL_READ_BYTES, MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES,
@@ -116,6 +117,7 @@ impl<T> ReadResponder<T> {
 
 pub(crate) enum ReadRequest {
     Barrier(ReadResponder<WorldReadBarrier>),
+    Entity(Uuid, ReadResponder<Option<Entity>>),
     Objects(Option<Box<ObjectPageCursor>>, usize, ReadResponder<ObjectListPage>),
     Regions(Option<RegionPageCursor>, usize, ReadResponder<RegionPage>),
     Details(Vec<Entity>, Option<Box<ObjectDetailCursor>>, ReadResponder<ObjectDetailBatchPage>),
@@ -129,6 +131,7 @@ impl ReadRequest {
     pub(crate) fn serve(self, world: &World) {
         match self {
             Self::Barrier(reply) if !reply.cancelled() => reply.send(Ok(world.read_barrier())),
+            Self::Entity(id, reply) if !reply.cancelled() => reply.send(Ok(world.entity(id))),
             Self::Objects(cursor, limit, reply) if !reply.cancelled() => {
                 reply.send(world.object_list_page(cursor.map(|cursor| *cursor), limit).map_err(ReadError::World));
             }
@@ -186,6 +189,10 @@ impl WorldReader {
 
     pub async fn barrier(&self) -> Result<WorldReadBarrier, ReadError> {
         self.request(size_of::<WorldReadBarrier>(), ReadRequest::Barrier).await
+    }
+
+    pub async fn entity(&self, id: Uuid) -> Result<Option<Entity>, ReadError> {
+        self.request(size_of::<Option<Entity>>(), |reply| ReadRequest::Entity(id, reply)).await
     }
 
     pub async fn objects(&self, cursor: Option<ObjectPageCursor>, limit: usize) -> Result<ObjectListPage, ReadError> {
@@ -810,5 +817,19 @@ mod tests {
         }
         assert_eq!(reader.changed().await.unwrap(), world.revision());
         assert!(poll!(Box::pin(reader.changed()).as_mut()).is_pending());
+    }
+
+    #[tokio::test]
+    async fn entity_lookup_resolves_present_and_missing() {
+        let mut world = world();
+        let region = world.register_region().unwrap();
+        let entity = insert(&mut world, region, 42, 1, 1);
+        let mut service = WorldReadHost::new(&world, Handle::current());
+        let reader = service.reader();
+        assert_eq!(deliver(reader.entity(Uuid::from_u128(42)), &mut service, &world).await, Ok(Some(entity)));
+        assert_eq!(deliver(reader.entity(Uuid::from_u128(99)), &mut service, &world).await, Ok(None));
+        let source = UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0);
+        let _ = world.remove_object(source, NonZeroU32::new(1).unwrap()).unwrap();
+        assert_eq!(deliver(reader.entity(Uuid::from_u128(42)), &mut service, &world).await, Ok(None));
     }
 }

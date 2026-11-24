@@ -9,8 +9,10 @@ mod world;
 use std::{future::Future, pin::Pin};
 
 use serde_json::Value;
+use uuid::Uuid;
+use world::Entity;
 
-use crate::inspection::ViewerInspectionHandle;
+use crate::{inspection::ViewerInspectionHandle, world_reader::WorldReader};
 
 pub type ToolFuture = Pin<Box<dyn Future<Output = ToolResult> + Send>>;
 pub type ToolHandler = fn(ViewerInspectionHandle, Value) -> ToolFuture;
@@ -34,4 +36,9 @@ pub const TOOLS: &[ToolSpec] = &[world::SPEC, stats::SPEC, logs::SPEC, screensho
 
 pub fn find_tool(name: &str) -> Option<&'static ToolSpec> {
     TOOLS.iter().find(|tool| tool.name == name)
+}
+
+pub(super) async fn lookup_object_entity(world: &WorldReader, id_str: &str) -> Result<Option<Entity>, String> {
+    let target_id = Uuid::parse_str(id_str).map_err(|e| format!("invalid object_id: {e}"))?;
+    world.entity(target_id).await.map_err(|e| format!("object lookup failed: {e}"))
 }
