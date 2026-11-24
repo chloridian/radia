@@ -1,3 +1,4 @@
+mod cache;
 mod explain_object;
 mod logs;
 mod pick;
@@ -33,7 +34,7 @@ pub struct ToolSpec {
 }
 
 pub const TOOLS: &[ToolSpec] =
-    &[world_query::SPEC, stats::SPEC, logs::SPEC, screenshot::SPEC, explain_object::SPEC, pick::SPEC, wait_for::SPEC];
+    &[world_query::SPEC, stats::SPEC, cache::SPEC, logs::SPEC, screenshot::SPEC, explain_object::SPEC, pick::SPEC, wait_for::SPEC];
 
 pub fn find_tool(name: &str) -> Option<&'static ToolSpec> {
     TOOLS.iter().find(|tool| tool.name == name)

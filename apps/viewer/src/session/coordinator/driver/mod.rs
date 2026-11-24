@@ -51,6 +51,7 @@ use super::{
 };
 use crate::{
     asset_coordinator::AssetCoordinator,
+    inspection::{ObjectCacheStats, SessionDiagnostics},
     inventory::{
         FolderApplyOutcome, FolderFetch, InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError,
         InventoryFetchEvent, MoveExpectation,
@@ -436,6 +437,7 @@ struct SessionDriver {
     inventory: Option<Inventory>,
     inventory_cache: InventoryCacheSession,
     object_cache: ObjectCacheSession,
+    object_cache_stats: watch::Sender<ObjectCacheStats>,
     pending_handshake_replies: Arc<Mutex<PendingHandshakeReplies>>,
     inventory_changes: watch::Sender<Option<InventorySnapshot>>,
     rejected_inventory_blocks: Summary<inventory_sync::InventoryRejections>,
@@ -630,6 +632,7 @@ impl SessionDriver {
         let inventory_cache = InventoryCacheSession::new(&runtime);
         let mut object_cache = ObjectCacheSession::new(credentials.grid);
         object_cache.start(&runtime);
+        let (object_cache_stats, _) = watch::channel(object_cache.stats());
         let pending_handshake_replies = Arc::new(Mutex::new(PendingHandshakeReplies::default()));
 
         Self {
@@ -665,6 +668,7 @@ impl SessionDriver {
             inventory: None,
             inventory_cache,
             object_cache,
+            object_cache_stats,
             pending_handshake_replies,
             inventory_changes,
             rejected_inventory_blocks: Summary::new(inventory_sync::INVENTORY_FAILURE_REPORT_INTERVAL),
@@ -708,6 +712,15 @@ impl SessionDriver {
             }
             self.reads.publish(self.session_world.world());
             self.object_cache.persist_overrides(&self.session_world);
+            let cache_stats = self.object_cache.stats();
+            self.object_cache_stats.send_if_modified(|current| {
+                if *current == cache_stats {
+                    false
+                } else {
+                    *current = cache_stats;
+                    true
+                }
+            });
             if self.pending_object_update.is_some() {
                 let flow = self.advance_pending_owner_turn().await;
                 if flow.is_break() {
@@ -1875,6 +1888,7 @@ impl SessionDriver {
             inventory_updates: self.inventory_changes.subscribe(),
             inventory_fetch: self.inventory.as_ref().map(|_| self.inventory_fetch.handle()),
             world_reader: self.reads.reader(),
+            diagnostics: SessionDiagnostics { object_cache: self.object_cache_stats.subscribe() },
         }));
     }
 

@@ -5,7 +5,7 @@ use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "stats",
-    description: "Return frame timing, renderer stats, asset queue stats, memory stats, and disk cache stats.",
+    description: "Return frame timing, renderer stats, asset queue stats, and memory stats.",
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,
@@ -27,12 +27,6 @@ fn handler(handle: ViewerInspectionHandle, _args: Value) -> ToolFuture {
         let rs = render_snapshot.render_stats;
         let queue = session.assets.queue_stats();
         let memory = session.assets.memory_stats();
-        let cache = session.assets.cache_stats().map(|stats| {
-            json!({
-                "size_bytes": stats.size_bytes,
-                "entries_by_kind": format!("{:?}", stats.entries_by_kind),
-            })
-        });
         Ok(ToolContent::Json(json!({
             "active_session": true,
             "viewport_size": render_snapshot.viewport_size,
@@ -72,7 +66,6 @@ fn handler(handle: ViewerInspectionHandle, _args: Value) -> ToolFuture {
                     "empty": queue.is_empty(),
                 },
                 "memory": format!("{memory:?}"),
-                "cache": cache,
             }
         })))
     })

@@ -713,6 +713,7 @@ impl LoginScreen {
             ready.movement,
             ready.agent_motion,
             ready.motion_circuits,
+            ready.diagnostics,
             cx,
         );
     }

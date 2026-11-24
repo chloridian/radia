@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(status, 200);
         let parsed: Value = serde_json::from_str(&body).expect("json response");
         let tools = parsed["result"]["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), super::TOOLS.len());
 
         let (status, _) = post_json(addr, &json!({"jsonrpc":"2.0","method":"notifications/initialized"}).to_string()).await;
         assert_eq!(status, 202);

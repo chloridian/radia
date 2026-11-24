@@ -21,7 +21,8 @@ Startup prints `MCP server listening on http://127.0.0.1:<port>`. The default en
 | Tool | Answers |
 |---|---|
 | `world` | Active regions, bounded object lists, or single object properties by UUID (`query`: `summary`, `regions`, `objects`, `object`). |
-| `stats` | Frame timing (`fps`, `frame_ms`, `game_ms`, `render_ms`, `gpu_timings_ms`), `render::Stats`, `AssetQueueStats`, memory stats, and disk cache stats. |
+| `stats` | Frame timing (`fps`, `frame_ms`, `game_ms`, `render_ms`, `gpu_timings_ms`), `render::Stats`, `AssetQueueStats`, and memory stats. |
+| `cache` | Object cache write-queue depth/capacity, busy/full drops, handshake state, and asset disk cache hit/miss/eviction counts. |
 | `logs` | Recent `WARN` and `ERROR` entries from the in-memory ring buffer (sensitive fields and capability URLs omitted). |
 | `screenshot` | Non-blocking viewport PNG capture encoded off the GUI thread. |
 | `explain_object` | Combined World detail + renderer placement, culling, mesh residency, and per-face texture/alpha/omission state for an `object_id`. |

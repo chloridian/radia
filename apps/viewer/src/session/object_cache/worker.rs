@@ -137,7 +137,7 @@ impl ObjectCacheSession {
             || self.pending_writes.len() >= MAX_PENDING_CACHE_WRITES
             || next_bytes > MAX_PENDING_BYTES
         {
-            self.count_dropped_write();
+            self.count_full_drop();
             return false;
         }
         self.pending_write_bytes = next_bytes;
@@ -189,7 +189,7 @@ impl ObjectCacheSession {
                 {
                     self.clear_cache_versions(simulator_id, &versions);
                     self.pending_write_bytes = self.pending_write_bytes.saturating_sub(MAX_PACKET_RETAINED_CAPACITY_BYTES);
-                    self.count_dropped_write();
+                    self.count_full_drop();
                 }
             } else {
                 self.warn("object cache invalidation queue is full; cache entries will be fetched normally");

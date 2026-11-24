@@ -34,6 +34,7 @@ use self::{
     store::{PendingSubmission, make_access_submission, open_default, queue_scope_load},
     worker::{CacheWriteJob, CacheWriteOperation, CacheWriteWorker},
 };
+use crate::inspection::ObjectCacheStats;
 
 const SCHEMA_VERSION: i64 = 1;
 const SQLITE_PAGE_SIZE: i64 = 4096;
@@ -200,6 +201,8 @@ pub(super) struct ObjectCacheSession {
     disabled: bool,
     warned: bool,
     degraded_warned: bool,
+    busy_drops: u64,
+    full_drops: u64,
     dropped_writes: u64,
     override_cursor: Option<WorldChangeCursor>,
 }
@@ -232,8 +235,35 @@ impl ObjectCacheSession {
             disabled: false,
             warned: false,
             degraded_warned: false,
+            busy_drops: 0,
+            full_drops: 0,
             dropped_writes: 0,
             override_cursor: None,
+        }
+    }
+
+    pub(in crate::session) fn stats(&self) -> ObjectCacheStats {
+        ObjectCacheStats {
+            started: self.started,
+            ready: self.db.is_some(),
+            disabled: self.disabled,
+            degraded: !self.disabled && self.dropped_writes > 0,
+            write_queue_depth: self.pending_writes.len(),
+            write_queue_capacity: MAX_PENDING_CACHE_WRITES,
+            write_queue_bytes: self.pending_write_bytes,
+            write_queue_byte_capacity: MAX_PENDING_BYTES,
+            outstanding_writes: self.outstanding_writes,
+            worker_queue_capacity: MAX_PENDING_SUBMISSIONS,
+            pending_submissions: self.pending.len(),
+            pending_submissions_capacity: MAX_PENDING_SUBMISSIONS,
+            busy_drops: self.busy_drops,
+            full_drops: self.full_drops,
+            dropped_writes: self.dropped_writes,
+            identified_regions: self.identities.len(),
+            loaded_regions: self.loaded_regions.len(),
+            in_flight_region_loads: self.in_flight_loads.len(),
+            loaded_entries: self.loaded_entries,
+            loaded_bytes: self.loaded_bytes,
         }
     }
 
@@ -352,7 +382,7 @@ impl ObjectCacheSession {
             ObjectCacheEvent::WriteDropped { simulator_id, versions } => {
                 self.outstanding_writes = self.outstanding_writes.saturating_sub(1);
                 self.clear_cache_versions(simulator_id, &versions);
-                self.count_dropped_write();
+                self.count_busy_drop();
                 self.flush_pending_writes();
                 None
             }
@@ -470,7 +500,7 @@ impl ObjectCacheSession {
         let permit = match self.event_sender.clone().try_reserve_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                self.count_dropped_write();
+                self.count_busy_drop();
                 return;
             }
         };
@@ -636,6 +666,7 @@ impl ObjectCacheSession {
         let rows = self.pending_rows.saturating_add(submission.rows);
         let bytes = self.pending_bytes.saturating_add(submission.bytes);
         if self.pending.len() >= MAX_PENDING_SUBMISSIONS || rows > MAX_PENDING_ROWS || bytes > MAX_PENDING_BYTES {
+            self.full_drops = self.full_drops.saturating_add(1);
             self.warn("object cache write queue is full; some objects will be refetched");
             return false;
         }
@@ -665,6 +696,16 @@ impl ObjectCacheSession {
         }
         self.warned = true;
         tracing::warn!(%error, "object cache is unavailable; simulator updates will be fetched normally");
+    }
+
+    fn count_busy_drop(&mut self) {
+        self.busy_drops = self.busy_drops.saturating_add(1);
+        self.count_dropped_write();
+    }
+
+    fn count_full_drop(&mut self) {
+        self.full_drops = self.full_drops.saturating_add(1);
+        self.count_dropped_write();
     }
 
     fn count_dropped_write(&mut self) {

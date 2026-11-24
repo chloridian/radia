@@ -22,7 +22,7 @@ use crate::{
         },
         window_geometry,
     },
-    inspection::{RenderStatsSnapshot, SessionInspection, VIEWPORT_QUERY_CAPACITY},
+    inspection::{RenderStatsSnapshot, SessionDiagnostics, SessionInspection, VIEWPORT_QUERY_CAPACITY},
     scene_feed::SceneSources,
     session::{AgentMotionSample, EnvironmentInbox, SessionEnd},
     world_reader::WorldReader,
@@ -94,6 +94,7 @@ pub(crate) fn start_session(
     movement: watch::Sender<Option<MovementObservation>>,
     agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<network::CircuitMotionStatus>)>>,
+    diagnostics: SessionDiagnostics,
     cx: &mut App,
 ) {
     if !cx.has_global::<AppLifecycle>()
@@ -118,6 +119,7 @@ pub(crate) fn start_session(
             assets: assets.clone(),
             render_stats: render_stats_rx,
             viewport_queries: viewport_queries_tx,
+            diagnostics,
         }));
     }
     let config = SceneViewConfig {

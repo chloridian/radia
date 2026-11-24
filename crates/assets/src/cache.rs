@@ -154,6 +154,7 @@ pub struct AssetCacheStats {
     pub size_limit_bytes: u64,
     pub entries_by_kind: AssetCacheEntriesByKind,
     pub protected_bytes: u64,
+    pub evictions: u64,
     pub recent_evictions: [Option<EvictionReason>; 8],
     pub prepared_hits: u64,
     pub prepared_misses: u64,
@@ -163,6 +164,7 @@ pub struct AssetCacheStats {
     pub prepared_size_bytes: u64,
     pub prepared_size_limit_bytes: u64,
     pub prepared_entries: usize,
+    pub prepared_evictions: u64,
 }
 
 #[derive(Default)]
@@ -461,6 +463,7 @@ impl AssetCache {
                 meshes: MESH_NAMESPACE_IDS.iter().map(|namespace| self.storage.namespace_entry_count(*namespace)).sum(),
             },
             protected_bytes: self.storage.protected_bytes(),
+            evictions: self.storage.eviction_count(),
             recent_evictions: self.storage.recent_evictions(),
             prepared_hits: self.counters.prepared_hits.load(Ordering::Relaxed),
             prepared_misses: self.counters.prepared_misses.load(Ordering::Relaxed),
@@ -470,6 +473,7 @@ impl AssetCache {
             prepared_size_bytes: self.prepared.accounted_size(),
             prepared_size_limit_bytes: self.prepared.size_limit(),
             prepared_entries: self.prepared.namespace_entry_count(PREPARED_TEXTURES),
+            prepared_evictions: self.prepared.eviction_count(),
         }
     }
 

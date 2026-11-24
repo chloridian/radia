@@ -43,12 +43,42 @@ impl ViewportQuery {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ObjectCacheStats {
+    pub started: bool,
+    pub ready: bool,
+    pub disabled: bool,
+    pub degraded: bool,
+    pub write_queue_depth: usize,
+    pub write_queue_capacity: usize,
+    pub write_queue_bytes: usize,
+    pub write_queue_byte_capacity: usize,
+    pub outstanding_writes: usize,
+    pub worker_queue_capacity: usize,
+    pub pending_submissions: usize,
+    pub pending_submissions_capacity: usize,
+    pub busy_drops: u64,
+    pub full_drops: u64,
+    pub dropped_writes: u64,
+    pub identified_regions: usize,
+    pub loaded_regions: usize,
+    pub in_flight_region_loads: usize,
+    pub loaded_entries: usize,
+    pub loaded_bytes: usize,
+}
+
+#[derive(Clone)]
+pub struct SessionDiagnostics {
+    pub object_cache: watch::Receiver<ObjectCacheStats>,
+}
+
 #[derive(Clone)]
 pub struct SessionInspection {
     pub world: WorldReader,
     pub assets: AssetHandle,
     pub render_stats: watch::Receiver<RenderStatsSnapshot>,
     pub viewport_queries: mpsc::Sender<ViewportQuery>,
+    pub diagnostics: SessionDiagnostics,
 }
 
 #[derive(Clone)]
