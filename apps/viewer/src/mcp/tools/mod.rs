@@ -22,9 +22,9 @@ mod world_query;
 
 use std::{future::Future, pin::Pin};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
-use world::Entity;
+use world::{Entity, SculptType, Shape};
 
 use crate::{inspection::ViewerInspectionHandle, world_reader::WorldReader};
 
@@ -77,4 +77,56 @@ pub fn find_tool(name: &str) -> Option<&'static ToolSpec> {
 pub(super) async fn lookup_object_entity(world: &WorldReader, id_str: &str) -> Result<Option<Entity>, String> {
     let target_id = Uuid::parse_str(id_str).map_err(|e| format!("invalid object_id: {e}"))?;
     world.entity(target_id).await.map_err(|e| format!("object lookup failed: {e}"))
+}
+
+pub(super) fn format_shape(shape: &Shape) -> Value {
+    match shape {
+        Shape::Prim(prim) => json!({
+            "kind": "prim",
+            "path_curve": prim.path_curve,
+            "profile_curve": prim.profile_curve,
+            "path_begin": prim.path_begin,
+            "path_end": prim.path_end,
+            "path_scale_x": prim.path_scale_x,
+            "path_scale_y": prim.path_scale_y,
+            "path_shear_x": prim.path_shear_x,
+            "path_shear_y": prim.path_shear_y,
+            "path_twist": prim.path_twist,
+            "path_twist_begin": prim.path_twist_begin,
+            "path_radius_offset": prim.path_radius_offset,
+            "path_taper_x": prim.path_taper_x,
+            "path_taper_y": prim.path_taper_y,
+            "path_revolutions": prim.path_revolutions,
+            "path_skew": prim.path_skew,
+            "profile_begin": prim.profile_begin,
+            "profile_end": prim.profile_end,
+            "profile_hollow": prim.profile_hollow,
+        }),
+        Shape::Sculpt { asset_id: _, sculpt_type, flags } => {
+            let sculpt_type = match sculpt_type {
+                SculptType::Sphere => "sphere",
+                SculptType::Torus => "torus",
+                SculptType::Plane => "plane",
+                SculptType::Cylinder => "cylinder",
+            };
+            json!({
+                "kind": "sculpt",
+                "sculpt_type": sculpt_type,
+                "flags": {
+                    "invert": flags.invert,
+                    "mirror": flags.mirror,
+                },
+            })
+        }
+        Shape::Mesh { asset_id: _, flags } => json!({
+            "kind": "mesh",
+            "flags": {
+                "invert": flags.invert,
+                "mirror": flags.mirror,
+            },
+        }),
+        Shape::Avatar => json!({
+            "kind": "avatar",
+        }),
+    }
 }

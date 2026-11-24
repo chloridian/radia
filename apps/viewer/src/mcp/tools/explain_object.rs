@@ -1,8 +1,8 @@
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
-use world::ObjectDetailResult;
+use world::{ObjectDetail, ObjectDetailResult};
 
-use super::{ToolContent, ToolFuture, ToolSpec, lookup_object_entity};
+use super::{ToolContent, ToolFuture, ToolSpec, format_shape, lookup_object_entity};
 use crate::{
     inspection::{ViewerInspectionHandle, ViewportQuery},
     mcp::MAX_JSON_RESPONSE_BYTES,
@@ -85,18 +85,7 @@ fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
             })
         });
 
-        let world_json = world_detail.map(|detail| {
-            json!({
-                "entity": format!("{:?}", detail.summary.entity),
-                "id": detail.summary.id.to_string(),
-                "region": detail.summary.address.region().get(),
-                "local_id": detail.summary.address.local_id(),
-                "kind": format!("{:?}", detail.summary.kind),
-                "shape": detail.shape.map(|shape| format!("{shape:?}")),
-                "is_physical": detail.is_physical,
-                "attachment_point": detail.attachment_point.map(|point| format!("{point:?}")),
-            })
-        });
+        let world_json = world_detail.as_ref().map(format_world_detail);
 
         Ok(ToolContent::Json(json!({
             "found": true,
@@ -105,4 +94,60 @@ fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
             "render": render_json,
         })))
     })
+}
+
+fn format_world_detail(detail: &ObjectDetail) -> Value {
+    json!({
+        "entity": format!("{:?}", detail.summary.entity),
+        "id": detail.summary.id.to_string(),
+        "region": detail.summary.address.region().get(),
+        "local_id": detail.summary.address.local_id(),
+        "kind": format!("{:?}", detail.summary.kind),
+        "shape": detail.shape.as_ref().map(format_shape),
+        "is_physical": detail.is_physical,
+        "attachment_point": detail.attachment_point.map(|point| format!("{point:?}")),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+
+    use utils::AssetId;
+    use uuid::Uuid;
+    use world::{FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, SculptFlags, Shape, UpdateSource, World, WorldLimits};
+
+    use super::format_world_detail;
+
+    #[test]
+    fn explain_object_output_omits_shape_asset_uuids() {
+        let mut world = World::new(WorldLimits {
+            max_regions: 2,
+            max_entities: 8,
+            max_entities_per_region: 8,
+            max_tombstones_per_region: 8,
+            max_tombstones: 8,
+            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(8),
+            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(8),
+            max_journal_entries: 8,
+            max_journal_changes: 32,
+            max_region_name_bytes: 64,
+            max_recovery_targets: 4,
+        });
+        let region = world.register_region().expect("register region");
+        let secret_mesh = Uuid::from_u128(0xdead_beef_cafe_babe_0123_4567_89ab_cdef);
+        let local_id = NonZeroU32::new(1).expect("nonzero local id");
+        let source = UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0);
+        let mesh_id = Uuid::from_u128(1);
+        let mut observation = ObjectObservation::new(source, mesh_id, local_id, Kind::Object, ParentUpdate::Root);
+        observation.shape =
+            FieldUpdate::Set(Shape::Mesh { asset_id: AssetId::new(secret_mesh), flags: SculptFlags { invert: false, mirror: true } });
+        drop(world.observe_object(observation).expect("observe mesh"));
+        let entity = world.entity(mesh_id).expect("mesh entity");
+        let detail = world.object_detail(entity).expect("mesh detail");
+        let output = format_world_detail(&detail);
+        assert_eq!(output["shape"]["kind"], "mesh");
+        assert_eq!(output["shape"]["flags"]["mirror"], true);
+        assert!(!output.to_string().contains(&secret_mesh.to_string()));
+    }
 }
