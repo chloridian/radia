@@ -5,6 +5,7 @@ pub mod gui;
 pub mod inspection;
 pub mod inventory;
 pub mod logging;
+pub mod mcp;
 mod remembered_login;
 mod scene_feed;
 mod session;
