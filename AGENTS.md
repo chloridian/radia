@@ -91,7 +91,7 @@ Source has no comments or doc comments, and that includes safety comments on `un
 - Use `assert_matches!` instead of `assert!(matches!(..))`, so failures print the actual value.
 - Keep test names short (`<subject>_<outcome>`, usually 2–5 words). Drop module/type/function names, setup, filler (`test_`, `should`, `when`, `returns`), and issue IDs; put details in assertion messages.
 - Ask before launching the gui viewer, driving a browser, or any computer use.
-- Inspect a running viewer through its local MCP server (`--mcp`) instead of guessing at scene, render, asset, or log state. See [radia-mcp](.agents/skills/radia-mcp/SKILL.md).
+- Launch with `cargo run --release --bin viewer -- --mcp`, then use the `radia` MCP server at `http://127.0.0.1:47100/mcp` to inspect scene, render, asset and log state instead of guessing.
 
 ## Versioning
 
