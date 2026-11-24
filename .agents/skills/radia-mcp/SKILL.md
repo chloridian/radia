@@ -34,6 +34,9 @@ Startup prints `MCP server listening on http://127.0.0.1:<port>`. The default en
 | `screenshot` | Non-blocking viewport PNG capture encoded off the GUI thread. |
 | `explain_object` | Combined World detail + renderer placement, culling, mesh residency, and per-face PBR/legacy material shading, reason, texture/alpha/omission state for an `object_id` (no asset UUIDs). |
 | `pick` | Geometry pick at viewport pixel `(x, y)` returning hit point, entity, object UUID, face slot, and base/emissive texture presence. |
+| `queues` | Depth, capacity, and lifetime full/rejected counts for bounded viewer queues grouped by subsystem (`object_cache`, `world`, `assets`, `inventory`, `network`, `session`, `viewport`). |
+| `region` | Current agent region name, handle, latest simulator `SimStats`, and current parcel name, area, and flags. |
+| `build` | Viewer version, build profile (`debug`/`release`), target OS/arch, GPU adapter details, and key `wgpu` device limits. |
 | `wait_for` | Bounded `watch`-channel wait (`world_revision`, `asset_queue_empty`, `texture_event`, max 30s timeout) with zero polling. |
 
 ## Write tools (local only)
