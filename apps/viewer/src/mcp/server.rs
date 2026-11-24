@@ -43,7 +43,8 @@ use tokio::{
 };
 
 use super::{
-    MAX_CONCURRENT_REQUESTS, MAX_JSON_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_SESSIONS, REQUEST_TIMEOUT, SESSION_IDLE_TIMEOUT,
+    MAX_CONCURRENT_REQUESTS, MAX_JSON_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_SESSIONS, REQUEST_TIMEOUT, SERVER_INSTRUCTIONS,
+    SESSION_IDLE_TIMEOUT,
     tools::{TOOLS, ToolContent, find_tool},
 };
 use crate::inspection::ViewerInspectionHandle;
@@ -267,6 +268,7 @@ impl ServerHandler for RadiaMcpHandler {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("radia", env!("CARGO_PKG_VERSION")))
+            .with_instructions(SERVER_INSTRUCTIONS)
     }
 
     async fn list_tools(

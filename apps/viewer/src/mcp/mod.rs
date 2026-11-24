@@ -14,3 +14,18 @@ pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
 pub const MAX_PNG_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
+
+pub const SERVER_INSTRUCTIONS: &str = "\
+Radia local viewer inspection server.
+
+Tool guide:
+- Scene state: `world` (regions/objects/detail), `changes` (cursor-paged World change stream), `region` (SimStats and parcel), `camera`, `environment`.
+- Render state: `stats` (frame/GPU timing, render stats, memory), `explain_object` (World + renderer visibility/mesh/material state), `pick` (viewport pixel pick), `screenshot` (PNG capture).
+- Assets and textures: `textures` (fetch/decode queues, discard histogram, GPU memory), `queues` (bounded subsystem queues).
+- Network: `network` (per-region circuits, throttles, EventQueueGet, capabilities).
+- Logs, inventory, cache, settings: `logs` (recent WARN/ERROR), `inventory` (folder fetch counts/failures), `cache` (object/asset cache stats), `settings` (cvars and provenance).
+
+Debugging order: start with `build`, then `stats` and `world`, then `explain_object` or `pick` for specific objects, then `logs`.
+Use `wait_for` instead of sleeping or polling when waiting for `world_revision`, `asset_queue_empty`, or `texture_event`.
+Write tools (`set_setting`, `set_log_level`, `set_camera`) change local viewer state only, except `set_camera`, whose pose reaches the simulator through normal `AgentUpdate` messages.
+Asset UUIDs and raw user content are never exposed.";
