@@ -10,15 +10,18 @@ use std::{
 use assets::cache::AssetCache;
 use futures::FutureExt;
 use prism::{
-    AnyWindowHandle, App, AppContext, ColorExt, Entity, Global, QuitMode, Subscription, TitlebarOptions, WindowBounds, WindowOptions,
+    AnyWindowHandle, App, AppContext, ColorExt, Entity, Global, QuitMode, Subscription, TitlebarOptions, Window, WindowBounds,
+    WindowOptions,
     component::{Theme, ThemeMode, TitleBar},
     px, rgb, rgb_to_hsla, size,
 };
+use prism_wgpu::WgpuContextHandle;
 use tokio::{runtime::Handle, task::JoinHandle};
+use wgpu::{Device, Queue};
 
 use crate::{
     gui::{views::login::LoginScreen, window_geometry::restore_bounds},
-    inspection::ViewerInspectionPublisher,
+    inspection::{GpuInfo, ViewerInspectionPublisher},
     logging::LogControl,
     settings::SettingsStore,
 };
@@ -105,6 +108,15 @@ pub(crate) fn inspection(cx: &App) -> Option<ViewerInspectionPublisher> {
     cx.try_global::<AppLifecycle>().and_then(|lifecycle| lifecycle.inspection.clone())
 }
 
+pub(crate) fn publish_window_gpu_info(window: &Window, cx: &App) {
+    let Some(publisher) = inspection(cx) else { return };
+    let Some(handle) = WgpuContextHandle::from_window(window) else { return };
+    let Some(gpu_box) = window.gpu_context() else { return };
+    let Ok(context) = gpu_box.downcast::<(Arc<Device>, Arc<Queue>)>() else { return };
+    let (device, _) = *context;
+    publisher.set_gpu_info(GpuInfo::from_wgpu(handle.adapter_info(), &device.limits()));
+}
+
 pub fn init(
     cx: &mut App,
     services: Handle,
@@ -131,9 +143,11 @@ pub fn init(
         lifecycle.inspection = inspection;
     }
 
-    let (main_window, login) =
-        prism::open_window(login_options(cx), cx, move |window, cx| cx.new(|cx| LoginScreen::new(window, cx, session_lifecycle)))
-            .expect("failed to open the main window");
+    let (main_window, login) = prism::open_window(login_options(cx), cx, move |window, cx| {
+        publish_window_gpu_info(window, cx);
+        cx.new(|cx| LoginScreen::new(window, cx, session_lifecycle))
+    })
+    .expect("failed to open the main window");
     let lifecycle = cx.global_mut::<AppLifecycle>();
     lifecycle.controller = Some(login);
     lifecycle.login_window = Some(main_window);

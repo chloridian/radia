@@ -1,3 +1,4 @@
+mod build;
 mod cache;
 mod camera;
 mod changes;
@@ -62,6 +63,7 @@ pub const TOOLS: &[ToolSpec] = &[
     pick::SPEC,
     queues::SPEC,
     region::SPEC,
+    build::SPEC,
     wait_for::SPEC,
     set_setting::SPEC,
     set_log_level::SPEC,

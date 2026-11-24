@@ -14,6 +14,7 @@ use tokio::sync::{
     oneshot, watch,
 };
 use uuid::Uuid;
+use wgpu::{AdapterInfo, Limits};
 use world::{Entity, Region};
 
 use crate::{
@@ -376,12 +377,40 @@ impl SessionInspection {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GpuInfo {
+    pub name: String,
+    pub backend: String,
+    pub driver: String,
+    pub driver_info: String,
+    pub device_type: String,
+    pub max_texture_dimension_2d: u32,
+    pub max_buffer_size: u64,
+    pub max_bind_groups: u32,
+}
+
+impl GpuInfo {
+    pub fn from_wgpu(info: &AdapterInfo, limits: &Limits) -> Self {
+        Self {
+            name: info.name.clone(),
+            backend: format!("{:?}", info.backend),
+            driver: info.driver.clone(),
+            driver_info: info.driver_info.clone(),
+            device_type: format!("{:?}", info.device_type),
+            max_texture_dimension_2d: limits.max_texture_dimension_2d,
+            max_buffer_size: limits.max_buffer_size,
+            max_bind_groups: limits.max_bind_groups,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ViewerInspectionHandle {
     recent_logs: RecentLogs,
     session: watch::Receiver<Option<SessionInspection>>,
     settings: watch::Receiver<Option<Arc<SettingsStore>>>,
     log_control: watch::Receiver<Option<LogControl>>,
+    gpu_info: watch::Receiver<Option<GpuInfo>>,
 }
 
 impl ViewerInspectionHandle {
@@ -404,6 +433,10 @@ impl ViewerInspectionHandle {
     pub fn log_control(&self) -> Option<LogControl> {
         self.log_control.borrow().clone()
     }
+
+    pub fn gpu_info(&self) -> Option<GpuInfo> {
+        self.gpu_info.borrow().clone()
+    }
 }
 
 #[derive(Clone)]
@@ -411,6 +444,7 @@ pub struct ViewerInspectionPublisher {
     session: watch::Sender<Option<SessionInspection>>,
     settings: watch::Sender<Option<Arc<SettingsStore>>>,
     log_control: watch::Sender<Option<LogControl>>,
+    gpu_info: watch::Sender<Option<GpuInfo>>,
 }
 
 impl ViewerInspectionPublisher {
@@ -425,14 +459,25 @@ impl ViewerInspectionPublisher {
     pub fn set_log_control(&self, control: LogControl) {
         self.log_control.send_replace(Some(control));
     }
+
+    pub fn set_gpu_info(&self, info: GpuInfo) {
+        self.gpu_info.send_replace(Some(info));
+    }
 }
 
 pub fn inspection_channel(recent_logs: RecentLogs) -> (ViewerInspectionPublisher, ViewerInspectionHandle) {
     let (session_tx, session_rx) = watch::channel(None);
     let (settings_tx, settings_rx) = watch::channel(None);
     let (log_control_tx, log_control_rx) = watch::channel(None);
+    let (gpu_info_tx, gpu_info_rx) = watch::channel(None);
     (
-        ViewerInspectionPublisher { session: session_tx, settings: settings_tx, log_control: log_control_tx },
-        ViewerInspectionHandle { recent_logs, session: session_rx, settings: settings_rx, log_control: log_control_rx },
+        ViewerInspectionPublisher { session: session_tx, settings: settings_tx, log_control: log_control_tx, gpu_info: gpu_info_tx },
+        ViewerInspectionHandle {
+            recent_logs,
+            session: session_rx,
+            settings: settings_rx,
+            log_control: log_control_rx,
+            gpu_info: gpu_info_rx,
+        },
     )
 }

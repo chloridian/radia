@@ -54,10 +54,10 @@ use super::{
 use crate::{
     agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
     camera::{CameraConfig, CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input},
-    gui::{scene as gui_scene, window_geometry},
+    gui::{inspection, scene as gui_scene, window_geometry},
     inspection::{
-        CameraModeRequest, CameraStateSnapshot, EnvironmentOverrideSummary, RenderStatsSnapshot, SceneQuerySummary, SetCameraRequest,
-        ViewportQuery,
+        CameraModeRequest, CameraStateSnapshot, EnvironmentOverrideSummary, GpuInfo, RenderStatsSnapshot, SceneQuerySummary,
+        SetCameraRequest, ViewportQuery,
     },
     inventory::environments::EnvironmentMenu,
     logging::{LogControl, LogLevel},
@@ -381,10 +381,14 @@ impl SceneView {
         };
         let format = handle.texture_format();
         let info = handle.adapter_info().clone();
+        let limits = device.limits();
         let [width, height] = self.viewport_size;
         match Renderer::new(device, queue, info, format, width, height) {
             Ok(renderer) => {
                 let info = renderer.adapter_info();
+                if let Some(publisher) = inspection(cx) {
+                    publisher.set_gpu_info(GpuInfo::from_wgpu(info, &limits));
+                }
                 tracing::info!(
                     backend = ?info.backend,
                     gpu = %info.name,
