@@ -181,17 +181,31 @@ fn handler(handle: ViewerInspectionHandle, _args: Value) -> ToolFuture {
 mod tests {
     use utils::AssetId;
     use uuid::Uuid;
-    use world::{EnvironmentAssignment, EnvironmentRead, EnvironmentSource, Region, WorldRevision};
+    use world::{EnvironmentAssignment, EnvironmentRead, EnvironmentSource, World, WorldLimits};
 
     use super::format_environment;
     use crate::inspection::EnvironmentOverrideSummary;
 
     #[test]
     fn environment_output_omits_asset_uuids() {
+        let mut world = World::new(WorldLimits {
+            max_regions: 2,
+            max_entities: 8,
+            max_entities_per_region: 8,
+            max_tombstones_per_region: 8,
+            max_tombstones: 8,
+            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(8),
+            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(8),
+            max_journal_entries: 8,
+            max_journal_changes: 32,
+            max_region_name_bytes: 64,
+            max_recovery_targets: 4,
+        });
+        let region = world.register_region().expect("register region");
         let secret_asset = Uuid::from_u128(0xdead_beef_cafe_babe_0123_4567_89ab_cdef);
         let read = EnvironmentRead {
-            region: Region::from_raw(1),
-            hydration_revision: WorldRevision::new(5),
+            region,
+            hydration_revision: world.revision(),
             region_assignment: Some(EnvironmentAssignment {
                 source: EnvironmentSource::Asset(AssetId::new(secret_asset)),
                 version: Some(2),

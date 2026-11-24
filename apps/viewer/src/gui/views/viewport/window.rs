@@ -660,7 +660,7 @@ impl SceneView {
                     },
                     Some(EnvironmentChoice::Shared) | None => EnvironmentOverrideSummary::default(),
                 };
-                drop(reply.send(summary));
+                reply.send(summary).ok();
             }
             ViewportQuery::CameraState { reply } => {
                 let mode = match self.camera_mode {
@@ -677,12 +677,12 @@ impl SceneView {
                             direction: Some([direction.x, direction.y, direction.z]),
                             vertical_fov_deg: Some(camera.vertical_fov().to_degrees()),
                             draw_distance: Some(camera.draw_distance()),
-                            lod_factor: Some(camera.lod_factor()),
+                            lod_factor: Some(f64::from(self.lod_factor)),
                         }
                     }
                     None => CameraStateSnapshot { mode, ..CameraStateSnapshot::default() },
                 };
-                drop(reply.send(snapshot));
+                reply.send(snapshot).ok();
             }
         }
     }

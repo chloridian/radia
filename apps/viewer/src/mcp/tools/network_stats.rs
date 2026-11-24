@@ -132,14 +132,28 @@ mod tests {
         CircuitMotionStatus, CircuitStats,
         capabilities::{CapabilityDiagnostics, CapabilityRequestStatus, EventQueueState, EventQueueStatus},
     };
-    use world::Region;
+    use world::{World, WorldLimits};
 
     use super::{RegionNetworkSnapshot, format_network_snapshot};
 
     #[test]
     fn network_output_omits_urls_and_session_ids() {
+        let mut world = World::new(WorldLimits {
+            max_regions: 2,
+            max_entities: 8,
+            max_entities_per_region: 8,
+            max_tombstones_per_region: 8,
+            max_tombstones: 8,
+            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(8),
+            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(8),
+            max_journal_entries: 8,
+            max_journal_changes: 32,
+            max_region_name_bytes: 64,
+            max_recovery_targets: 4,
+        });
+        let region = world.register_region().expect("register region");
         let regions = vec![RegionNetworkSnapshot {
-            region: Region::from_raw(1),
+            region,
             region_name: Some("Ahern".to_owned()),
             is_primary: true,
             circuit: CircuitMotionStatus {

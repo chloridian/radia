@@ -1,7 +1,7 @@
 pub(super) mod inventory_sync;
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     future::pending,
     mem,
     net::SocketAddr,

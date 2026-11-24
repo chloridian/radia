@@ -117,7 +117,7 @@ impl GeometryRenderer {
             MeshResidency::NoMesh
         };
 
-        let materials = scene_object.or(item.source.as_deref()).and_then(Object::materials);
+        let materials = scene_object.or(item.source.as_ref()).and_then(Object::materials);
         let faces = item
             .faces
             .iter()

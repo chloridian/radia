@@ -177,7 +177,7 @@ pub struct SessionInspection {
     pub assets: AssetHandle,
     pub render_stats: watch::Receiver<RenderStatsSnapshot>,
     pub viewport_queries: mpsc::Sender<ViewportQuery>,
-    pub agent_motion: watch::Receiver<Option<AgentMotionSample>>,
+    pub(crate) agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     pub diagnostics: SessionDiagnostics,
 }
 
