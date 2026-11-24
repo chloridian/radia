@@ -198,6 +198,27 @@ pub struct WorldChangeCursor {
 }
 
 impl WorldChangeCursor {
+    pub fn encode(self) -> String {
+        match self.next_change {
+            Some(next) => format!("{}:{}:{next}", self.world.raw(), self.through_revision.0),
+            None => format!("{}:{}", self.world.raw(), self.through_revision.0),
+        }
+    }
+
+    pub fn decode(token: &str) -> Option<Self> {
+        let mut parts = token.split(':');
+        let world = parts.next()?.parse::<u64>().ok()?;
+        let through_revision = parts.next()?.parse::<u64>().ok()?;
+        let next_change = match parts.next() {
+            Some(raw) => Some(raw.parse::<usize>().ok()?),
+            None => None,
+        };
+        if parts.next().is_some() || (next_change.is_some() && through_revision == 0) {
+            return None;
+        }
+        Some(Self { world: WorldId::from_raw(world), through_revision: WorldRevision(through_revision), next_change })
+    }
+
     fn completed_revision(self) -> WorldRevision {
         match self.next_change {
             Some(_) => WorldRevision(self.through_revision.0.checked_sub(1).expect("a partial revision is nonzero")),
