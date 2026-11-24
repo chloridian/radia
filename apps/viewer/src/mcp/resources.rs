@@ -13,42 +13,42 @@ use super::{
 };
 use crate::inspection::ViewerInspectionHandle;
 
-pub const OBJECT_URI_TEMPLATE: &str = "radia://object/{local_id}";
-const OBJECT_URI_PREFIX: &str = "radia://object/";
+pub const OBJECT_URI_TEMPLATE: &str = "viewer://object/{local_id}";
+const OBJECT_URI_PREFIX: &str = "viewer://object/";
 
 pub fn static_resources() -> Vec<Resource> {
     vec![
         make_resource(
-            "radia://world",
+            "viewer://world",
             "world",
             "World Summary",
             "Active regions and object counts from the World snapshot.",
             "application/json",
         ),
         make_resource(
-            "radia://stats",
+            "viewer://stats",
             "stats",
             "Viewer Stats",
             "Frame timing, recent spikes, render stats, asset queue stats, and memory stats.",
             "application/json",
         ),
         make_resource(
-            "radia://region",
+            "viewer://region",
             "region",
             "Current Region",
             "Current agent region name, handle, SimStats, and parcel state.",
             "application/json",
         ),
-        make_resource("radia://settings", "settings", "Viewer Settings", "Current viewer cvar values and provenance.", "application/json"),
+        make_resource("viewer://settings", "settings", "Viewer Settings", "Current viewer cvar values and provenance.", "application/json"),
         make_resource(
-            "radia://logs",
+            "viewer://logs",
             "logs",
             "Recent Logs",
             "Recent WARN and ERROR log entries from the in-memory ring buffer.",
             "text/plain",
         ),
         make_resource(
-            "radia://screenshot",
+            "viewer://screenshot",
             "screenshot",
             "Viewport Screenshot",
             "Current viewport texture encoded as a PNG image.",
@@ -76,12 +76,12 @@ pub async fn read_resource(
     ctx: ToolCallContext,
 ) -> Result<ReadResourceResult, ErrorData> {
     match uri {
-        "radia://world" => read_json_tool(uri, "world", json!({ "query": "summary" }), "application/json", handle, config).await,
-        "radia://stats" => read_json_tool(uri, "stats", json!({}), "application/json", handle, config).await,
-        "radia://region" => read_json_tool(uri, "region", json!({}), "application/json", handle, config).await,
-        "radia://settings" => read_json_tool(uri, "settings", json!({}), "application/json", handle, config).await,
-        "radia://logs" => read_json_tool(uri, "logs", json!({}), "text/plain", handle, config).await,
-        "radia://screenshot" => read_screenshot_resource(uri, handle, config, ctx).await,
+        "viewer://world" => read_json_tool(uri, "world", json!({ "query": "summary" }), "application/json", handle, config).await,
+        "viewer://stats" => read_json_tool(uri, "stats", json!({}), "application/json", handle, config).await,
+        "viewer://region" => read_json_tool(uri, "region", json!({}), "application/json", handle, config).await,
+        "viewer://settings" => read_json_tool(uri, "settings", json!({}), "application/json", handle, config).await,
+        "viewer://logs" => read_json_tool(uri, "logs", json!({}), "text/plain", handle, config).await,
+        "viewer://screenshot" => read_screenshot_resource(uri, handle, config, ctx).await,
         _ => {
             if let Some(id_segment) = uri.strip_prefix(OBJECT_URI_PREFIX) {
                 read_object_resource(uri, id_segment, handle, config).await

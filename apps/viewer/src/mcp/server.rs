@@ -711,7 +711,8 @@ mod tests {
         let parsed = parse_mcp_payload(&body);
         let uris: Vec<&str> =
             parsed["result"]["resources"].as_array().expect("resources array").iter().filter_map(|entry| entry["uri"].as_str()).collect();
-        for expected in ["radia://world", "radia://stats", "radia://region", "radia://settings", "radia://logs", "radia://screenshot"] {
+        for expected in ["viewer://world", "viewer://stats", "viewer://region", "viewer://settings", "viewer://logs", "viewer://screenshot"]
+        {
             assert!(uris.contains(&expected), "missing resource {expected} in {uris:?}");
         }
 
@@ -720,19 +721,19 @@ mod tests {
         assert_eq!(status, 200, "resources/templates/list body: {body}");
         let parsed = parse_mcp_payload(&body);
         let templates = parsed["result"]["resourceTemplates"].as_array().expect("templates array");
-        assert!(templates.iter().any(|entry| entry["uriTemplate"] == "radia://object/{local_id}"));
+        assert!(templates.iter().any(|entry| entry["uriTemplate"] == "viewer://object/{local_id}"));
 
         let tool_req = json!({"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": { "name": "logs", "arguments": {} }});
         let (_, _, tool_body) = post_mcp(&client, addr, Some(&session_id), &tool_req).await;
         let tool_text = parse_mcp_payload(&tool_body)["result"]["content"][0]["text"].as_str().expect("tool text").to_owned();
 
-        let read_req = json!({"jsonrpc": "2.0", "id": 13, "method": "resources/read", "params": { "uri": "radia://logs" }});
+        let read_req = json!({"jsonrpc": "2.0", "id": 13, "method": "resources/read", "params": { "uri": "viewer://logs" }});
         let (status, _, read_body) = post_mcp(&client, addr, Some(&session_id), &read_req).await;
         assert_eq!(status, 200, "resources/read body: {read_body}");
         let res_text = parse_mcp_payload(&read_body)["result"]["contents"][0]["text"].as_str().expect("resource text").to_owned();
         assert_eq!(res_text, tool_text);
 
-        let missing_req = json!({"jsonrpc": "2.0", "id": 14, "method": "resources/read", "params": { "uri": "radia://object/999999" }});
+        let missing_req = json!({"jsonrpc": "2.0", "id": 14, "method": "resources/read", "params": { "uri": "viewer://object/999999" }});
         let (status, _, missing_body) = post_mcp(&client, addr, Some(&session_id), &missing_req).await;
         assert_eq!(status, 200);
         assert!(parse_mcp_payload(&missing_body).get("error").is_some(), "expected MCP error for unknown object, got: {missing_body}");

@@ -59,7 +59,7 @@ pub fn get_prompt(request: &GetPromptRequestParams) -> Result<GetPromptResult, E
                 format!(
                     "Diagnose object `{local_id}`.\n\
                      Call these tools/resources in order:\n\
-                     1. Read `radia://object/{local_id}` (or call `explain_object`) to inspect World detail, placement, culling, mesh residency, and per-face materials.\n\
+                     1. Read `viewer://object/{local_id}` (or call `explain_object`) to inspect World detail, placement, culling, mesh residency, and per-face materials.\n\
                      2. Call `world` (`query=\"object\"`) if you need revision and attachment metadata.\n\
                      3. Call `textures` and `logs` (`level=\"warn\"`) if a mesh or texture is pending or failed.\n\
                      Conclude with why `{local_id}` is hidden, unmeshed, or shaded as observed."

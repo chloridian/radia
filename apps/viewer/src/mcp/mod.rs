@@ -18,7 +18,7 @@ pub const MAX_PNG_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
 
 pub const SERVER_INSTRUCTIONS: &str = "\
-Radia local viewer inspection server.
+Verify runtime viewer state through these tools and `viewer://` resources rather than guessing from code or logs.
 
 Tool guide:
 - Scene state: `world` (regions/objects/detail), `changes` (cursor-paged World change stream), `region` (SimStats and parcel), `camera`, `environment`.
@@ -26,6 +26,7 @@ Tool guide:
 - Assets and textures: `textures` (fetch/decode queues, discard histogram, GPU memory), `queues` (bounded subsystem queues).
 - Network: `network` (per-region circuits, throttles, EventQueueGet, capabilities).
 - Logs, inventory, cache, settings: `logs` (recent WARN/ERROR), `inventory` (folder fetch counts/failures), `cache` (object/asset cache stats), `settings` (cvars and provenance).
+- Resources: `viewer://world`, `viewer://stats`, `viewer://region`, `viewer://settings`, `viewer://logs`, `viewer://screenshot`, and `viewer://object/{local_id}`.
 
 Debugging order: start with `build`, then `stats` and `world`, then `explain_object` or `pick` for specific objects, then `logs`.
 Use `wait_for` instead of sleeping or polling when waiting for `world_revision`, `asset_queue_empty`, or `texture_event`.
