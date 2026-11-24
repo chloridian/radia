@@ -23,7 +23,7 @@ fn handler(handle: ViewerInspectionHandle, _args: Value) -> ToolFuture {
         let Some(session) = handle.session() else {
             return Ok(ToolContent::Json(json!({ "active_session": false })));
         };
-        let tex = session.assets.texture_stats();
+        let tex = session.assets.texture_stats().await.map_err(|_| "asset coordinator is unavailable".to_owned())?;
         let rs = session.render_stats.borrow().render_stats;
         let mut discard_levels = Map::new();
         for (level, count) in tex.discard_histogram.iter().enumerate() {

@@ -37,7 +37,6 @@ const COMMANDS: usize = 64;
 const MAX_MATERIALS_PER_POST: usize = 50;
 const MATERIALS_POST_INTERVAL: Duration = Duration::from_secs(1);
 const ASSET_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(30);
-const TEXTURE_STATS_INTERVAL: Duration = Duration::from_millis(250);
 const SLOW_TEXTURE_FETCH_THRESHOLD: Duration = Duration::from_secs(30);
 static UNEXPECTED_HTTP_STATUS_WARNED: AtomicU8 = AtomicU8::new(0);
 
@@ -329,6 +328,11 @@ struct DemandRequest {
     reply: oneshot::Sender<Result<Option<Demand>, RequestError>>,
 }
 
+enum AssetCommand {
+    Demand(DemandRequest),
+    TextureStats(oneshot::Sender<TextureStatsSnapshot>),
+}
+
 enum RouteCommand {
     Register(Region, Client),
     Retire(Region),
@@ -336,14 +340,13 @@ enum RouteCommand {
 
 #[derive(Clone)]
 pub struct AssetHandle {
-    requests: mpsc::Sender<DemandRequest>,
+    requests: mpsc::Sender<AssetCommand>,
     active: Arc<AtomicBool>,
     runtime: Handle,
     budget: Budget,
     textures: assets::TextureEvents,
     routes: watch::Receiver<()>,
     queue_stats: watch::Receiver<assets::AssetQueueStats>,
-    texture_stats: watch::Receiver<TextureStatsSnapshot>,
     cache: Option<Arc<AssetCache>>,
 }
 
@@ -360,8 +363,32 @@ impl AssetHandle {
         self.queue_stats.clone()
     }
 
-    pub fn texture_stats(&self) -> TextureStatsSnapshot {
-        *self.texture_stats.borrow()
+    pub async fn texture_stats(&self) -> Result<TextureStatsSnapshot, RequestError> {
+        if !self.active.load(Ordering::Acquire) {
+            return Err(RequestError::Closed);
+        }
+        let (reply, response) = oneshot::channel();
+        let deadline = {
+            let _entered = self.runtime.enter();
+            time::sleep(Duration::from_secs(1))
+        }
+        .fuse();
+        pin_mut!(deadline);
+        let permit = {
+            let reserve = self.requests.reserve().fuse();
+            pin_mut!(reserve);
+            futures::select_biased! {
+                permit = reserve => permit.map_err(|_| RequestError::Closed)?,
+                _ = deadline => return Err(if self.active.load(Ordering::Acquire) { RequestError::Busy } else { RequestError::Closed }),
+            }
+        };
+        permit.send(AssetCommand::TextureStats(reply));
+        let response = response.fuse();
+        pin_mut!(response);
+        futures::select_biased! {
+            result = response => result.map_err(|_| RequestError::Closed),
+            _ = deadline => Err(if self.active.load(Ordering::Acquire) { RequestError::Busy } else { RequestError::Closed }),
+        }
     }
 
     pub async fn request_with_importance(
@@ -406,7 +433,7 @@ impl AssetHandle {
                 _ = deadline => return Err(if self.active.load(Ordering::Acquire) { RequestError::Busy } else { RequestError::Closed }),
             }
         };
-        permit.send(DemandRequest { region, resource, priority, importance, reply });
+        permit.send(AssetCommand::Demand(DemandRequest { region, resource, priority, importance, reply }));
         let response = response.fuse();
         pin_mut!(response);
         let result = futures::select_biased! {
@@ -463,7 +490,6 @@ impl AssetCoordinator {
         let (controls, control_receiver) = mpsc::channel(COMMANDS);
         let (routes, route_events) = watch::channel(());
         let (queue_stats_tx, queue_stats_rx) = watch::channel(assets::AssetQueueStats::default());
-        let (texture_stats_tx, texture_stats_rx) = watch::channel(TextureStatsSnapshot::default());
         let active = Arc::new(AtomicBool::new(true));
         let store = cache.as_ref().map_or_else(|| Store::new(budget.clone()), |cache| Store::with_cache(budget.clone(), Arc::clone(cache)));
         let handle = AssetHandle {
@@ -474,24 +500,11 @@ impl AssetCoordinator {
             textures: store.texture_events(),
             routes: route_events,
             queue_stats: queue_stats_rx,
-            texture_stats: texture_stats_rx,
             cache,
         };
         let worker = runtime.clone().spawn(
-            run(
-                store,
-                receiver,
-                control_receiver,
-                routes,
-                queue_stats_tx,
-                texture_stats_tx,
-                active,
-                runtime,
-                cancelled,
-                write_spawner,
-                shutdown_drain_hook,
-            )
-            .in_current_span(),
+            run(store, receiver, control_receiver, routes, queue_stats_tx, active, runtime, cancelled, write_spawner, shutdown_drain_hook)
+                .in_current_span(),
         );
         Self { handle, controls, worker }
     }
@@ -638,11 +651,10 @@ fn warn_unexpected_http_status(kind: Kind, status: u16) {
 #[tracing::instrument(name = "assets.service", level = "debug", skip_all)]
 async fn run(
     mut store: Store,
-    mut requests: mpsc::Receiver<DemandRequest>,
+    mut requests: mpsc::Receiver<AssetCommand>,
     mut controls: mpsc::Receiver<RouteCommand>,
     routes: watch::Sender<()>,
     queue_stats: watch::Sender<assets::AssetQueueStats>,
-    texture_stats: watch::Sender<TextureStatsSnapshot>,
     active: Arc<AtomicBool>,
     runtime: Handle,
     cancelled: impl Future<Output = ()>,
@@ -659,7 +671,6 @@ async fn run(
     let mut fetches = VecDeque::<FetchJob>::new();
     let mut in_flight_texture_fetches = HashMap::<u64, Instant>::new();
     let mut next_texture_fetch_id = 0u64;
-    let mut last_texture_stats_at: Option<Instant> = None;
     let mut failures = Summary::<AssetFailures>::new(ASSET_FAILURE_REPORT_INTERVAL);
     loop {
         if !active.load(Ordering::Acquire) {
@@ -675,42 +686,6 @@ async fn run(
                 true
             }
         });
-        if last_texture_stats_at.is_none_or(|at| now.saturating_duration_since(at) >= TEXTURE_STATS_INTERVAL) {
-            last_texture_stats_at = Some(now);
-            let store_textures = store.texture_stats();
-            let mut decode_queued_visible = 0usize;
-            let mut decode_queued_background = 0usize;
-            for input in &waiting {
-                if input.resource().kind != Kind::Texture {
-                    continue;
-                }
-                match store.priority(input) {
-                    Priority::Visible => decode_queued_visible += 1,
-                    Priority::Background => decode_queued_background += 1,
-                }
-            }
-            let fetches_in_flight_over_30s = in_flight_texture_fetches
-                .values()
-                .filter(|started| now.saturating_duration_since(**started) > SLOW_TEXTURE_FETCH_THRESHOLD)
-                .count();
-            let snapshot = TextureStatsSnapshot {
-                fetch_queued_visible: store_textures.fetch_queued_visible,
-                fetch_queued_background: store_textures.fetch_queued_background,
-                decode_queued_visible,
-                decode_queued_background,
-                running_texture_decodes: stats.running_texture_decodes,
-                discard_histogram: store_textures.discard_histogram,
-                fetches_in_flight_over_30s,
-            };
-            texture_stats.send_if_modified(|current| {
-                if *current == snapshot {
-                    false
-                } else {
-                    *current = snapshot;
-                    true
-                }
-            });
-        }
         while let Some(job) = fetches.pop_front() {
             spawn_fetch(job, &transports, &runtime, &mut jobs, &mut in_flight_texture_fetches, &mut next_texture_fetch_id, now);
         }
@@ -755,7 +730,7 @@ async fn run(
         enum Input {
             Cancel,
             Control(Option<RouteCommand>),
-            Request(Option<DemandRequest>),
+            Request(Option<AssetCommand>),
             Job(Result<WorkerResult, JoinError>),
             Wake,
         }
@@ -808,7 +783,39 @@ async fn run(
                     transports.remove(&route);
                 }
             }
-            Input::Request(Some(DemandRequest { region, resource, priority, importance, reply })) => {
+            Input::Request(Some(AssetCommand::TextureStats(reply))) => {
+                if reply.is_canceled() {
+                    continue;
+                }
+                let now = Instant::now();
+                let store_textures = store.texture_stats();
+                let mut decode_queued_visible = 0usize;
+                let mut decode_queued_background = 0usize;
+                for input in &waiting {
+                    if input.resource().kind != Kind::Texture {
+                        continue;
+                    }
+                    match store.priority(input) {
+                        Priority::Visible => decode_queued_visible += 1,
+                        Priority::Background => decode_queued_background += 1,
+                    }
+                }
+                let fetches_in_flight_over_30s = in_flight_texture_fetches
+                    .values()
+                    .filter(|started| now.saturating_duration_since(**started) > SLOW_TEXTURE_FETCH_THRESHOLD)
+                    .count();
+                let snapshot = TextureStatsSnapshot {
+                    fetch_queued_visible: store_textures.fetch_queued_visible,
+                    fetch_queued_background: store_textures.fetch_queued_background,
+                    decode_queued_visible,
+                    decode_queued_background,
+                    running_texture_decodes: store.queue_stats().running_texture_decodes,
+                    discard_histogram: store_textures.discard_histogram,
+                    fetches_in_flight_over_30s,
+                };
+                reply.send(snapshot).ok();
+            }
+            Input::Request(Some(AssetCommand::Demand(DemandRequest { region, resource, priority, importance, reply }))) => {
                 if reply.is_canceled() {
                     continue;
                 }

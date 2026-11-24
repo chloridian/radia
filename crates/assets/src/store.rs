@@ -29,6 +29,9 @@ const MAX_NON_TEXTURE_DECODES: usize = 2;
 pub const MAX_NON_MESH_FETCHES: usize = 8;
 const MAX_MESH_FETCHES: usize = 32;
 const MAX_LEGACY_MATERIAL_FETCHES: usize = 50;
+const MESH_FETCH_POOL: usize = 0;
+const LEGACY_MATERIAL_FETCH_POOL: usize = 1;
+const OTHER_FETCH_POOL: usize = 2;
 const FETCH_LIMITS: [usize; 3] = [MAX_MESH_FETCHES, MAX_LEGACY_MATERIAL_FETCHES, MAX_NON_MESH_FETCHES];
 const DEMAND_DEADLINE: Duration = Duration::from_secs(60);
 const NEGATIVE_TTL: Duration = Duration::from_secs(30);
@@ -993,9 +996,9 @@ impl Store {
 
     pub fn queue_stats(&self) -> AssetQueueStats {
         AssetQueueStats {
-            queued_mesh: self.candidate_queues[0].len(),
-            queued_legacy_material: self.candidate_queues[1].len(),
-            queued_other: self.candidate_queues[2].len(),
+            queued_mesh: self.candidate_queues[MESH_FETCH_POOL].len(),
+            queued_legacy_material: self.candidate_queues[LEGACY_MATERIAL_FETCH_POOL].len(),
+            queued_other: self.candidate_queues[OTHER_FETCH_POOL].len(),
             running_fetches: self.running_fetches.iter().sum(),
             running_cache_reads: self.running_cache_reads,
             running_texture_decodes: self.running_texture_decodes,
@@ -1005,7 +1008,7 @@ impl Store {
 
     pub fn texture_stats(&self) -> TextureStoreStats {
         let mut stats = TextureStoreStats::default();
-        for candidate in &self.candidate_queues[2] {
+        for candidate in &self.candidate_queues[fetch_pool(Kind::Texture)] {
             if candidate.key.resource.kind != Kind::Texture {
                 continue;
             }
@@ -2295,9 +2298,9 @@ fn content_satisfies(content: &Content, desired: Option<TextureSize>) -> bool {
 
 fn fetch_pool(kind: Kind) -> usize {
     match kind {
-        Kind::Mesh => 0,
-        Kind::LegacyMaterial => 1,
-        Kind::Texture | Kind::PbrMaterial | Kind::Environment => 2,
+        Kind::Mesh => MESH_FETCH_POOL,
+        Kind::LegacyMaterial => LEGACY_MATERIAL_FETCH_POOL,
+        Kind::Texture | Kind::PbrMaterial | Kind::Environment => OTHER_FETCH_POOL,
     }
 }
 
