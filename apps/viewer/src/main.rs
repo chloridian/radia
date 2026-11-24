@@ -12,7 +12,7 @@ use viewer::{
     gui,
     inspection::inspection_channel,
     logging::{self, LogLevel},
-    mcp::{McpServer, McpServerConfig},
+    mcp::{DEFAULT_PORT, McpServer, McpServerConfig},
     settings::{SettingsStore, default_settings_path},
 };
 
@@ -35,10 +35,16 @@ impl AssetSource for ViewerAssets {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CliOptions {
     mcp: bool,
     mcp_port: u16,
+}
+
+impl Default for CliOptions {
+    fn default() -> Self {
+        Self { mcp: false, mcp_port: DEFAULT_PORT }
+    }
 }
 
 fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions, String> {
@@ -140,12 +146,20 @@ fn main() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use viewer::mcp::DEFAULT_PORT;
+
     use super::{CliOptions, parse_cli_args};
 
     #[test]
     fn mcp_cli_off_by_default() {
         let parsed = parse_cli_args(Vec::<String>::new()).expect("empty args");
-        assert_eq!(parsed, CliOptions { mcp: false, mcp_port: 0 });
+        assert_eq!(parsed, CliOptions { mcp: false, mcp_port: DEFAULT_PORT });
+    }
+
+    #[test]
+    fn mcp_cli_flag_uses_default_port() {
+        let parsed = parse_cli_args(["--mcp".to_owned()]).expect("mcp flag");
+        assert_eq!(parsed, CliOptions { mcp: true, mcp_port: DEFAULT_PORT });
     }
 
     #[test]

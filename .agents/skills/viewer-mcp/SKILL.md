@@ -7,14 +7,14 @@ description: Inspect a running Radia viewer through its opt-in local loopback MC
 
 ## Starting the viewer with MCP enabled
 
-By default, Radia binds no network listener. Pass `--mcp` (ephemeral loopback port) or `--mcp-port <port>` (fixed loopback port) to start the local MCP HTTP server on `127.0.0.1`:
+By default, Radia binds no network listener. Pass `--mcp` (fixed default loopback port `47100`) or `--mcp-port <port>` (override loopback port) to start the local MCP HTTP server on `127.0.0.1`:
 
 ```sh
 cargo run --bin viewer -- --mcp
 cargo run --bin viewer -- --mcp-port 4040
 ```
 
-Startup prints `MCP server listening on http://127.0.0.1:<port>`. Disconnecting an MCP client leaves the viewer running.
+Startup prints `MCP server listening on http://127.0.0.1:<port>`. The default endpoint URL is `http://127.0.0.1:47100/` (the server accepts JSON-RPC `POST` requests on any path, including `/` and `/mcp`). Disconnecting an MCP client leaves the viewer running.
 
 ## Available read-only tools
 
@@ -33,11 +33,9 @@ Startup prints `MCP server listening on http://127.0.0.1:<port>`. Disconnecting 
 - Strictly bound to `127.0.0.1`.
 - Concurrency capped at 4 in-flight requests (`HTTP 429` when saturated).
 - Request body capped at 64 KiB (`HTTP 413`); JSON responses capped at 512 KiB; PNG responses capped at 8 MiB.
-- Never exposes capability URLs, session tokens, or credentials.
+- Never exposes texture/asset UUIDs, capability URLs, session tokens, or credentials.
 
 ## Adding a new tool
 
 1. Create `apps/viewer/src/mcp/tools/<name>.rs` exporting `pub const SPEC: ToolSpec`.
 2. Add `mod <name>;` and `<name>::SPEC` to `TOOLS` in `apps/viewer/src/mcp/tools/mod.rs`.
-
-Do not modify `apps/viewer/src/mcp/server.rs` or unrelated tool modules.

@@ -189,7 +189,7 @@ On Linux, remembered login storage uses Secret Service and requires a running pr
 
 ## Local MCP server
 
-Pass `--mcp` (ephemeral port) or `--mcp-port <port>` to expose read-only viewer inspection tools on `127.0.0.1`:
+Pass `--mcp` (default port `47100`) or `--mcp-port <port>` to expose read-only viewer inspection tools on `127.0.0.1`:
 
 ```bash
 cargo run --bin viewer -- --mcp
