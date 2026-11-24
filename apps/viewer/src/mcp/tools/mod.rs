@@ -4,7 +4,7 @@ mod pick;
 mod screenshot;
 mod stats;
 mod wait_for;
-mod world;
+mod world_query;
 
 use std::{future::Future, pin::Pin};
 
@@ -32,7 +32,8 @@ pub struct ToolSpec {
     pub max_response_bytes: usize,
 }
 
-pub const TOOLS: &[ToolSpec] = &[world::SPEC, stats::SPEC, logs::SPEC, screenshot::SPEC, explain_object::SPEC, pick::SPEC, wait_for::SPEC];
+pub const TOOLS: &[ToolSpec] =
+    &[world_query::SPEC, stats::SPEC, logs::SPEC, screenshot::SPEC, explain_object::SPEC, pick::SPEC, wait_for::SPEC];
 
 pub fn find_tool(name: &str) -> Option<&'static ToolSpec> {
     TOOLS.iter().find(|tool| tool.name == name)
