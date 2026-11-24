@@ -19,6 +19,7 @@ use crate::{
         region::{
             region_handshake::RegionInfo4,
             region_info::{CombatSettings, RegionInfo3, RegionInfo5},
+            sim_stats::{SimStatEntry, SimStatsRegionInfo},
         },
     },
     schema,
@@ -54,6 +55,8 @@ const _: () = {
     assert!(size_of::<RegionInfo3>() <= size_of::<FieldValue>());
     assert!(size_of::<RegionInfo5>() <= 7 * size_of::<FieldValue>());
     assert!(size_of::<CombatSettings>() <= 6 * size_of::<FieldValue>());
+    assert!(size_of::<SimStatEntry>() <= 2 * size_of::<FieldValue>());
+    assert!(size_of::<SimStatsRegionInfo>() <= size_of::<FieldValue>());
 };
 
 pub(crate) fn typed_allocation_bound<T: TypedMessage>(payload: &[u8]) -> Result<(AllocationStrategy, usize), LLUdpError> {

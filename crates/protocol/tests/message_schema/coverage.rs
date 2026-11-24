@@ -10,7 +10,7 @@ use protocol::{
             OBJECT_EXTRA_PARAMS, OBJECT_UPDATE, OBJECT_UPDATE_CACHED, OBJECT_UPDATE_COMPRESSED, PACKET_ACK, PARCEL_OVERLAY,
             PARCEL_PROPERTIES, REGION_HANDLE_REQUEST, REGION_HANDSHAKE, REGION_HANDSHAKE_REPLY, REGION_ID_AND_HANDLE_REPLY, REGION_INFO,
             REMOVE_INVENTORY_FOLDER, REMOVE_INVENTORY_ITEM, REMOVE_INVENTORY_OBJECTS, REQUEST_MULTIPLE_OBJECTS, SAVE_ASSET_INTO_INVENTORY,
-            SET_ALWAYS_RUN, START_PING_CHECK, TELEPORT_CANCEL, TELEPORT_FAILED, TELEPORT_FINISH, UPDATE_CREATE_INVENTORY_ITEM,
+            SET_ALWAYS_RUN, SIM_STATS, START_PING_CHECK, TELEPORT_CANCEL, TELEPORT_FAILED, TELEPORT_FINISH, UPDATE_CREATE_INVENTORY_ITEM,
             USE_CIRCUIT_CODE,
         },
     },
@@ -300,5 +300,12 @@ typed_message_coverage! {
         SchemaDerived, SchemaConforming, [
         ("AgentData", BlockMode::Single, "AgentID SessionID Stamp"),
         ("InventoryData", BlockMode::Variable, "FolderID ParentID"),
+    ];
+    "SimStats" => SimStats, SIM_STATS, "",
+        SchemaDerived, SchemaConforming, [
+        ("Region", BlockMode::Single, "RegionX RegionY RegionFlags ObjectCapacity"),
+        ("Stat", BlockMode::Variable, "StatID StatValue"),
+        ("PidStat", BlockMode::Single, "PID"),
+        ("RegionInfo", BlockMode::Variable, "RegionFlagsExtended"),
     ];
 }

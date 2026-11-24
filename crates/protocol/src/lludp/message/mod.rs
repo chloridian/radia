@@ -14,8 +14,8 @@ use crate::{
         MapBlockReply, MapBlockRequest, MoveInventoryFolder, MoveInventoryItem, ObjectExtraParams, ObjectUpdate, ObjectUpdateCached,
         ObjectUpdateCompressed, PacketAck, ParcelOverlay, ParcelProperties, RegionHandleRequest, RegionHandshake, RegionHandshakeReply,
         RegionIdAndHandleReply, RegionInfo, RemoveInventoryFolder, RemoveInventoryItem, RemoveInventoryObjects, RequestMultipleObjects,
-        SaveAssetIntoInventory, SetAlwaysRun, StartPingCheck, TeleportCancel, TeleportFailed, TeleportFinish, UpdateCreateInventoryItem,
-        UseCircuitCode,
+        SaveAssetIntoInventory, SetAlwaysRun, SimStats, StartPingCheck, TeleportCancel, TeleportFailed, TeleportFinish,
+        UpdateCreateInventoryItem, UseCircuitCode,
     },
     schema,
 };
@@ -206,6 +206,7 @@ messages! {
     GenericMessage(GenericMessage),
     LayerData(LayerData),
     RegionInfo(RegionInfo),
+    SimStats(SimStats),
     TeleportFinish(TeleportFinish),
     TeleportFailed(TeleportFailed),
 }

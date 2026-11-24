@@ -1,9 +1,13 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use network::{CircuitMotionStatus, CircuitStats, SessionHandle, SimulatorId, capabilities::Client as CapabilityClient};
+use protocol::messages::SimStats;
 use render::{CaptureReadback, ObjectExplanation, PickDetail, PickError, Stats};
 use tokio::sync::{
     mpsc::{self, error::TrySendError},
@@ -208,11 +212,133 @@ pub struct RegionNetworkHandle {
     pub capabilities: Option<CapabilityClient>,
 }
 
+const MAX_UNKNOWN_SIM_STATS: usize = 64;
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RegionSimStats {
+    pub region_x: u32,
+    pub region_y: u32,
+    pub region_flags: u32,
+    pub region_flags_extended: Option<u64>,
+    pub object_capacity: u32,
+    pub pid: Option<i32>,
+    pub time_dilation: Option<f32>,
+    pub sim_fps: Option<f32>,
+    pub physics_fps: Option<f32>,
+    pub agent_updates_per_sec: Option<f32>,
+    pub frame_ms: Option<f32>,
+    pub net_ms: Option<f32>,
+    pub other_ms: Option<f32>,
+    pub physics_ms: Option<f32>,
+    pub agent_ms: Option<f32>,
+    pub image_ms: Option<f32>,
+    pub script_ms: Option<f32>,
+    pub total_objects: Option<f32>,
+    pub active_objects: Option<f32>,
+    pub main_agents: Option<f32>,
+    pub child_agents: Option<f32>,
+    pub active_scripts: Option<f32>,
+    pub script_lsl_ips: Option<f32>,
+    pub in_packets_per_sec: Option<f32>,
+    pub out_packets_per_sec: Option<f32>,
+    pub pending_downloads: Option<f32>,
+    pub pending_uploads: Option<f32>,
+    pub virtual_size_kb: Option<f32>,
+    pub resident_size_kb: Option<f32>,
+    pub pending_local_uploads: Option<f32>,
+    pub unacked_bytes: Option<f32>,
+    pub physics_pinned_tasks: Option<f32>,
+    pub physics_lod_tasks: Option<f32>,
+    pub physics_step_ms: Option<f32>,
+    pub physics_shape_ms: Option<f32>,
+    pub physics_other_ms: Option<f32>,
+    pub physics_memory_mb: Option<f32>,
+    pub script_eps: Option<f32>,
+    pub spare_ms: Option<f32>,
+    pub sleep_ms: Option<f32>,
+    pub io_pump_ms: Option<f32>,
+    pub scripts_run_pct: Option<f32>,
+    pub ai_step_ms: Option<f32>,
+    pub skipped_silhouette_steps: Option<f32>,
+    pub characters_updated_pct: Option<f32>,
+    pub other_stats: Vec<(u32, f32)>,
+}
+
+impl RegionSimStats {
+    pub fn from_message(message: &SimStats) -> Self {
+        let region_flags_extended =
+            message.region_info.iter().filter_map(|info| info.region_flags_extended).reduce(|left, right| left | right);
+        let mut stats = Self {
+            region_x: message.region.region_x,
+            region_y: message.region.region_y,
+            region_flags: message.region.region_flags,
+            region_flags_extended,
+            object_capacity: message.region.object_capacity,
+            pid: message.pid,
+            ..Self::default()
+        };
+        for entry in &message.stats {
+            if !entry.stat_value.is_finite() {
+                continue;
+            }
+            let value = Some(entry.stat_value);
+            match entry.stat_id {
+                0 => stats.time_dilation = value,
+                1 => stats.sim_fps = value,
+                2 => stats.physics_fps = value,
+                3 => stats.agent_updates_per_sec = value,
+                4 => stats.frame_ms = value,
+                5 => stats.net_ms = value,
+                6 => stats.other_ms = value,
+                7 => stats.physics_ms = value,
+                8 => stats.agent_ms = value,
+                9 => stats.image_ms = value,
+                10 => stats.script_ms = value,
+                11 => stats.total_objects = value,
+                12 => stats.active_objects = value,
+                13 => stats.main_agents = value,
+                14 => stats.child_agents = value,
+                15 => stats.active_scripts = value,
+                16 => stats.script_lsl_ips = value,
+                17 => stats.in_packets_per_sec = value,
+                18 => stats.out_packets_per_sec = value,
+                19 => stats.pending_downloads = value,
+                20 => stats.pending_uploads = value,
+                21 => stats.virtual_size_kb = value,
+                22 => stats.resident_size_kb = value,
+                23 => stats.pending_local_uploads = value,
+                24 => stats.unacked_bytes = value,
+                25 => stats.physics_pinned_tasks = value,
+                26 => stats.physics_lod_tasks = value,
+                27 => stats.physics_step_ms = value,
+                28 => stats.physics_shape_ms = value,
+                29 => stats.physics_other_ms = value,
+                30 => stats.physics_memory_mb = value,
+                31 => stats.script_eps = value,
+                32 => stats.spare_ms = value,
+                33 => stats.sleep_ms = value,
+                34 => stats.io_pump_ms = value,
+                35 => stats.scripts_run_pct = value,
+                37 => stats.ai_step_ms = value,
+                38 => stats.skipped_silhouette_steps = value,
+                39 => stats.characters_updated_pct = value,
+                id => {
+                    if stats.other_stats.len() < MAX_UNKNOWN_SIM_STATS {
+                        stats.other_stats.push((id, entry.stat_value));
+                    }
+                }
+            }
+        }
+        stats
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionDiagnostics {
     pub object_cache: watch::Receiver<ObjectCacheStats>,
     pub inventory: watch::Receiver<InventoryFetchStats>,
     pub network: watch::Receiver<Vec<RegionNetworkHandle>>,
+    pub sim_stats: watch::Receiver<HashMap<Region, RegionSimStats>>,
     pub session_queues: watch::Receiver<SessionQueuesSnapshot>,
     pub network_session: SessionHandle,
     pub inventory_fetch: InventoryFetchHandle,

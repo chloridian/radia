@@ -51,7 +51,7 @@ use super::{
 };
 use crate::{
     asset_coordinator::AssetCoordinator,
-    inspection::{InventoryFetchStats, ObjectCacheStats, RegionNetworkHandle, SessionDiagnostics, SessionQueuesSnapshot},
+    inspection::{InventoryFetchStats, ObjectCacheStats, RegionNetworkHandle, RegionSimStats, SessionDiagnostics, SessionQueuesSnapshot},
     inventory::{
         FolderApplyOutcome, FolderFetch, InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError,
         InventoryFetchEvent, MoveExpectation,
@@ -463,6 +463,8 @@ struct SessionDriver {
     region_motion_mapping: HashMap<world::Region, SimulatorId>,
     region_motion_sender: watch::Sender<Vec<(world::Region, watch::Receiver<CircuitMotionStatus>)>>,
     network_diagnostics: watch::Sender<Vec<RegionNetworkHandle>>,
+    region_sim_stats: HashMap<world::Region, RegionSimStats>,
+    sim_stats: watch::Sender<HashMap<world::Region, RegionSimStats>>,
     session_queues: watch::Sender<SessionQueuesSnapshot>,
     region_lookup: Option<RegionLookup>,
     media: ObjectMediaIntake,
@@ -630,6 +632,7 @@ impl SessionDriver {
         let camera = CameraUplink::new();
         let (region_motion_sender, _) = watch::channel(Vec::new());
         let (network_diagnostics, _) = watch::channel(Vec::new());
+        let (sim_stats, _) = watch::channel(HashMap::new());
         let (session_queues, _) = watch::channel(SessionQueuesSnapshot::default());
         let media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
         let recovery = RecoveryIntake::new();
@@ -702,6 +705,8 @@ impl SessionDriver {
             region_motion_mapping: HashMap::new(),
             region_motion_sender,
             network_diagnostics,
+            region_sim_stats: HashMap::new(),
+            sim_stats,
             session_queues,
             region_lookup: None,
             media,
@@ -1683,6 +1688,12 @@ impl SessionDriver {
     ) -> ControlFlow<()> {
         let primary_origin_before = (self.primary_simulator == Some(simulator_id)).then(|| self.primary_region_origin()).flatten();
         let region = self.session_world.region_for(simulator_id);
+        if let Message::SimStats(stats) = &message
+            && let Some(region) = region
+        {
+            self.region_sim_stats.insert(region, RegionSimStats::from_message(stats));
+            self.sim_stats.send_replace(self.region_sim_stats.clone());
+        }
         if let Message::RegionHandshake(handshake) = &message {
             self.object_cache.set_region_identity(simulator_id, handshake);
             if let Some(flags) = self.object_cache.begin_region_load(simulator_id, &self.runtime) {
@@ -1905,6 +1916,9 @@ impl SessionDriver {
         self.environments.simulator_disconnected(&mut self.session_world, simulator_id);
         if let Some(region) = self.session_world.region_for(simulator_id) {
             self.assets.retire(region);
+            if self.region_sim_stats.remove(&region).is_some() {
+                self.sim_stats.send_replace(self.region_sim_stats.clone());
+            }
         }
         self.handoff.simulator_disconnected(&mut self.session_world, simulator_id);
         self.motion_statuses.remove(&simulator_id);
@@ -1940,6 +1954,7 @@ impl SessionDriver {
                 object_cache: self.object_cache_stats.subscribe(),
                 inventory: self.inventory_fetch_stats.subscribe(),
                 network: self.network_diagnostics.subscribe(),
+                sim_stats: self.sim_stats.subscribe(),
                 session_queues: self.session_queues.subscribe(),
                 network_session: self.session_handle.clone(),
                 inventory_fetch: self.inventory_fetch.handle(),

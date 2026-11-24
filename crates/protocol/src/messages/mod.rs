@@ -33,7 +33,7 @@ pub use self::{
     parcel::{ParcelOverlay, ParcelProperties},
     region::{
         ConfirmEnableSimulator, DisableSimulator, EnableSimulator, RegionHandleRequest, RegionHandshake, RegionHandshakeReply,
-        RegionIdAndHandleReply, RegionInfo,
+        RegionIdAndHandleReply, RegionInfo, SimStats,
     },
     terrain::LayerData,
 };
