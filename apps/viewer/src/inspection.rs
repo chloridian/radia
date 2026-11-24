@@ -7,7 +7,11 @@ use uuid::Uuid;
 use world::{Entity, Region};
 
 use crate::{
-    asset_coordinator::AssetHandle, logging::RecentLogs, session::AgentMotionSample, settings::SettingsStore, world_reader::WorldReader,
+    asset_coordinator::AssetHandle,
+    logging::{LogControl, RecentLogs},
+    session::AgentMotionSample,
+    settings::SettingsStore,
+    world_reader::WorldReader,
 };
 
 pub const VIEWPORT_QUERY_CAPACITY: usize = 8;
@@ -186,6 +190,7 @@ pub struct ViewerInspectionHandle {
     recent_logs: RecentLogs,
     session: watch::Receiver<Option<SessionInspection>>,
     settings: watch::Receiver<Option<Arc<SettingsStore>>>,
+    log_control: watch::Receiver<Option<LogControl>>,
 }
 
 impl ViewerInspectionHandle {
@@ -204,12 +209,17 @@ impl ViewerInspectionHandle {
     pub fn settings(&self) -> Option<Arc<SettingsStore>> {
         self.settings.borrow().clone()
     }
+
+    pub fn log_control(&self) -> Option<LogControl> {
+        self.log_control.borrow().clone()
+    }
 }
 
 #[derive(Clone)]
 pub struct ViewerInspectionPublisher {
     session: watch::Sender<Option<SessionInspection>>,
     settings: watch::Sender<Option<Arc<SettingsStore>>>,
+    log_control: watch::Sender<Option<LogControl>>,
 }
 
 impl ViewerInspectionPublisher {
@@ -220,13 +230,18 @@ impl ViewerInspectionPublisher {
     pub fn set_settings(&self, settings: Arc<SettingsStore>) {
         self.settings.send_replace(Some(settings));
     }
+
+    pub fn set_log_control(&self, control: LogControl) {
+        self.log_control.send_replace(Some(control));
+    }
 }
 
 pub fn inspection_channel(recent_logs: RecentLogs) -> (ViewerInspectionPublisher, ViewerInspectionHandle) {
     let (session_tx, session_rx) = watch::channel(None);
     let (settings_tx, settings_rx) = watch::channel(None);
+    let (log_control_tx, log_control_rx) = watch::channel(None);
     (
-        ViewerInspectionPublisher { session: session_tx, settings: settings_tx },
-        ViewerInspectionHandle { recent_logs, session: session_rx, settings: settings_rx },
+        ViewerInspectionPublisher { session: session_tx, settings: settings_tx, log_control: log_control_tx },
+        ViewerInspectionHandle { recent_logs, session: session_rx, settings: settings_rx, log_control: log_control_rx },
     )
 }

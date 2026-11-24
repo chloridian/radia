@@ -1,7 +1,9 @@
 use std::{
     backtrace::Backtrace,
-    collections::VecDeque,
-    env, fmt as std_fmt,
+    collections::{BTreeMap, VecDeque},
+    env,
+    error::Error,
+    fmt as std_fmt,
     fs::{self, OpenOptions},
     io::{self, IsTerminal},
     panic,
@@ -74,6 +76,17 @@ impl LogLevel {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogFilterError(String);
+
+impl std_fmt::Display for LogFilterError {
+    fn fmt(&self, formatter: &mut std_fmt::Formatter<'_>) -> std_fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Error for LogFilterError {}
+
 #[derive(Clone)]
 pub struct LogControl {
     state: Arc<Mutex<LogState>>,
@@ -84,12 +97,13 @@ pub struct LogControl {
 struct LogState {
     level: LogLevel,
     noisy_network: bool,
+    target_overrides: BTreeMap<String, LogLevel>,
 }
 
 impl LogControl {
     pub fn noop() -> Self {
         Self {
-            state: Arc::new(Mutex::new(LogState { level: LogLevel::Info, noisy_network: false })),
+            state: Arc::new(Mutex::new(LogState { level: LogLevel::Info, noisy_network: false, target_overrides: BTreeMap::new() })),
             reload_console: Arc::new(|_| {}),
             reload_file: None,
         }
@@ -103,52 +117,103 @@ impl LogControl {
         self.state.lock().unwrap_or_else(PoisonError::into_inner).noisy_network
     }
 
+    pub fn filter(&self) -> String {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        filter_spec(state.level, state.noisy_network, &state.target_overrides)
+    }
+
     pub fn set_level(&self, level: LogLevel) {
-        let noisy_network = {
+        let (noisy_network, overrides) = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.level == level {
                 return;
             }
             state.level = level;
-            state.noisy_network
+            (state.noisy_network, state.target_overrides.clone())
         };
-        self.apply(level, noisy_network);
+        self.apply(level, noisy_network, &overrides);
     }
 
     pub fn set_noisy_network(&self, noisy_network: bool) {
-        let level = {
+        let (level, overrides) = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.noisy_network == noisy_network {
                 return;
             }
             state.noisy_network = noisy_network;
-            state.level
+            (state.level, state.target_overrides.clone())
         };
-        self.apply(level, noisy_network);
+        self.apply(level, noisy_network, &overrides);
+    }
+
+    pub fn set_filter(&self, level: Option<LogLevel>, target: Option<(&str, Option<LogLevel>)>) -> Result<String, LogFilterError> {
+        if let Some((target_name, _)) = target
+            && !is_valid_log_target(target_name)
+        {
+            return Err(LogFilterError(format!("invalid log target `{target_name}`")));
+        }
+        let spec = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let next_level = level.unwrap_or(state.level);
+            let mut next_overrides = state.target_overrides.clone();
+            if let Some((target_name, target_level)) = target {
+                match target_level {
+                    Some(target_level) => {
+                        next_overrides.insert(target_name.to_owned(), target_level);
+                    }
+                    None => {
+                        next_overrides.remove(target_name);
+                    }
+                }
+            }
+            let spec = filter_spec(next_level, state.noisy_network, &next_overrides);
+            let _ = EnvFilter::try_new(&spec).map_err(|error| LogFilterError(format!("invalid log filter: {error}")))?;
+            state.level = next_level;
+            state.target_overrides = next_overrides;
+            spec
+        };
+        if let Ok(console_filter) = EnvFilter::try_new(&spec) {
+            (self.reload_console)(console_filter);
+        }
+        if let Some(reload_file) = &self.reload_file
+            && let Ok(file_filter) = EnvFilter::try_new(&spec)
+        {
+            reload_file(file_filter);
+        }
+        Ok(spec)
     }
 
     pub fn apply_startup_settings(&self, level: LogLevel, noisy_network: bool) {
-        {
+        let overrides = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.level = level;
             state.noisy_network = noisy_network;
-        }
+            state.target_overrides.clone()
+        };
         if env::var_os("LOG").is_none() {
-            (self.reload_console)(build_filter(level, noisy_network));
+            (self.reload_console)(build_filter(level, noisy_network, &overrides));
         }
         if env::var_os("FILE_LOG").is_none()
             && let Some(reload_file) = &self.reload_file
         {
-            reload_file(build_filter(level, noisy_network));
+            reload_file(build_filter(level, noisy_network, &overrides));
         }
     }
 
-    fn apply(&self, level: LogLevel, noisy_network: bool) {
-        (self.reload_console)(build_filter(level, noisy_network));
+    fn apply(&self, level: LogLevel, noisy_network: bool, overrides: &BTreeMap<String, LogLevel>) {
+        (self.reload_console)(build_filter(level, noisy_network, overrides));
         if let Some(reload_file) = &self.reload_file {
-            reload_file(build_filter(level, noisy_network));
+            reload_file(build_filter(level, noisy_network, overrides));
         }
     }
+}
+
+fn is_valid_log_target(target: &str) -> bool {
+    !target.is_empty()
+        && target.len() <= 128
+        && !target.starts_with(':')
+        && !target.ends_with(':')
+        && target.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':' | b'-'))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -379,7 +444,7 @@ pub fn init() -> (Option<WorkerGuard>, LogControl, RecentLogs) {
     }));
 
     let control = LogControl {
-        state: Arc::new(Mutex::new(LogState { level: LogLevel::Info, noisy_network: false })),
+        state: Arc::new(Mutex::new(LogState { level: LogLevel::Info, noisy_network: false, target_overrides: BTreeMap::new() })),
         reload_console: Arc::new(move |filter| {
             if let Err(error) = console_handle.reload(filter) {
                 tracing::warn!(%error, "could not reload console log filter");
@@ -391,7 +456,7 @@ pub fn init() -> (Option<WorkerGuard>, LogControl, RecentLogs) {
     (guard, control, recent_logs)
 }
 
-fn filter_spec(level: LogLevel, noisy_network: bool) -> String {
+fn filter_spec(level: LogLevel, noisy_network: bool, overrides: &BTreeMap<String, LogLevel>) -> String {
     let base = match level {
         LogLevel::Error => "error",
         LogLevel::Warn | LogLevel::Info | LogLevel::Debug | LogLevel::Trace => "warn",
@@ -406,13 +471,20 @@ fn filter_spec(level: LogLevel, noisy_network: bool) -> String {
             LogLevel::Info | LogLevel::Debug | LogLevel::Trace => "info",
         }
     };
-    format!(
+    let mut spec = format!(
         "{base},viewer={app},assets={app},storage={app},inventory={app},render={app},world={app},llsd={app},network={net},protocol={net},jpeg2k=warn"
-    )
+    );
+    for (target, target_level) in overrides {
+        spec.push(',');
+        spec.push_str(target);
+        spec.push('=');
+        spec.push_str(target_level.directive());
+    }
+    spec
 }
 
-fn build_filter(level: LogLevel, noisy_network: bool) -> EnvFilter {
-    EnvFilter::new(filter_spec(level, noisy_network))
+fn build_filter(level: LogLevel, noisy_network: bool, overrides: &BTreeMap<String, LogLevel>) -> EnvFilter {
+    EnvFilter::new(filter_spec(level, noisy_network, overrides))
 }
 
 fn create_session_log(offset: UtcOffset) -> io::Result<(fs::File, Option<String>)> {
@@ -482,6 +554,8 @@ fn prune_logs(dir: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use tracing::subscriber::with_default;
     use tracing_subscriber::layer::SubscriberExt;
 
@@ -531,10 +605,11 @@ mod tests {
 
     #[test]
     fn directives_match_levels() {
+        let overrides = BTreeMap::new();
         for level in LogLevel::ALL {
             for noisy in [false, true] {
-                let spec = filter_spec(level, noisy);
-                let parsed = build_filter(level, noisy).to_string();
+                let spec = filter_spec(level, noisy, &overrides);
+                let parsed = build_filter(level, noisy, &overrides).to_string();
                 assert!(parsed.contains(&format!("viewer={}", level.directive())), "{spec} -> {parsed}");
                 assert!(parsed.contains("jpeg2k=warn"), "{spec} -> {parsed}");
                 let expected_net = if noisy {

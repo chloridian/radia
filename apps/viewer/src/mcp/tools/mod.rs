@@ -8,6 +8,7 @@ mod logs;
 mod network_stats;
 mod pick;
 mod screenshot;
+mod set_log_level;
 mod set_setting;
 mod settings;
 mod stats;
@@ -58,6 +59,7 @@ pub const TOOLS: &[ToolSpec] = &[
     pick::SPEC,
     wait_for::SPEC,
     set_setting::SPEC,
+    set_log_level::SPEC,
 ];
 
 pub fn find_tool(name: &str) -> Option<&'static ToolSpec> {

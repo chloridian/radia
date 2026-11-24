@@ -43,6 +43,7 @@ These tools change only local viewer state and never send grid mutations to simu
 | Tool | Effect |
 |---|---|
 | `set_setting` | Change a local cvar setting by name through `SettingsStore` validation and persistence; refuses sensitive settings and returns old and new values. |
+| `set_log_level` | Change the local runtime log filter (global level and/or per-target override) through `LogControl` and return the active filter. |
 
 ## Bounds and safety
 

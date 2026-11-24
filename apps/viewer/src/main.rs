@@ -104,6 +104,7 @@ fn main() -> io::Result<()> {
     settings.lock_startup_values();
     if let Some(publisher) = &inspection_publisher {
         publisher.set_settings(Arc::clone(&settings));
+        publisher.set_log_control(log_control.clone());
     }
 
     let cache_limit_bytes = u64::try_from(settings.get(ASSET_DISK_CACHE_CAPACITY_MIB)).unwrap_or(1024).saturating_mul(1024 * 1024);
