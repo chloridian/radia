@@ -76,8 +76,6 @@ pub struct McpServer {
     addr: SocketAddr,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
-    #[cfg(test)]
-    semaphore: Arc<Semaphore>,
 }
 
 impl McpServer {
@@ -91,7 +89,7 @@ impl McpServer {
         let (shutdown, mut shutdown_rx) = watch::channel(false);
 
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_requests.max(1)));
-        let server_handler = RadiaServer::new(handle, config, Arc::clone(&semaphore));
+        let server_handler = RadiaServer::new(handle, config, semaphore);
         let mut http_config = StreamableHttpServerConfig::default();
         http_config.legacy_session_mode = true;
         http_config.json_response = false;
@@ -119,13 +117,7 @@ impl McpServer {
             }
         });
         tracing::info!(%addr, "local MCP server listening");
-        Ok(Self {
-            addr,
-            shutdown,
-            task,
-            #[cfg(test)]
-            semaphore,
-        })
+        Ok(Self { addr, shutdown, task })
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -359,8 +351,7 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::{
         runtime::Handle,
-        sync::{mpsc, watch},
-        task,
+        sync::{mpsc, oneshot, watch},
     };
     use uuid::Uuid;
     use world::{World, WorldLimits};
@@ -806,17 +797,40 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 100,
             "method": "tools/call",
-            "params": { "name": "wait_for", "arguments": { "condition": "world_revision", "revision": 999_999, "timeout_ms": 10_000 } }
+            "params": {
+                "name": "wait_for",
+                "arguments": { "condition": "world_revision", "revision": 999_999, "timeout_ms": 10_000 },
+                "_meta": { "progressToken": "wait-1" }
+            }
         });
+        let (progress_tx, progress_rx) = oneshot::channel::<()>();
         let first = tokio::spawn({
             let client = client.clone();
             let session_id = session_id.clone();
-            async move { post_mcp(&client, addr, Some(&session_id), &wait_call).await }
+            async move {
+                let mut response = client
+                    .post(mcp_url(addr))
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(ACCEPT, "application/json, text/event-stream")
+                    .header(SESSION_HEADER, &session_id)
+                    .body(wait_call.to_string())
+                    .send()
+                    .await
+                    .expect("send wait_for request");
+                let mut progress_tx = Some(progress_tx);
+                let mut buffer = String::new();
+                while let Some(chunk) = response.chunk().await.expect("read SSE chunk") {
+                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    if buffer.contains("notifications/progress")
+                        && let Some(tx) = progress_tx.take()
+                    {
+                        let _ = tx.send(());
+                    }
+                }
+            }
         });
 
-        while server.semaphore.available_permits() > 0 {
-            task::yield_now().await;
-        }
+        progress_rx.await.expect("wait_for emitted progress notification");
 
         let second_call = json!({
             "jsonrpc": "2.0",
@@ -838,7 +852,7 @@ mod tests {
             "params": { "requestId": 100 }
         });
         let _ = post_mcp(&client, addr, Some(&session_id), &cancel_notif).await;
-        let _ = first.await.expect("first task finished");
+        first.await.expect("first task finished");
 
         let third_call = json!({
             "jsonrpc": "2.0",
