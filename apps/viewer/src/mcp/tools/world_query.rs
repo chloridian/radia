@@ -5,7 +5,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use world::{AttachmentPoint, Kind, ObjectDetail, ObjectDetailResult, RegionHandle, WorldRevision};
+use world::{AttachmentPoint, Kind, ObjectDetail, ObjectDetailResult, RegionHandle, RegionPage, WorldRevision};
 
 use super::{ShapeOutput, format_shape, lookup_object_entity};
 use crate::{inspection::ViewerInspectionHandle, mcp::server::Handler};
@@ -34,10 +34,18 @@ pub struct WorldArgs {
 }
 
 #[derive(Serialize, JsonSchema)]
+pub struct WorldRegionSummaryOutput {
+    pub region: u64,
+    pub name: Option<String>,
+    pub object_count: usize,
+}
+
+#[derive(Serialize, JsonSchema)]
 pub struct WorldRegionItemOutput {
     pub region: u64,
     pub name: Option<String>,
     pub handle: Option<u64>,
+    pub object_count: usize,
 }
 
 #[derive(Clone, Copy, Serialize, JsonSchema)]
@@ -83,7 +91,7 @@ pub struct WorldObjectDetailOutput {
 #[serde(untagged)]
 pub enum WorldOutput {
     Inactive { active_session: bool },
-    Summary { active_session: bool, revision: u64, region_count: usize },
+    Summary { active_session: bool, revision: u64, region_count: usize, object_count: usize, regions: Vec<WorldRegionSummaryOutput> },
     Regions { revision: u64, regions: Vec<WorldRegionItemOutput>, has_more: bool },
     Objects { revision: u64, objects: Vec<WorldObjectItemOutput>, has_more: bool },
     ObjectNotFound { found: bool, object_id: String },
@@ -121,6 +129,7 @@ impl Handler {
                         region: region.region.get(),
                         name: region.info.name,
                         handle: region.info.handle.map(RegionHandle::get),
+                        object_count: region.object_count,
                     })
                     .collect();
                 WorldOutput::Regions { revision: revision.get(), regions, has_more: page.next.is_some() }
@@ -185,8 +194,18 @@ pub(in crate::mcp) async fn world_summary_data(handle: &ViewerInspectionHandle) 
         return Ok(WorldOutput::Inactive { active_session: false });
     };
     let revision = session.world.revision().map_err(|e| format!("world revision failed: {e}"))?;
-    let regions = session.world.regions(None, 32).await.map_err(|e| format!("regions query failed: {e}"))?;
-    Ok(WorldOutput::Summary { active_session: true, revision: revision.get(), region_count: regions.regions.len() })
+    let page = session.world.regions(None, 32).await.map_err(|e| format!("regions query failed: {e}"))?;
+    Ok(format_world_summary(revision, page))
+}
+
+fn format_world_summary(revision: WorldRevision, page: RegionPage) -> WorldOutput {
+    let object_count = page.regions.iter().map(|region| region.object_count).sum();
+    let regions = page
+        .regions
+        .into_iter()
+        .map(|region| WorldRegionSummaryOutput { region: region.region.get(), name: region.info.name, object_count: region.object_count })
+        .collect::<Vec<_>>();
+    WorldOutput::Summary { active_session: true, revision: revision.get(), region_count: regions.len(), object_count, regions }
 }
 
 fn format_object_detail(revision: WorldRevision, detail: &ObjectDetail) -> WorldObjectDetailOutput {
@@ -213,7 +232,52 @@ mod tests {
         FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, SculptFlags, SculptType, Shape, UpdateSource, World, WorldLimits,
     };
 
-    use super::format_object_detail;
+    use super::{format_object_detail, format_world_summary};
+
+    #[test]
+    fn world_summary_reports_total_and_per_region_object_counts() {
+        let mut world = World::new(WorldLimits {
+            max_regions: 2,
+            max_entities: 8,
+            max_entities_per_region: 8,
+            max_tombstones_per_region: 8,
+            max_tombstones: 8,
+            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(8),
+            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(8),
+            max_journal_entries: 8,
+            max_journal_changes: 32,
+            max_region_name_bytes: 64,
+            max_recovery_targets: 4,
+        });
+        let region_a = world.register_region().expect("register region a");
+        let region_b = world.register_region().expect("register region b");
+        let source_a = UpdateSource::new(region_a, 1, OrderEvidence::Ordered(1), 0);
+        let source_b = UpdateSource::new(region_b, 1, OrderEvidence::Ordered(1), 0);
+        for local in 1..=2 {
+            let local_id = NonZeroU32::new(local).expect("nonzero local id");
+            let obs = ObjectObservation::new(source_a, Uuid::from_u128(u128::from(local)), local_id, Kind::Object, ParentUpdate::Root);
+            drop(world.observe_object(obs).expect("observe region a object"));
+        }
+        let obs_b = ObjectObservation::new(
+            source_b,
+            Uuid::from_u128(10),
+            NonZeroU32::new(1).expect("nonzero local id"),
+            Kind::Object,
+            ParentUpdate::Root,
+        );
+        drop(world.observe_object(obs_b).expect("observe region b object"));
+
+        let page = world.region_page(None, 32).expect("region page");
+        let output = serde_json::to_value(format_world_summary(world.revision(), page)).expect("serialize summary");
+        assert_eq!(output["region_count"], 2);
+        assert_eq!(output["object_count"], 3);
+        let regions = output["regions"].as_array().expect("regions array");
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0]["region"], region_a.get());
+        assert_eq!(regions[0]["object_count"], 2);
+        assert_eq!(regions[1]["region"], region_b.get());
+        assert_eq!(regions[1]["object_count"], 1);
+    }
 
     #[test]
     fn world_object_output_omits_shape_asset_uuids() {

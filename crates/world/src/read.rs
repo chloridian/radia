@@ -100,6 +100,7 @@ pub struct RegionSummary {
     pub region: Region,
     pub info: RegionInfo,
     pub terrain_settings: Option<TerrainSettings>,
+    pub object_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -479,7 +480,12 @@ impl World {
             }
             bytes = bytes.saturating_add(charge);
             after = Some(*region);
-            regions.push(RegionSummary { region: *region, info: info.clone(), terrain_settings: state.terrain.settings() });
+            regions.push(RegionSummary {
+                region: *region,
+                info: info.clone(),
+                terrain_settings: state.terrain.settings(),
+                object_count: self.region_object_count_upper_bound(*region),
+            });
         }
         let has_more = oversized_item || iter.next().is_some();
         let next = has_more.then(|| RegionPageCursor { world: self.id, after: after.expect("nonzero page limit") });
