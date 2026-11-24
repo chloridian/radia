@@ -129,6 +129,9 @@ pub(crate) struct Circuit {
     next_ping_id: u8,
     pending_pings: HashMap<u8, Instant>,
     quarantined_ping_ids: HashMap<u8, Instant>,
+    packets_in: u64,
+    packets_out: u64,
+    resent: u64,
 }
 
 impl Circuit {
@@ -149,7 +152,14 @@ impl Circuit {
             next_ping_id: 0,
             pending_pings: HashMap::new(),
             quarantined_ping_ids: HashMap::new(),
+            packets_in: 0,
+            packets_out: 0,
+            resent: 0,
         }
+    }
+
+    pub(crate) fn packet_counts(&self) -> (u64, u64, usize, u64) {
+        (self.packets_in, self.packets_out, self.pending.len(), self.resent)
     }
 
     pub(crate) fn retry_timeout(&self) -> Duration {
@@ -330,9 +340,11 @@ impl Circuit {
                     packet.bytes = prepared.bytes;
                     packet.sent_at = sent_at;
                     packet.retries += 1;
+                    self.resent = self.resent.saturating_add(1);
                 }
             }
         }
+        self.packets_out = self.packets_out.saturating_add(1);
         Ok(())
     }
 
@@ -373,6 +385,7 @@ impl Circuit {
     }
 
     pub(crate) fn commit_receive(&mut self, admission: ReceiveAdmission) -> ReceiveOutcome {
+        self.packets_in = self.packets_in.saturating_add(1);
         match admission {
             ReceiveAdmission::Duplicate(outcome) => outcome,
             ReceiveAdmission::New(reservation) => {

@@ -26,7 +26,7 @@ use super::{
         CapabilityBudget, EVENT_QUEUE_REQUEST_TIMEOUT, MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES,
         MAX_SEED_CAPABILITY_RESPONSE_BYTES, REQUEST_TIMEOUT, spawn_blocking_with_permit,
     },
-    event_queue::{self, EventQueueContext, EventQueueTask, Stop},
+    event_queue::{self, EventQueueContext, EventQueueStatus, EventQueueTask, Stop},
     request::{
         RequestDeadline, decode_capability_value_with_response_limit, decode_seed_capabilities, delete_capability, get_capability_bytes,
         get_capability_range_bytes, patch_capability, post_capability, request_capabilities_response, validate_capability_names,
@@ -39,26 +39,45 @@ use crate::{
     http::{self, RedirectPolicy, validate_http_url},
 };
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapabilityRequestStatus {
+    pub name: String,
+    pub granted: bool,
+    pub last_status: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CapabilityDiagnostics {
+    pub event_queue: EventQueueStatus,
+    pub capabilities: Vec<CapabilityRequestStatus>,
+}
+
 #[derive(Clone)]
 pub struct CapabilityUrl {
     pub(super) url: Url,
+    name: Option<Arc<str>>,
 }
 
 impl CapabilityUrl {
     pub(super) fn from_discovery(url: Url) -> Self {
-        Self { url }
+        Self { url, name: None }
+    }
+
+    fn with_name(mut self, name: &str) -> Self {
+        self.name = Some(Arc::from(name));
+        self
     }
 
     pub fn parse(value: &str) -> Result<Self, Error> {
         let url = Url::parse(value).map_err(|_| Error::Capability("Capability URL is invalid.".into()))?;
         validate_http_url(&url).map_err(|error| Error::Capability(error.to_string()))?;
-        Ok(Self { url })
+        Ok(Self { url, name: None })
     }
 
     pub fn with_query_pair(&self, name: &str, value: &str) -> Self {
         let mut url = self.url.clone();
         url.query_pairs_mut().append_pair(name, value);
-        Self { url }
+        Self { url, name: self.name.clone() }
     }
 
     pub fn with_path_segments(&self, segments: &[&str]) -> Result<Self, Error> {
@@ -69,7 +88,7 @@ impl CapabilityUrl {
         path.pop_if_empty();
         path.extend(segments.iter().copied());
         drop(path);
-        Ok(Self { url })
+        Ok(Self { url, name: self.name.clone() })
     }
 
     pub fn with_trailing_slash(&self) -> Self {
@@ -77,7 +96,7 @@ impl CapabilityUrl {
         if !url.path().ends_with('/') {
             url.set_path(&format!("{}/", url.path()));
         }
-        Self { url }
+        Self { url, name: self.name.clone() }
     }
 }
 
@@ -110,6 +129,7 @@ pub struct Client {
     pub(super) budget: CapabilityBudget,
     request_timeout: Duration,
     grants: Arc<GrantCache>,
+    event_queue_status: watch::Sender<EventQueueStatus>,
 }
 
 impl fmt::Debug for Client {
@@ -128,6 +148,7 @@ impl Client {
         let runtime = Handle::try_current().map_err(|_| SetupError::RequestRuntimeUnavailable)?;
         let http = budget.http_client()?;
         let (session_closed, _) = watch::channel(false);
+        let (event_queue_status, _) = watch::channel(EventQueueStatus::default());
         Ok(Self {
             seed: Arc::new(seed),
             runtime,
@@ -137,7 +158,12 @@ impl Client {
             budget,
             request_timeout: REQUEST_TIMEOUT,
             grants: Arc::default(),
+            event_queue_status,
         })
+    }
+
+    pub fn diagnostics(&self) -> CapabilityDiagnostics {
+        CapabilityDiagnostics { event_queue: *self.event_queue_status.borrow(), capabilities: self.grants.snapshot() }
     }
 
     pub async fn request_capabilities(&self, names: &[&str]) -> Result<HashMap<String, CapabilityUrl>, Error> {
@@ -217,12 +243,17 @@ impl Client {
         let client = self.clone();
         let url = url.clone();
         self.on_runtime(async move {
-            let (response, permit) = client
-                .run_with_admitted_permit(deadline, permit, |http, permit| async move {
-                    let response = post_capability(&http, &url.url, body, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
-                    Ok((response, permit))
+            let result = client
+                .run_with_admitted_permit(deadline, permit, |http, permit| {
+                    let url = url.clone();
+                    async move {
+                        let response = post_capability(&http, &url.url, body, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
+                        Ok((response, permit))
+                    }
                 })
-                .await?;
+                .await;
+            client.record_response_status(&url, result.as_ref().map(|(response, _)| response.status));
+            let (response, permit) = result?;
             client.decode_admitted_response(response, max_response_bytes, deadline, permit).await
         })
         .await
@@ -254,12 +285,17 @@ impl Client {
         let client = self.clone();
         let url = url.clone();
         self.on_runtime(async move {
-            let (response, permit) = client
-                .run_with_admitted_permit(deadline, permit, |http, permit| async move {
-                    let response = post_capability(&http, &url.url, body, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
-                    Ok((response, permit))
+            let result = client
+                .run_with_admitted_permit(deadline, permit, |http, permit| {
+                    let url = url.clone();
+                    async move {
+                        let response = post_capability(&http, &url.url, body, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
+                        Ok((response, permit))
+                    }
                 })
-                .await?;
+                .await;
+            client.record_response_status(&url, result.as_ref().map(|(response, _)| response.status));
+            let (response, permit) = result?;
             drop(permit);
             Ok(response.body)
         })
@@ -285,12 +321,17 @@ impl Client {
         let client = self.clone();
         let url = url.clone();
         self.on_runtime(async move {
-            let (response, permit) = client
-                .run_with_admitted_permit(deadline, permit, |http, permit| async move {
-                    let response = patch_capability(&http, &url.url, body, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
-                    Ok((response, permit))
+            let result = client
+                .run_with_admitted_permit(deadline, permit, |http, permit| {
+                    let url = url.clone();
+                    async move {
+                        let response = patch_capability(&http, &url.url, body, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
+                        Ok((response, permit))
+                    }
                 })
-                .await?;
+                .await;
+            client.record_response_status(&url, result.as_ref().map(|(response, _)| response.status));
+            let (response, permit) = result?;
             drop(permit);
             Ok(response.body)
         })
@@ -307,12 +348,17 @@ impl Client {
         let client = self.clone();
         let url = url.clone();
         self.on_runtime(async move {
-            let (response, permit) = client
-                .run_with_admitted_permit(deadline, permit, |http, permit| async move {
-                    let response = delete_capability(&http, &url.url, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
-                    Ok((response, permit))
+            let result = client
+                .run_with_admitted_permit(deadline, permit, |http, permit| {
+                    let url = url.clone();
+                    async move {
+                        let response = delete_capability(&http, &url.url, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
+                        Ok((response, permit))
+                    }
                 })
-                .await?;
+                .await;
+            client.record_response_status(&url, result.as_ref().map(|(response, _)| response.status));
+            let (response, permit) = result?;
             drop(permit);
             Ok(response.body)
         })
@@ -347,14 +393,25 @@ impl Client {
         let client = self.clone();
         let url = url.clone();
         self.on_runtime(async move {
-            let (response, permit) = client
-                .run_with_get_permit(deadline, redirect_policy, |http, permit| async move {
-                    let response = get_capability_range_bytes(&http, &url.url, range, max_response_bytes, redirect_policy)
-                        .await
-                        .map_err(Error::CapabilityHttp)?;
-                    Ok((response, permit))
+            let result = client
+                .run_with_get_permit(deadline, redirect_policy, |http, permit| {
+                    let url = url.clone();
+                    async move {
+                        let response = get_capability_range_bytes(&http, &url.url, range, max_response_bytes, redirect_policy)
+                            .await
+                            .map_err(Error::CapabilityHttp)?;
+                        Ok((response, permit))
+                    }
                 })
-                .await?;
+                .await;
+            client.record_response_status(
+                &url,
+                result.as_ref().map(|(response, _)| match response {
+                    RangeResponse::Partial { .. } => reqwest::StatusCode::PARTIAL_CONTENT,
+                    RangeResponse::Full(_) => reqwest::StatusCode::OK,
+                }),
+            );
+            let (response, permit) = result?;
             drop(permit);
             Ok(response)
         })
@@ -377,14 +434,19 @@ impl Client {
         let client = self.clone();
         let url = url.clone();
         self.on_runtime(async move {
-            let (response, permit) = client
-                .run_with_get_permit(deadline, redirect_policy, |http, permit| async move {
-                    let response = get_capability_bytes(&http, &url.url, accept.as_deref(), max_response_bytes, redirect_policy)
-                        .await
-                        .map_err(Error::CapabilityHttp)?;
-                    Ok((response, permit))
+            let result = client
+                .run_with_get_permit(deadline, redirect_policy, |http, permit| {
+                    let url = url.clone();
+                    async move {
+                        let response = get_capability_bytes(&http, &url.url, accept.as_deref(), max_response_bytes, redirect_policy)
+                            .await
+                            .map_err(Error::CapabilityHttp)?;
+                        Ok((response, permit))
+                    }
                 })
-                .await?;
+                .await;
+            client.record_response_status(&url, result.as_ref().map(|(response, _)| response.status));
+            let (response, permit) = result?;
             drop(permit);
             Ok(response.body)
         })
@@ -584,7 +646,16 @@ impl Client {
         let (role, primary) = event_queue::EventQueueRoleHandle::channel(is_primary);
         let session_closed = self.session_closed.subscribe();
         let (completed, completion) = oneshot::channel();
-        let context = EventQueueContext { simulator_id, source, seed, http, events, budget: self.budget.clone(), coverage_losses };
+        let context = EventQueueContext {
+            simulator_id,
+            source,
+            seed,
+            http,
+            events,
+            budget: self.budget.clone(),
+            coverage_losses,
+            status: self.event_queue_status.clone(),
+        };
         let stop = Stop::new(shutdown, session_closed);
         let task = runtime.spawn(
             async move {
@@ -595,11 +666,29 @@ impl Client {
         );
         Ok(EventQueueTask::new(task, completion, role))
     }
+    fn record_response_status(&self, url: &CapabilityUrl, result: Result<reqwest::StatusCode, &Error>) {
+        let Some(name) = url.name.as_deref() else { return };
+        let status = match result {
+            Ok(code) => code.as_u16().to_string(),
+            Err(Error::CapabilityHttp(error)) => {
+                if let Some(code) = error.status {
+                    code.as_u16().to_string()
+                } else {
+                    format!("{:?}", error.kind)
+                }
+            }
+            Err(Error::CapabilityRequestCanceled) => "cancelled".to_owned(),
+            Err(Error::CapabilitySessionClosed) => "session_closed".to_owned(),
+            Err(_) => "error".to_owned(),
+        };
+        self.grants.record_status(name, status);
+    }
 }
 
 #[derive(Default)]
 struct GrantCache {
     grants: Mutex<HashMap<String, Option<CapabilityUrl>>>,
+    last_statuses: Mutex<HashMap<String, String>>,
     discovery: sync::Mutex<()>,
 }
 
@@ -618,10 +707,30 @@ impl GrantCache {
     ) -> HashMap<String, CapabilityUrl> {
         let mut grants = self.grants.lock().unwrap_or_else(PoisonError::into_inner);
         for name in missing {
-            let url = discovered.get(&name).cloned();
+            let url = discovered.get(&name).cloned().map(|url| url.with_name(&name));
             grants.insert(name, url);
         }
         granted(&grants, names)
+    }
+
+    fn record_status(&self, name: &str, status: String) {
+        let mut statuses = self.last_statuses.lock().unwrap_or_else(PoisonError::into_inner);
+        statuses.insert(name.to_owned(), status);
+    }
+
+    fn snapshot(&self) -> Vec<CapabilityRequestStatus> {
+        let grants = self.grants.lock().unwrap_or_else(PoisonError::into_inner);
+        let statuses = self.last_statuses.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut items = grants
+            .iter()
+            .map(|(name, url)| CapabilityRequestStatus {
+                name: name.clone(),
+                granted: url.is_some(),
+                last_status: statuses.get(name).cloned(),
+            })
+            .collect::<Vec<_>>();
+        items.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        items
     }
 }
 

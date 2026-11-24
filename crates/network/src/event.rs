@@ -39,11 +39,23 @@ impl SimulatorId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CircuitStats {
+    pub packets_in: u64,
+    pub packets_out: u64,
+    pub packets_in_per_sec: u32,
+    pub packets_out_per_sec: u32,
+    pub unacked: usize,
+    pub resent: u64,
+    pub throttle_sent: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CircuitMotionStatus {
     pub last_packet_received_at: Instant,
     pub measured_ping_delay: Option<Duration>,
     pub connected: bool,
+    pub stats: CircuitStats,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

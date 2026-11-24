@@ -51,7 +51,7 @@ use super::{
 };
 use crate::{
     asset_coordinator::AssetCoordinator,
-    inspection::{InventoryFetchStats, ObjectCacheStats, SessionDiagnostics},
+    inspection::{InventoryFetchStats, ObjectCacheStats, RegionNetworkHandle, SessionDiagnostics},
     inventory::{
         FolderApplyOutcome, FolderFetch, InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError,
         InventoryFetchEvent, MoveExpectation,
@@ -430,6 +430,7 @@ struct SessionDriver {
     active_session: Option<AgentSession>,
     active_login_data: Option<ResponseData>,
     active_capabilities: Option<Client>,
+    simulator_capabilities: HashMap<SimulatorId, Client>,
     favorites_enabled: bool,
     favorites_load: Option<JoinHandle<FavoritesUpdate>>,
     inventory_bootstrap: Option<JoinHandle<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>>>,
@@ -460,6 +461,7 @@ struct SessionDriver {
     motion_statuses: HashMap<SimulatorId, watch::Receiver<CircuitMotionStatus>>,
     region_motion_mapping: HashMap<world::Region, SimulatorId>,
     region_motion_sender: watch::Sender<Vec<(world::Region, watch::Receiver<CircuitMotionStatus>)>>,
+    network_diagnostics: watch::Sender<Vec<RegionNetworkHandle>>,
     region_lookup: Option<RegionLookup>,
     media: ObjectMediaIntake,
     recovery: RecoveryIntake,
@@ -625,6 +627,7 @@ impl SessionDriver {
         let assets = AssetCoordinator::new(runtime.clone(), cancellation.clone(), cache);
         let camera = CameraUplink::new();
         let (region_motion_sender, _) = watch::channel(Vec::new());
+        let (network_diagnostics, _) = watch::channel(Vec::new());
         let media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
         let recovery = RecoveryIntake::new();
         let (inventory_changes, _) = watch::channel(None);
@@ -663,6 +666,7 @@ impl SessionDriver {
             active_session: None,
             active_login_data: None,
             active_capabilities: None,
+            simulator_capabilities: HashMap::new(),
             favorites_enabled: false,
             favorites_load: None,
             inventory_bootstrap: None,
@@ -693,6 +697,7 @@ impl SessionDriver {
             motion_statuses: HashMap::new(),
             region_motion_mapping: HashMap::new(),
             region_motion_sender,
+            network_diagnostics,
             region_lookup: None,
             media,
             recovery,
@@ -1857,9 +1862,11 @@ impl SessionDriver {
         if let Some(login_data) = login_data {
             self.active_login_data = Some(login_data);
         }
-        self.active_capabilities = Some(capabilities);
+        self.active_capabilities = Some(capabilities.clone());
+        self.simulator_capabilities.insert(simulator_id, capabilities);
         let lookup = RegionLookup::new(self.session_handle.clone(), simulator_id, &session, self.runtime.clone());
         self.region_lookup = Some(lookup);
+        self.publish_network_diagnostics();
         self.publish_session_ready_update(simulator_id, session);
         self.start_favorites_load_for_active();
     }
@@ -1880,7 +1887,9 @@ impl SessionDriver {
         }
         self.handoff.simulator_disconnected(&mut self.session_world, simulator_id);
         self.motion_statuses.remove(&simulator_id);
+        self.simulator_capabilities.remove(&simulator_id);
         self.publish_region_motion();
+        self.publish_network_diagnostics();
         self.object_cache.forget_simulator(simulator_id);
         self.recovery.cancel_simulator(simulator_id);
         self.media.forget_simulator(simulator_id);
@@ -1908,6 +1917,7 @@ impl SessionDriver {
             diagnostics: SessionDiagnostics {
                 object_cache: self.object_cache_stats.subscribe(),
                 inventory: self.inventory_fetch_stats.subscribe(),
+                network: self.network_diagnostics.subscribe(),
             },
         }));
     }
@@ -2017,6 +2027,29 @@ impl SessionDriver {
             .filter_map(|(region, simulator_id)| self.motion_statuses.get(simulator_id).map(|status| (*region, status.clone())))
             .collect();
         self.region_motion_sender.send_replace(circuits);
+        self.publish_network_diagnostics();
+    }
+
+    fn publish_network_diagnostics(&self) {
+        let mut entries = self
+            .region_motion_mapping
+            .iter()
+            .filter_map(|(region, simulator_id)| {
+                let circuit = self.motion_statuses.get(simulator_id)?.clone();
+                let region_name = self.session_world.region_name(*simulator_id).map(str::to_owned);
+                let capabilities = self.simulator_capabilities.get(simulator_id).cloned();
+                Some(RegionNetworkHandle {
+                    region: *region,
+                    simulator_id: *simulator_id,
+                    region_name,
+                    is_primary: self.primary_simulator == Some(*simulator_id),
+                    circuit,
+                    capabilities,
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|entry| (!entry.is_primary, entry.region.get()));
+        self.network_diagnostics.send_replace(entries);
     }
 
     fn publish_arrival_agent_motion(&mut self, simulator_id: SimulatorId, movement: &AgentMovementComplete, received_at: Instant) {

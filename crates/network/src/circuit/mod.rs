@@ -62,7 +62,7 @@ use crate::{
         pacing::{ConnectionPacer, OutboundBudget, OutboundBudgetHandle, TrafficClass},
     },
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
-    event::{CircuitMotionStatus, EventEnvelope, SimulatorId},
+    event::{CircuitMotionStatus, CircuitStats, EventEnvelope, SimulatorId},
 };
 
 const MAX_PENDING_SENDS: usize = 8;
@@ -82,6 +82,10 @@ const DEFAULT_AGENT_THROTTLE_RATES: ThrottleRates = ThrottleRates {
     texture_bits_per_second: 1_564_672.0,
     asset_bits_per_second: 573_440.0,
 };
+
+pub fn default_throttle_rates() -> ThrottleRates {
+    DEFAULT_AGENT_THROTTLE_RATES
+}
 
 pub(super) struct SimulatorConnectionOptions {
     pub(super) simulator_id: SimulatorId,
@@ -175,6 +179,11 @@ struct ConnectionTask {
     packet_rejections: receive::PacketRejections,
     motion_status_sender: watch::Sender<CircuitMotionStatus>,
     motion_status_receiver: watch::Receiver<CircuitMotionStatus>,
+    stats_sample_at: Instant,
+    stats_sample_in: u64,
+    stats_sample_out: u64,
+    packets_in_per_sec: u32,
+    packets_out_per_sec: u32,
 }
 
 impl Drop for ConnectionTask {

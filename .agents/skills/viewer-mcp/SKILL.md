@@ -24,6 +24,7 @@ Startup prints `MCP server listening on http://127.0.0.1:<port>`. The default en
 | `stats` | Frame timing (`fps`, `frame_ms`, `game_ms`, `render_ms`, `gpu_timings_ms`), `render::Stats`, `AssetQueueStats`, and memory stats. |
 | `cache` | Object cache write-queue depth/capacity, busy/full drops, handshake state, and asset disk cache hit/miss/eviction counts. |
 | `inventory` | Inventory folder fetch counts (`pending`, `in_flight`, `done`, `failed`) and a bounded list of failed folders (UUIDs, retry state, typed error; no items or asset IDs). |
+| `network` | Per-region circuit packet counts/rates, unacked/resent counts, throttle settings, `EventQueueGet` state, and capability names + last status (no URLs or session IDs). |
 | `logs` | Recent `WARN` and `ERROR` entries from the in-memory ring buffer (sensitive fields and capability URLs omitted). |
 | `screenshot` | Non-blocking viewport PNG capture encoded off the GUI thread. |
 | `explain_object` | Combined World detail + renderer placement, culling, mesh residency, and per-face texture/alpha/omission state for an `object_id`. |

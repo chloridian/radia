@@ -1,7 +1,8 @@
+use network::{CircuitMotionStatus, SimulatorId, capabilities::Client as CapabilityClient};
 use render::{CaptureReadback, ObjectExplanation, PickDetail, PickError, Stats};
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
-use world::Entity;
+use world::{Entity, Region};
 
 use crate::{asset_coordinator::AssetHandle, logging::RecentLogs, world_reader::WorldReader};
 
@@ -89,9 +90,20 @@ pub struct InventoryFetchStats {
 }
 
 #[derive(Clone)]
+pub struct RegionNetworkHandle {
+    pub region: Region,
+    pub simulator_id: SimulatorId,
+    pub region_name: Option<String>,
+    pub is_primary: bool,
+    pub circuit: watch::Receiver<CircuitMotionStatus>,
+    pub capabilities: Option<CapabilityClient>,
+}
+
+#[derive(Clone)]
 pub struct SessionDiagnostics {
     pub object_cache: watch::Receiver<ObjectCacheStats>,
     pub inventory: watch::Receiver<InventoryFetchStats>,
+    pub network: watch::Receiver<Vec<RegionNetworkHandle>>,
 }
 
 #[derive(Clone)]

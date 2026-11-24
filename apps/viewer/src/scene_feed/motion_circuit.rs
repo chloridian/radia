@@ -194,7 +194,12 @@ mod tests {
         let maximum_interpolation = silence + taper;
         let (_region_world, region) = test_helpers::registered_region();
         let mut liveness = MotionCircuitLiveness::default();
-        let status = |last_packet_received_at| CircuitMotionStatus { last_packet_received_at, measured_ping_delay: None, connected: true };
+        let status = |last_packet_received_at| CircuitMotionStatus {
+            last_packet_received_at,
+            measured_ping_delay: None,
+            connected: true,
+            stats: network::CircuitStats::default(),
+        };
 
         assert!(liveness.replace(HashMap::from([(region, status(started_at))]), started_at));
         let active_packet_at = started_at + silence / 2;
@@ -213,7 +218,12 @@ mod tests {
     #[tokio::test]
     async fn watcher_ignores_active_packets() {
         let (_region_world, region) = test_helpers::registered_region();
-        let status = CircuitMotionStatus { last_packet_received_at: Instant::now(), measured_ping_delay: None, connected: false };
+        let status = CircuitMotionStatus {
+            last_packet_received_at: Instant::now(),
+            measured_ping_delay: None,
+            connected: false,
+            stats: network::CircuitStats::default(),
+        };
         let (status_sender, status_receiver) = watch::channel(status);
         let (_circuits_sender, circuits_receiver) = watch::channel(vec![(region, status_receiver)]);
         let mut wake = MotionCircuitWake::new(circuits_receiver);
@@ -243,7 +253,12 @@ mod tests {
     async fn silence_wakes_once() {
         let (_region_world, region) = test_helpers::registered_region();
         let last_packet_received_at = time::Instant::now().into_std();
-        let status = CircuitMotionStatus { last_packet_received_at, measured_ping_delay: None, connected: true };
+        let status = CircuitMotionStatus {
+            last_packet_received_at,
+            measured_ping_delay: None,
+            connected: true,
+            stats: network::CircuitStats::default(),
+        };
         let (status_sender, status_receiver) = watch::channel(status);
         let (_circuits_sender, circuits_receiver) = watch::channel(vec![(region, status_receiver)]);
         let mut wake = MotionCircuitWake::new(circuits_receiver);

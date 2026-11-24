@@ -93,6 +93,7 @@ fn seed_context(events: mpsc::Sender<EventEnvelope>) -> EventQueueContext {
         events,
         budget: CapabilityBudget::new(),
         coverage_losses: CoverageLossLedger::new(),
+        status: watch::channel(EventQueueStatus::default()).0,
     }
 }
 
