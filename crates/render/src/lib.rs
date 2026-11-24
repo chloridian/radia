@@ -17,3 +17,7 @@ pub use self::{
     renderer::{Error, FrameInput, Progress, Renderer, Retirement, required_features, required_limits},
     texture::{CompressionQuality, TextureCompletion, TextureJob},
 };
+
+pub fn max_texture_jobs() -> usize {
+    texture::max_jobs()
+}
