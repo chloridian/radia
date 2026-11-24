@@ -1,5 +1,6 @@
 mod cache;
 mod changes;
+mod environment;
 mod explain_object;
 mod inventory_fetch;
 mod logs;
@@ -45,6 +46,7 @@ pub const TOOLS: &[ToolSpec] = &[
     network_stats::SPEC,
     changes::SPEC,
     textures::SPEC,
+    environment::SPEC,
     logs::SPEC,
     screenshot::SPEC,
     explain_object::SPEC,

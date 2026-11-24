@@ -34,7 +34,7 @@ use prism::{
     px, rgb, rgb_to_hsla, size, surface, white,
 };
 use prism_wgpu::WgpuContextHandle;
-use render::{CompressionQuality, FrameInput, Renderer, TextureCompletion, scene};
+use render::{CompressionQuality, FrameInput, Renderer, TextureCompletion, scene, scene::EnvironmentChoice};
 use tokio::{
     runtime::Handle,
     sync::{mpsc as tokio_mpsc, watch},
@@ -55,7 +55,7 @@ use crate::{
     agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
     camera::{CameraConfig, CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input},
     gui::{scene as gui_scene, window_geometry},
-    inspection::{RenderStatsSnapshot, SceneQuerySummary, ViewportQuery},
+    inspection::{EnvironmentOverrideSummary, RenderStatsSnapshot, SceneQuerySummary, ViewportQuery},
     inventory::environments::EnvironmentMenu,
     logging::{LogControl, LogLevel},
     scene_feed::{SceneFeed, SceneSources},
@@ -646,6 +646,20 @@ impl SceneView {
             ViewportQuery::BeginScreenshot { reply } => {
                 let readback = self.renderer.as_ref().and_then(Renderer::begin_capture_rgba);
                 drop(reply.send(readback));
+            }
+            ViewportQuery::EnvironmentOverride { reply } => {
+                let summary = match self.feed.as_ref().map(|feed| feed.environment_choice()) {
+                    Some(EnvironmentChoice::Local(_)) => {
+                        EnvironmentOverrideSummary { local_override: true, local_sky: true, local_water: true }
+                    }
+                    Some(EnvironmentChoice::Split { sky, water }) => EnvironmentOverrideSummary {
+                        local_override: sky.is_some() || water.is_some(),
+                        local_sky: sky.is_some(),
+                        local_water: water.is_some(),
+                    },
+                    Some(EnvironmentChoice::Shared) | None => EnvironmentOverrideSummary::default(),
+                };
+                drop(reply.send(summary));
             }
         }
     }

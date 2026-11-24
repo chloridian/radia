@@ -27,11 +27,19 @@ pub struct SceneQuerySummary {
     pub has_camera: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EnvironmentOverrideSummary {
+    pub local_override: bool,
+    pub local_sky: bool,
+    pub local_water: bool,
+}
+
 pub enum ViewportQuery {
     SceneQuery { reply: oneshot::Sender<SceneQuerySummary> },
     ExplainObject { entity: Entity, reply: oneshot::Sender<Option<ObjectExplanation>> },
     PixelPick { x: f32, y: f32, reply: oneshot::Sender<Result<Option<PickDetail>, PickError>> },
     BeginScreenshot { reply: oneshot::Sender<Option<CaptureReadback>> },
+    EnvironmentOverride { reply: oneshot::Sender<EnvironmentOverrideSummary> },
 }
 
 impl ViewportQuery {
@@ -41,6 +49,7 @@ impl ViewportQuery {
             Self::ExplainObject { reply, .. } => reply.is_closed(),
             Self::PixelPick { reply, .. } => reply.is_closed(),
             Self::BeginScreenshot { reply } => reply.is_closed(),
+            Self::EnvironmentOverride { reply } => reply.is_closed(),
         }
     }
 }
