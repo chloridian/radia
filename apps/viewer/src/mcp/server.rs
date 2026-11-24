@@ -45,7 +45,7 @@ use tokio::{
 use super::{
     MAX_CONCURRENT_REQUESTS, MAX_JSON_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_SESSIONS, REQUEST_TIMEOUT, SERVER_INSTRUCTIONS,
     SESSION_IDLE_TIMEOUT,
-    tools::{TOOLS, ToolContent, find_tool},
+    tools::{TOOLS, ToolCallContext, ToolContent, find_tool, screenshot, wait_for},
 };
 use crate::inspection::ViewerInspectionHandle;
 
@@ -298,12 +298,25 @@ impl ServerHandler for RadiaMcpHandler {
         Ok(ListToolsResult::with_all_items(tools))
     }
 
-    async fn call_tool(&self, request: CallToolRequestParams, _context: RequestContext<RoleServer>) -> Result<CallToolResponse, ErrorData> {
+    async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResponse, ErrorData> {
         let Some(tool) = find_tool(request.name.as_ref()) else {
             return Err(ErrorData::invalid_params("unknown tool", None));
         };
         let arguments = request.arguments.map(Value::Object).unwrap_or_else(|| json!({}));
-        let outcome = time::timeout(self.config.request_timeout, (tool.handler)(self.handle.clone(), arguments)).await;
+        let ct = context.ct.clone();
+        let tool_ctx = ToolCallContext::new(context);
+        let call_future = match tool.name {
+            "wait_for" => wait_for::call_with_context(self.handle.clone(), arguments, tool_ctx),
+            "screenshot" => screenshot::call_with_context(self.handle.clone(), arguments, tool_ctx),
+            _ => (tool.handler)(self.handle.clone(), arguments),
+        };
+        let outcome = tokio::select! {
+            biased;
+            () = ct.cancelled() => {
+                return Err(ErrorData::new(ErrorCode(-32000), "request cancelled", None));
+            }
+            outcome = time::timeout(self.config.request_timeout, call_future) => outcome,
+        };
         let (result, max_bytes) = match outcome {
             Ok(Ok(ToolContent::Json(value))) => {
                 let limit = tool.max_response_bytes.min(self.config.max_response_bytes);

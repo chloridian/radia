@@ -10,23 +10,58 @@ mod network_stats;
 mod pick;
 mod queues;
 mod region;
-mod screenshot;
+pub(super) mod screenshot;
 mod set_camera;
 mod set_log_level;
 mod set_setting;
 mod settings;
 mod stats;
 mod textures;
-mod wait_for;
+pub(super) mod wait_for;
 mod world_query;
 
 use std::{future::Future, pin::Pin};
 
+use rmcp::{RoleServer, model::ProgressNotificationParam, service::RequestContext};
 use serde_json::{Value, json};
 use uuid::Uuid;
 use world::{Entity, SculptType, Shape};
 
 use crate::{inspection::ViewerInspectionHandle, world_reader::WorldReader};
+
+pub struct ToolCallContext {
+    context: RequestContext<RoleServer>,
+}
+
+impl ToolCallContext {
+    pub fn new(context: RequestContext<RoleServer>) -> Self {
+        Self { context }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.context.ct.is_cancelled()
+    }
+
+    pub async fn cancelled(&self) {
+        self.context.ct.cancelled().await;
+    }
+
+    pub fn has_progress_token(&self) -> bool {
+        self.context.meta.get_progress_token().is_some()
+    }
+
+    pub async fn report_progress(&self, progress: f64, total: Option<f64>, message: Option<String>) {
+        let Some(progress_token) = self.context.meta.get_progress_token() else {
+            return;
+        };
+        let mut param = ProgressNotificationParam::new(progress_token, progress);
+        param.total = total;
+        param.message = message;
+        if let Err(error) = self.context.peer.notify_progress(param).await {
+            tracing::debug!(%error, "MCP progress notification dropped");
+        }
+    }
+}
 
 pub type ToolFuture = Pin<Box<dyn Future<Output = ToolResult> + Send>>;
 pub type ToolHandler = fn(ViewerInspectionHandle, Value) -> ToolFuture;
