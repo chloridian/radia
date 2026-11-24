@@ -55,7 +55,10 @@ use crate::{
     agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
     camera::{CameraConfig, CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input},
     gui::{scene as gui_scene, window_geometry},
-    inspection::{CameraStateSnapshot, EnvironmentOverrideSummary, RenderStatsSnapshot, SceneQuerySummary, ViewportQuery},
+    inspection::{
+        CameraModeRequest, CameraStateSnapshot, EnvironmentOverrideSummary, RenderStatsSnapshot, SceneQuerySummary, SetCameraRequest,
+        ViewportQuery,
+    },
     inventory::environments::EnvironmentMenu,
     logging::{LogControl, LogLevel},
     scene_feed::{SceneFeed, SceneSources},
@@ -267,7 +270,7 @@ impl SceneView {
                 if query.is_closed() {
                     continue;
                 }
-                if this.update(cx, |view, _| view.handle_viewport_query(query)).is_err() {
+                if this.update(cx, |view, cx| view.handle_viewport_query(query, cx)).is_err() {
                     break;
                 }
             }
@@ -610,7 +613,7 @@ impl SceneView {
         self.render_stats.send_replace(snapshot);
     }
 
-    fn handle_viewport_query(&self, query: ViewportQuery) {
+    fn handle_viewport_query(&mut self, query: ViewportQuery, cx: &mut Context<Self>) {
         if query.is_closed() {
             return;
         }
@@ -663,28 +666,108 @@ impl SceneView {
                 reply.send(summary).ok();
             }
             ViewportQuery::CameraState { reply } => {
-                let mode = match self.camera_mode {
-                    CameraMode::Follow => "follow",
-                    CameraMode::Free => "free",
-                };
-                let snapshot = match self.last_camera {
-                    Some(camera) => {
-                        let position = camera.position();
-                        let direction = camera.direction();
-                        CameraStateSnapshot {
-                            mode,
-                            position: Some([position.x, position.y, position.z]),
-                            direction: Some([direction.x, direction.y, direction.z]),
-                            vertical_fov_deg: Some(camera.vertical_fov().to_degrees()),
-                            draw_distance: Some(camera.draw_distance()),
-                            lod_factor: Some(f64::from(self.lod_factor)),
-                        }
-                    }
-                    None => CameraStateSnapshot { mode, ..CameraStateSnapshot::default() },
-                };
+                let snapshot = self.camera_state_snapshot(self.last_camera);
                 reply.send(snapshot).ok();
             }
+            ViewportQuery::SetCamera { request, reply } => {
+                let result = self.apply_set_camera(request, cx);
+                reply.send(result).ok();
+            }
         }
+    }
+
+    fn camera_state_snapshot(&self, camera: Option<scene::Camera>) -> CameraStateSnapshot {
+        let mode = match self.camera_mode {
+            CameraMode::Follow => "follow",
+            CameraMode::Free => "free",
+        };
+        match camera {
+            Some(camera) => {
+                let position = camera.position();
+                let direction = camera.direction();
+                CameraStateSnapshot {
+                    mode,
+                    position: Some([position.x, position.y, position.z]),
+                    direction: Some([direction.x, direction.y, direction.z]),
+                    vertical_fov_deg: Some(camera.vertical_fov().to_degrees()),
+                    draw_distance: Some(camera.draw_distance()),
+                    lod_factor: Some(f64::from(self.lod_factor)),
+                }
+            }
+            None => CameraStateSnapshot { mode, ..CameraStateSnapshot::default() },
+        }
+    }
+
+    fn apply_set_camera(&mut self, request: SetCameraRequest, cx: &mut Context<Self>) -> Result<CameraStateSnapshot, String> {
+        if request.mode.is_none() && request.position.is_none() && request.look_at.is_none() {
+            return Err("provide at least one of mode, position, or look_at".to_owned());
+        }
+        if request.mode == Some(CameraModeRequest::Follow) && (request.position.is_some() || request.look_at.is_some()) {
+            return Err("position and look_at cannot be set when mode is follow".to_owned());
+        }
+        if let Some(pos) = request.position
+            && !pos.iter().all(|v| v.is_finite())
+        {
+            return Err("position coordinates must be finite".to_owned());
+        }
+        if let Some(look_at) = request.look_at
+            && !look_at.iter().all(|v| v.is_finite())
+        {
+            return Err("look_at coordinates must be finite".to_owned());
+        }
+
+        let now = Instant::now();
+        if request.mode == Some(CameraModeRequest::Follow) {
+            self.transition_to_follow();
+            let pose = self.agent_pose();
+            let rotation = self.body_rotation.current();
+            let camera = self.camera_observation(pose, rotation, now).or(self.last_camera);
+            if let Some(camera) = camera {
+                self.last_camera = Some(camera);
+            }
+            cx.notify();
+            return Ok(self.camera_state_snapshot(camera));
+        }
+
+        let current = if self.camera_mode == CameraMode::Free
+            && let Some(camera) = &self.camera
+        {
+            Some(camera.current_position_and_focus(now))
+        } else if let Some(mut pose) = self.agent_pose() {
+            pose.rotation = self.body_rotation.current();
+            Some(self.follow_camera.current_position_and_focus(pose, now))
+        } else {
+            self.last_camera.map(|last| {
+                let pos = last.position();
+                (pos, pos + last.direction().as_dvec3() * 4.0)
+            })
+        };
+
+        let position = request
+            .position
+            .map(math::DVec3::from_array)
+            .or_else(|| current.map(|(pos, _)| pos))
+            .ok_or_else(|| "camera position is unavailable; provide both position and look_at".to_owned())?;
+        let focus = request
+            .look_at
+            .map(math::DVec3::from_array)
+            .or_else(|| current.map(|(_, focus)| focus))
+            .ok_or_else(|| "camera look_at is unavailable; provide both position and look_at".to_owned())?;
+        if (focus - position).length() < 0.02 {
+            return Err("position and look_at must be at least 0.02m apart".to_owned());
+        }
+
+        let mut orbit = OrbitCamera::from_follow_view(position, focus, self.draw_distance, self.lod_factor);
+        orbit.config = self.follow_camera.config;
+        let viewport = [self.viewport_size[0].max(1), self.viewport_size[1].max(1)];
+        let scene_camera = orbit.scene_camera(viewport, now).ok_or_else(|| "invalid camera pose".to_owned())?;
+
+        self.camera = Some(orbit);
+        self.camera_mode.detach_for_focus();
+        self.last_camera = Some(scene_camera);
+        self.dirty = true;
+        cx.notify();
+        Ok(self.camera_state_snapshot(Some(scene_camera)))
     }
 
     fn agent_pose(&mut self) -> Option<world::WorldPose> {

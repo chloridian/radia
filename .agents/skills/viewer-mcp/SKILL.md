@@ -44,6 +44,7 @@ These tools change only local viewer state and never send grid mutations to simu
 |---|---|
 | `set_setting` | Change a local cvar setting by name through `SettingsStore` validation and persistence; refuses sensitive settings and returns old and new values. |
 | `set_log_level` | Change the local runtime log filter (global level and/or per-target override) through `LogControl` and return the active filter. |
+| `set_camera` | Change the local camera mode (`follow` or `free`) and/or free camera pose (`position`, `look_at`) on the GUI thread without moving the agent or sending simulator traffic. |
 
 ## Bounds and safety
 

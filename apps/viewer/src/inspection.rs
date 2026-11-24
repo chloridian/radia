@@ -92,6 +92,19 @@ pub struct CameraStateSnapshot {
     pub lod_factor: Option<f64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CameraModeRequest {
+    Follow,
+    Free,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SetCameraRequest {
+    pub mode: Option<CameraModeRequest>,
+    pub position: Option<[f64; 3]>,
+    pub look_at: Option<[f64; 3]>,
+}
+
 pub enum ViewportQuery {
     SceneQuery { reply: oneshot::Sender<SceneQuerySummary> },
     ExplainObject { entity: Entity, reply: oneshot::Sender<Option<ObjectExplanation>> },
@@ -99,6 +112,7 @@ pub enum ViewportQuery {
     BeginScreenshot { reply: oneshot::Sender<Option<CaptureReadback>> },
     EnvironmentOverride { reply: oneshot::Sender<EnvironmentOverrideSummary> },
     CameraState { reply: oneshot::Sender<CameraStateSnapshot> },
+    SetCamera { request: SetCameraRequest, reply: oneshot::Sender<Result<CameraStateSnapshot, String>> },
 }
 
 impl ViewportQuery {
@@ -110,6 +124,7 @@ impl ViewportQuery {
             Self::BeginScreenshot { reply } => reply.is_closed(),
             Self::EnvironmentOverride { reply } => reply.is_closed(),
             Self::CameraState { reply } => reply.is_closed(),
+            Self::SetCamera { reply, .. } => reply.is_closed(),
         }
     }
 }
