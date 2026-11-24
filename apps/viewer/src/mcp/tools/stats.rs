@@ -45,6 +45,7 @@ fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
             .skip(total_spikes.saturating_sub(limit))
             .map(|spike| {
                 json!({
+                    "work_ms": spike.work_ms,
                     "frame_ms": spike.frame_ms,
                     "game_ms": spike.game_ms,
                     "render_ms": spike.render_ms,

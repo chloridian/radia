@@ -19,6 +19,7 @@ pub const FRAME_SPIKE_CAPACITY: usize = 32;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FrameSpike {
+    pub work_ms: f64,
     pub frame_ms: f64,
     pub game_ms: f64,
     pub render_ms: f64,
