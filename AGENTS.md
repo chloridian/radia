@@ -91,6 +91,7 @@ Source has no comments or doc comments, and that includes safety comments on `un
 - Use `assert_matches!` instead of `assert!(matches!(..))`, so failures print the actual value.
 - Keep test names short (`<subject>_<outcome>`, usually 2–5 words). Drop module/type/function names, setup, filler (`test_`, `should`, `when`, `returns`), and issue IDs; put details in assertion messages.
 - Ask before launching the gui viewer, driving a browser, or any computer use.
+- Inspect a running viewer through its local MCP server (`--mcp`) instead of guessing at scene, render, asset, or log state. See [viewer-mcp](.agents/skills/viewer-mcp/SKILL.md).
 
 ## Versioning
 
