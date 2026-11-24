@@ -36,6 +36,14 @@ Startup prints `MCP server listening on http://127.0.0.1:<port>`. The default en
 | `pick` | Geometry pick at viewport pixel `(x, y)` returning hit point, entity, object UUID, face slot, and base/emissive texture presence. |
 | `wait_for` | Bounded `watch`-channel wait (`world_revision`, `asset_queue_empty`, `texture_event`, max 30s timeout) with zero polling. |
 
+## Write tools (local only)
+
+These tools change only local viewer state and never send grid mutations to simulators.
+
+| Tool | Effect |
+|---|---|
+| `set_setting` | Change a local cvar setting by name through `SettingsStore` validation and persistence; refuses sensitive settings and returns old and new values. |
+
 ## Bounds and safety
 
 - Strictly bound to `127.0.0.1`.

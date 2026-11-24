@@ -39,12 +39,12 @@ fn input_schema() -> Value {
     })
 }
 
-fn is_sensitive_setting(name: &str) -> bool {
+pub(super) fn is_sensitive_setting(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     SENSITIVE_NAME_TOKENS.iter().any(|token| lower.contains(token))
 }
 
-fn cvar_value_to_json(value: &CvarValue) -> Value {
+pub(super) fn cvar_value_to_json(value: &CvarValue) -> Value {
     match value {
         CvarValue::Bool(flag) => Value::from(*flag),
         CvarValue::I64(number) => Value::from(*number),

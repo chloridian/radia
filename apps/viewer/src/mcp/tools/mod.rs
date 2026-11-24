@@ -8,6 +8,7 @@ mod logs;
 mod network_stats;
 mod pick;
 mod screenshot;
+mod set_setting;
 mod settings;
 mod stats;
 mod textures;
@@ -56,6 +57,7 @@ pub const TOOLS: &[ToolSpec] = &[
     explain_object::SPEC,
     pick::SPEC,
     wait_for::SPEC,
+    set_setting::SPEC,
 ];
 
 pub fn find_tool(name: &str) -> Option<&'static ToolSpec> {
