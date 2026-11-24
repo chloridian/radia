@@ -7,6 +7,7 @@ mod network_stats;
 mod pick;
 mod screenshot;
 mod stats;
+mod textures;
 mod wait_for;
 mod world_query;
 
@@ -43,6 +44,7 @@ pub const TOOLS: &[ToolSpec] = &[
     inventory_fetch::SPEC,
     network_stats::SPEC,
     changes::SPEC,
+    textures::SPEC,
     logs::SPEC,
     screenshot::SPEC,
     explain_object::SPEC,

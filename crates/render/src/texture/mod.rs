@@ -962,6 +962,10 @@ impl Textures {
     pub(crate) fn bytes(&self) -> usize {
         self.memory.gpu.load(Ordering::Acquire)
     }
+
+    pub(crate) fn soft_cap(&self) -> usize {
+        self.soft_cap
+    }
     fn changed(&mut self, id: TextureId) {
         self.revision = self.revision.checked_add(1).expect("texture state space exhausted");
         if let Some(entry) = self.entries.get_mut(&id) {

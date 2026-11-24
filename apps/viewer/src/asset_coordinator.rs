@@ -11,8 +11,8 @@ use std::{
 };
 
 use assets::{
-    AdmissionError, Budget, CacheReadCompletion, DecodeInput, Demand, Failure, FetchJob, FetchResponse, Kind, LoadCompletion, LoadJob,
-    MAX_RETRY_AFTER, MemoryStats, Priority, Request, Resource, Route, Store,
+    AdmissionError, Budget, CacheReadCompletion, DISCARD_HISTOGRAM_BUCKETS, DecodeInput, Demand, Failure, FetchJob, FetchResponse, Kind,
+    LoadCompletion, LoadJob, MAX_RETRY_AFTER, MemoryStats, Priority, Request, Resource, Route, Store,
     cache::{AssetCache, AssetCacheStats, CacheWrite},
     legacy_request,
     mesh::{MAX_MESH_HEADER_BYTES, MESH_HEADER_BYTES, MeshLodRequest, header_needs_more},
@@ -37,7 +37,20 @@ const COMMANDS: usize = 64;
 const MAX_MATERIALS_PER_POST: usize = 50;
 const MATERIALS_POST_INTERVAL: Duration = Duration::from_secs(1);
 const ASSET_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(30);
+const TEXTURE_STATS_INTERVAL: Duration = Duration::from_millis(250);
+const SLOW_TEXTURE_FETCH_THRESHOLD: Duration = Duration::from_secs(30);
 static UNEXPECTED_HTTP_STATUS_WARNED: AtomicU8 = AtomicU8::new(0);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TextureStatsSnapshot {
+    pub fetch_queued_visible: usize,
+    pub fetch_queued_background: usize,
+    pub decode_queued_visible: usize,
+    pub decode_queued_background: usize,
+    pub running_texture_decodes: usize,
+    pub discard_histogram: [usize; DISCARD_HISTOGRAM_BUCKETS],
+    pub fetches_in_flight_over_30s: usize,
+}
 
 type MaterialReply = oneshot::Sender<Result<Vec<u8>, Failure>>;
 
@@ -330,6 +343,7 @@ pub struct AssetHandle {
     textures: assets::TextureEvents,
     routes: watch::Receiver<()>,
     queue_stats: watch::Receiver<assets::AssetQueueStats>,
+    texture_stats: watch::Receiver<TextureStatsSnapshot>,
     cache: Option<Arc<AssetCache>>,
 }
 
@@ -344,6 +358,10 @@ impl AssetHandle {
 
     pub fn queue_stats_watch(&self) -> watch::Receiver<assets::AssetQueueStats> {
         self.queue_stats.clone()
+    }
+
+    pub fn texture_stats(&self) -> TextureStatsSnapshot {
+        *self.texture_stats.borrow()
     }
 
     pub async fn request_with_importance(
@@ -445,6 +463,7 @@ impl AssetCoordinator {
         let (controls, control_receiver) = mpsc::channel(COMMANDS);
         let (routes, route_events) = watch::channel(());
         let (queue_stats_tx, queue_stats_rx) = watch::channel(assets::AssetQueueStats::default());
+        let (texture_stats_tx, texture_stats_rx) = watch::channel(TextureStatsSnapshot::default());
         let active = Arc::new(AtomicBool::new(true));
         let store = cache.as_ref().map_or_else(|| Store::new(budget.clone()), |cache| Store::with_cache(budget.clone(), Arc::clone(cache)));
         let handle = AssetHandle {
@@ -455,11 +474,24 @@ impl AssetCoordinator {
             textures: store.texture_events(),
             routes: route_events,
             queue_stats: queue_stats_rx,
+            texture_stats: texture_stats_rx,
             cache,
         };
         let worker = runtime.clone().spawn(
-            run(store, receiver, control_receiver, routes, queue_stats_tx, active, runtime, cancelled, write_spawner, shutdown_drain_hook)
-                .in_current_span(),
+            run(
+                store,
+                receiver,
+                control_receiver,
+                routes,
+                queue_stats_tx,
+                texture_stats_tx,
+                active,
+                runtime,
+                cancelled,
+                write_spawner,
+                shutdown_drain_hook,
+            )
+            .in_current_span(),
         );
         Self { handle, controls, worker }
     }
@@ -493,8 +525,8 @@ impl AssetCoordinator {
 }
 
 enum WorkerResult {
-    Input(DecodeInput),
-    Complete(LoadCompletion, Option<AssetFailure>),
+    Input(Option<u64>, DecodeInput),
+    Complete(Option<u64>, LoadCompletion, Option<AssetFailure>),
     CacheRead(CacheReadCompletion),
     CacheWritten,
 }
@@ -610,6 +642,7 @@ async fn run(
     mut controls: mpsc::Receiver<RouteCommand>,
     routes: watch::Sender<()>,
     queue_stats: watch::Sender<assets::AssetQueueStats>,
+    texture_stats: watch::Sender<TextureStatsSnapshot>,
     active: Arc<AtomicBool>,
     runtime: Handle,
     cancelled: impl Future<Output = ()>,
@@ -624,11 +657,15 @@ async fn run(
     let mut jobs = FuturesUnordered::<JoinHandle<WorkerResult>>::new();
     let mut waiting = VecDeque::<DecodeInput>::new();
     let mut fetches = VecDeque::<FetchJob>::new();
+    let mut in_flight_texture_fetches = HashMap::<u64, Instant>::new();
+    let mut next_texture_fetch_id = 0u64;
+    let mut last_texture_stats_at: Option<Instant> = None;
     let mut failures = Summary::<AssetFailures>::new(ASSET_FAILURE_REPORT_INTERVAL);
     loop {
         if !active.load(Ordering::Acquire) {
             break;
         }
+        let now = Instant::now();
         let stats = store.queue_stats();
         queue_stats.send_if_modified(|current| {
             if *current == stats {
@@ -638,9 +675,44 @@ async fn run(
                 true
             }
         });
-        let now = Instant::now();
+        if last_texture_stats_at.is_none_or(|at| now.saturating_duration_since(at) >= TEXTURE_STATS_INTERVAL) {
+            last_texture_stats_at = Some(now);
+            let store_textures = store.texture_stats();
+            let mut decode_queued_visible = 0usize;
+            let mut decode_queued_background = 0usize;
+            for input in &waiting {
+                if input.resource().kind != Kind::Texture {
+                    continue;
+                }
+                match store.priority(input) {
+                    Priority::Visible => decode_queued_visible += 1,
+                    Priority::Background => decode_queued_background += 1,
+                }
+            }
+            let fetches_in_flight_over_30s = in_flight_texture_fetches
+                .values()
+                .filter(|started| now.saturating_duration_since(**started) > SLOW_TEXTURE_FETCH_THRESHOLD)
+                .count();
+            let snapshot = TextureStatsSnapshot {
+                fetch_queued_visible: store_textures.fetch_queued_visible,
+                fetch_queued_background: store_textures.fetch_queued_background,
+                decode_queued_visible,
+                decode_queued_background,
+                running_texture_decodes: stats.running_texture_decodes,
+                discard_histogram: store_textures.discard_histogram,
+                fetches_in_flight_over_30s,
+            };
+            texture_stats.send_if_modified(|current| {
+                if *current == snapshot {
+                    false
+                } else {
+                    *current = snapshot;
+                    true
+                }
+            });
+        }
         while let Some(job) = fetches.pop_front() {
-            spawn_fetch(job, &transports, &runtime, &mut jobs);
+            spawn_fetch(job, &transports, &runtime, &mut jobs, &mut in_flight_texture_fetches, &mut next_texture_fetch_id, now);
         }
         while let Some(job) = store.next_job(now) {
             match job {
@@ -655,7 +727,7 @@ async fn run(
             }
         }
         while let Some(job) = fetches.pop_front() {
-            spawn_fetch(job, &transports, &runtime, &mut jobs);
+            spawn_fetch(job, &transports, &runtime, &mut jobs, &mut in_flight_texture_fetches, &mut next_texture_fetch_id, now);
         }
         waiting.make_contiguous().sort_by_key(|input| Reverse((store.priority(input), store.importance(input))));
         for _ in 0..waiting.len() {
@@ -677,7 +749,7 @@ async fn run(
                 let _span = span.enter();
                 let completion = job.run();
                 let failure = completion.failure().and_then(|failure| AssetFailure::new(AssetStage::Prepare, resource, failure));
-                WorkerResult::Complete(completion, failure)
+                WorkerResult::Complete(None, completion, failure)
             }));
         }
         enum Input {
@@ -750,8 +822,16 @@ async fn run(
                     .transpose();
                 reply.send(result).ok();
             }
-            Input::Job(Ok(WorkerResult::Input(input))) => waiting.push_back(input),
-            Input::Job(Ok(WorkerResult::Complete(completion, failure))) => {
+            Input::Job(Ok(WorkerResult::Input(fetch_id, input))) => {
+                if let Some(fetch_id) = fetch_id {
+                    in_flight_texture_fetches.remove(&fetch_id);
+                }
+                waiting.push_back(input);
+            }
+            Input::Job(Ok(WorkerResult::Complete(fetch_id, completion, failure))) => {
+                if let Some(fetch_id) = fetch_id {
+                    in_flight_texture_fetches.remove(&fetch_id);
+                }
                 let now = Instant::now();
                 if let Some(failure) = failure
                     && let Some(due) = failures.record(now, |failures| failures.record(failure))
@@ -791,9 +871,20 @@ fn spawn_fetch(
     transports: &HashMap<Route, CapabilityTransport>,
     runtime: &Handle,
     jobs: &mut FuturesUnordered<JoinHandle<WorkerResult>>,
+    in_flight_texture_fetches: &mut HashMap<u64, Instant>,
+    next_texture_fetch_id: &mut u64,
+    now: Instant,
 ) {
     let transport = transports.get(&job.route()).cloned();
     let resource = job.resource();
+    let fetch_id = if resource.kind == Kind::Texture {
+        let id = *next_texture_fetch_id;
+        *next_texture_fetch_id = id.wrapping_add(1);
+        in_flight_texture_fetches.insert(id, now);
+        Some(id)
+    } else {
+        None
+    };
     jobs.push(
         runtime.spawn(
             async move {
@@ -812,8 +903,8 @@ fn spawn_fetch(
                 };
                 let failure = result.as_ref().err().and_then(|failure| AssetFailure::new(AssetStage::Fetch, resource, *failure));
                 match job.complete_response(result) {
-                    Ok(input) => WorkerResult::Input(input),
-                    Err(fetch) => WorkerResult::Complete(fetch.into(), failure),
+                    Ok(input) => WorkerResult::Input(fetch_id, input),
+                    Err(fetch) => WorkerResult::Complete(fetch_id, fetch.into(), failure),
                 }
             }
             .instrument(tracing::Span::current()),

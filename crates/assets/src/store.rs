@@ -954,6 +954,15 @@ impl Drop for Store {
     }
 }
 
+pub const DISCARD_HISTOGRAM_BUCKETS: usize = 16;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TextureStoreStats {
+    pub fetch_queued_visible: usize,
+    pub fetch_queued_background: usize,
+    pub discard_histogram: [usize; DISCARD_HISTOGRAM_BUCKETS],
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AssetQueueStats {
     pub queued_mesh: usize,
@@ -992,6 +1001,31 @@ impl Store {
             running_texture_decodes: self.running_texture_decodes,
             running_other_decodes: self.running_other_decodes,
         }
+    }
+
+    pub fn texture_stats(&self) -> TextureStoreStats {
+        let mut stats = TextureStoreStats::default();
+        for candidate in &self.candidate_queues[2] {
+            if candidate.key.resource.kind != Kind::Texture {
+                continue;
+            }
+            match candidate.priority.0 {
+                Priority::Visible => stats.fetch_queued_visible += 1,
+                Priority::Background => stats.fetch_queued_background += 1,
+            }
+        }
+        for (key, entry) in &self.entries {
+            if key.resource.kind != Kind::Texture {
+                continue;
+            }
+            if let Some(Content::Texture(image)) = entry.ready()
+                && let Some(info) = image.info()
+            {
+                let bucket = usize::from(info.discard).min(DISCARD_HISTOGRAM_BUCKETS - 1);
+                stats.discard_histogram[bucket] += 1;
+            }
+        }
+        stats
     }
 
     pub fn new(budget: Budget) -> Self {

@@ -88,6 +88,7 @@ pub struct Stats {
     pub prepare_draw_batches_ms: f64,
     pub prepare_finalize_ms: f64,
     pub texture_bytes: usize,
+    pub texture_budget_bytes: usize,
     pub texture_count: usize,
     pub texture_failure: Option<assets::Failure>,
     pub staging_bytes: usize,
@@ -508,6 +509,7 @@ impl GeometryRenderer {
         self.stats.instance_peak = self.memory.instance_peak.load(Ordering::Acquire);
         self.stats.instance_buffer_growths = self.instances.growths();
         self.stats.texture_bytes = self.textures.bytes();
+        self.stats.texture_budget_bytes = self.textures.soft_cap();
         self.stats.texture_count = self.textures.count();
         self.stats.texture_failure = self.textures.failure();
         self.stats.staging_bytes = self.textures.staging_bytes();

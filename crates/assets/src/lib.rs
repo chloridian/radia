@@ -25,9 +25,9 @@ pub use self::{
     },
     prepared_texture::{PREPARED_TEXTURE_FORMAT_VERSION, PreparedTextureKey},
     store::{
-        AdmissionError, AssetQueueStats, CacheReadCompletion, CacheReadJob, DecodeInput, DecodeJob, Demand, Failure, FetchFailure,
-        FetchJob, FetchResponse, Kind, LoadCompletion, LoadJob, MAX_ASSET_ROUTES, MAX_NON_MESH_FETCHES, MAX_RETRY_AFTER,
-        MAX_TEXTURE_DECODES, Priority, Request, Resource, Route, Status, Store,
+        AdmissionError, AssetQueueStats, CacheReadCompletion, CacheReadJob, DISCARD_HISTOGRAM_BUCKETS, DecodeInput, DecodeJob, Demand,
+        Failure, FetchFailure, FetchJob, FetchResponse, Kind, LoadCompletion, LoadJob, MAX_ASSET_ROUTES, MAX_NON_MESH_FETCHES,
+        MAX_RETRY_AFTER, MAX_TEXTURE_DECODES, Priority, Request, Resource, Route, Status, Store, TextureStoreStats,
     },
     texture::{
         ColorSpace, Image, ImageInfo, MAX_SOURCE_EDGE, MAX_TEXTURE_EDGE, PixelAlpha, PixelFormat, TextureDecodeJob, TextureEvents,
