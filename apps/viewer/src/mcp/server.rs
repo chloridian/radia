@@ -80,6 +80,8 @@ pub struct McpServer {
     addr: SocketAddr,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
+    #[cfg(test)]
+    semaphore: Arc<Semaphore>,
 }
 
 impl McpServer {
@@ -92,7 +94,8 @@ impl McpServer {
         let listener = TcpListener::from_std(std_listener)?;
         let (shutdown, mut shutdown_rx) = watch::channel(false);
 
-        let handler = RadiaMcpHandler { handle, config };
+        let semaphore = Arc::new(Semaphore::new(config.max_concurrent_requests.max(1)));
+        let handler = RadiaMcpHandler { handle, config, semaphore: Arc::clone(&semaphore) };
         let mut http_config = StreamableHttpServerConfig::default();
         http_config.legacy_session_mode = true;
         http_config.json_response = false;
@@ -102,7 +105,7 @@ impl McpServer {
 
         let session_manager = Arc::new(BoundedSessionManager::new(config.max_sessions, config.session_idle_timeout));
         let service = StreamableHttpService::new(move || Ok(handler.clone()), session_manager, http_config);
-        let guard_state = GuardState { port: addr.port(), semaphore: Arc::new(Semaphore::new(config.max_concurrent_requests.max(1))) };
+        let guard_state = GuardState { port: addr.port() };
         let router = Router::new().nest_service("/mcp", service).layer(middleware::from_fn_with_state(guard_state, guard_middleware));
 
         let task = runtime.spawn(async move {
@@ -119,7 +122,13 @@ impl McpServer {
             }
         });
         tracing::info!(%addr, "local MCP server listening");
-        Ok(Self { addr, shutdown, task })
+        Ok(Self {
+            addr,
+            shutdown,
+            task,
+            #[cfg(test)]
+            semaphore,
+        })
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -227,7 +236,6 @@ impl SessionManager for BoundedSessionManager {
 #[derive(Clone)]
 struct GuardState {
     port: u16,
-    semaphore: Arc<Semaphore>,
 }
 
 async fn guard_middleware(State(state): State<GuardState>, request: Request, next: Next) -> Response {
@@ -253,10 +261,6 @@ async fn guard_middleware(State(state): State<GuardState>, request: Request, nex
         return (StatusCode::FORBIDDEN, "{\"error\":\"forbidden host or origin\"}").into_response();
     }
 
-    let Ok(_permit) = state.semaphore.try_acquire_owned() else {
-        return (StatusCode::TOO_MANY_REQUESTS, "{\"error\":\"server busy: concurrency limit reached\"}").into_response();
-    };
-
     next.run(request).await
 }
 
@@ -264,6 +268,7 @@ async fn guard_middleware(State(state): State<GuardState>, request: Request, nex
 struct RadiaMcpHandler {
     handle: ViewerInspectionHandle,
     config: McpServerConfig,
+    semaphore: Arc<Semaphore>,
 }
 
 impl ServerHandler for RadiaMcpHandler {
@@ -295,6 +300,9 @@ impl ServerHandler for RadiaMcpHandler {
         request: ReadResourceRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
+        let Ok(_permit) = Arc::clone(&self.semaphore).try_acquire_owned() else {
+            return Err(ErrorData::new(ErrorCode(-32000), "server busy: concurrency limit reached", None));
+        };
         let ct = context.ct.clone();
         let tool_ctx = ToolCallContext::new(context);
         let result = tokio::select! {
@@ -355,6 +363,9 @@ impl ServerHandler for RadiaMcpHandler {
     }
 
     async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResponse, ErrorData> {
+        let Ok(_permit) = Arc::clone(&self.semaphore).try_acquire_owned() else {
+            return Err(ErrorData::new(ErrorCode(-32000), "server busy: concurrency limit reached", None));
+        };
         let Some(tool) = find_tool(request.name.as_ref()) else {
             return Err(ErrorData::invalid_params("unknown tool", None));
         };
@@ -440,26 +451,36 @@ fn is_loopback_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::{
-        net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener},
-        sync::Arc,
+        collections::HashMap,
+        future,
+        net::SocketAddr,
+        sync::{Arc, atomic::AtomicU64},
     };
 
-    use axum::{Router, middleware, routing::post};
+    use futures::FutureExt;
+    use network::{Grid, LoginCredentials, Session, StartLocation};
     use reqwest::{
         Client,
         header::{ACCEPT, CONTENT_TYPE, HOST, ORIGIN},
     };
     use serde_json::{Value, json};
     use tokio::{
-        net::TcpListener,
         runtime::Handle,
-        sync::{Mutex, Semaphore, oneshot},
+        sync::{mpsc, watch},
+        task,
     };
+    use world::{World, WorldLimits};
 
-    use super::{GuardState, McpServer, McpServerConfig, TOOLS, guard_middleware};
+    use super::{McpServer, McpServerConfig, TOOLS};
     use crate::{
-        inspection::inspection_channel,
+        asset_coordinator::AssetCoordinator,
+        inspection::{
+            InventoryFetchStats, ObjectCacheStats, RenderStatsSnapshot, SessionDiagnostics, SessionInspection, SessionQueuesSnapshot,
+            VIEWPORT_QUERY_CAPACITY, inspection_channel,
+        },
+        inventory::{InventoryEditController, InventoryFetchController},
         logging::{LogLevel, RecentLogEntry, RecentLogs},
+        world_reader::WorldReadHost,
     };
 
     const SESSION_HEADER: &str = "mcp-session-id";
@@ -802,59 +823,117 @@ mod tests {
 
     #[tokio::test]
     async fn concurrency_is_bounded() {
-        let std_listener = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind listener");
-        std_listener.set_nonblocking(true).expect("set nonblocking");
-        let addr = std_listener.local_addr().expect("local addr");
-        let listener = TcpListener::from_std(std_listener).expect("tokio listener");
-
-        let (entered_tx, entered_rx) = oneshot::channel::<()>();
-        let (release_tx, release_rx) = oneshot::channel::<()>();
-        let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
-        let release_rx = Arc::new(Mutex::new(Some(release_rx)));
-
-        let router = Router::new()
-            .route(
-                "/mcp",
-                post({
-                    let entered_tx = Arc::clone(&entered_tx);
-                    let release_rx = Arc::clone(&release_rx);
-                    move || {
-                        let entered_tx = Arc::clone(&entered_tx);
-                        let release_rx = Arc::clone(&release_rx);
-                        async move {
-                            if let Some(tx) = entered_tx.lock().await.take() {
-                                let _ = tx.send(());
-                            }
-                            if let Some(rx) = release_rx.lock().await.take() {
-                                let _ = rx.await;
-                            }
-                            "ok"
-                        }
-                    }
-                }),
-            )
-            .layer(middleware::from_fn_with_state(
-                GuardState { port: addr.port(), semaphore: Arc::new(Semaphore::new(1)) },
-                guard_middleware,
-            ));
-
-        let server_task = tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
+        let (publisher, handle) = inspection_channel(RecentLogs::default());
+        let runtime = Handle::current();
+        let world = World::new(WorldLimits {
+            max_regions: 2,
+            max_entities: 8,
+            max_entities_per_region: 8,
+            max_tombstones_per_region: 8,
+            max_tombstones: 8,
+            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(8),
+            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(8),
+            max_journal_entries: 8,
+            max_journal_changes: 32,
+            max_region_name_bytes: 64,
+            max_recovery_targets: 4,
         });
+        let reads = WorldReadHost::new(&world, runtime.clone());
+        let cancellation = future::pending::<()>().boxed().shared();
+        let assets = AssetCoordinator::new(runtime.clone(), cancellation, None);
+        let inventory_edits = InventoryEditController::new();
+        let inventory_fetch = InventoryFetchController::new(inventory_edits.handle());
+        let network_session = Session::start(LoginCredentials {
+            first_name: "Test".to_owned(),
+            last_name: "User".to_owned(),
+            password: String::new(),
+            grid: Grid::Agni,
+            start_location: StartLocation::Last,
+            mfa_hash: String::new(),
+        })
+        .expect("start test network session");
+        let network_handle = network_session.handle();
+        let (_render_tx, render_stats) = watch::channel(RenderStatsSnapshot::default());
+        let (viewport_queries, _viewport_rx) = mpsc::channel(VIEWPORT_QUERY_CAPACITY);
+        let (_motion_tx, agent_motion) = watch::channel(None);
+        let (_oc_tx, object_cache) = watch::channel(ObjectCacheStats::default());
+        let (_inv_tx, inventory) = watch::channel(InventoryFetchStats::default());
+        let (_net_tx, network) = watch::channel(Vec::new());
+        let (_sim_tx, sim_stats) = watch::channel(HashMap::new());
+        let (_q_tx, session_queues) = watch::channel(SessionQueuesSnapshot::default());
+        publisher.set_session(Some(SessionInspection {
+            world: reads.reader(),
+            assets: assets.handle(),
+            render_stats,
+            viewport_queries,
+            viewport_query_full: Arc::new(AtomicU64::new(0)),
+            agent_motion,
+            diagnostics: SessionDiagnostics {
+                object_cache,
+                inventory,
+                network,
+                sim_stats,
+                session_queues,
+                network_session: network_handle,
+                inventory_fetch: inventory_fetch.handle(),
+            },
+        }));
 
+        let config = McpServerConfig { max_concurrent_requests: 1, ..McpServerConfig::default() };
+        let server = McpServer::start(handle, config, &runtime).expect("start server");
+        let addr = server.addr();
         let client = Client::new();
+        let (session_id, _) = open_session(&client, addr).await;
+
+        let wait_call = json!({
+            "jsonrpc": "2.0",
+            "id": 100,
+            "method": "tools/call",
+            "params": { "name": "wait_for", "arguments": { "condition": "world_revision", "revision": 999_999, "timeout_ms": 10_000 } }
+        });
         let first = tokio::spawn({
             let client = client.clone();
-            async move { client.post(mcp_url(addr)).send().await.expect("first request").status().as_u16() }
+            let session_id = session_id.clone();
+            async move { post_mcp(&client, addr, Some(&session_id), &wait_call).await }
         });
 
-        entered_rx.await.expect("first request entered handler");
-        let second_status = client.post(mcp_url(addr)).send().await.expect("second request").status().as_u16();
-        let _ = release_tx.send(());
-        let first_status = first.await.expect("first task finished");
+        while server.semaphore.available_permits() > 0 {
+            task::yield_now().await;
+        }
 
-        assert_eq!(first_status, 200);
-        assert_eq!(second_status, 429);
-        server_task.abort();
+        let second_call = json!({
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": { "name": "logs", "arguments": {} }
+        });
+        let (second_status, _, second_body) = post_mcp(&client, addr, Some(&session_id), &second_call).await;
+        assert_eq!(second_status, 200);
+        let second_parsed = parse_mcp_payload(&second_body);
+        assert!(
+            second_parsed["error"]["message"].as_str().is_some_and(|msg| msg.contains("server busy")),
+            "expected server busy error, got: {second_body}"
+        );
+
+        let cancel_notif = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": 100 }
+        });
+        let _ = post_mcp(&client, addr, Some(&session_id), &cancel_notif).await;
+        let _ = first.await.expect("first task finished");
+
+        let third_call = json!({
+            "jsonrpc": "2.0",
+            "id": 102,
+            "method": "tools/call",
+            "params": { "name": "logs", "arguments": {} }
+        });
+        let (third_status, _, third_body) = post_mcp(&client, addr, Some(&session_id), &third_call).await;
+        assert_eq!(third_status, 200);
+        let third_parsed = parse_mcp_payload(&third_body);
+        assert_eq!(third_parsed["result"]["isError"], false, "expected call to succeed after permit release: {third_body}");
+
+        server.shutdown();
     }
 }
