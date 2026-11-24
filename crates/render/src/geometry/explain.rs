@@ -1,4 +1,3 @@
-use utils::AssetId;
 use uuid::Uuid;
 use world::{Entity, Region};
 
@@ -28,9 +27,9 @@ pub struct FaceExplanation {
     pub blended: bool,
     pub double_sided: bool,
     pub alpha_hidden: bool,
-    pub base_texture: Option<AssetId>,
+    pub has_base_texture: bool,
     pub base_texture_ready: Option<bool>,
-    pub emissive_texture: Option<AssetId>,
+    pub has_emissive_texture: bool,
     pub emissive_texture_ready: Option<bool>,
 }
 
@@ -116,9 +115,9 @@ impl GeometryRenderer {
             .faces
             .iter()
             .map(|face| {
-                let base_texture = face.images.base.as_ref().map(|handle| handle.asset());
+                let has_base_texture = face.images.base.is_some();
                 let base_texture_ready = face.images.base.as_ref().map(|handle| !self.pending_textures.contains(&handle.id()));
-                let emissive_texture = face.images.emissive.as_ref().map(|handle| handle.asset());
+                let has_emissive_texture = face.images.emissive.is_some();
                 let emissive_texture_ready = face.images.emissive.as_ref().map(|handle| !self.pending_textures.contains(&handle.id()));
                 let alpha_hidden = face.params.color[3] <= 0.0;
                 let submitted = face.slot.is_some();
@@ -130,9 +129,9 @@ impl GeometryRenderer {
                     blended: face.blended,
                     double_sided: face.params.double_sided,
                     alpha_hidden,
-                    base_texture,
+                    has_base_texture,
                     base_texture_ready,
-                    emissive_texture,
+                    has_emissive_texture,
                     emissive_texture_ready,
                 }
             })

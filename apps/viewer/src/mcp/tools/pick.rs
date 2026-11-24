@@ -9,7 +9,7 @@ use crate::{
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "viewer_pick",
-    description: "Pick the rendered geometry at viewport pixel coordinates (x, y) and return hit point, object, face, and texture IDs.",
+    description: "Pick the rendered geometry at viewport pixel coordinates (x, y) and return hit point, object, face, and texture presence.",
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,
@@ -55,8 +55,8 @@ fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
                 "region": detail.region.get(),
                 "face_range": [detail.face_range.start, detail.face_range.end],
                 "material_slot": detail.material_slot,
-                "base_texture": detail.base_texture.map(|id| format!("{id:?}")),
-                "emissive_texture": detail.emissive_texture.map(|id| format!("{id:?}")),
+                "has_base_texture": detail.has_base_texture,
+                "has_emissive_texture": detail.has_emissive_texture,
                 "double_sided": detail.double_sided,
                 "blended": detail.blended,
             }))),

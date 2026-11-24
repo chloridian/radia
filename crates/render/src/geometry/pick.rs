@@ -5,7 +5,6 @@ use std::{
 };
 
 use math::{DVec3, Quat, Vec3, ray_intersects_bounds, ray_triangle_intersection};
-use utils::AssetId;
 use uuid::Uuid;
 use world::{Entity, Region};
 
@@ -22,8 +21,8 @@ pub struct PickDetail {
     pub region: Region,
     pub face_range: Range<u32>,
     pub material_slot: u8,
-    pub base_texture: Option<AssetId>,
-    pub emissive_texture: Option<AssetId>,
+    pub has_base_texture: bool,
+    pub has_emissive_texture: bool,
     pub double_sided: bool,
     pub blended: bool,
 }
@@ -92,8 +91,8 @@ impl GeometryRenderer {
             return Ok(None);
         };
         let face = item.faces.iter().find(|face| face.indices == hit.face_range && face.order.3 == hit.material_slot);
-        let base_texture = face.and_then(|face| face.images.base.as_ref().map(|handle| handle.asset()));
-        let emissive_texture = face.and_then(|face| face.images.emissive.as_ref().map(|handle| handle.asset()));
+        let has_base_texture = face.is_some_and(|face| face.images.base.is_some());
+        let has_emissive_texture = face.is_some_and(|face| face.images.emissive.is_some());
         Ok(Some(PickDetail {
             point,
             entity: item.entity,
@@ -101,8 +100,8 @@ impl GeometryRenderer {
             region: item.region,
             face_range: hit.face_range.clone(),
             material_slot: hit.material_slot,
-            base_texture,
-            emissive_texture,
+            has_base_texture,
+            has_emissive_texture,
             double_sided: face.is_some_and(|face| face.params.double_sided),
             blended: face.is_some_and(|face| face.blended),
         }))

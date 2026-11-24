@@ -81,9 +81,9 @@ fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
                         "blended": face.blended,
                         "double_sided": face.double_sided,
                         "alpha_hidden": face.alpha_hidden,
-                        "base_texture": face.base_texture.map(|id| format!("{id:?}")),
+                        "has_base_texture": face.has_base_texture,
                         "base_texture_ready": face.base_texture_ready,
-                        "emissive_texture": face.emissive_texture.map(|id| format!("{id:?}")),
+                        "has_emissive_texture": face.has_emissive_texture,
                         "emissive_texture_ready": face.emissive_texture_ready,
                     })
                 })

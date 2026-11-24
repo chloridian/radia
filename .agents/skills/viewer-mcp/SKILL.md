@@ -25,7 +25,7 @@ Startup prints `MCP server listening on http://127.0.0.1:<port>`. Disconnecting 
 | `viewer_logs` | Recent `WARN` and `ERROR` entries from the in-memory ring buffer (sensitive fields and capability URLs omitted). |
 | `viewer_screenshot` | Non-blocking viewport PNG capture encoded off the GUI thread. |
 | `viewer_explain_object` | Combined World detail + renderer placement, culling, mesh residency, and per-face texture/alpha/omission state for an `object_id`. |
-| `viewer_pick` | Geometry pick at viewport pixel `(x, y)` returning hit point, entity, object UUID, face slot, and base/emissive texture IDs. |
+| `viewer_pick` | Geometry pick at viewport pixel `(x, y)` returning hit point, entity, object UUID, face slot, and base/emissive texture presence. |
 | `viewer_wait_for` | Bounded `watch`-channel wait (`world_revision`, `asset_queue_empty`, `texture_event`, max 30s timeout) with zero polling. |
 
 ## Bounds and safety
