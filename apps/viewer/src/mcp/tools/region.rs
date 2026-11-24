@@ -1,7 +1,7 @@
 use serde_json::{Map, Value, json};
 use world::{ParcelFlags, ParcelRead};
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{
     inspection::{RegionSimStats, ViewerInspectionHandle},
     mcp::MAX_JSON_RESPONSE_BYTES,
@@ -9,7 +9,9 @@ use crate::{
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "region",
+    title: "Region & Parcel Stats",
     description: "Return the agent's current region name, handle, latest simulator stats (SimStats), and current parcel name, area, and flags.",
+    annotations: ToolAnnotationsSpec::read_only(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

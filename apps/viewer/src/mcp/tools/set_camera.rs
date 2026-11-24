@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{
     inspection::{CameraModeRequest, SetCameraRequest, ViewerInspectionHandle, ViewportQuery},
     mcp::MAX_JSON_RESPONSE_BYTES,
@@ -9,7 +9,9 @@ use crate::{
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "set_camera",
+    title: "Set Camera",
     description: "Changes local viewer state: set the local camera mode (follow or free) and/or free camera pose (position and look_at) on the GUI thread. Never moves the agent; camera pose reaches the simulator through the normal agent update like any manual camera move.",
+    annotations: ToolAnnotationsSpec::camera_write(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

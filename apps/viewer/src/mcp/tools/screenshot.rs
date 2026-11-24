@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use tokio::{sync::oneshot, task};
 use wgpu::{MapMode, PollType};
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{
     inspection::{ViewerInspectionHandle, ViewportQuery},
     mcp::{MAX_PNG_RESPONSE_BYTES, png::encode_rgba_png},
@@ -13,7 +13,9 @@ use crate::{
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "screenshot",
+    title: "Viewport Screenshot",
     description: "Capture the current viewport texture as a PNG image without blocking the GUI thread.",
+    annotations: ToolAnnotationsSpec::read_only(),
     input_schema,
     handler,
     max_response_bytes: MAX_PNG_RESPONSE_BYTES,

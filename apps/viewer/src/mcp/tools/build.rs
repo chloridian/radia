@@ -2,12 +2,14 @@ use std::env::consts::{ARCH, OS};
 
 use serde_json::{Value, json};
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "build",
+    title: "Viewer Build Info",
     description: "Return viewer version, build profile, target OS/arch, GPU adapter details, and key wgpu device limits.",
+    annotations: ToolAnnotationsSpec::read_only(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

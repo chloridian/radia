@@ -1,14 +1,16 @@
 use serde_json::{Value, json};
 use world::{MAX_WORLD_CHANGE_PAGE_ITEMS, WorldChange, WorldChangeClasses, WorldChangeCursor, WorldChangeRecord, WorldEntityRemovalReason};
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
 
 const DEFAULT_LIMIT: usize = 50;
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "changes",
+    title: "World Changes",
     description: "Return a bounded page of the World change stream using an optional cursor and returning the next cursor.",
+    annotations: ToolAnnotationsSpec::read_only(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

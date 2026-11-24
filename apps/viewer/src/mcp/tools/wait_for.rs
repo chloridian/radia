@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::time;
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
 
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
@@ -11,7 +11,9 @@ const MAX_TIMEOUT_MS: u64 = 30_000;
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "wait_for",
+    title: "Wait For Event",
     description: "Wait on watch channels until world_revision >= target, asset_queue_empty, or texture_event advances, with a hard timeout.",
+    annotations: ToolAnnotationsSpec::read_only(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

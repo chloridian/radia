@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{
     inspection::ViewerInspectionHandle,
     logging::{LogControl, LogLevel},
@@ -9,7 +9,9 @@ use crate::{
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "set_log_level",
+    title: "Set Log Level",
     description: "Change the local viewer's runtime log filter (global level and/or per-target override) through LogControl and return the active filter.",
+    annotations: ToolAnnotationsSpec::local_write(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

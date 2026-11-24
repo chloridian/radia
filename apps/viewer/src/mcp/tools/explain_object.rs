@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use world::{ObjectDetail, ObjectDetailResult};
 
-use super::{ToolContent, ToolFuture, ToolSpec, format_shape, lookup_object_entity};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec, format_shape, lookup_object_entity};
 use crate::{
     inspection::{ViewerInspectionHandle, ViewportQuery},
     mcp::MAX_JSON_RESPONSE_BYTES,
@@ -10,7 +10,9 @@ use crate::{
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "explain_object",
+    title: "Explain Object",
     description: "Explain why an object is or is not drawn by combining World detail with renderer visibility, mesh, and texture state.",
+    annotations: ToolAnnotationsSpec::read_only(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

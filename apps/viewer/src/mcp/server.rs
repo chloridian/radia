@@ -19,7 +19,7 @@ use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ClientJsonRpcMessage, ContentBlock, ErrorCode, Implementation, JsonObject,
-        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, ServerJsonRpcMessage, Tool,
+        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, ServerJsonRpcMessage, Tool, ToolAnnotations,
     },
     service::RequestContext,
     transport::{
@@ -283,7 +283,16 @@ impl ServerHandler for RadiaMcpHandler {
                     Value::Object(map) => map,
                     _ => JsonObject::new(),
                 };
+                let mut annotations = ToolAnnotations::new().read_only(tool.annotations.read_only).open_world(tool.annotations.open_world);
+                if let Some(destructive) = tool.annotations.destructive {
+                    annotations = annotations.destructive(destructive);
+                }
+                if let Some(idempotent) = tool.annotations.idempotent {
+                    annotations = annotations.idempotent(idempotent);
+                }
                 Tool::new_with_raw(tool.name, Some(Cow::Borrowed(tool.description)), Arc::new(schema))
+                    .with_title(tool.title)
+                    .with_annotations(annotations)
             })
             .collect();
         Ok(ListToolsResult::with_all_items(tools))
@@ -604,6 +613,24 @@ mod tests {
         assert_ne!(status, 200, "third session beyond cap must be rejected");
 
         server.shutdown();
+    }
+
+    #[test]
+    fn tool_registry_titles_and_annotations() {
+        let mut non_read_only = Vec::new();
+        for tool in TOOLS {
+            assert!(!tool.title.trim().is_empty(), "tool {} missing title", tool.name);
+            if !tool.annotations.read_only {
+                non_read_only.push(tool.name);
+                assert_eq!(tool.annotations.destructive, Some(false), "tool {} must not be destructive", tool.name);
+                assert_eq!(tool.annotations.idempotent, Some(true), "tool {} must be idempotent", tool.name);
+                assert_eq!(tool.annotations.open_world, tool.name == "set_camera", "unexpected open_world for {}", tool.name);
+            } else {
+                assert!(!tool.annotations.open_world, "read tool {} must have open_world=false", tool.name);
+            }
+        }
+        non_read_only.sort_unstable();
+        assert_eq!(non_read_only, vec!["set_camera", "set_log_level", "set_setting"]);
     }
 
     #[tokio::test]

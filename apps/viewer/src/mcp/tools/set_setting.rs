@@ -3,12 +3,14 @@ use std::{borrow::Cow, sync::Arc};
 use cvars::{CvarError, CvarValue, ValueDomain, lookup_by_name};
 use serde_json::{Value, json};
 
-use super::{ToolContent, ToolFuture, ToolSpec, settings::cvar_value_to_json};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec, settings::cvar_value_to_json};
 use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES, settings::SettingsStore};
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "set_setting",
+    title: "Set Setting",
     description: "Changes local viewer state: set a local cvar setting by name through SettingsStore validation and persistence.",
+    annotations: ToolAnnotationsSpec::local_write(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

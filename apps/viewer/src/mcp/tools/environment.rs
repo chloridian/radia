@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use world::{EnvironmentAssignment, EnvironmentRead, EnvironmentSource};
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{
     inspection::{EnvironmentOverrideSummary, ViewerInspectionHandle, ViewportQuery},
     mcp::MAX_JSON_RESPONSE_BYTES,
@@ -11,7 +11,9 @@ use crate::{
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "environment",
+    title: "Region Environment",
     description: "Return active sky, water, and day-cycle values and source (region, parcel, local override) for the agent's region without asset UUIDs.",
+    annotations: ToolAnnotationsSpec::read_only(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

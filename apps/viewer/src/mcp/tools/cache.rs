@@ -1,11 +1,13 @@
 use serde_json::{Value, json};
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "cache",
+    title: "Cache Statistics",
     description: "Return object cache write-queue depth, capacity, busy/full drops, handshake state, and asset disk cache stats.",
+    annotations: ToolAnnotationsSpec::read_only(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{
     inspection::{FRAME_SPIKE_CAPACITY, ViewerInspectionHandle},
     mcp::MAX_JSON_RESPONSE_BYTES,
@@ -8,7 +8,9 @@ use crate::{
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "stats",
+    title: "Viewer Stats",
     description: "Return frame timing, recent frame spikes (>2x median), renderer stats, asset queue stats, and memory stats.",
+    annotations: ToolAnnotationsSpec::read_only(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

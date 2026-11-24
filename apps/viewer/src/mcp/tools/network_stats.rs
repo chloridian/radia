@@ -6,7 +6,7 @@ use network::{
 use serde_json::{Value, json};
 use world::Region;
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
 
 const DEFAULT_LIMIT: usize = 32;
@@ -14,7 +14,9 @@ const MAX_LIMIT: usize = 100;
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "network",
+    title: "Network Diagnostics",
     description: "Return per-region circuit packet stats, throttle settings, EventQueueGet state, and capability statuses without URLs or session IDs.",
+    annotations: ToolAnnotationsSpec::read_only(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

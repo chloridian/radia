@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{
     inspection::{ViewerInspectionHandle, ViewportQuery},
     mcp::MAX_JSON_RESPONSE_BYTES,
@@ -9,7 +9,9 @@ use crate::{
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "camera",
+    title: "Camera State",
     description: "Return camera mode, position, orientation, agent region name and handle, and agent region-local position.",
+    annotations: ToolAnnotationsSpec::read_only(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

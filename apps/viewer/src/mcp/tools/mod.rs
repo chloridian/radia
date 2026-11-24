@@ -38,9 +38,33 @@ pub enum ToolContent {
 
 pub type ToolResult = Result<ToolContent, String>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolAnnotationsSpec {
+    pub read_only: bool,
+    pub destructive: Option<bool>,
+    pub idempotent: Option<bool>,
+    pub open_world: bool,
+}
+
+impl ToolAnnotationsSpec {
+    pub const fn read_only() -> Self {
+        Self { read_only: true, destructive: None, idempotent: None, open_world: false }
+    }
+
+    pub const fn local_write() -> Self {
+        Self { read_only: false, destructive: Some(false), idempotent: Some(true), open_world: false }
+    }
+
+    pub const fn camera_write() -> Self {
+        Self { read_only: false, destructive: Some(false), idempotent: Some(true), open_world: true }
+    }
+}
+
 pub struct ToolSpec {
     pub name: &'static str,
+    pub title: &'static str,
     pub description: &'static str,
+    pub annotations: ToolAnnotationsSpec,
     pub input_schema: fn() -> Value,
     pub handler: ToolHandler,
     pub max_response_bytes: usize,

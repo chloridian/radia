@@ -1,11 +1,13 @@
 use serde_json::{Map, Value, json};
 
-use super::{ToolContent, ToolFuture, ToolSpec};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "textures",
+    title: "Texture Pipeline Stats",
     description: "Return aggregate texture fetch/decode queue depths by priority, discard-level histogram, GPU texture memory vs budget, and slow in-flight fetches (>30s).",
+    annotations: ToolAnnotationsSpec::read_only(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

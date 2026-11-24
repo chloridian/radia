@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use world::{ObjectDetail, ObjectDetailResult, WorldRevision};
 
-use super::{ToolContent, ToolFuture, ToolSpec, format_shape, lookup_object_entity};
+use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec, format_shape, lookup_object_entity};
 use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
 
 const DEFAULT_LIMIT: usize = 50;
@@ -9,7 +9,9 @@ const MAX_LIMIT: usize = 100;
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "world",
+    title: "World Query",
     description: "Query active regions, bounded object lists, or object properties by UUID.",
+    annotations: ToolAnnotationsSpec::read_only(),
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,
