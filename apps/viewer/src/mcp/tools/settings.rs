@@ -21,14 +21,38 @@ pub struct SettingsArgs {
     pub limit: Option<usize>,
 }
 
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingSourceOutput {
+    Default,
+    Preset,
+    Global,
+    StartupDeveloper,
+    Session,
+}
+
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingApplyOutput {
+    Live,
+    RestartRequired,
+}
+
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingPersistenceOutput {
+    Global,
+    SessionOnly,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct SettingEntryOutput {
     pub name: &'static str,
     pub value: Value,
-    pub source: &'static str,
+    pub source: SettingSourceOutput,
     pub unit: Option<&'static str>,
-    pub apply: &'static str,
-    pub persistence: &'static str,
+    pub apply: SettingApplyOutput,
+    pub persistence: SettingPersistenceOutput,
     pub pending_restart: Option<Value>,
 }
 
@@ -86,20 +110,20 @@ fn format_settings_snapshot(snapshot: &CvarSnapshot, prefix: Option<&str>, limit
             name: desc.name,
             value: cvar_value_to_json(&provenance.value),
             source: match provenance.source {
-                Layer::Default => "default",
-                Layer::Preset => "preset",
-                Layer::Global => "global",
-                Layer::StartupDeveloper => "startup_developer",
-                Layer::Session => "session",
+                Layer::Default => SettingSourceOutput::Default,
+                Layer::Preset => SettingSourceOutput::Preset,
+                Layer::Global => SettingSourceOutput::Global,
+                Layer::StartupDeveloper => SettingSourceOutput::StartupDeveloper,
+                Layer::Session => SettingSourceOutput::Session,
             },
             unit: desc.unit,
             apply: match desc.apply {
-                ApplyScope::Live => "live",
-                ApplyScope::RestartRequired => "restart_required",
+                ApplyScope::Live => SettingApplyOutput::Live,
+                ApplyScope::RestartRequired => SettingApplyOutput::RestartRequired,
             },
             persistence: match desc.persistence {
-                PersistenceScope::Global => "global",
-                PersistenceScope::SessionOnly => "session_only",
+                PersistenceScope::Global => SettingPersistenceOutput::Global,
+                PersistenceScope::SessionOnly => SettingPersistenceOutput::SessionOnly,
             },
             pending_restart: provenance.pending_restart_value.as_ref().map(cvar_value_to_json),
         });

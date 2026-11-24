@@ -6,7 +6,10 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{inspection::InventoryFetchStats, mcp::server::Handler};
+use crate::{
+    inspection::{InventoryErrorKind, InventoryFetchStats, InventoryRetryState},
+    mcp::server::Handler,
+};
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
@@ -21,8 +24,8 @@ pub struct InventoryArgs {
 pub struct FailedFolderOutput {
     pub folder_id: String,
     pub owner_id: String,
-    pub retry_state: &'static str,
-    pub error_kind: &'static str,
+    pub retry_state: InventoryRetryState,
+    pub error_kind: InventoryErrorKind,
     pub error: String,
 }
 
@@ -106,7 +109,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::format_inventory_stats;
-    use crate::inspection::{FailedInventoryFolder, InventoryFetchStats};
+    use crate::inspection::{FailedInventoryFolder, InventoryErrorKind, InventoryFetchStats, InventoryRetryState};
 
     #[test]
     fn inventory_output_bounds_failures_and_omits_items() {
@@ -121,15 +124,15 @@ mod tests {
                 FailedInventoryFolder {
                     folder_id: Uuid::from_u128(1),
                     owner_id: Uuid::from_u128(10),
-                    retry_state: "non_retryable",
-                    error_kind: "invalid_response",
+                    retry_state: InventoryRetryState::NonRetryable,
+                    error_kind: InventoryErrorKind::InvalidResponse,
                     error: "inventory server returned an invalid folder response: inventory response contains malformed LLSD".to_owned(),
                 },
                 FailedInventoryFolder {
                     folder_id: Uuid::from_u128(2),
                     owner_id: Uuid::from_u128(10),
-                    retry_state: "exhausted",
-                    error_kind: "retry_exhausted",
+                    retry_state: InventoryRetryState::Exhausted,
+                    error_kind: InventoryErrorKind::RetryExhausted,
                     error: "inventory folder fetch retries were exhausted: request timed out".to_owned(),
                 },
             ],

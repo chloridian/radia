@@ -17,7 +17,7 @@ use tracing::{Instrument, field};
 
 use super::{DeferredInventoryEvent, PendingFolderPreparation, SessionDriver};
 use crate::{
-    inspection::{FailedInventoryFolder, InventoryFetchStats},
+    inspection::{FailedInventoryFolder, InventoryErrorKind, InventoryFetchStats, InventoryRetryState},
     inventory::{
         AisDelta, FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryEditEvent, InventoryFetchError, InventoryFetchEvent,
         InventoryLoadingStatus, MoveExpectation, favorites::load_favorites,
@@ -551,29 +551,29 @@ impl SessionDriver {
     }
 }
 
-fn retry_state_for_error(error: &InventoryFetchError) -> &'static str {
+fn retry_state_for_error(error: &InventoryFetchError) -> InventoryRetryState {
     match error {
-        InventoryFetchError::RetryExhausted(_) => "exhausted",
-        InventoryFetchError::Cancelled => "cancelled",
+        InventoryFetchError::RetryExhausted(_) => InventoryRetryState::Exhausted,
+        InventoryFetchError::Cancelled => InventoryRetryState::Cancelled,
         InventoryFetchError::CapabilityUnavailable
         | InventoryFetchError::FolderTooLarge
         | InventoryFetchError::InvalidResponse(_)
         | InventoryFetchError::HttpStatus(_)
         | InventoryFetchError::RequestFailed
-        | InventoryFetchError::Model(_) => "non_retryable",
+        | InventoryFetchError::Model(_) => InventoryRetryState::NonRetryable,
     }
 }
 
-fn error_kind_for_error(error: &InventoryFetchError) -> &'static str {
+fn error_kind_for_error(error: &InventoryFetchError) -> InventoryErrorKind {
     match error {
-        InventoryFetchError::CapabilityUnavailable => "capability_unavailable",
-        InventoryFetchError::FolderTooLarge => "folder_too_large",
-        InventoryFetchError::InvalidResponse(_) => "invalid_response",
-        InventoryFetchError::RetryExhausted(_) => "retry_exhausted",
-        InventoryFetchError::HttpStatus(_) => "http_status",
-        InventoryFetchError::Cancelled => "cancelled",
-        InventoryFetchError::RequestFailed => "request_failed",
-        InventoryFetchError::Model(_) => "model",
+        InventoryFetchError::CapabilityUnavailable => InventoryErrorKind::CapabilityUnavailable,
+        InventoryFetchError::FolderTooLarge => InventoryErrorKind::FolderTooLarge,
+        InventoryFetchError::InvalidResponse(_) => InventoryErrorKind::InvalidResponse,
+        InventoryFetchError::RetryExhausted(_) => InventoryErrorKind::RetryExhausted,
+        InventoryFetchError::HttpStatus(_) => InventoryErrorKind::HttpStatus,
+        InventoryFetchError::Cancelled => InventoryErrorKind::Cancelled,
+        InventoryFetchError::RequestFailed => InventoryErrorKind::RequestFailed,
+        InventoryFetchError::Model(_) => InventoryErrorKind::Model,
     }
 }
 

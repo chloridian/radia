@@ -29,7 +29,7 @@ pub struct LogsArgs {
 #[derive(Serialize, JsonSchema)]
 pub struct LogEntryOutput {
     pub timestamp_ms: u64,
-    pub level: &'static str,
+    pub level: LogLevel,
     pub target: String,
     pub message: String,
 }
@@ -62,12 +62,7 @@ pub(in crate::mcp) fn logs_data(handle: &ViewerInspectionHandle, limit: Option<u
         .recent_logs()
         .snapshot(limit, min_level)
         .into_iter()
-        .map(|entry| LogEntryOutput {
-            timestamp_ms: entry.timestamp_ms,
-            level: entry.level.directive(),
-            target: entry.target,
-            message: entry.message,
-        })
+        .map(|entry| LogEntryOutput { timestamp_ms: entry.timestamp_ms, level: entry.level, target: entry.target, message: entry.message })
         .collect();
     LogsOutput { entries }
 }

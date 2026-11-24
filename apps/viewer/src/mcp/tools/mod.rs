@@ -58,6 +58,15 @@ pub(super) async fn lookup_object_entity(world: &WorldReader, id_str: &str) -> R
     world.entity(target_id).await.map_err(|e| format!("object lookup failed: {e}"))
 }
 
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum SculptTypeOutput {
+    Sphere,
+    Torus,
+    Plane,
+    Cylinder,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub(super) struct SculptFlagsOutput {
     pub invert: bool,
@@ -88,7 +97,7 @@ pub(super) enum ShapeOutput {
         profile_hollow: u16,
     },
     Sculpt {
-        sculpt_type: &'static str,
+        sculpt_type: SculptTypeOutput,
         flags: SculptFlagsOutput,
     },
     Mesh {
@@ -121,10 +130,10 @@ pub(super) fn format_shape(shape: &Shape) -> ShapeOutput {
         },
         Shape::Sculpt { asset_id: _, sculpt_type, flags } => {
             let sculpt_type = match sculpt_type {
-                SculptType::Sphere => "sphere",
-                SculptType::Torus => "torus",
-                SculptType::Plane => "plane",
-                SculptType::Cylinder => "cylinder",
+                SculptType::Sphere => SculptTypeOutput::Sphere,
+                SculptType::Torus => SculptTypeOutput::Torus,
+                SculptType::Plane => SculptTypeOutput::Plane,
+                SculptType::Cylinder => SculptTypeOutput::Cylinder,
             };
             ShapeOutput::Sculpt { sculpt_type, flags: SculptFlagsOutput { invert: flags.invert, mirror: flags.mirror } }
         }

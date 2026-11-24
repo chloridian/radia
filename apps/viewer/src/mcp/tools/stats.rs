@@ -38,6 +38,14 @@ pub struct FrameStatsOutput {
     pub has_more_spikes: bool,
 }
 
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OmissionReasonOutput {
+    InstanceBufferBudget,
+    MeshMemoryBudget,
+    CombinedBudgets,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct RenderStatsOutput {
     pub instances: usize,
@@ -48,7 +56,7 @@ pub struct RenderStatsOutput {
     pub pending_textures: usize,
     pub omitted_faces: usize,
     pub mesh_budget_blocked: usize,
-    pub omission_reason: Option<&'static str>,
+    pub omission_reason: Option<OmissionReasonOutput>,
     pub mesh_bytes: usize,
     pub texture_bytes: usize,
     pub texture_count: usize,
@@ -152,9 +160,9 @@ pub(in crate::mcp) fn stats_data(handle: &ViewerInspectionHandle, limit: Option<
             omitted_faces: rs.omitted_faces,
             mesh_budget_blocked: rs.mesh_budget_blocked,
             omission_reason: rs.omission_reason.map(|reason| match reason {
-                OmissionReason::InstanceBufferBudget => "instance_buffer_budget",
-                OmissionReason::MeshMemoryBudget => "mesh_memory_budget",
-                OmissionReason::CombinedBudgets => "combined_budgets",
+                OmissionReason::InstanceBufferBudget => OmissionReasonOutput::InstanceBufferBudget,
+                OmissionReason::MeshMemoryBudget => OmissionReasonOutput::MeshMemoryBudget,
+                OmissionReason::CombinedBudgets => OmissionReasonOutput::CombinedBudgets,
             }),
             mesh_bytes: rs.mesh_bytes,
             texture_bytes: rs.texture_bytes,

@@ -1,6 +1,6 @@
 use network::{
     CircuitMotionStatus, CircuitStats,
-    capabilities::{CapabilityDiagnostics, CapabilityLastStatus},
+    capabilities::{CapabilityDiagnostics, CapabilityLastStatus, EventQueueState},
     default_throttle_rates,
 };
 use rmcp::{
@@ -46,9 +46,19 @@ pub struct CircuitStatsOutput {
     pub throttle_rates: ThrottleRatesOutput,
 }
 
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EventQueueStateOutput {
+    Starting,
+    Connected,
+    Backoff,
+    Failed,
+    Stopped,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct EventQueueOutput {
-    pub state: &'static str,
+    pub state: EventQueueStateOutput,
     pub last_status: Option<u16>,
 }
 
@@ -145,10 +155,16 @@ fn format_network_snapshot(regions: &[RegionNetworkSnapshot], limit: usize) -> N
         .take(limit)
         .map(|entry| {
             let stats = entry.stats;
-            let event_queue = entry
-                .capabilities
-                .as_ref()
-                .map(|caps| EventQueueOutput { state: caps.event_queue.state.as_str(), last_status: caps.event_queue.last_status });
+            let event_queue = entry.capabilities.as_ref().map(|caps| EventQueueOutput {
+                state: match caps.event_queue.state {
+                    EventQueueState::Starting => EventQueueStateOutput::Starting,
+                    EventQueueState::Connected => EventQueueStateOutput::Connected,
+                    EventQueueState::Backoff => EventQueueStateOutput::Backoff,
+                    EventQueueState::Failed => EventQueueStateOutput::Failed,
+                    EventQueueState::Stopped => EventQueueStateOutput::Stopped,
+                },
+                last_status: caps.event_queue.last_status,
+            });
             let (capabilities, has_more_capabilities) = match &entry.capabilities {
                 Some(caps) => {
                     let list = caps

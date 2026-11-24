@@ -686,8 +686,8 @@ impl SceneView {
 
     fn camera_state_snapshot(&self, camera: Option<scene::Camera>) -> CameraStateSnapshot {
         let mode = match self.camera_mode {
-            CameraMode::Follow => "follow",
-            CameraMode::Free => "free",
+            CameraMode::Follow => CameraModeRequest::Follow,
+            CameraMode::Free => CameraModeRequest::Free,
         };
         match camera {
             Some(camera) => {

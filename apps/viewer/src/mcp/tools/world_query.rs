@@ -40,12 +40,30 @@ pub struct WorldRegionItemOutput {
     pub handle: Option<u64>,
 }
 
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectKindOutput {
+    Avatar,
+    Object,
+    Unknown { code: u8 },
+}
+
+impl From<Kind> for ObjectKindOutput {
+    fn from(kind: Kind) -> Self {
+        match kind {
+            Kind::Avatar => Self::Avatar,
+            Kind::Object => Self::Object,
+            Kind::Unknown(code) => Self::Unknown { code },
+        }
+    }
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct WorldObjectItemOutput {
     pub id: String,
     pub region: u64,
     pub local_id: u32,
-    pub kind: String,
+    pub kind: ObjectKindOutput,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -55,7 +73,7 @@ pub struct WorldObjectDetailOutput {
     pub id: String,
     pub region: u64,
     pub local_id: u32,
-    pub kind: String,
+    pub kind: ObjectKindOutput,
     pub shape: Option<ShapeOutput>,
     pub is_physical: bool,
     pub attachment_point: Option<u8>,
@@ -125,7 +143,7 @@ impl Handler {
                         id: item.id.to_string(),
                         region: item.address.region().get(),
                         local_id: item.address.local_id().get(),
-                        kind: format_kind(item.kind),
+                        kind: ObjectKindOutput::from(item.kind),
                     })
                     .collect();
                 WorldOutput::Objects { revision: revision.get(), objects, has_more: page.next.is_some() }
@@ -171,14 +189,6 @@ pub(in crate::mcp) async fn world_summary_data(handle: &ViewerInspectionHandle) 
     Ok(WorldOutput::Summary { active_session: true, revision: revision.get(), region_count: regions.regions.len() })
 }
 
-pub(super) fn format_kind(kind: Kind) -> String {
-    match kind {
-        Kind::Avatar => "avatar".to_owned(),
-        Kind::Object => "object".to_owned(),
-        Kind::Unknown(code) => format!("unknown({code})"),
-    }
-}
-
 fn format_object_detail(revision: WorldRevision, detail: &ObjectDetail) -> WorldObjectDetailOutput {
     WorldObjectDetailOutput {
         found: true,
@@ -186,7 +196,7 @@ fn format_object_detail(revision: WorldRevision, detail: &ObjectDetail) -> World
         id: detail.summary.id.to_string(),
         region: detail.summary.address.region().get(),
         local_id: detail.summary.address.local_id().get(),
-        kind: format_kind(detail.summary.kind),
+        kind: ObjectKindOutput::from(detail.summary.kind),
         shape: detail.shape.as_ref().map(format_shape),
         is_physical: detail.is_physical,
         attachment_point: detail.attachment_point.map(AttachmentPoint::get),

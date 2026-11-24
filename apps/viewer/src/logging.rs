@@ -13,7 +13,7 @@ use std::{
 };
 
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime, UtcOffset, format_description};
 use tracing::{
     Event, Level, Subscriber,
@@ -33,7 +33,7 @@ const MAX_LOGS: usize = 20;
 const RECENT_LOG_CAPACITY: usize = 256;
 const MAX_LOG_TEXT_CHARS: usize = 512;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, JsonSchema, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogLevel {
     Error,

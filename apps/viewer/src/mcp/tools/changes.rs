@@ -78,42 +78,66 @@ impl Handler {
     }
 }
 
-fn change_classes_list(classes: WorldChangeClasses) -> Vec<&'static str> {
-    let mut list = Vec::new();
-    if classes.contains(WorldChangeClasses::POSE) {
-        list.push("pose");
-    }
-    if classes.contains(WorldChangeClasses::MOTION) {
-        list.push("motion");
-    }
-    if classes.contains(WorldChangeClasses::SCALE) {
-        list.push("scale");
-    }
-    if classes.contains(WorldChangeClasses::RELATIONSHIP) {
-        list.push("relationship");
-    }
-    if classes.contains(WorldChangeClasses::SHAPE) {
-        list.push("shape");
-    }
-    if classes.contains(WorldChangeClasses::APPEARANCE) {
-        list.push("appearance");
-    }
-    if classes.contains(WorldChangeClasses::MEDIA) {
-        list.push("media");
-    }
-    if classes.contains(WorldChangeClasses::PBR_MATERIAL_OVERRIDES) {
-        list.push("pbr_material_overrides");
-    }
-    list
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum ChangeClassOutput {
+    Pose,
+    Motion,
+    Scale,
+    Relationship,
+    Shape,
+    Appearance,
+    Media,
+    PbrMaterialOverrides,
 }
 
-fn removal_reason_str(reason: WorldEntityRemovalReason) -> &'static str {
-    match reason {
-        WorldEntityRemovalReason::Killed => "killed",
-        WorldEntityRemovalReason::AddressReplaced => "address_replaced",
-        WorldEntityRemovalReason::ParentCascade => "parent_cascade",
-        WorldEntityRemovalReason::RegionRetired => "region_retired",
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum RemovalReasonOutput {
+    Killed,
+    AddressReplaced,
+    ParentCascade,
+    RegionRetired,
+}
+
+impl From<WorldEntityRemovalReason> for RemovalReasonOutput {
+    fn from(reason: WorldEntityRemovalReason) -> Self {
+        match reason {
+            WorldEntityRemovalReason::Killed => Self::Killed,
+            WorldEntityRemovalReason::AddressReplaced => Self::AddressReplaced,
+            WorldEntityRemovalReason::ParentCascade => Self::ParentCascade,
+            WorldEntityRemovalReason::RegionRetired => Self::RegionRetired,
+        }
     }
+}
+
+fn change_classes_list(classes: WorldChangeClasses) -> Vec<ChangeClassOutput> {
+    let mut list = Vec::new();
+    if classes.contains(WorldChangeClasses::POSE) {
+        list.push(ChangeClassOutput::Pose);
+    }
+    if classes.contains(WorldChangeClasses::MOTION) {
+        list.push(ChangeClassOutput::Motion);
+    }
+    if classes.contains(WorldChangeClasses::SCALE) {
+        list.push(ChangeClassOutput::Scale);
+    }
+    if classes.contains(WorldChangeClasses::RELATIONSHIP) {
+        list.push(ChangeClassOutput::Relationship);
+    }
+    if classes.contains(WorldChangeClasses::SHAPE) {
+        list.push(ChangeClassOutput::Shape);
+    }
+    if classes.contains(WorldChangeClasses::APPEARANCE) {
+        list.push(ChangeClassOutput::Appearance);
+    }
+    if classes.contains(WorldChangeClasses::MEDIA) {
+        list.push(ChangeClassOutput::Media);
+    }
+    if classes.contains(WorldChangeClasses::PBR_MATERIAL_OVERRIDES) {
+        list.push(ChangeClassOutput::PbrMaterialOverrides);
+    }
+    list
 }
 
 fn format_record(record: &WorldChangeRecord) -> Value {
@@ -152,7 +176,7 @@ fn format_record(record: &WorldChangeRecord) -> Value {
             "id": id.to_string(),
             "region": address.region().get(),
             "local_id": address.local_id(),
-            "reason": removal_reason_str(reason),
+            "reason": RemovalReasonOutput::from(reason),
         }),
         WorldChange::EntityRebound { id, from, to, .. } => json!({
             "revision": revision,

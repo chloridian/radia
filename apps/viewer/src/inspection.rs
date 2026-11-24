@@ -10,7 +10,7 @@ use network::{CircuitMotionStatus, CircuitStats, SessionHandle, SimulatorId, cap
 use protocol::messages::SimStats;
 use render::{CaptureReadback, ObjectExplanation, PickDetail, PickError, Stats};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{
     mpsc::{self, error::TrySendError},
     oneshot, watch,
@@ -116,7 +116,7 @@ pub struct EnvironmentOverrideSummary {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CameraStateSnapshot {
-    pub mode: &'static str,
+    pub mode: CameraModeRequest,
     pub position: Option<[f64; 3]>,
     pub direction: Option<[f32; 3]>,
     pub vertical_fov_deg: Option<f64>,
@@ -124,9 +124,10 @@ pub struct CameraStateSnapshot {
     pub lod_factor: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CameraModeRequest {
+    #[default]
     Follow,
     Free,
 }
@@ -185,12 +186,33 @@ pub struct ObjectCacheStats {
     pub loaded_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryRetryState {
+    Exhausted,
+    Cancelled,
+    NonRetryable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryErrorKind {
+    CapabilityUnavailable,
+    FolderTooLarge,
+    InvalidResponse,
+    RetryExhausted,
+    HttpStatus,
+    Cancelled,
+    RequestFailed,
+    Model,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FailedInventoryFolder {
     pub folder_id: Uuid,
     pub owner_id: Uuid,
-    pub retry_state: &'static str,
-    pub error_kind: &'static str,
+    pub retry_state: InventoryRetryState,
+    pub error_kind: InventoryErrorKind,
     pub error: String,
 }
 

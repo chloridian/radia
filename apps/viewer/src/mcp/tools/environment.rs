@@ -11,6 +11,23 @@ use crate::{
     mcp::server::Handler,
 };
 
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentSourceKindOutput {
+    Inherit,
+    Asset,
+    Inline,
+}
+
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentEffectiveSourceOutput {
+    LocalOverride,
+    Parcel,
+    Region,
+    Default,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct LocalOverrideOutput {
     pub active: bool,
@@ -20,7 +37,7 @@ pub struct LocalOverrideOutput {
 
 #[derive(Serialize, JsonSchema)]
 pub struct EnvironmentAssignmentOutput {
-    pub source_kind: &'static str,
+    pub source_kind: EnvironmentSourceKindOutput,
     pub version: Option<u32>,
     pub day_length_seconds: Option<u32>,
     pub day_offset_seconds: Option<i32>,
@@ -42,7 +59,7 @@ pub struct EnvironmentOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hydration_revision: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<&'static str>,
+    pub source: Option<EnvironmentEffectiveSourceOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_override: Option<LocalOverrideOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -191,15 +208,15 @@ fn format_day_cycle(day: &DayCycle) -> Value {
 
 fn format_assignment(assignment: &EnvironmentAssignment) -> EnvironmentAssignmentOutput {
     let (source_kind, settings) = match &assignment.source {
-        EnvironmentSource::Inherit => ("inherit", Value::Null),
-        EnvironmentSource::Asset(_) => ("asset", Value::Null),
+        EnvironmentSource::Inherit => (EnvironmentSourceKindOutput::Inherit, Value::Null),
+        EnvironmentSource::Asset(_) => (EnvironmentSourceKindOutput::Asset, Value::Null),
         EnvironmentSource::Inline(bytes) => {
             let decoded = EnvironmentDescription::decode(bytes).ok().map(|description| match &description.settings {
                 EnvironmentSettings::Sky(sky) => json!({ "kind": "sky", "sky": format_sky(sky) }),
                 EnvironmentSettings::Water(water) => json!({ "kind": "water", "water": format_water(water) }),
                 EnvironmentSettings::DayCycle(day) => json!({ "kind": "day_cycle", "day_cycle": format_day_cycle(day) }),
             });
-            ("inline", decoded.unwrap_or(Value::Null))
+            (EnvironmentSourceKindOutput::Inline, decoded.unwrap_or(Value::Null))
         }
     };
     EnvironmentAssignmentOutput {
@@ -216,13 +233,13 @@ fn format_environment(read: &EnvironmentRead, overrides: EnvironmentOverrideSumm
     let parcel_active =
         read.parcel.as_ref().and_then(|parcel| parcel.assignment.as_ref()).is_some_and(|a| !matches!(a.source, EnvironmentSource::Inherit));
     let effective_source = if overrides.local_override {
-        "local_override"
+        EnvironmentEffectiveSourceOutput::LocalOverride
     } else if parcel_active {
-        "parcel"
+        EnvironmentEffectiveSourceOutput::Parcel
     } else if read.region_assignment.is_some() {
-        "region"
+        EnvironmentEffectiveSourceOutput::Region
     } else {
-        "default"
+        EnvironmentEffectiveSourceOutput::Default
     };
     EnvironmentOutput {
         active_session: true,
@@ -248,7 +265,7 @@ mod tests {
     use uuid::Uuid;
     use world::{EnvironmentAssignment, EnvironmentRead, EnvironmentSource, World, WorldLimits};
 
-    use super::format_environment;
+    use super::{EnvironmentEffectiveSourceOutput, EnvironmentSourceKindOutput, format_environment};
     use crate::inspection::EnvironmentOverrideSummary;
 
     #[test]
@@ -281,9 +298,9 @@ mod tests {
             parcel: None,
         };
         let output = format_environment(&read, EnvironmentOverrideSummary::default());
-        assert_eq!(output.source, Some("region"));
+        assert_eq!(output.source, Some(EnvironmentEffectiveSourceOutput::Region));
         let assignment = output.region_assignment.as_ref().expect("region assignment");
-        assert_eq!(assignment.source_kind, "asset");
+        assert_eq!(assignment.source_kind, EnvironmentSourceKindOutput::Asset);
         assert_eq!(assignment.day_length_seconds, Some(14400));
         let serialized = serde_json::to_string(&output).expect("serialize environment");
         assert!(!serialized.contains(&secret_asset.to_string()));

@@ -3,11 +3,14 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use tokio::sync::oneshot;
 
-use crate::{inspection::ViewportQuery, mcp::server::Handler};
+use crate::{
+    inspection::{CameraModeRequest, ViewportQuery},
+    mcp::server::Handler,
+};
 
 #[derive(Serialize, JsonSchema)]
 pub struct CameraStateOutput {
-    pub mode: &'static str,
+    pub mode: CameraModeRequest,
     pub position: Option<[f64; 3]>,
     pub direction: Option<[f32; 3]>,
     pub vertical_fov_deg: Option<f64>,

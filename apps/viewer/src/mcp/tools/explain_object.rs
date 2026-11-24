@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use world::{AttachmentPoint, ObjectDetail, ObjectDetailResult};
 
-use super::{ShapeOutput, format_shape, lookup_object_entity, world_query::format_kind};
+use super::{ShapeOutput, format_shape, lookup_object_entity, world_query::ObjectKindOutput};
 use crate::{
     inspection::{ViewerInspectionHandle, ViewportQuery},
     mcp::server::Handler,
@@ -19,6 +19,62 @@ use crate::{
 pub struct ExplainObjectArgs {
     #[schemars(description = "Object UUID to explain.")]
     pub object_id: String,
+}
+
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialShadingOutput {
+    Legacy,
+    Pbr,
+}
+
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialReasonOutput {
+    NoMaterialOverride,
+    PbrMaterialApplied,
+    PbrOverrideApplied,
+    PbrMaterialPending,
+    PbrMaterialFailed,
+    PbrMaterialUnavailable,
+    LegacyMaterialApplied,
+    LegacyMaterialPending,
+    LegacyMaterialFailed,
+}
+
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementOutput {
+    Ready,
+    Hidden,
+    Missing,
+}
+
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GeometryOutput {
+    Prim,
+    Mesh,
+    Sculpt,
+    Unsupported,
+    Missing,
+}
+
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VisibilityOutput {
+    Visible,
+    Culled,
+    NotCached,
+}
+
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshResidencyOutput {
+    Resident,
+    Pending,
+    BudgetBlocked,
+    NoMesh,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -33,21 +89,21 @@ pub struct FaceExplanationOutput {
     pub base_texture_ready: Option<bool>,
     pub has_emissive_texture: bool,
     pub emissive_texture_ready: Option<bool>,
-    pub material_shading: &'static str,
-    pub material_reason: &'static str,
+    pub material_shading: MaterialShadingOutput,
+    pub material_reason: MaterialReasonOutput,
 }
 
 #[derive(Serialize, JsonSchema)]
 pub struct RenderExplanationOutput {
     pub in_scene: bool,
-    pub placement: &'static str,
+    pub placement: PlacementOutput,
     pub hidden_reason: Option<String>,
-    pub geometry: &'static str,
+    pub geometry: GeometryOutput,
     pub has_mesh: bool,
     pub mesh_matches_geometry: bool,
     pub in_cache: bool,
-    pub visibility: &'static str,
-    pub mesh_residency: &'static str,
+    pub visibility: VisibilityOutput,
+    pub mesh_residency: MeshResidencyOutput,
     pub faces: Vec<FaceExplanationOutput>,
 }
 
@@ -56,7 +112,7 @@ pub struct WorldDetailOutput {
     pub id: String,
     pub region: u64,
     pub local_id: u32,
-    pub kind: String,
+    pub kind: ObjectKindOutput,
     pub shape: Option<ShapeOutput>,
     pub is_physical: bool,
     pub attachment_point: Option<u8>,
@@ -134,28 +190,51 @@ pub(in crate::mcp) async fn explain_object_data(handle: &ViewerInspectionHandle,
                 base_texture_ready: face.base_texture_ready,
                 has_emissive_texture: face.has_emissive_texture,
                 emissive_texture_ready: face.emissive_texture_ready,
-                material_shading: face.material_shading,
-                material_reason: face.material_reason,
+                material_shading: match face.material_shading {
+                    "pbr" => MaterialShadingOutput::Pbr,
+                    _ => MaterialShadingOutput::Legacy,
+                },
+                material_reason: match face.material_reason {
+                    "pbr_material_applied" => MaterialReasonOutput::PbrMaterialApplied,
+                    "pbr_override_applied" => MaterialReasonOutput::PbrOverrideApplied,
+                    "pbr_material_pending" => MaterialReasonOutput::PbrMaterialPending,
+                    "pbr_material_failed" => MaterialReasonOutput::PbrMaterialFailed,
+                    "pbr_material_unavailable" => MaterialReasonOutput::PbrMaterialUnavailable,
+                    "legacy_material_applied" => MaterialReasonOutput::LegacyMaterialApplied,
+                    "legacy_material_pending" => MaterialReasonOutput::LegacyMaterialPending,
+                    "legacy_material_failed" => MaterialReasonOutput::LegacyMaterialFailed,
+                    _ => MaterialReasonOutput::NoMaterialOverride,
+                },
             })
             .collect();
         RenderExplanationOutput {
             in_scene: exp.in_scene,
-            placement: exp.placement,
+            placement: match exp.placement {
+                "ready" => PlacementOutput::Ready,
+                "hidden" => PlacementOutput::Hidden,
+                _ => PlacementOutput::Missing,
+            },
             hidden_reason: exp.hidden_reason,
-            geometry: exp.geometry,
+            geometry: match exp.geometry {
+                "prim" => GeometryOutput::Prim,
+                "mesh" => GeometryOutput::Mesh,
+                "sculpt" => GeometryOutput::Sculpt,
+                "unsupported" => GeometryOutput::Unsupported,
+                _ => GeometryOutput::Missing,
+            },
             has_mesh: exp.has_mesh,
             mesh_matches_geometry: exp.mesh_matches_geometry,
             in_cache: exp.in_cache,
             visibility: match exp.visibility {
-                VisibilityStatus::Visible => "visible",
-                VisibilityStatus::Culled => "culled",
-                VisibilityStatus::NotCached => "not_cached",
+                VisibilityStatus::Visible => VisibilityOutput::Visible,
+                VisibilityStatus::Culled => VisibilityOutput::Culled,
+                VisibilityStatus::NotCached => VisibilityOutput::NotCached,
             },
             mesh_residency: match exp.mesh_residency {
-                MeshResidency::Resident => "resident",
-                MeshResidency::Pending => "pending",
-                MeshResidency::BudgetBlocked => "budget_blocked",
-                MeshResidency::NoMesh => "no_mesh",
+                MeshResidency::Resident => MeshResidencyOutput::Resident,
+                MeshResidency::Pending => MeshResidencyOutput::Pending,
+                MeshResidency::BudgetBlocked => MeshResidencyOutput::BudgetBlocked,
+                MeshResidency::NoMesh => MeshResidencyOutput::NoMesh,
             },
             faces,
         }
@@ -175,7 +254,7 @@ fn format_world_detail(detail: &ObjectDetail) -> WorldDetailOutput {
         id: detail.summary.id.to_string(),
         region: detail.summary.address.region().get(),
         local_id: detail.summary.address.local_id().get(),
-        kind: format_kind(detail.summary.kind),
+        kind: ObjectKindOutput::from(detail.summary.kind),
         shape: detail.shape.as_ref().map(format_shape),
         is_physical: detail.is_physical,
         attachment_point: detail.attachment_point.map(AttachmentPoint::get),

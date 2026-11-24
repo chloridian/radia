@@ -17,22 +17,12 @@ const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 const MAX_TIMEOUT_MS: u64 = 30_000;
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
-#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitCondition {
     WorldRevision,
     AssetQueueEmpty,
     TextureEvent,
-}
-
-impl WaitCondition {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::WorldRevision => "world_revision",
-            Self::AssetQueueEmpty => "asset_queue_empty",
-            Self::TextureEvent => "texture_event",
-        }
-    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -50,7 +40,7 @@ pub struct WaitForOutput {
     pub satisfied: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timed_out: Option<bool>,
-    pub condition: &'static str,
+    pub condition: WaitCondition,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,7 +112,12 @@ impl Handler {
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).clamp(1, MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
 
-        let condition_name = args.condition.as_str();
+        let condition = args.condition;
+        let condition_name = match condition {
+            WaitCondition::WorldRevision => "world_revision",
+            WaitCondition::AssetQueueEmpty => "asset_queue_empty",
+            WaitCondition::TextureEvent => "texture_event",
+        };
         match args.condition {
             WaitCondition::WorldRevision => {
                 let Some(target) = args.revision else {
@@ -134,7 +129,7 @@ impl Handler {
                     return Ok(Json(WaitForOutput {
                         satisfied: true,
                         timed_out: None,
-                        condition: condition_name,
+                        condition,
                         revision: Some(current.get()),
                         event: None,
                     }));
@@ -149,37 +144,21 @@ impl Handler {
                 })
                 .await;
                 match waited {
-                    WaitOutcome::Ready(Ok(rev)) => Ok(Json(WaitForOutput {
-                        satisfied: true,
-                        timed_out: None,
-                        condition: condition_name,
-                        revision: Some(rev),
-                        event: None,
-                    })),
+                    WaitOutcome::Ready(Ok(rev)) => {
+                        Ok(Json(WaitForOutput { satisfied: true, timed_out: None, condition, revision: Some(rev), event: None }))
+                    }
                     WaitOutcome::Ready(Err(error)) => Err(ErrorData::internal_error(error, None)),
                     WaitOutcome::Cancelled => Err(ErrorData::new(ErrorCode(-32000), "wait_for cancelled", None)),
                     WaitOutcome::TimedOut => {
                         let latest = world.revision().map(|rev| rev.get()).unwrap_or(current.get());
-                        Ok(Json(WaitForOutput {
-                            satisfied: false,
-                            timed_out: Some(true),
-                            condition: condition_name,
-                            revision: Some(latest),
-                            event: None,
-                        }))
+                        Ok(Json(WaitForOutput { satisfied: false, timed_out: Some(true), condition, revision: Some(latest), event: None }))
                     }
                 }
             }
             WaitCondition::AssetQueueEmpty => {
                 let mut watch = session.assets.queue_stats_watch();
                 if watch.borrow_and_update().is_empty() {
-                    return Ok(Json(WaitForOutput {
-                        satisfied: true,
-                        timed_out: None,
-                        condition: condition_name,
-                        revision: None,
-                        event: None,
-                    }));
+                    return Ok(Json(WaitForOutput { satisfied: true, timed_out: None, condition, revision: None, event: None }));
                 }
                 let waited = await_with_cancellation_and_progress(condition_name, timeout, &context, async {
                     loop {
@@ -192,17 +171,13 @@ impl Handler {
                 .await;
                 match waited {
                     WaitOutcome::Ready(Ok(())) => {
-                        Ok(Json(WaitForOutput { satisfied: true, timed_out: None, condition: condition_name, revision: None, event: None }))
+                        Ok(Json(WaitForOutput { satisfied: true, timed_out: None, condition, revision: None, event: None }))
                     }
                     WaitOutcome::Ready(Err(error)) => Err(ErrorData::internal_error(error, None)),
                     WaitOutcome::Cancelled => Err(ErrorData::new(ErrorCode(-32000), "wait_for cancelled", None)),
-                    WaitOutcome::TimedOut => Ok(Json(WaitForOutput {
-                        satisfied: false,
-                        timed_out: Some(true),
-                        condition: condition_name,
-                        revision: None,
-                        event: None,
-                    })),
+                    WaitOutcome::TimedOut => {
+                        Ok(Json(WaitForOutput { satisfied: false, timed_out: Some(true), condition, revision: None, event: None }))
+                    }
                 }
             }
             WaitCondition::TextureEvent => {
@@ -214,22 +189,14 @@ impl Handler {
                 })
                 .await;
                 match waited {
-                    WaitOutcome::Ready(Ok(event)) => Ok(Json(WaitForOutput {
-                        satisfied: true,
-                        timed_out: None,
-                        condition: condition_name,
-                        revision: None,
-                        event: Some(event),
-                    })),
+                    WaitOutcome::Ready(Ok(event)) => {
+                        Ok(Json(WaitForOutput { satisfied: true, timed_out: None, condition, revision: None, event: Some(event) }))
+                    }
                     WaitOutcome::Ready(Err(error)) => Err(ErrorData::internal_error(error, None)),
                     WaitOutcome::Cancelled => Err(ErrorData::new(ErrorCode(-32000), "wait_for cancelled", None)),
-                    WaitOutcome::TimedOut => Ok(Json(WaitForOutput {
-                        satisfied: false,
-                        timed_out: Some(true),
-                        condition: condition_name,
-                        revision: None,
-                        event: Some(initial),
-                    })),
+                    WaitOutcome::TimedOut => {
+                        Ok(Json(WaitForOutput { satisfied: false, timed_out: Some(true), condition, revision: None, event: Some(initial) }))
+                    }
                 }
             }
         }
