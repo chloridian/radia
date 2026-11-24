@@ -69,6 +69,8 @@ fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
                         "base_texture_ready": face.base_texture_ready,
                         "has_emissive_texture": face.has_emissive_texture,
                         "emissive_texture_ready": face.emissive_texture_ready,
+                        "material_shading": face.material_shading,
+                        "material_reason": face.material_reason,
                     })
                 })
                 .collect();

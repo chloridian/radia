@@ -1,8 +1,12 @@
+use assets::MaterialDescription;
 use uuid::Uuid;
 use world::{Entity, Region};
 
 use super::GeometryRenderer;
-use crate::scene::{Geometry, Placement, SceneView};
+use crate::{
+    material::{FaceMaterial, Resolution},
+    scene::{Geometry, Object, Placement, SceneView},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VisibilityStatus {
@@ -31,6 +35,8 @@ pub struct FaceExplanation {
     pub base_texture_ready: Option<bool>,
     pub has_emissive_texture: bool,
     pub emissive_texture_ready: Option<bool>,
+    pub material_shading: &'static str,
+    pub material_reason: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,6 +117,7 @@ impl GeometryRenderer {
             MeshResidency::NoMesh
         };
 
+        let materials = scene_object.or(item.source.as_deref()).and_then(Object::materials);
         let faces = item
             .faces
             .iter()
@@ -122,6 +129,12 @@ impl GeometryRenderer {
                 let alpha_hidden = face.params.color[3] <= 0.0;
                 let submitted = face.slot.is_some();
                 let omitted = is_visible && !submitted && !alpha_hidden;
+                let face_material = materials.and_then(|materials| {
+                    face.material_index
+                        .and_then(|idx| materials.get(idx))
+                        .or_else(|| materials.iter().find(|material| material.slot == face.order.3))
+                });
+                let (material_shading, material_reason) = material_selection(face_material);
                 FaceExplanation {
                     material_slot: face.order.3,
                     submitted,
@@ -133,6 +146,8 @@ impl GeometryRenderer {
                     base_texture_ready,
                     has_emissive_texture,
                     emissive_texture_ready,
+                    material_shading,
+                    material_reason,
                 }
             })
             .collect();
@@ -151,6 +166,35 @@ impl GeometryRenderer {
             visibility,
             mesh_residency,
             faces,
+        }
+    }
+}
+
+fn material_selection(face_material: Option<&FaceMaterial>) -> (&'static str, &'static str) {
+    let Some(face_material) = face_material else {
+        return ("legacy", "no_material_override");
+    };
+    match face_material.material {
+        MaterialDescription::Pbr(_) => {
+            let reason = match face_material.pbr_state {
+                Some(state) if state.resolution == Resolution::Ready => "pbr_material_applied",
+                _ => "pbr_override_applied",
+            };
+            ("pbr", reason)
+        }
+        MaterialDescription::Legacy(_) => {
+            let reason = match face_material.pbr_state.map(|state| state.resolution) {
+                Some(Resolution::Pending) => "pbr_material_pending",
+                Some(Resolution::Failed(_)) => "pbr_material_failed",
+                Some(Resolution::Ready) => "pbr_material_unavailable",
+                None => match face_material.legacy_state.map(|state| state.resolution) {
+                    Some(Resolution::Ready) => "legacy_material_applied",
+                    Some(Resolution::Pending) => "legacy_material_pending",
+                    Some(Resolution::Failed(_)) => "legacy_material_failed",
+                    None => "no_material_override",
+                },
+            };
+            ("legacy", reason)
         }
     }
 }
