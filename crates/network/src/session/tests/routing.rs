@@ -276,6 +276,10 @@ async fn primary_intro_precedes_udp_data() {
     };
     assert_matches!(
         next_raw_event(&mut events).await,
+        Event::SimulatorMotionStatus { simulator_id: id, motion_status, .. } if id == simulator_id && motion_status.borrow().connected
+    );
+    assert_matches!(
+        next_raw_event(&mut events).await,
         Event::SimulatorMessage { simulator_id: id, sequence: 19, message: Message::ChatFromSimulator(_), .. }
             if id == simulator_id
     );
