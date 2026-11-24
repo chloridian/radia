@@ -36,7 +36,7 @@ const RELIABLE_TIMEOUT_FACTOR: u32 = 5;
 const SEQUENCE_32_HALF_RANGE: u32 = 1 << 31;
 pub(crate) const MAX_ORDERED_SEQUENCE_DISTANCE: u32 = 1 << 30;
 
-#[derive(Clone, Debug, Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct PacketCounts {
     pub(crate) packets_in: u64,
     pub(crate) packets_out: u64,
@@ -44,6 +44,7 @@ pub(crate) struct PacketCounts {
     pub(crate) resent: u64,
 }
 
+#[derive(Clone, Debug)]
 pub(crate) enum CircuitError {
     InboundOnly,
     UnknownDirection,
