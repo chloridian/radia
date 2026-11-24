@@ -39,7 +39,7 @@ use serde_json::{Value, json};
 use tokio::{
     net::TcpListener,
     runtime::Handle,
-    sync::{Semaphore, watch},
+    sync::{Mutex, Semaphore, watch},
     task::JoinHandle,
     time,
 };
@@ -174,13 +174,14 @@ impl From<LocalSessionManagerError> for BoundedSessionError {
 struct BoundedSessionManager {
     inner: LocalSessionManager,
     max_sessions: usize,
+    create_lock: Mutex<()>,
 }
 
 impl BoundedSessionManager {
     fn new(max_sessions: usize, idle_timeout: Duration) -> Self {
         let mut inner = LocalSessionManager::default();
         inner.session_config.keep_alive = Some(idle_timeout);
-        Self { inner, max_sessions: max_sessions.max(1) }
+        Self { inner, max_sessions: max_sessions.max(1), create_lock: Mutex::new(()) }
     }
 }
 
@@ -189,6 +190,7 @@ impl SessionManager for BoundedSessionManager {
     type Transport = <LocalSessionManager as SessionManager>::Transport;
 
     async fn create_session(&self) -> Result<(SessionId, Self::Transport), Self::Error> {
+        let _guard = self.create_lock.lock().await;
         let live_count = self.inner.sessions.read().await.len();
         if live_count >= self.max_sessions {
             return Err(BoundedSessionError::LimitReached { max_sessions: self.max_sessions });
