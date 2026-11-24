@@ -141,7 +141,6 @@ pub struct ObjectCacheStats {
     pub write_queue_bytes: usize,
     pub write_queue_byte_capacity: usize,
     pub outstanding_writes: usize,
-    pub worker_queue_capacity: usize,
     pub pending_submissions: usize,
     pub pending_submissions_capacity: usize,
     pub busy_drops: u64,

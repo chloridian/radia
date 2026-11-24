@@ -253,7 +253,6 @@ impl ObjectCacheSession {
             write_queue_bytes: self.pending_write_bytes,
             write_queue_byte_capacity: MAX_PENDING_BYTES,
             outstanding_writes: self.outstanding_writes,
-            worker_queue_capacity: MAX_PENDING_SUBMISSIONS,
             pending_submissions: self.pending.len(),
             pending_submissions_capacity: MAX_PENDING_SUBMISSIONS,
             busy_drops: self.busy_drops,
@@ -666,7 +665,7 @@ impl ObjectCacheSession {
         let rows = self.pending_rows.saturating_add(submission.rows);
         let bytes = self.pending_bytes.saturating_add(submission.bytes);
         if self.pending.len() >= MAX_PENDING_SUBMISSIONS || rows > MAX_PENDING_ROWS || bytes > MAX_PENDING_BYTES {
-            self.full_drops = self.full_drops.saturating_add(1);
+            self.count_full_drop();
             self.warn("object cache write queue is full; some objects will be refetched");
             return false;
         }

@@ -858,6 +858,20 @@ mod tests {
         }
 
         assert!(cache.dropped_writes() > 0);
+        let before_extra = cache.stats();
+        assert_eq!(before_extra.full_drops, before_extra.dropped_writes);
+        for extra_id in 800_001..=800_003 {
+            let mut message = fixture_message(vectors::OBJECT_UPDATE);
+            let Message::ObjectUpdate(update) = &mut message else {
+                panic!("object update fixture should be a full update");
+            };
+            update.objects.truncate(1);
+            update.objects[0].local_id = extra_id;
+            cache.record_update(SIMULATOR, message);
+        }
+        let after_extra = cache.stats();
+        assert_eq!(after_extra.full_drops, before_extra.full_drops + 3);
+        assert_eq!(after_extra.dropped_writes, before_extra.dropped_writes + 3);
         assert!(cache.is_degraded());
         assert!(!cache.is_disabled());
 

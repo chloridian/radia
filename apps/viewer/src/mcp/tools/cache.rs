@@ -77,7 +77,6 @@ fn handler(handle: ViewerInspectionHandle, _args: Value) -> ToolFuture {
                     "bytes": obj.write_queue_bytes,
                     "byte_capacity": obj.write_queue_byte_capacity,
                     "outstanding_writes": obj.outstanding_writes,
-                    "worker_capacity": obj.worker_queue_capacity,
                     "pending_submissions": obj.pending_submissions,
                     "pending_submissions_capacity": obj.pending_submissions_capacity,
                     "busy_drops": obj.busy_drops,
