@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 use world::{Entity, Region};
 
-use crate::{asset_coordinator::AssetHandle, logging::RecentLogs, world_reader::WorldReader};
+use crate::{asset_coordinator::AssetHandle, logging::RecentLogs, session::AgentMotionSample, world_reader::WorldReader};
 
 pub const VIEWPORT_QUERY_CAPACITY: usize = 8;
 
@@ -34,12 +34,23 @@ pub struct EnvironmentOverrideSummary {
     pub local_water: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CameraStateSnapshot {
+    pub mode: &'static str,
+    pub position: Option<[f64; 3]>,
+    pub direction: Option<[f32; 3]>,
+    pub vertical_fov_deg: Option<f64>,
+    pub draw_distance: Option<f64>,
+    pub lod_factor: Option<f64>,
+}
+
 pub enum ViewportQuery {
     SceneQuery { reply: oneshot::Sender<SceneQuerySummary> },
     ExplainObject { entity: Entity, reply: oneshot::Sender<Option<ObjectExplanation>> },
     PixelPick { x: f32, y: f32, reply: oneshot::Sender<Result<Option<PickDetail>, PickError>> },
     BeginScreenshot { reply: oneshot::Sender<Option<CaptureReadback>> },
     EnvironmentOverride { reply: oneshot::Sender<EnvironmentOverrideSummary> },
+    CameraState { reply: oneshot::Sender<CameraStateSnapshot> },
 }
 
 impl ViewportQuery {
@@ -50,6 +61,7 @@ impl ViewportQuery {
             Self::PixelPick { reply, .. } => reply.is_closed(),
             Self::BeginScreenshot { reply } => reply.is_closed(),
             Self::EnvironmentOverride { reply } => reply.is_closed(),
+            Self::CameraState { reply } => reply.is_closed(),
         }
     }
 }
@@ -121,6 +133,7 @@ pub struct SessionInspection {
     pub assets: AssetHandle,
     pub render_stats: watch::Receiver<RenderStatsSnapshot>,
     pub viewport_queries: mpsc::Sender<ViewportQuery>,
+    pub agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     pub diagnostics: SessionDiagnostics,
 }
 

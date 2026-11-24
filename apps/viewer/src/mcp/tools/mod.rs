@@ -1,4 +1,5 @@
 mod cache;
+mod camera;
 mod changes;
 mod environment;
 mod explain_object;
@@ -47,6 +48,7 @@ pub const TOOLS: &[ToolSpec] = &[
     changes::SPEC,
     textures::SPEC,
     environment::SPEC,
+    camera::SPEC,
     logs::SPEC,
     screenshot::SPEC,
     explain_object::SPEC,

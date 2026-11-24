@@ -55,7 +55,7 @@ use crate::{
     agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
     camera::{CameraConfig, CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input},
     gui::{scene as gui_scene, window_geometry},
-    inspection::{EnvironmentOverrideSummary, RenderStatsSnapshot, SceneQuerySummary, ViewportQuery},
+    inspection::{CameraStateSnapshot, EnvironmentOverrideSummary, RenderStatsSnapshot, SceneQuerySummary, ViewportQuery},
     inventory::environments::EnvironmentMenu,
     logging::{LogControl, LogLevel},
     scene_feed::{SceneFeed, SceneSources},
@@ -660,6 +660,28 @@ impl SceneView {
                     Some(EnvironmentChoice::Shared) | None => EnvironmentOverrideSummary::default(),
                 };
                 drop(reply.send(summary));
+            }
+            ViewportQuery::CameraState { reply } => {
+                let mode = match self.camera_mode {
+                    CameraMode::Follow => "follow",
+                    CameraMode::Orbit => "orbit",
+                };
+                let snapshot = match self.last_camera {
+                    Some(camera) => {
+                        let position = camera.position();
+                        let direction = camera.direction();
+                        CameraStateSnapshot {
+                            mode,
+                            position: Some([position.x, position.y, position.z]),
+                            direction: Some([direction.x, direction.y, direction.z]),
+                            vertical_fov_deg: Some(camera.vertical_fov().to_degrees()),
+                            draw_distance: Some(camera.draw_distance()),
+                            lod_factor: Some(camera.lod_factor()),
+                        }
+                    }
+                    None => CameraStateSnapshot { mode, ..CameraStateSnapshot::default() },
+                };
+                drop(reply.send(snapshot));
             }
         }
     }

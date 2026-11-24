@@ -119,6 +119,7 @@ pub(crate) fn start_session(
             assets: assets.clone(),
             render_stats: render_stats_rx,
             viewport_queries: viewport_queries_tx,
+            agent_motion: agent_motion.clone(),
             diagnostics,
         }));
     }

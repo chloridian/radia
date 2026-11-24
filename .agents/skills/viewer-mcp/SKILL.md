@@ -28,6 +28,7 @@ Startup prints `MCP server listening on http://127.0.0.1:<port>`. The default en
 | `changes` | Bounded page of the World change stream (`cursor`, `limit`) returning change kinds (updates, kills, reparents) and `next_cursor`. |
 | `textures` | Aggregate texture fetch/decode queue depths by priority, discard-level histogram, GPU texture memory vs budget, and slow in-flight fetch count (>30s); no texture UUIDs. |
 | `environment` | Active sky, water, and day-cycle values plus source (`region`, `parcel`, `local_override`) for the agent's region (values only, no asset UUIDs). |
+| `camera` | Camera mode, position, direction, agent region name/handle, and region-local position. |
 | `logs` | Recent `WARN` and `ERROR` entries from the in-memory ring buffer (sensitive fields and capability URLs omitted). |
 | `screenshot` | Non-blocking viewport PNG capture encoded off the GUI thread. |
 | `explain_object` | Combined World detail + renderer placement, culling, mesh residency, and per-face PBR/legacy material shading, reason, texture/alpha/omission state for an `object_id` (no asset UUIDs). |
