@@ -1,9 +1,10 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::BTreeMap,
     mem,
     ops::Bound::{Excluded, Unbounded},
 };
 
+use utils::{FastHashMap, FastHashSet};
 use uuid::Uuid;
 use world::{Entity, Region};
 
@@ -69,9 +70,9 @@ enum ScanState {
 pub(in crate::scene) struct MeshPlanner {
     camera: Option<Camera>,
     meshes: MeshCache,
-    targets: HashMap<Entity, MeshTarget>,
-    target_users: HashMap<MeshKey, HashSet<Entity>>,
-    rejected: HashSet<Entity>,
+    targets: FastHashMap<Entity, MeshTarget>,
+    target_users: FastHashMap<MeshKey, FastHashSet<Entity>>,
+    rejected: FastHashSet<Entity>,
     last_retry_capacity_revision: Option<u64>,
     scan: ScanState,
 }
@@ -81,9 +82,9 @@ impl MeshPlanner {
         Self {
             camera: None,
             meshes: MeshCache::new(budget),
-            targets: HashMap::new(),
-            target_users: HashMap::new(),
-            rejected: HashSet::new(),
+            targets: FastHashMap::default(),
+            target_users: FastHashMap::default(),
+            rejected: FastHashSet::default(),
             last_retry_capacity_revision: None,
             scan: ScanState::Idle { dirty: false },
         }

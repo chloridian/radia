@@ -1,10 +1,10 @@
 use crate::{MAX_SOURCE_EDGE, PixelFormat, TextureSize, texture::Decoded};
 
-pub const PREPARED_TEXTURE_FORMAT_VERSION: u32 = 1;
+pub const PREPARED_TEXTURE_FORMAT_VERSION: u32 = 2;
 const MAGIC: [u8; 4] = *b"RTEX";
 const KEY_DOMAIN: &[u8] = b"radia-prepared-texture-v1";
 const MIP_COUNT: u8 = 1;
-pub(crate) const PREPARED_TEXTURE_HEADER_BYTES: usize = 68;
+pub(crate) const PREPARED_TEXTURE_FOOTER_BYTES: usize = 68;
 pub(crate) const MAX_PREPARED_TEXTURE_BYTES: usize = storage::MAX_VALUE_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -42,7 +42,7 @@ impl PreparedTextureKey {
 
 pub(crate) fn encode_prepared_texture(key: PreparedTextureKey, decoded: &Decoded) -> Option<Vec<u8>> {
     let pixels = decoded.pixels();
-    let total_len = PREPARED_TEXTURE_HEADER_BYTES.checked_add(pixels.len())?;
+    let total_len = PREPARED_TEXTURE_FOOTER_BYTES.checked_add(pixels.len())?;
     if total_len > MAX_PREPARED_TEXTURE_BYTES {
         return None;
     }
@@ -58,6 +58,7 @@ pub(crate) fn encode_prepared_texture(key: PreparedTextureKey, decoded: &Decoded
 
     let mut out = Vec::new();
     out.try_reserve_exact(total_len).ok()?;
+    out.extend_from_slice(pixels);
     out.extend_from_slice(&MAGIC);
     out.extend_from_slice(&key.format_version.to_le_bytes());
     out.extend_from_slice(&key.source_sha256);
@@ -71,71 +72,66 @@ pub(crate) fn encode_prepared_texture(key: PreparedTextureKey, decoded: &Decoded
     out.extend_from_slice(&size[0].to_le_bytes());
     out.extend_from_slice(&size[1].to_le_bytes());
     out.extend_from_slice(&pixel_len.to_le_bytes());
-    out.extend_from_slice(pixels);
     Some(out)
 }
 
-pub(crate) fn decode_prepared_texture(bytes: &[u8], expected: PreparedTextureKey) -> Option<Decoded> {
-    if bytes.len() < PREPARED_TEXTURE_HEADER_BYTES || bytes.len() > MAX_PREPARED_TEXTURE_BYTES {
+pub(crate) fn decode_prepared_texture(mut bytes: Vec<u8>, expected: PreparedTextureKey) -> Option<Decoded> {
+    if bytes.len() < PREPARED_TEXTURE_FOOTER_BYTES || bytes.len() > MAX_PREPARED_TEXTURE_BYTES {
         return None;
     }
-    if bytes.get(0..4)? != MAGIC {
+    let footer_start = bytes.len() - PREPARED_TEXTURE_FOOTER_BYTES;
+    let footer = bytes.get(footer_start..)?;
+    if footer.get(0..4)? != MAGIC {
         return None;
     }
-    let format_version = read_u32(bytes, 4)?;
+    let format_version = read_u32(footer, 4)?;
     if format_version != expected.format_version || format_version != PREPARED_TEXTURE_FORMAT_VERSION {
         return None;
     }
-    let source_sha256 = bytes.get(8..40)?;
+    let source_sha256 = footer.get(8..40)?;
     if source_sha256 != expected.source_sha256 {
         return None;
     }
-    let target_edge = read_u32(bytes, 40)?;
+    let target_edge = read_u32(footer, 40)?;
     if target_edge != expected.target_edge {
         return None;
     }
-    let source_width = read_u32(bytes, 44)?;
-    let source_height = read_u32(bytes, 48)?;
+    let source_width = read_u32(footer, 44)?;
+    let source_height = read_u32(footer, 48)?;
     if source_width == 0 || source_height == 0 || source_width > MAX_SOURCE_EDGE || source_height > MAX_SOURCE_EDGE {
         return None;
     }
     let source_size = [source_width, source_height];
-    let discard = *bytes.get(52)?;
+    let discard = *footer.get(52)?;
     let expected_discard = TextureSize::new(target_edge).discard_level(source_size);
     if discard != expected_discard {
         return None;
     }
-    let format = match *bytes.get(53)? {
+    let format = match *footer.get(53)? {
         0 => PixelFormat::Gray8,
         1 => PixelFormat::GrayAlpha8,
         2 => PixelFormat::Rgb8,
         3 => PixelFormat::Rgba8,
         _ => return None,
     };
-    let mip_count = *bytes.get(54)?;
-    let reserved = *bytes.get(55)?;
+    let mip_count = *footer.get(54)?;
+    let reserved = *footer.get(55)?;
     if mip_count != MIP_COUNT || reserved != 0 {
         return None;
     }
-    let width = read_u32(bytes, 56)?;
-    let height = read_u32(bytes, 60)?;
+    let width = read_u32(footer, 56)?;
+    let height = read_u32(footer, 60)?;
     let desired = source_size.map(|edge| edge.div_ceil(1 << discard));
     if width == 0 || height == 0 || width > MAX_SOURCE_EDGE || height > MAX_SOURCE_EDGE || [width, height] != desired {
         return None;
     }
-    let pixel_len = usize::try_from(read_u32(bytes, 64)?).ok()?;
+    let pixel_len = usize::try_from(read_u32(footer, 64)?).ok()?;
     let expected_len = usize::try_from(width).ok()?.checked_mul(usize::try_from(height).ok()?)?.checked_mul(format.channels())?;
-    if pixel_len != expected_len {
+    if pixel_len != expected_len || footer_start != pixel_len {
         return None;
     }
-    let pixel_slice = bytes.get(PREPARED_TEXTURE_HEADER_BYTES..)?;
-    if pixel_slice.len() != pixel_len {
-        return None;
-    }
-    let mut pixels = Vec::new();
-    pixels.try_reserve_exact(pixel_len).ok()?;
-    pixels.extend_from_slice(pixel_slice);
-    Some(Decoded::from_prepared(source_size, discard, [width, height], format, pixels))
+    bytes.truncate(pixel_len);
+    Some(Decoded::from_prepared(source_size, discard, [width, height], format, bytes))
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -217,17 +213,17 @@ mod tests {
         let key = PreparedTextureKey::new(source_hash, TextureSize::default());
         let encoded = encode_prepared_texture(key, &decoded).expect("encode prepared");
 
-        assert!(decode_prepared_texture(&encoded, key).is_some());
+        assert!(decode_prepared_texture(encoded.clone(), key).is_some());
 
         let mut other_hash = source_hash;
         other_hash[0] ^= 0xff;
-        assert!(decode_prepared_texture(&encoded, PreparedTextureKey::new(other_hash, TextureSize::default())).is_none());
+        assert!(decode_prepared_texture(encoded.clone(), PreparedTextureKey::new(other_hash, TextureSize::default())).is_none());
 
         let other_version = PreparedTextureKey::with_version(source_hash, PREPARED_TEXTURE_FORMAT_VERSION + 1, key.target_edge);
-        assert!(decode_prepared_texture(&encoded, other_version).is_none());
+        assert!(decode_prepared_texture(encoded.clone(), other_version).is_none());
 
         let other_edge = PreparedTextureKey::new(source_hash, TextureSize::new(64));
-        assert!(decode_prepared_texture(&encoded, other_edge).is_none());
+        assert!(decode_prepared_texture(encoded, other_edge).is_none());
     }
 
     fn corrupt_first_prep_file(dir: &Path) {

@@ -1236,14 +1236,16 @@ impl Store {
                 Some(cursor) => self.entries.range((Bound::Excluded(cursor), Bound::Unbounded)).next(),
                 None => self.entries.iter().next(),
             }
-            .map(|(key, _)| *key);
-            let Some(key) = next else {
+            .map(|(key, entry)| (*key, entry.dirty.is_dirty()));
+            let Some((key, is_dirty)) = next else {
                 self.fallback_scan_active = false;
                 self.fallback_scan_cursor = None;
                 break;
             };
             self.fallback_scan_cursor = Some(key);
-            self.reconcile_dirty_key(key, now);
+            if is_dirty {
+                self.reconcile_dirty_key(key, now);
+            }
         }
 
         let generation = self.dirty_signals.change_generation.load(Ordering::Acquire);
@@ -1285,17 +1287,63 @@ impl Store {
         if !self.dirty_signals.take(&signal.dirty) {
             return;
         }
-        if !self.entries.get(&signal.key).is_some_and(|entry| Arc::ptr_eq(&entry.dirty, &signal.dirty)) {
-            self.dirty_signals.retire(&signal.dirty);
+        let Store {
+            entries,
+            deadlines,
+            dirty_signals,
+            candidate_queues,
+            candidates_dirty,
+            running_fetches,
+            running_cache_reads,
+            running_non_mesh_cache_reads,
+            pending_non_mesh_cache_decodes,
+            running_texture_decodes,
+            running_other_decodes,
+            ..
+        } = self;
+        let Some(entry) = entries.get_mut(&signal.key) else {
+            dirty_signals.retire(&signal.dirty);
+            return;
+        };
+        if !Arc::ptr_eq(&entry.dirty, &signal.dirty) {
+            dirty_signals.retire(&signal.dirty);
             return;
         }
-        self.candidates_dirty = true;
-        self.reconcile_resource(signal.key, now);
+        reconcile_entry(
+            entry,
+            signal.key,
+            deadlines,
+            now,
+            running_fetches,
+            running_cache_reads,
+            running_non_mesh_cache_reads,
+            pending_non_mesh_cache_decodes,
+            running_texture_decodes,
+            running_other_decodes,
+        );
+        if entry.dirty.is_dirty() {
+            if Self::remove_candidate(candidate_queues, entry) {
+                *candidates_dirty = true;
+            }
+        } else if Self::refresh_candidate_queues(candidate_queues, signal.key, entry, now) {
+            *candidates_dirty = true;
+        }
+        Self::refresh_deadline_index(deadlines, signal.key, entry, now);
+        if !entry.has_active_demand()
+            && entry.texture().is_none()
+            && !matches!(entry.phase, LoadPhase::Running { .. })
+            && let Some(entry) = entries.remove(&signal.key)
+        {
+            dirty_signals.retire(&entry.dirty);
+        }
     }
 
     fn reconcile_dirty_key(&mut self, key: LoadKey, now: Instant) {
-        let Some(dirty) = self.entries.get(&key).map(|entry| Arc::clone(&entry.dirty)) else { return };
-        self.reconcile_dirty_notification(&DirtyNotification { key, dirty }, now);
+        let Some(entry) = self.entries.get(&key) else { return };
+        if !self.dirty_signals.take(&entry.dirty) {
+            return;
+        }
+        self.reconcile_resource(key, now);
     }
 
     fn reconcile_resource(&mut self, key: LoadKey, now: Instant) {
@@ -1304,6 +1352,7 @@ impl Store {
             deadlines,
             dirty_signals,
             candidate_queues,
+            candidates_dirty,
             running_fetches,
             running_cache_reads,
             running_non_mesh_cache_reads,
@@ -1326,9 +1375,11 @@ impl Store {
             running_other_decodes,
         );
         if entry.dirty.is_dirty() {
-            Self::remove_candidate(candidate_queues, entry);
-        } else {
-            Self::refresh_candidate_queues(candidate_queues, key, entry, now);
+            if Self::remove_candidate(candidate_queues, entry) {
+                *candidates_dirty = true;
+            }
+        } else if Self::refresh_candidate_queues(candidate_queues, key, entry, now) {
+            *candidates_dirty = true;
         }
         Self::refresh_deadline_index(deadlines, key, entry, now);
         if !entry.has_active_demand()
@@ -1340,7 +1391,12 @@ impl Store {
         }
     }
 
-    fn refresh_candidate_queues(candidate_queues: &mut [BTreeSet<ScheduleKey>; 3], key: LoadKey, entry: &mut AssetEntry, now: Instant) {
+    fn refresh_candidate_queues(
+        candidate_queues: &mut [BTreeSet<ScheduleKey>; 3],
+        key: LoadKey,
+        entry: &mut AssetEntry,
+        now: Instant,
+    ) -> bool {
         let candidate = if matches!(entry.phase, LoadPhase::Queued) && cache_retry_ready(entry.cache_eligibility, now) {
             entry
                 .views
@@ -1363,18 +1419,22 @@ impl Store {
             None
         };
         if entry.candidate == candidate {
-            return;
+            return false;
         }
         Self::remove_candidate(candidate_queues, entry);
         if let Some(candidate) = candidate {
             candidate_queues[fetch_pool(key.resource.kind)].insert(candidate);
             entry.candidate = Some(candidate);
         }
+        true
     }
 
-    fn remove_candidate(candidate_queues: &mut [BTreeSet<ScheduleKey>; 3], entry: &mut AssetEntry) {
+    fn remove_candidate(candidate_queues: &mut [BTreeSet<ScheduleKey>; 3], entry: &mut AssetEntry) -> bool {
         if let Some(previous) = entry.candidate.take() {
             candidate_queues[fetch_pool(previous.key.resource.kind)].remove(&previous);
+            true
+        } else {
+            false
         }
     }
 
@@ -1413,24 +1473,23 @@ impl Store {
             let candidate = self.candidates[index];
             let key = candidate.key;
             let resource = key.resource;
-            if !self.entries.get(&key).is_some_and(|entry| !entry.dirty.is_dirty() && entry.candidate == Some(candidate)) {
+            let Some(entry) = self.entries.get_mut(&key) else {
+                self.quarantine_candidate(candidate);
+                continue;
+            };
+            if entry.dirty.is_dirty() || entry.candidate != Some(candidate) {
                 self.quarantine_candidate(candidate);
                 continue;
             }
-            let Some(request) = self.entries.get(&key).map(|entry| entry.request) else { continue };
-            let cache_lookup_unchecked = self.entries.get(&key).is_some_and(|entry| {
-                cache_unchecked(entry.cache_eligibility, now) && entry.texture().and_then(|texture| texture.source()).is_none()
-            });
-            if cache_lookup_unchecked
-                && self.cache.as_ref().is_some_and(|cache| !cache.may_contain(request))
-                && let Some(entry) = self.entries.get_mut(&key)
-            {
+            let request = entry.request;
+            let mesh_fetch_mode = entry.mesh_fetch_mode;
+            let mut cache_lookup_unchecked =
+                cache_unchecked(entry.cache_eligibility, now) && entry.texture().and_then(|texture| texture.source()).is_none();
+            if cache_lookup_unchecked && self.cache.as_ref().is_some_and(|cache| !cache.may_contain(request)) {
                 entry.cache_eligibility = CacheEligibility::Checked;
+                cache_lookup_unchecked = false;
             }
-            let cache_read = self.cache.is_some()
-                && self.entries.get(&key).is_some_and(|entry| {
-                    cache_unchecked(entry.cache_eligibility, now) && entry.texture().and_then(|texture| texture.source()).is_none()
-                });
+            let cache_read = self.cache.is_some() && cache_lookup_unchecked;
             if cache_read {
                 if self.running_cache_reads >= storage::MAX_IN_FLIGHT_READS
                     || resource.kind != Kind::Mesh
@@ -1443,7 +1502,6 @@ impl Store {
                 continue;
             }
             let prefix_lod = (!cache_read).then(|| self.mesh_lod_prefix(request)).flatten();
-            let mesh_fetch_mode = self.entries.get(&key).map_or(MeshFetchMode::Range, |entry| entry.mesh_fetch_mode);
             let fetch_bytes = if mesh_fetch_mode == MeshFetchMode::FullFallback && resource.kind == Kind::Mesh {
                 Some(resource.kind.max_response_bytes())
             } else {

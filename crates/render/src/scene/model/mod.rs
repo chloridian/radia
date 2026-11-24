@@ -12,7 +12,7 @@ use std::{
 };
 
 use assets::TextureHandle;
-use utils::AssetId;
+use utils::{AssetId, FastHashMap};
 use world::{Entity, Region, RegionSummary, RemovalFence, TerrainPatch, TerrainPatchId, WorldRevision};
 
 pub(in crate::scene) use self::delivery::{Delivery, DeliveryState, Receipt};
@@ -185,7 +185,7 @@ impl RetiredRegions {
 #[derive(Default)]
 pub(in crate::scene) struct Mirror {
     pub(in crate::scene) viewer_environment: Option<ViewerEnvironment>,
-    pub(in crate::scene) objects: HashMap<Entity, Object>,
+    pub(in crate::scene) objects: FastHashMap<Entity, Object>,
     pub(in crate::scene) invalidations: HashMap<Entity, RemovalFence>,
     pub(in crate::scene) retired_regions: RetiredRegions,
     pub(in crate::scene) regions: BTreeMap<Region, RegionData>,

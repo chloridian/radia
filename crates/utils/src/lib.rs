@@ -1,3 +1,4 @@
+mod fast_hash;
 mod summary;
 
 use std::{
@@ -10,7 +11,10 @@ use std::{
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
-pub use self::summary::Summary;
+pub use self::{
+    fast_hash::{FastHashMap, FastHashSet, FastHasher},
+    summary::Summary,
+};
 
 const PERSIST_ATTEMPTS: usize = 4;
 const PERSIST_RETRY_DELAY: Duration = Duration::from_millis(10);
