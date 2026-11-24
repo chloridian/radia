@@ -191,12 +191,12 @@ impl ServerHandler for RadiaServer {
         };
         if let CallToolResponse::Complete(ref mut result) = response {
             if result.is_error != Some(true)
-                && matches!(tool_name.as_ref(), "screenshot" | "world" | "logs")
                 && let Some(link) = resources::resource_for_tool(tool_name.as_ref())
             {
                 result.content.push(ContentBlock::resource_link(link));
             }
-            let max_bytes = if tool_name.as_ref() == "screenshot" { MAX_PNG_RESPONSE_BYTES } else { self.config.max_response_bytes };
+            let has_image = result.content.iter().any(|block| matches!(block, ContentBlock::Image(_)));
+            let max_bytes = if has_image { MAX_PNG_RESPONSE_BYTES } else { self.config.max_response_bytes };
             let encoded_len = serde_json::to_vec(result).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
             if encoded_len > max_bytes {
                 return Err(response_too_large_error());
