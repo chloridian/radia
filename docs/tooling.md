@@ -186,3 +186,14 @@ The CI workflow builds, lints, and tests on Windows, macOS, and Linux.
 Prefer `~/Radia` over `/mnt/c/Radia` for Linux builds under WSL2. Keep build artifacts separate between platforms. Windows `.exe` tools exposed through WSL's `PATH` do not replace Linux-native installations.
 
 On Linux, remembered login storage uses Secret Service and requires a running provider such as GNOME Keyring or KWallet.
+
+## Local MCP server
+
+Pass `--mcp` (ephemeral port) or `--mcp-port <port>` to expose read-only viewer inspection tools on `127.0.0.1`:
+
+```bash
+cargo run --bin viewer -- --mcp
+cargo run --bin viewer -- --mcp-port 4040
+```
+
+When omitted, no listener is opened. See `.agents/skills/viewer-mcp/SKILL.md` for available tools and limits.
