@@ -88,7 +88,7 @@ fn llsd_kinds_use_distinct_paths() {
         b"environment llsd"
     );
     assert_eq!(
-        fs::read(directory.path().join(format!("assets/meshes/header/ab/{name}.llmesh"))).expect("read mesh header file"),
+        fs::read(directory.path().join(format!("assets/geometry/mesh/header/ab/{name}.llmesh"))).expect("read mesh header file"),
         mesh_bytes
     );
     assert!(!directory.path().join("assets/animations").exists());
@@ -119,6 +119,57 @@ fn whole_mesh_namespace_removed() {
     assert_eq!(cache.stats().entries_by_kind.meshes, 0);
     cache.shutdown().expect("finish namespace migration");
     assert!(!old_path.exists());
+}
+
+#[test]
+fn legacy_mesh_namespaces_swept() {
+    let directory = tempdir().expect("cache directory");
+    let old_namespaces = [
+        Namespace::new("textures", "j2c"),
+        Namespace::new("materials/pbr", "llsd"),
+        Namespace::new("materials/legacy", "llsd"),
+        Namespace::new("environments", "llsd"),
+        Namespace::new("meshes/header", "llmesh"),
+        Namespace::new("meshes/lod/lowest", "llmesh"),
+        Namespace::new("meshes/lod/low", "llmesh"),
+        Namespace::new("meshes/lod/medium", "llmesh"),
+        Namespace::new("meshes/lod/high", "llmesh"),
+    ];
+    let texture = resource(70, Kind::Texture);
+    let pbr = resource(71, Kind::PbrMaterial);
+    let legacy = resource(72, Kind::LegacyMaterial);
+    let environment = resource(73, Kind::Environment);
+    let mesh = resource(74, Kind::Mesh);
+    let uuid = mesh.id.uuid().to_string();
+    let shard = uuid.get(..2).expect("UUID shard");
+    let old_header_path = directory.path().join(format!("assets/meshes/header/{shard}/{uuid}.llmesh"));
+    let old_lod_path = directory.path().join(format!("assets/meshes/lod/high/{shard}/{uuid}.llmesh"));
+
+    let old_cache =
+        storage::Cache::open(directory.path().join("assets"), storage::DEFAULT_SIZE_LIMIT, &old_namespaces).expect("open legacy cache");
+    old_cache.put(storage::Key::new(TEXTURES, *texture.id.uuid().as_bytes()), b"texture".to_vec()).expect("write texture");
+    old_cache.put(storage::Key::new(PBR_MATERIALS, *pbr.id.uuid().as_bytes()), b"pbr".to_vec()).expect("write pbr");
+    old_cache.put(storage::Key::new(LEGACY_MATERIALS, *legacy.id.uuid().as_bytes()), b"legacy".to_vec()).expect("write legacy");
+    old_cache.put(storage::Key::new(ENVIRONMENTS, *environment.id.uuid().as_bytes()), b"environment".to_vec()).expect("write environment");
+    old_cache.put(storage::Key::new(MESH_HEADER, *mesh.id.uuid().as_bytes()), b"old header".to_vec()).expect("write old mesh header");
+    old_cache.put(storage::Key::new(MESH_LOD_HIGH, *mesh.id.uuid().as_bytes()), b"old lod".to_vec()).expect("write old mesh lod");
+    old_cache.shutdown().expect("close legacy cache");
+    assert!(old_header_path.exists());
+    assert!(old_lod_path.exists());
+
+    let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("reopen cache");
+    assert_eq!(
+        cache.stats().entries_by_kind,
+        AssetCacheEntriesByKind { textures: 1, pbr_materials: 1, legacy_materials: 1, environments: 1, meshes: 0 }
+    );
+    assert_matches!(cache.lookup(Request::new(texture)), AssetLookup::Hit(CacheValue { bytes, .. }) if bytes == b"texture");
+    assert_matches!(cache.lookup(Request::new(pbr)), AssetLookup::Hit(CacheValue { bytes, .. }) if bytes == b"pbr");
+    assert_matches!(cache.lookup(Request::new(legacy)), AssetLookup::Hit(CacheValue { bytes, .. }) if bytes == b"legacy");
+    assert_matches!(cache.lookup(Request::new(environment)), AssetLookup::Hit(CacheValue { bytes, .. }) if bytes == b"environment");
+    assert_eq!(cache.lookup(Request::MeshHeader(mesh.id)), AssetLookup::Miss);
+    cache.shutdown().expect("finish namespace migration");
+    assert!(!old_header_path.exists());
+    assert!(!old_lod_path.exists());
 }
 
 #[test]

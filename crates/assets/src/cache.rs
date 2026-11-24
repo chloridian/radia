@@ -31,7 +31,7 @@ const MESH_LOD_LOW: NamespaceId = NamespaceId::new(6);
 const MESH_LOD_MEDIUM: NamespaceId = NamespaceId::new(7);
 const MESH_LOD_HIGH: NamespaceId = NamespaceId::new(8);
 const PREPARED_TEXTURES: NamespaceId = NamespaceId::new(0);
-pub(crate) const MESH_NAMESPACE_IDS: [NamespaceId; 5] = [MESH_HEADER, MESH_LOD_LOWEST, MESH_LOD_LOW, MESH_LOD_MEDIUM, MESH_LOD_HIGH];
+const MESH_NAMESPACE_IDS: [NamespaceId; 5] = [MESH_HEADER, MESH_LOD_LOWEST, MESH_LOD_LOW, MESH_LOD_MEDIUM, MESH_LOD_HIGH];
 pub(super) const MESH_HEADER_FRAME_BYTES: usize = size_of::<u64>();
 pub(super) const MESH_LOD_FRAME_BYTES: usize = 3 * size_of::<u64>();
 const NAMESPACES: [Namespace; 9] = [
@@ -39,13 +39,29 @@ const NAMESPACES: [Namespace; 9] = [
     Namespace::new("materials/pbr", "llsd"),
     Namespace::new("materials/legacy", "llsd"),
     Namespace::new("environments", "llsd"),
-    Namespace::new("meshes/header", "llmesh"),
-    Namespace::new("meshes/lod/lowest", "llmesh"),
-    Namespace::new("meshes/lod/low", "llmesh"),
-    Namespace::new("meshes/lod/medium", "llmesh"),
-    Namespace::new("meshes/lod/high", "llmesh"),
+    Namespace::new("geometry/mesh/header", "llmesh"),
+    Namespace::new("geometry/mesh/lod/lowest", "llmesh"),
+    Namespace::new("geometry/mesh/lod/low", "llmesh"),
+    Namespace::new("geometry/mesh/lod/medium", "llmesh"),
+    Namespace::new("geometry/mesh/lod/high", "llmesh"),
 ];
 const PREPARED_NAMESPACES: [Namespace; 1] = [Namespace::new("textures", "prep")];
+
+pub(crate) fn namespace_kind(namespace: NamespaceId) -> Option<Kind> {
+    if namespace == TEXTURES {
+        Some(Kind::Texture)
+    } else if namespace == PBR_MATERIALS {
+        Some(Kind::PbrMaterial)
+    } else if namespace == LEGACY_MATERIALS {
+        Some(Kind::LegacyMaterial)
+    } else if namespace == ENVIRONMENTS {
+        Some(Kind::Environment)
+    } else if MESH_NAMESPACE_IDS.contains(&namespace) {
+        Some(Kind::Mesh)
+    } else {
+        None
+    }
+}
 
 pub(crate) fn mesh_header_frame(total_length: u64, header: &[u8]) -> Option<Vec<u8>> {
     if total_length == 0 || total_length > MAX_MESH_ASSET_BYTES as u64 || header.is_empty() || header.len() > MAX_MESH_HEADER_BYTES {
