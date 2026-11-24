@@ -201,28 +201,16 @@ impl SettingsStore {
     }
 
     pub fn set_global<T: CvarTyped>(self: &Arc<Self>, key: CvarKey<T>, value: T) -> Result<MutationOutcome, SettingsError> {
-        let outcome = self.apply_global_in_memory(key.id(), &value.into_cvar_value())?;
-        self.schedule_save();
-        Ok(outcome)
+        self.set_global_value(key.id(), &value.into_cvar_value())
     }
 
     pub fn set_by_name(self: &Arc<Self>, name: &str, value: &CvarValue) -> Result<(CvarValue, CvarValue, MutationOutcome), SettingsError> {
         let descriptor = lookup_by_name(name).ok_or_else(|| SettingsError::InvalidValue(CvarError::UnknownName(name.to_owned())))?;
         let old_value = self.snapshot().get_value(descriptor.id).clone();
         let outcome = if descriptor.persistence == PersistenceScope::SessionOnly {
-            let validated = descriptor.domain.validate(descriptor.name, value).map_err(SettingsError::InvalidValue)?;
-            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            let revision = state.registry.set_value(descriptor.id, Layer::Session, &validated).map_err(SettingsError::InvalidValue)?;
-            let pending_restart = state.registry.snapshot().provenance(descriptor.id).pending_restart_value.is_some();
-            MutationOutcome { revision, pending_restart }
+            self.set_session_value(descriptor.id, value)?
         } else {
-            let outcome = self.apply_global_in_memory(descriptor.id, value)?;
-            if self.runtime.is_some() {
-                self.schedule_save();
-            } else {
-                self.save_sync()?;
-            }
-            outcome
+            self.set_global_value(descriptor.id, value)?
         };
         let new_value = self.snapshot().get_value(descriptor.id).clone();
         Ok((old_value, new_value, outcome))
@@ -235,9 +223,24 @@ impl SettingsStore {
     }
 
     pub fn set_session<T: CvarTyped>(&self, key: CvarKey<T>, value: T) -> Result<MutationOutcome, SettingsError> {
-        let id = key.id();
+        self.set_session_value(key.id(), &value.into_cvar_value())
+    }
+
+    fn set_global_value(self: &Arc<Self>, id: CvarId, value: &CvarValue) -> Result<MutationOutcome, SettingsError> {
+        let outcome = self.apply_global_in_memory(id, value)?;
+        if self.runtime.is_some() {
+            self.schedule_save();
+        } else {
+            self.save_sync()?;
+        }
+        Ok(outcome)
+    }
+
+    fn set_session_value(&self, id: CvarId, value: &CvarValue) -> Result<MutationOutcome, SettingsError> {
+        let descriptor = id.descriptor();
+        let validated = descriptor.domain.validate(descriptor.name, value).map_err(SettingsError::InvalidValue)?;
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let revision = state.registry.set_value(id, Layer::Session, &value.into_cvar_value()).map_err(SettingsError::InvalidValue)?;
+        let revision = state.registry.set_value(id, Layer::Session, &validated).map_err(SettingsError::InvalidValue)?;
         let pending_restart = state.registry.snapshot().provenance(id).pending_restart_value.is_some();
         Ok(MutationOutcome { revision, pending_restart })
     }
