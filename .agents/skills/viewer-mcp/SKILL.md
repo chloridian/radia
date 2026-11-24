@@ -20,13 +20,13 @@ Startup prints `MCP server listening on http://127.0.0.1:<port>`. The default en
 
 | Tool | Answers |
 |---|---|
-| `viewer_world` | Active regions, bounded object lists, or single object properties by UUID (`query`: `summary`, `regions`, `objects`, `object`). |
-| `viewer_stats` | Frame timing (`fps`, `frame_ms`, `game_ms`, `render_ms`, `gpu_timings_ms`), `render::Stats`, `AssetQueueStats`, memory stats, and disk cache stats. |
-| `viewer_logs` | Recent `WARN` and `ERROR` entries from the in-memory ring buffer (sensitive fields and capability URLs omitted). |
-| `viewer_screenshot` | Non-blocking viewport PNG capture encoded off the GUI thread. |
-| `viewer_explain_object` | Combined World detail + renderer placement, culling, mesh residency, and per-face texture/alpha/omission state for an `object_id`. |
-| `viewer_pick` | Geometry pick at viewport pixel `(x, y)` returning hit point, entity, object UUID, face slot, and base/emissive texture presence. |
-| `viewer_wait_for` | Bounded `watch`-channel wait (`world_revision`, `asset_queue_empty`, `texture_event`, max 30s timeout) with zero polling. |
+| `world` | Active regions, bounded object lists, or single object properties by UUID (`query`: `summary`, `regions`, `objects`, `object`). |
+| `stats` | Frame timing (`fps`, `frame_ms`, `game_ms`, `render_ms`, `gpu_timings_ms`), `render::Stats`, `AssetQueueStats`, memory stats, and disk cache stats. |
+| `logs` | Recent `WARN` and `ERROR` entries from the in-memory ring buffer (sensitive fields and capability URLs omitted). |
+| `screenshot` | Non-blocking viewport PNG capture encoded off the GUI thread. |
+| `explain_object` | Combined World detail + renderer placement, culling, mesh residency, and per-face texture/alpha/omission state for an `object_id`. |
+| `pick` | Geometry pick at viewport pixel `(x, y)` returning hit point, entity, object UUID, face slot, and base/emissive texture presence. |
+| `wait_for` | Bounded `watch`-channel wait (`world_revision`, `asset_queue_empty`, `texture_event`, max 30s timeout) with zero polling. |
 
 ## Bounds and safety
 

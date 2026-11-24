@@ -12,7 +12,7 @@ use crate::{
 };
 
 pub const SPEC: ToolSpec = ToolSpec {
-    name: "viewer_screenshot",
+    name: "screenshot",
     description: "Capture the current viewport texture as a PNG image without blocking the GUI thread.",
     input_schema,
     handler,

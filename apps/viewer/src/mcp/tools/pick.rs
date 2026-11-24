@@ -8,7 +8,7 @@ use crate::{
 };
 
 pub const SPEC: ToolSpec = ToolSpec {
-    name: "viewer_pick",
+    name: "pick",
     description: "Pick the rendered geometry at viewport pixel coordinates (x, y) and return hit point, object, face, and texture presence.",
     input_schema,
     handler,

@@ -7,7 +7,7 @@ const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 256;
 
 pub const SPEC: ToolSpec = ToolSpec {
-    name: "viewer_logs",
+    name: "logs",
     description: "List recent WARN and ERROR log entries from the viewer's in-memory ring buffer.",
     input_schema,
     handler,

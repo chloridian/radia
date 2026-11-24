@@ -512,7 +512,7 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": { "name": "viewer_logs", "arguments": { "limit": 10 } }
+            "params": { "name": "logs", "arguments": { "limit": 10 } }
         });
         let (status, body) = post_json(addr, &call.to_string()).await;
         assert_eq!(status, 200);
@@ -542,7 +542,7 @@ mod tests {
         let (status, _) = post_json(addr, &big_body).await;
         assert_eq!(status, 413);
 
-        let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"viewer_logs"}});
+        let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"logs"}});
         let (status, body) = post_json(addr, &call.to_string()).await;
         assert_eq!(status, 200);
         let parsed: Value = serde_json::from_str(&body).expect("json response");

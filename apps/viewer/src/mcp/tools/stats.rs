@@ -4,7 +4,7 @@ use super::{ToolContent, ToolFuture, ToolSpec};
 use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
 
 pub const SPEC: ToolSpec = ToolSpec {
-    name: "viewer_stats",
+    name: "stats",
     description: "Return frame timing, renderer stats, asset queue stats, memory stats, and disk cache stats.",
     input_schema,
     handler,

@@ -8,7 +8,7 @@ const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 100;
 
 pub const SPEC: ToolSpec = ToolSpec {
-    name: "viewer_world",
+    name: "world",
     description: "Query active regions, bounded object lists, or object properties by UUID.",
     input_schema,
     handler,

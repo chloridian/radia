@@ -10,7 +10,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 const MAX_TIMEOUT_MS: u64 = 30_000;
 
 pub const SPEC: ToolSpec = ToolSpec {
-    name: "viewer_wait_for",
+    name: "wait_for",
     description: "Wait on watch channels until world_revision >= target, asset_queue_empty, or texture_event advances, with a hard timeout.",
     input_schema,
     handler,

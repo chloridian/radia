@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub const SPEC: ToolSpec = ToolSpec {
-    name: "viewer_explain_object",
+    name: "explain_object",
     description: "Explain why an object is or is not drawn by combining World detail with renderer visibility, mesh, and texture state.",
     input_schema,
     handler,
