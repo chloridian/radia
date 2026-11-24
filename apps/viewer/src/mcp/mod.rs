@@ -1,4 +1,6 @@
 mod png;
+mod prompts;
+mod resources;
 mod server;
 mod tools;
 

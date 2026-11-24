@@ -18,8 +18,10 @@ use futures::Stream;
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ClientJsonRpcMessage, ContentBlock, ErrorCode, Implementation, JsonObject,
-        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, ServerJsonRpcMessage, Tool, ToolAnnotations,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ClientJsonRpcMessage, CompleteRequestParams, CompleteResult, ContentBlock,
+        ErrorCode, GetPromptRequestParams, GetPromptResponse, Implementation, JsonObject, ListPromptsResult, ListResourceTemplatesResult,
+        ListResourcesResult, ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities,
+        ServerConfig, ServerJsonRpcMessage, Tool, ToolAnnotations,
     },
     service::RequestContext,
     transport::{
@@ -44,7 +46,7 @@ use tokio::{
 
 use super::{
     MAX_CONCURRENT_REQUESTS, MAX_JSON_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_SESSIONS, REQUEST_TIMEOUT, SERVER_INSTRUCTIONS,
-    SESSION_IDLE_TIMEOUT,
+    SESSION_IDLE_TIMEOUT, prompts, resources,
     tools::{TOOLS, ToolCallContext, ToolContent, find_tool, screenshot, wait_for},
 };
 use crate::inspection::ViewerInspectionHandle;
@@ -266,9 +268,63 @@ struct RadiaMcpHandler {
 
 impl ServerHandler for RadiaMcpHandler {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+        let capabilities = ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().enable_completions().build();
+        ServerConfig::new(capabilities)
             .with_server_info(Implementation::new("radia", env!("CARGO_PKG_VERSION")))
             .with_instructions(SERVER_INSTRUCTIONS)
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        Ok(ListResourcesResult::with_all_items(resources::static_resources()))
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        Ok(ListResourceTemplatesResult::with_all_items(resources::resource_templates()))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        let ct = context.ct.clone();
+        let tool_ctx = ToolCallContext::new(context);
+        let result = tokio::select! {
+            biased;
+            () = ct.cancelled() => {
+                return Err(ErrorData::new(ErrorCode(-32000), "request cancelled", None));
+            }
+            result = resources::read_resource(&request.uri, &self.handle, self.config, tool_ctx) => result?,
+        };
+        Ok(ReadResourceResponse::Complete(result))
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, ErrorData> {
+        Ok(ListPromptsResult::with_all_items(prompts::list_prompts()))
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, ErrorData> {
+        Ok(GetPromptResponse::Complete(prompts::get_prompt(&request)?))
+    }
+
+    async fn complete(&self, request: CompleteRequestParams, _context: RequestContext<RoleServer>) -> Result<CompleteResult, ErrorData> {
+        Ok(prompts::complete(&request, &self.handle).await)
     }
 
     async fn list_tools(
@@ -317,7 +373,7 @@ impl ServerHandler for RadiaMcpHandler {
             }
             outcome = time::timeout(self.config.request_timeout, call_future) => outcome,
         };
-        let (result, max_bytes) = match outcome {
+        let (mut result, max_bytes) = match outcome {
             Ok(Ok(ToolContent::Json(value))) => {
                 let limit = tool.max_response_bytes.min(self.config.max_response_bytes);
                 (CallToolResult::success(vec![ContentBlock::text(value.to_string())]), limit)
@@ -332,6 +388,12 @@ impl ServerHandler for RadiaMcpHandler {
             Ok(Err(message)) => (CallToolResult::error(vec![ContentBlock::text(message)]), self.config.max_response_bytes),
             Err(_) => return Err(ErrorData::new(ErrorCode(-32001), "tool call timed out", None)),
         };
+        if result.is_error == Some(false)
+            && matches!(tool.name, "screenshot" | "world" | "logs")
+            && let Some(link) = resources::resource_for_tool(tool.name)
+        {
+            result.content.push(ContentBlock::resource_link(link));
+        }
         let encoded_len = serde_json::to_vec(&result).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
         if encoded_len > max_bytes {
             return Err(ErrorData::new(ErrorCode(-32002), "response exceeded size limit", None));
@@ -624,6 +686,97 @@ mod tests {
 
         let (status, _, _) = post_mcp(&client, addr, None, &init_payload()).await;
         assert_ne!(status, 200, "third session beyond cap must be rejected");
+
+        server.shutdown();
+    }
+
+    #[tokio::test]
+    async fn resources_list_templates_read_and_unknown_object() {
+        let logs = RecentLogs::with_capacity(8);
+        logs.push(RecentLogEntry {
+            timestamp_ms: 200,
+            level: LogLevel::Warn,
+            target: "viewer::res".to_owned(),
+            message: "resource check".to_owned(),
+        });
+        let (_pub, handle) = inspection_channel(logs);
+        let server = McpServer::start(handle, McpServerConfig::default(), &Handle::current()).expect("start server");
+        let addr = server.addr();
+        let client = Client::new();
+        let (session_id, _) = open_session(&client, addr).await;
+
+        let list_req = json!({"jsonrpc": "2.0", "id": 10, "method": "resources/list"});
+        let (status, _, body) = post_mcp(&client, addr, Some(&session_id), &list_req).await;
+        assert_eq!(status, 200, "resources/list body: {body}");
+        let parsed = parse_mcp_payload(&body);
+        let uris: Vec<&str> =
+            parsed["result"]["resources"].as_array().expect("resources array").iter().filter_map(|entry| entry["uri"].as_str()).collect();
+        for expected in ["radia://world", "radia://stats", "radia://region", "radia://settings", "radia://logs", "radia://screenshot"] {
+            assert!(uris.contains(&expected), "missing resource {expected} in {uris:?}");
+        }
+
+        let tpl_req = json!({"jsonrpc": "2.0", "id": 11, "method": "resources/templates/list"});
+        let (status, _, body) = post_mcp(&client, addr, Some(&session_id), &tpl_req).await;
+        assert_eq!(status, 200, "resources/templates/list body: {body}");
+        let parsed = parse_mcp_payload(&body);
+        let templates = parsed["result"]["resourceTemplates"].as_array().expect("templates array");
+        assert!(templates.iter().any(|entry| entry["uriTemplate"] == "radia://object/{local_id}"));
+
+        let tool_req = json!({"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": { "name": "logs", "arguments": {} }});
+        let (_, _, tool_body) = post_mcp(&client, addr, Some(&session_id), &tool_req).await;
+        let tool_text = parse_mcp_payload(&tool_body)["result"]["content"][0]["text"].as_str().expect("tool text").to_owned();
+
+        let read_req = json!({"jsonrpc": "2.0", "id": 13, "method": "resources/read", "params": { "uri": "radia://logs" }});
+        let (status, _, read_body) = post_mcp(&client, addr, Some(&session_id), &read_req).await;
+        assert_eq!(status, 200, "resources/read body: {read_body}");
+        let res_text = parse_mcp_payload(&read_body)["result"]["contents"][0]["text"].as_str().expect("resource text").to_owned();
+        assert_eq!(res_text, tool_text);
+
+        let missing_req = json!({"jsonrpc": "2.0", "id": 14, "method": "resources/read", "params": { "uri": "radia://object/999999" }});
+        let (status, _, missing_body) = post_mcp(&client, addr, Some(&session_id), &missing_req).await;
+        assert_eq!(status, 200);
+        assert!(parse_mcp_payload(&missing_body).get("error").is_some(), "expected MCP error for unknown object, got: {missing_body}");
+
+        server.shutdown();
+    }
+
+    #[tokio::test]
+    async fn prompts_list_get_and_missing_arg() {
+        let (_pub, handle) = inspection_channel(RecentLogs::default());
+        let server = McpServer::start(handle, McpServerConfig::default(), &Handle::current()).expect("start server");
+        let addr = server.addr();
+        let client = Client::new();
+        let (session_id, _) = open_session(&client, addr).await;
+
+        let list_req = json!({"jsonrpc": "2.0", "id": 20, "method": "prompts/list"});
+        let (status, _, body) = post_mcp(&client, addr, Some(&session_id), &list_req).await;
+        assert_eq!(status, 200, "prompts/list body: {body}");
+        let names: Vec<String> = parse_mcp_payload(&body)["result"]["prompts"]
+            .as_array()
+            .expect("prompts array")
+            .iter()
+            .filter_map(|entry| entry["name"].as_str().map(str::to_owned))
+            .collect();
+        for expected in ["diagnose_scene", "diagnose_object", "diagnose_performance"] {
+            assert!(names.iter().any(|name| name == expected), "missing prompt {expected} in {names:?}");
+        }
+
+        let missing_req = json!({"jsonrpc": "2.0", "id": 21, "method": "prompts/get", "params": { "name": "diagnose_object" }});
+        let (status, _, missing_body) = post_mcp(&client, addr, Some(&session_id), &missing_req).await;
+        assert_eq!(status, 200);
+        assert!(parse_mcp_payload(&missing_body).get("error").is_some(), "expected MCP error for missing local_id, got: {missing_body}");
+
+        let ok_req = json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "prompts/get",
+            "params": { "name": "diagnose_object", "arguments": { "local_id": "42" } }
+        });
+        let (status, _, ok_body) = post_mcp(&client, addr, Some(&session_id), &ok_req).await;
+        assert_eq!(status, 200, "prompts/get body: {ok_body}");
+        let messages = parse_mcp_payload(&ok_body)["result"]["messages"].as_array().expect("messages array").clone();
+        assert!(!messages.is_empty());
+        assert!(messages[0]["content"]["text"].as_str().expect("prompt text").contains("42"));
 
         server.shutdown();
     }
