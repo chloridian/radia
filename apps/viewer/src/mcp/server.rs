@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
-    io,
+    error::Error,
+    fmt, io,
     net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener},
     sync::Arc,
     time::Duration,
@@ -13,14 +14,24 @@ use axum::{
     middleware::{self, Next},
     response::{IntoResponse, Response},
 };
+use futures::Stream;
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorCode, Implementation, JsonObject, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ClientJsonRpcMessage, ContentBlock, ErrorCode, Implementation, JsonObject,
+        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, ServerJsonRpcMessage, Tool,
     },
     service::RequestContext,
-    transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService, session::never::NeverSessionManager},
+    transport::{
+        common::server_side_http::ServerSseMessage,
+        streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService,
+            session::{
+                SessionId, SessionManager,
+                local::{LocalSessionManager, LocalSessionManagerError},
+            },
+        },
+    },
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -32,7 +43,7 @@ use tokio::{
 };
 
 use super::{
-    MAX_CONCURRENT_REQUESTS, MAX_JSON_RESPONSE_BYTES, MAX_REQUEST_BYTES, REQUEST_TIMEOUT,
+    MAX_CONCURRENT_REQUESTS, MAX_JSON_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_SESSIONS, REQUEST_TIMEOUT, SESSION_IDLE_TIMEOUT,
     tools::{TOOLS, ToolContent, find_tool},
 };
 use crate::inspection::ViewerInspectionHandle;
@@ -41,6 +52,8 @@ use crate::inspection::ViewerInspectionHandle;
 pub struct McpServerConfig {
     pub port: u16,
     pub max_concurrent_requests: usize,
+    pub max_sessions: usize,
+    pub session_idle_timeout: Duration,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
     pub request_timeout: Duration,
@@ -51,6 +64,8 @@ impl Default for McpServerConfig {
         Self {
             port: 0,
             max_concurrent_requests: MAX_CONCURRENT_REQUESTS,
+            max_sessions: MAX_SESSIONS,
+            session_idle_timeout: SESSION_IDLE_TIMEOUT,
             max_request_bytes: MAX_REQUEST_BYTES,
             max_response_bytes: MAX_JSON_RESPONSE_BYTES,
             request_timeout: REQUEST_TIMEOUT,
@@ -76,14 +91,14 @@ impl McpServer {
 
         let handler = RadiaMcpHandler { handle, config };
         let mut http_config = StreamableHttpServerConfig::default();
-        http_config.legacy_session_mode = false;
-        http_config.json_response = true;
-        http_config.sse_keep_alive = None;
+        http_config.legacy_session_mode = true;
+        http_config.json_response = false;
         http_config.max_request_body_bytes = config.max_request_bytes;
         http_config = http_config.with_allowed_hosts([format!("127.0.0.1:{}", addr.port()), format!("localhost:{}", addr.port())]);
         let cancellation_token = http_config.cancellation_token.clone();
 
-        let service = StreamableHttpService::new(move || Ok(handler.clone()), Arc::new(NeverSessionManager::default()), http_config);
+        let session_manager = Arc::new(BoundedSessionManager::new(config.max_sessions, config.session_idle_timeout));
+        let service = StreamableHttpService::new(move || Ok(handler.clone()), session_manager, http_config);
         let guard_state = GuardState { port: addr.port(), semaphore: Arc::new(Semaphore::new(config.max_concurrent_requests.max(1))) };
         let router = Router::new().nest_service("/mcp", service).layer(middleware::from_fn_with_state(guard_state, guard_middleware));
 
@@ -111,6 +126,98 @@ impl McpServer {
     pub fn shutdown(self) {
         self.shutdown.send_replace(true);
         self.task.abort();
+    }
+}
+
+#[derive(Debug)]
+enum BoundedSessionError {
+    LimitReached { max_sessions: usize },
+    Inner(LocalSessionManagerError),
+}
+
+impl fmt::Display for BoundedSessionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LimitReached { max_sessions } => write!(f, "session limit reached ({max_sessions})"),
+            Self::Inner(error) => error.fmt(f),
+        }
+    }
+}
+
+impl Error for BoundedSessionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::LimitReached { .. } => None,
+            Self::Inner(error) => Some(error),
+        }
+    }
+}
+
+impl From<LocalSessionManagerError> for BoundedSessionError {
+    fn from(error: LocalSessionManagerError) -> Self {
+        Self::Inner(error)
+    }
+}
+
+struct BoundedSessionManager {
+    inner: LocalSessionManager,
+    max_sessions: usize,
+}
+
+impl BoundedSessionManager {
+    fn new(max_sessions: usize, idle_timeout: Duration) -> Self {
+        let mut inner = LocalSessionManager::default();
+        inner.session_config.keep_alive = Some(idle_timeout);
+        Self { inner, max_sessions: max_sessions.max(1) }
+    }
+}
+
+impl SessionManager for BoundedSessionManager {
+    type Error = BoundedSessionError;
+    type Transport = <LocalSessionManager as SessionManager>::Transport;
+
+    async fn create_session(&self) -> Result<(SessionId, Self::Transport), Self::Error> {
+        let live_count = self.inner.sessions.read().await.len();
+        if live_count >= self.max_sessions {
+            return Err(BoundedSessionError::LimitReached { max_sessions: self.max_sessions });
+        }
+        Ok(self.inner.create_session().await?)
+    }
+
+    async fn initialize_session(&self, id: &SessionId, message: ClientJsonRpcMessage) -> Result<ServerJsonRpcMessage, Self::Error> {
+        Ok(self.inner.initialize_session(id, message).await?)
+    }
+
+    async fn has_session(&self, id: &SessionId) -> Result<bool, Self::Error> {
+        Ok(self.inner.has_session(id).await?)
+    }
+
+    async fn close_session(&self, id: &SessionId) -> Result<(), Self::Error> {
+        Ok(self.inner.close_session(id).await?)
+    }
+
+    async fn create_stream(
+        &self,
+        id: &SessionId,
+        message: ClientJsonRpcMessage,
+    ) -> Result<impl Stream<Item = ServerSseMessage> + Send + 'static, Self::Error> {
+        Ok(self.inner.create_stream(id, message).await?)
+    }
+
+    async fn create_standalone_stream(&self, id: &SessionId) -> Result<impl Stream<Item = ServerSseMessage> + Send + 'static, Self::Error> {
+        Ok(self.inner.create_standalone_stream(id).await?)
+    }
+
+    async fn resume(
+        &self,
+        id: &SessionId,
+        last_event_id: String,
+    ) -> Result<impl Stream<Item = ServerSseMessage> + Send + 'static, Self::Error> {
+        Ok(self.inner.resume(id, last_event_id).await?)
+    }
+
+    async fn accept_message(&self, id: &SessionId, message: ClientJsonRpcMessage) -> Result<(), Self::Error> {
+        Ok(self.inner.accept_message(id, message).await?)
     }
 }
 
@@ -269,22 +376,67 @@ mod tests {
         logging::{LogLevel, RecentLogEntry, RecentLogs},
     };
 
+    const SESSION_HEADER: &str = "mcp-session-id";
+
     fn mcp_url(addr: SocketAddr) -> String {
         format!("http://127.0.0.1:{}/mcp", addr.port())
     }
 
-    async fn post_mcp(client: &Client, addr: SocketAddr, body: &Value) -> (u16, String) {
-        let response = client
+    fn init_payload() -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": { "name": "test-client", "version": "0.1.0" }
+            }
+        })
+    }
+
+    fn parse_mcp_payload(body: &str) -> Value {
+        if let Ok(value) = serde_json::from_str::<Value>(body) {
+            return value;
+        }
+        for line in body.lines() {
+            if let Some(data) = line.strip_prefix("data:") {
+                let trimmed = data.trim();
+                if !trimmed.is_empty()
+                    && let Ok(value) = serde_json::from_str::<Value>(trimmed)
+                {
+                    return value;
+                }
+            }
+        }
+        panic!("expected JSON or SSE data payload, got: {body}");
+    }
+
+    async fn post_mcp(client: &Client, addr: SocketAddr, session_id: Option<&str>, body: &Value) -> (u16, Option<String>, String) {
+        let mut request = client
             .post(mcp_url(addr))
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
-            .body(body.to_string())
-            .send()
-            .await
-            .expect("send MCP request");
+            .body(body.to_string());
+        if let Some(id) = session_id {
+            request = request.header(SESSION_HEADER, id);
+        }
+        let response = request.send().await.expect("send MCP request");
         let status = response.status().as_u16();
+        let next_session = response.headers().get(SESSION_HEADER).and_then(|value| value.to_str().ok()).map(str::to_owned);
         let text = response.text().await.expect("read response body");
-        (status, text)
+        (status, next_session, text)
+    }
+
+    async fn open_session(client: &Client, addr: SocketAddr) -> (String, Value) {
+        let (status, session_id, body) = post_mcp(client, addr, None, &init_payload()).await;
+        assert_eq!(status, 200, "initialize body: {body}");
+        let session_id = session_id.expect("mcp-session-id header");
+        let parsed = parse_mcp_payload(&body);
+        let initialized = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        let (notif_status, _, notif_body) = post_mcp(client, addr, Some(&session_id), &initialized).await;
+        assert_eq!(notif_status, 202, "initialized body: {notif_body}");
+        (session_id, parsed)
     }
 
     #[tokio::test]
@@ -301,25 +453,13 @@ mod tests {
         let addr = server.addr();
         let client = Client::new();
 
-        let init = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": { "name": "test-client", "version": "0.1.0" }
-            }
-        });
-        let (status, body) = post_mcp(&client, addr, &init).await;
-        assert_eq!(status, 200, "initialize body: {body}");
-        let parsed: Value = serde_json::from_str(&body).expect("json response");
-        assert_eq!(parsed["result"]["serverInfo"]["name"], "radia");
+        let (session_id, init_parsed) = open_session(&client, addr).await;
+        assert_eq!(init_parsed["result"]["serverInfo"]["name"], "radia");
 
         let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
-        let (status, body) = post_mcp(&client, addr, &list).await;
+        let (status, _, body) = post_mcp(&client, addr, Some(&session_id), &list).await;
         assert_eq!(status, 200, "list body: {body}");
-        let parsed: Value = serde_json::from_str(&body).expect("json response");
+        let parsed = parse_mcp_payload(&body);
         let tools = parsed["result"]["tools"].as_array().expect("tools array");
         assert_eq!(tools.len(), TOOLS.len());
 
@@ -329,9 +469,9 @@ mod tests {
             "method": "tools/call",
             "params": { "name": "logs", "arguments": { "limit": 10 } }
         });
-        let (status, body) = post_mcp(&client, addr, &call).await;
+        let (status, _, body) = post_mcp(&client, addr, Some(&session_id), &call).await;
         assert_eq!(status, 200, "call body: {body}");
-        let parsed: Value = serde_json::from_str(&body).expect("json response");
+        let parsed = parse_mcp_payload(&body);
         assert_eq!(parsed["result"]["isError"], false);
         let text = parsed["result"]["content"][0]["text"].as_str().expect("text content");
         assert!(text.contains("sample warning"));
@@ -345,6 +485,7 @@ mod tests {
         let server = McpServer::start(handle, McpServerConfig::default(), &Handle::current()).expect("start server");
         let addr = server.addr();
         let client = Client::new();
+        let (session_id, _) = open_session(&client, addr).await;
 
         let call = json!({
             "jsonrpc": "2.0",
@@ -352,9 +493,9 @@ mod tests {
             "method": "tools/call",
             "params": { "name": "does_not_exist", "arguments": {} }
         });
-        let (status, body) = post_mcp(&client, addr, &call).await;
+        let (status, _, body) = post_mcp(&client, addr, Some(&session_id), &call).await;
         assert_eq!(status, 200);
-        let parsed: Value = serde_json::from_str(&body).expect("json response");
+        let parsed = parse_mcp_payload(&body);
         assert!(parsed.get("error").is_some(), "expected JSON-RPC error, got: {body}");
 
         server.shutdown();
@@ -366,7 +507,7 @@ mod tests {
         let server = McpServer::start(handle, McpServerConfig::default(), &Handle::current()).expect("start server");
         let addr = server.addr();
         let client = Client::new();
-        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).to_string();
+        let body = init_payload().to_string();
 
         let evil_host = format!("evil.example:{}", addr.port());
         for host in ["127.0.0.1", evil_host.as_str()] {
@@ -420,26 +561,45 @@ mod tests {
             message: "x".repeat(200),
         });
         let (_pub, handle) = inspection_channel(logs);
-        let config = McpServerConfig { max_request_bytes: 100, max_response_bytes: 128, ..McpServerConfig::default() };
+        let config = McpServerConfig { max_request_bytes: 256, max_response_bytes: 128, ..McpServerConfig::default() };
         let server = McpServer::start(handle, config, &Handle::current()).expect("start server");
         let addr = server.addr();
         let client = Client::new();
+        let (session_id, _) = open_session(&client, addr).await;
 
         let response = client
             .post(mcp_url(addr))
+            .header(SESSION_HEADER, &session_id)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
-            .body("a".repeat(128))
+            .body("a".repeat(300))
             .send()
             .await
             .expect("send oversized request");
         assert_eq!(response.status().as_u16(), 413);
 
         let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "logs" }});
-        let (status, body) = post_mcp(&client, addr, &call).await;
+        let (status, _, body) = post_mcp(&client, addr, Some(&session_id), &call).await;
         assert_eq!(status, 200);
-        let parsed: Value = serde_json::from_str(&body).expect("json response");
+        let parsed = parse_mcp_payload(&body);
         assert_eq!(parsed["error"]["code"], -32002);
+
+        server.shutdown();
+    }
+
+    #[tokio::test]
+    async fn session_cap_rejects_excess_sessions() {
+        let (_pub, handle) = inspection_channel(RecentLogs::default());
+        let config = McpServerConfig { max_sessions: 2, ..McpServerConfig::default() };
+        let server = McpServer::start(handle, config, &Handle::current()).expect("start server");
+        let addr = server.addr();
+        let client = Client::new();
+
+        let _first = open_session(&client, addr).await;
+        let _second = open_session(&client, addr).await;
+
+        let (status, _, _) = post_mcp(&client, addr, None, &init_payload()).await;
+        assert_ne!(status, 200, "third session beyond cap must be rejected");
 
         server.shutdown();
     }
