@@ -21,6 +21,14 @@ impl WorldId {
             .unwrap_or_else(|_| panic!("World identity space exhausted"));
         Self(id)
     }
+
+    pub(crate) const fn raw(self) -> u64 {
+        self.0
+    }
+
+    pub(crate) const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

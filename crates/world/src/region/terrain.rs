@@ -129,6 +129,10 @@ impl Terrain {
         self.settings.map(|(settings, _)| settings)
     }
 
+    pub(crate) fn water_height(&self) -> Option<f32> {
+        self.water.map(|(height, _)| height)
+    }
+
     pub(crate) fn reclaim_one(&mut self) -> bool {
         if self.patches.pop_first().is_some() || self.water.take().is_some() { true } else { self.settings.take().is_some() }
     }

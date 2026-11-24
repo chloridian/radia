@@ -1,7 +1,7 @@
 pub(super) mod inventory_sync;
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     future::pending,
     mem,
     net::SocketAddr,
@@ -18,8 +18,8 @@ use futures::{
 };
 use inventory::{CategoryKey, Inventory, InventoryChild, InventoryNodeKey, InventoryPreparationCancellation, InventorySnapshot};
 use network::{
-    AgentSession, CircuitMotionStatus, CoverageLoss, CoverageLossReason, CoverageSource, Event, Grid, PacketOrder, SimulatorId,
-    capabilities::Client,
+    AgentSession, CircuitMotionStatus, CircuitStats, CoverageLoss, CoverageLossReason, CoverageSource, Event, Grid, PacketOrder,
+    SimulatorId, capabilities::Client,
 };
 use protocol::{
     lludp::Message,
@@ -51,6 +51,7 @@ use super::{
 };
 use crate::{
     asset_coordinator::AssetCoordinator,
+    inspection::{InventoryFetchStats, ObjectCacheStats, RegionNetworkHandle, RegionSimStats, SessionDiagnostics, SessionQueuesSnapshot},
     inventory::{
         FolderApplyOutcome, FolderFetch, InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError,
         InventoryFetchEvent, MoveExpectation,
@@ -429,6 +430,7 @@ struct SessionDriver {
     active_session: Option<AgentSession>,
     active_login_data: Option<ResponseData>,
     active_capabilities: Option<Client>,
+    simulator_capabilities: HashMap<SimulatorId, Client>,
     favorites_enabled: bool,
     favorites_load: Option<JoinHandle<FavoritesUpdate>>,
     inventory_bootstrap: Option<JoinHandle<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>>>,
@@ -436,14 +438,16 @@ struct SessionDriver {
     inventory: Option<Inventory>,
     inventory_cache: InventoryCacheSession,
     object_cache: ObjectCacheSession,
+    object_cache_stats: watch::Sender<ObjectCacheStats>,
     pending_handshake_replies: Arc<Mutex<PendingHandshakeReplies>>,
     inventory_changes: watch::Sender<Option<InventorySnapshot>>,
     rejected_inventory_blocks: Summary<inventory_sync::InventoryRejections>,
     inventory_fetch_failures: Summary<inventory_sync::InventoryFetchFailures>,
     inventory_fetch: InventoryFetchController,
+    inventory_fetch_stats: watch::Sender<InventoryFetchStats>,
     inventory_edits: InventoryEditController,
     inventory_pending_moves: HashMap<InventoryNodeKey, (MoveExpectation, tokio_oneshot::Sender<()>)>,
-    inventory_failed: HashSet<CategoryKey>,
+    inventory_failed: HashMap<CategoryKey, InventoryFetchError>,
     pending_folder_preparation: Option<PendingFolderPreparation>,
     pending_owner_refresh: Option<PendingOwnerRefresh>,
     deferred_inventory: VecDeque<(DeferredInventoryEvent, usize)>,
@@ -455,8 +459,13 @@ struct SessionDriver {
     camera: CameraUplink,
     agent_motion: AgentMotionPublisher,
     motion_statuses: HashMap<SimulatorId, watch::Receiver<CircuitMotionStatus>>,
+    circuit_stats: HashMap<SimulatorId, watch::Receiver<CircuitStats>>,
     region_motion_mapping: HashMap<world::Region, SimulatorId>,
     region_motion_sender: watch::Sender<Vec<(world::Region, watch::Receiver<CircuitMotionStatus>)>>,
+    network_diagnostics: watch::Sender<Vec<RegionNetworkHandle>>,
+    region_sim_stats: HashMap<world::Region, RegionSimStats>,
+    sim_stats: watch::Sender<HashMap<world::Region, RegionSimStats>>,
+    session_queues: watch::Sender<SessionQueuesSnapshot>,
     region_lookup: Option<RegionLookup>,
     media: ObjectMediaIntake,
     recovery: RecoveryIntake,
@@ -622,14 +631,19 @@ impl SessionDriver {
         let assets = AssetCoordinator::new(runtime.clone(), cancellation.clone(), cache);
         let camera = CameraUplink::new();
         let (region_motion_sender, _) = watch::channel(Vec::new());
+        let (network_diagnostics, _) = watch::channel(Vec::new());
+        let (sim_stats, _) = watch::channel(HashMap::new());
+        let (session_queues, _) = watch::channel(SessionQueuesSnapshot::default());
         let media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
         let recovery = RecoveryIntake::new();
         let (inventory_changes, _) = watch::channel(None);
         let inventory_edits = InventoryEditController::new();
         let inventory_fetch = InventoryFetchController::new(inventory_edits.handle());
+        let (inventory_fetch_stats, _) = watch::channel(InventoryFetchStats::default());
         let inventory_cache = InventoryCacheSession::new(&runtime);
         let mut object_cache = ObjectCacheSession::new(credentials.grid);
         object_cache.start(&runtime);
+        let (object_cache_stats, _) = watch::channel(object_cache.stats());
         let pending_handshake_replies = Arc::new(Mutex::new(PendingHandshakeReplies::default()));
 
         Self {
@@ -658,6 +672,7 @@ impl SessionDriver {
             active_session: None,
             active_login_data: None,
             active_capabilities: None,
+            simulator_capabilities: HashMap::new(),
             favorites_enabled: false,
             favorites_load: None,
             inventory_bootstrap: None,
@@ -665,14 +680,16 @@ impl SessionDriver {
             inventory: None,
             inventory_cache,
             object_cache,
+            object_cache_stats,
             pending_handshake_replies,
             inventory_changes,
             rejected_inventory_blocks: Summary::new(inventory_sync::INVENTORY_FAILURE_REPORT_INTERVAL),
             inventory_fetch_failures: Summary::new(inventory_sync::INVENTORY_FAILURE_REPORT_INTERVAL),
             inventory_fetch,
+            inventory_fetch_stats,
             inventory_edits,
             inventory_pending_moves: HashMap::new(),
-            inventory_failed: HashSet::new(),
+            inventory_failed: HashMap::new(),
             pending_folder_preparation: None,
             pending_owner_refresh: None,
             deferred_inventory: VecDeque::new(),
@@ -684,8 +701,13 @@ impl SessionDriver {
             camera,
             agent_motion: AgentMotionPublisher::new(),
             motion_statuses: HashMap::new(),
+            circuit_stats: HashMap::new(),
             region_motion_mapping: HashMap::new(),
             region_motion_sender,
+            network_diagnostics,
+            region_sim_stats: HashMap::new(),
+            sim_stats,
+            session_queues,
             region_lookup: None,
             media,
             recovery,
@@ -708,6 +730,44 @@ impl SessionDriver {
             }
             self.reads.publish(self.session_world.world());
             self.object_cache.persist_overrides(&self.session_world);
+            let (client_events_depth, client_events_capacity) = self.session.event_queue_depth_capacity();
+            let queues_snapshot = SessionQueuesSnapshot {
+                client_events_depth,
+                client_events_capacity,
+                experience_environment: self.environment_pushes.queue_stats(),
+                object_media: self.media.queue_stats(),
+            };
+            self.session_queues.send_if_modified(|current| {
+                if *current == queues_snapshot {
+                    false
+                } else {
+                    *current = queues_snapshot;
+                    true
+                }
+            });
+            let cache_stats = self.object_cache.stats();
+            self.object_cache_stats.send_if_modified(|current| {
+                if *current == cache_stats {
+                    false
+                } else {
+                    *current = cache_stats;
+                    true
+                }
+            });
+            let in_flight = self.inventory_fetch.in_flight_count();
+            self.inventory_fetch_stats.send_if_modified(|current| {
+                if current.folders_in_flight == in_flight {
+                    false
+                } else {
+                    current.folders_in_flight = in_flight;
+                    current.folders_pending = current
+                        .folders_known
+                        .saturating_sub(current.folders_done)
+                        .saturating_sub(in_flight)
+                        .saturating_sub(current.folders_failed);
+                    true
+                }
+            });
             if self.pending_object_update.is_some() {
                 let flow = self.advance_pending_owner_turn().await;
                 if flow.is_break() {
@@ -1414,8 +1474,9 @@ impl SessionDriver {
                 self.publish_region_motion();
                 ControlFlow::Continue(())
             }
-            Event::SimulatorMotionStatus { simulator_id, motion_status } => {
+            Event::SimulatorMotionStatus { simulator_id, motion_status, circuit_stats } => {
                 self.motion_statuses.insert(simulator_id, motion_status);
+                self.circuit_stats.insert(simulator_id, circuit_stats);
                 self.publish_region_motion();
                 ControlFlow::Continue(())
             }
@@ -1484,6 +1545,8 @@ impl SessionDriver {
                 if let Some(region) = self.session_world.region_for(simulator_id) {
                     self.assets.register(region, capabilities.clone());
                 }
+                self.simulator_capabilities.insert(simulator_id, capabilities.clone());
+                self.publish_network_diagnostics();
                 self.media.set_client(simulator_id, capabilities);
                 ControlFlow::Continue(())
             }
@@ -1627,6 +1690,12 @@ impl SessionDriver {
     ) -> ControlFlow<()> {
         let primary_origin_before = (self.primary_simulator == Some(simulator_id)).then(|| self.primary_region_origin()).flatten();
         let region = self.session_world.region_for(simulator_id);
+        if let Message::SimStats(stats) = &message
+            && let Some(region) = region
+        {
+            self.region_sim_stats.insert(region, RegionSimStats::from_message(stats));
+            self.sim_stats.send_replace(self.region_sim_stats.clone());
+        }
         if let Message::RegionHandshake(handshake) = &message {
             self.object_cache.set_region_identity(simulator_id, handshake);
             if let Some(flags) = self.object_cache.begin_region_load(simulator_id, &self.runtime) {
@@ -1804,11 +1873,15 @@ impl SessionDriver {
             region_name,
             &self.mailbox,
         );
+        let is_region_handshake = matches!(message, Message::RegionHandshake(_));
         self.object_cache.record_update(simulator_id, message);
         if self.primary_simulator == Some(simulator_id) {
             self.camera.region_origin_changed(primary_origin_before, self.primary_region_origin());
         }
         self.publish_region_motion();
+        if is_region_handshake {
+            self.publish_network_diagnostics();
+        }
     }
 
     fn on_primary_changed(
@@ -1827,9 +1900,11 @@ impl SessionDriver {
         if let Some(login_data) = login_data {
             self.active_login_data = Some(login_data);
         }
-        self.active_capabilities = Some(capabilities);
+        self.active_capabilities = Some(capabilities.clone());
+        self.simulator_capabilities.insert(simulator_id, capabilities);
         let lookup = RegionLookup::new(self.session_handle.clone(), simulator_id, &session, self.runtime.clone());
         self.region_lookup = Some(lookup);
+        self.publish_network_diagnostics();
         self.publish_session_ready_update(simulator_id, session);
         self.start_favorites_load_for_active();
     }
@@ -1847,10 +1922,16 @@ impl SessionDriver {
         self.environments.simulator_disconnected(&mut self.session_world, simulator_id);
         if let Some(region) = self.session_world.region_for(simulator_id) {
             self.assets.retire(region);
+            if self.region_sim_stats.remove(&region).is_some() {
+                self.sim_stats.send_replace(self.region_sim_stats.clone());
+            }
         }
         self.handoff.simulator_disconnected(&mut self.session_world, simulator_id);
         self.motion_statuses.remove(&simulator_id);
+        self.circuit_stats.remove(&simulator_id);
+        self.simulator_capabilities.remove(&simulator_id);
         self.publish_region_motion();
+        self.publish_network_diagnostics();
         self.object_cache.forget_simulator(simulator_id);
         self.recovery.cancel_simulator(simulator_id);
         self.media.forget_simulator(simulator_id);
@@ -1875,6 +1956,15 @@ impl SessionDriver {
             inventory_updates: self.inventory_changes.subscribe(),
             inventory_fetch: self.inventory.as_ref().map(|_| self.inventory_fetch.handle()),
             world_reader: self.reads.reader(),
+            diagnostics: SessionDiagnostics {
+                object_cache: self.object_cache_stats.subscribe(),
+                inventory: self.inventory_fetch_stats.subscribe(),
+                network: self.network_diagnostics.subscribe(),
+                sim_stats: self.sim_stats.subscribe(),
+                session_queues: self.session_queues.subscribe(),
+                network_session: self.session_handle.clone(),
+                inventory_fetch: self.inventory_fetch.handle(),
+            },
         }));
     }
 
@@ -1983,6 +2073,31 @@ impl SessionDriver {
             .filter_map(|(region, simulator_id)| self.motion_statuses.get(simulator_id).map(|status| (*region, status.clone())))
             .collect();
         self.region_motion_sender.send_replace(circuits);
+        self.publish_network_diagnostics();
+    }
+
+    fn publish_network_diagnostics(&self) {
+        let mut entries = self
+            .region_motion_mapping
+            .iter()
+            .filter_map(|(region, simulator_id)| {
+                let circuit = self.motion_statuses.get(simulator_id)?.clone();
+                let stats = self.circuit_stats.get(simulator_id)?.clone();
+                let region_name = self.session_world.region_name(*simulator_id).map(str::to_owned);
+                let capabilities = self.simulator_capabilities.get(simulator_id).cloned();
+                Some(RegionNetworkHandle {
+                    region: *region,
+                    simulator_id: *simulator_id,
+                    region_name,
+                    is_primary: self.primary_simulator == Some(*simulator_id),
+                    circuit,
+                    stats,
+                    capabilities,
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|entry| (!entry.is_primary, entry.region.get()));
+        self.network_diagnostics.send_replace(entries);
     }
 
     fn publish_arrival_agent_motion(&mut self, simulator_id: SimulatorId, movement: &AgentMovementComplete, received_at: Instant) {

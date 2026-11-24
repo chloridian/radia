@@ -186,3 +186,25 @@ The CI workflow builds, lints, and tests on Windows, macOS, and Linux.
 Prefer `~/Radia` over `/mnt/c/Radia` for Linux builds under WSL2. Keep build artifacts separate between platforms. Windows `.exe` tools exposed through WSL's `PATH` do not replace Linux-native installations.
 
 On Linux, remembered login storage uses Secret Service and requires a running provider such as GNOME Keyring or KWallet.
+
+## MCP server
+
+The viewer can run an MCP server so agents and tools can inspect the running session: scene, rendering, textures, network, inventory, cache, settings, logs, and screenshots. It is off unless you pass `--mcp` (port `47100`) or `--mcp-port <port>`:
+
+```bash
+cargo run -- --mcp
+cargo run -- --mcp-port 4040
+```
+
+The server speaks streamable HTTP at `http://127.0.0.1:<port>/mcp`. To connect Claude Code:
+
+```bash
+claude mcp add --transport http radia http://127.0.0.1:47100/mcp
+```
+
+The server sends its tools, `viewer://` resources, and usage instructions to the client when it connects, so this guide does not repeat them. To list them, run `/mcp` in Claude Code and select `radia`, or call `tools/list` and `resources/list` from any MCP client.
+
+- It listens on loopback only and rejects requests whose `Host` or `Origin` is not `127.0.0.1` or `localhost`.
+- Most tools only read. `set_setting` changes and persists a setting, `set_log_level` changes the log filter for the session, and `set_camera` moves the local camera, whose pose reaches the simulator through normal `AgentUpdate` messages. No tool moves the agent.
+- Outputs never contain asset UUIDs, capability URLs, session secrets, or raw user content.
+- Requests, responses, sessions, and concurrency are bounded. The limits are constants in `apps/viewer/src/mcp/mod.rs`.

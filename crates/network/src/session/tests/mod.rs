@@ -652,7 +652,7 @@ fn chat_message(message: impl Into<String>) -> Message {
 async fn next_event(events: &mut Receiver<EventEnvelope>) -> Event {
     loop {
         let event = next_raw_event(events).await;
-        if matches!(&event, Event::SimulatorConnected { region_handle: None, .. }) {
+        if matches!(&event, Event::SimulatorConnected { region_handle: None, .. } | Event::SimulatorMotionStatus { .. }) {
             continue;
         }
         return event;

@@ -711,6 +711,10 @@ impl Cache {
         self.read_state.evictions.snapshot()
     }
 
+    pub fn eviction_count(&self) -> u64 {
+        self.read_state.evictions.count()
+    }
+
     pub fn shutdown(mut self) -> Result<(), StorageError> {
         let (reply, receiver) = mpsc::sync_channel(0);
         let result = match self.queue.send_terminal(Command::Shutdown { reply }) {

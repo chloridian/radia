@@ -13,8 +13,8 @@ mod texture;
 #[doc(hidden)]
 pub use self::benchmark::GeometryPrepare;
 pub use self::{
-    geometry::{OmissionReason, PickError, Stats},
-    renderer::{Error, FrameInput, Progress, Renderer, Retirement, required_features, required_limits},
+    geometry::{FaceExplanation, MeshResidency, ObjectExplanation, OmissionReason, PickDetail, PickError, Stats, VisibilityStatus},
+    renderer::{CaptureReadback, Error, FrameInput, Progress, Renderer, Retirement, required_features, required_limits},
     texture::{CompressionQuality, TextureCompletion, TextureJob},
 };
 

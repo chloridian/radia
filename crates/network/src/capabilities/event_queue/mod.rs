@@ -55,6 +55,34 @@ const MAX_QUEUED_CAPABILITY_EVENT_BYTES: usize = 256 * 1024;
 
 static NEXT_EVENT_QUEUE_INCARNATION: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EventQueueState {
+    #[default]
+    Starting,
+    Connected,
+    Backoff,
+    Failed,
+    Stopped,
+}
+
+impl EventQueueState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Connected => "connected",
+            Self::Backoff => "backoff",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EventQueueStatus {
+    pub state: EventQueueState,
+    pub last_status: Option<u16>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EventQueueExit {
     Stopped,
@@ -143,6 +171,7 @@ pub(super) struct EventQueueContext {
     pub(super) events: mpsc::Sender<EventEnvelope>,
     pub(super) budget: CapabilityBudget,
     pub(super) coverage_losses: CoverageLossLedger,
+    pub(super) status: watch::Sender<EventQueueStatus>,
 }
 
 #[derive(Clone)]
@@ -508,7 +537,7 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
         Ok(capability) => capability,
         Err(exit) => return exit,
     };
-    let EventQueueContext { simulator_id, source, http, events, budget, coverage_losses, .. } = context;
+    let EventQueueContext { simulator_id, source, http, events, budget, coverage_losses, status, .. } = context;
 
     let mut acknowledge = Value::Undefined;
     let mut error_count = 0;
@@ -563,6 +592,7 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
 
         match response {
             Ok(response) if response.status == StatusCode::NOT_FOUND => {
+                status.send_replace(EventQueueStatus { state: EventQueueState::Failed, last_status: Some(response.status.as_u16()) });
                 pending_loss.record();
                 let status_code = response.status;
                 drop(poll);
@@ -579,10 +609,12 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                 return exit_after_send(outcome, EventQueueExit::StoppedWithCoverageLoss);
             }
             Ok(response) if expected_empty_poll(response.status, response.elapsed) => {
+                status.send_replace(EventQueueStatus { state: EventQueueState::Connected, last_status: Some(response.status.as_u16()) });
                 pending_loss.commit();
                 error_count = 0;
             }
             Ok(response) if response.status.is_success() => {
+                status.send_replace(EventQueueStatus { state: EventQueueState::Connected, last_status: Some(response.status.as_u16()) });
                 let Some(event_queue_permit) = poll.event_queue.take() else {
                     return EventQueueExit::TaskFailed;
                 };
@@ -647,9 +679,11 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                 drop(poll);
                 let error = format!("EventQueueGet returned HTTP {status_code}.");
                 if !retryable_event_queue_error(status_code) {
+                    status.send_replace(EventQueueStatus { state: EventQueueState::Failed, last_status: Some(status_code.as_u16()) });
                     pending_loss.record();
                     return notify_loss_then(&mut pending_loss, error, EventQueueExit::StoppedWithCoverageLoss).await;
                 }
+                status.send_replace(EventQueueStatus { state: EventQueueState::Backoff, last_status: Some(status_code.as_u16()) });
                 match retry_event_queue_with_hint(
                     simulator_id,
                     &mut error_count,
@@ -663,8 +697,12 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                 .await
                 {
                     RetryOutcome::Retry => {}
-                    RetryOutcome::Stopped => return EventQueueExit::Stopped,
+                    RetryOutcome::Stopped => {
+                        status.send_replace(EventQueueStatus { state: EventQueueState::Stopped, last_status: Some(status_code.as_u16()) });
+                        return EventQueueExit::Stopped;
+                    }
                     RetryOutcome::LimitReached => {
+                        status.send_replace(EventQueueStatus { state: EventQueueState::Failed, last_status: Some(status_code.as_u16()) });
                         return notify_loss_then(&mut pending_loss, error, EventQueueExit::RetryLimitReached).await;
                     }
                 }
@@ -673,16 +711,19 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                 if error.is_timeout_after(MIN_EMPTY_POLL_DURATION)
                     || error.is_transport_without_response_after(MIN_EMPTY_POLL_DURATION) =>
             {
+                status.send_replace(EventQueueStatus { state: EventQueueState::Connected, last_status: error.status.map(|s| s.as_u16()) });
                 pending_loss.commit();
                 error_count = 0;
             }
             Err(error) if error.is_resource_exhausted() => {
+                status.send_replace(EventQueueStatus { state: EventQueueState::Failed, last_status: error.status.map(|s| s.as_u16()) });
                 pending_loss.record();
                 drop(poll);
                 let reason = format!("EventQueueGet response could not be admitted: {error}");
                 return notify_loss_then(&mut pending_loss, reason, EventQueueExit::StoppedWithCoverageLoss).await;
             }
             Err(error) if error.is_transient() => {
+                status.send_replace(EventQueueStatus { state: EventQueueState::Backoff, last_status: error.status.map(|s| s.as_u16()) });
                 let retry_after = error.retry_after;
                 drop(poll);
                 let error = format!("EventQueueGet request failed: {error}");

@@ -6,9 +6,10 @@ pub mod region_handshake;
 pub mod region_handshake_reply;
 pub mod region_id_and_handle_reply;
 pub mod region_info;
+pub mod sim_stats;
 
 pub use self::{
     confirm_enable_simulator::ConfirmEnableSimulator, disable_simulator::DisableSimulator, enable_simulator::EnableSimulator,
     region_handle_request::RegionHandleRequest, region_handshake::RegionHandshake, region_handshake_reply::RegionHandshakeReply,
-    region_id_and_handle_reply::RegionIdAndHandleReply, region_info::RegionInfo,
+    region_id_and_handle_reply::RegionIdAndHandleReply, region_info::RegionInfo, sim_stats::SimStats,
 };

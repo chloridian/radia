@@ -605,7 +605,13 @@ mod tests {
             view.mirror.regions.insert(
                 region,
                 RegionData::new(
-                    RegionSummary { region, info: RegionInfo { origin: Some(origin), ..RegionInfo::default() }, terrain_settings: None },
+                    RegionSummary {
+                        region,
+                        info: RegionInfo { origin: Some(origin), ..RegionInfo::default() },
+                        terrain_settings: None,
+                        water_height: None,
+                        object_count: 0,
+                    },
                     budget.reserve(size_of::<RegionSummary>()).expect("region lease"),
                 ),
             );

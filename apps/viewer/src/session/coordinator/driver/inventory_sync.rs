@@ -17,6 +17,7 @@ use tracing::{Instrument, field};
 
 use super::{DeferredInventoryEvent, PendingFolderPreparation, SessionDriver};
 use crate::{
+    inspection::{FailedInventoryFolder, InventoryErrorKind, InventoryFetchStats, InventoryRetryState},
     inventory::{
         AisDelta, FolderApplyOutcome, FolderFetch, FolderFetchProvenance, InventoryEditEvent, InventoryFetchError, InventoryFetchEvent,
         InventoryLoadingStatus, MoveExpectation, favorites::load_favorites,
@@ -425,7 +426,7 @@ impl SessionDriver {
 
     pub(super) fn process_inventory_changes(&mut self, before: &InventorySnapshot, after: &InventorySnapshot) {
         resolve_pending_inventory_moves_between(&mut self.inventory_pending_moves, before, after);
-        self.inventory_failed.retain(|folder| after.category(*folder).is_some());
+        self.inventory_failed.retain(|folder, _| after.category(*folder).is_some());
     }
 
     pub(super) fn mark_inventory_folders_incomplete(
@@ -487,7 +488,7 @@ impl SessionDriver {
                 continue;
             }
             if handle.refetch_folder(*folder).is_err() {
-                self.inventory_failed.insert(*folder);
+                self.inventory_failed.insert(*folder, InventoryFetchError::RequestFailed);
                 self.inventory_last_failure = Some((*folder, InventoryFetchError::RequestFailed));
                 queue_failures = queue_failures.saturating_add(1);
             }
@@ -498,7 +499,7 @@ impl SessionDriver {
     }
 
     fn record_inventory_failure(&mut self, folder: CategoryKey, error: InventoryFetchError) {
-        self.inventory_failed.insert(folder);
+        self.inventory_failed.insert(folder, error.clone());
         self.inventory_last_failure = Some((folder, error.clone()));
         let due = self.inventory_fetch_failures.record(Instant::now(), |failures| {
             failures.failed = failures.failed.saturating_add(1);
@@ -515,13 +516,64 @@ impl SessionDriver {
             let known = snapshot.category_count();
             (known, known.saturating_sub(snapshot.incomplete_category_count_all()))
         });
+        let folders_in_flight = self.inventory_fetch.in_flight_count();
+        let folders_failed = self.inventory_failed.len();
+        let folders_pending =
+            folders_known.saturating_sub(folders_complete).saturating_sub(folders_in_flight).saturating_sub(folders_failed);
+        let mut failed_folders = self
+            .inventory_failed
+            .iter()
+            .map(|(folder, error)| FailedInventoryFolder {
+                folder_id: folder.id().uuid(),
+                owner_id: folder.owner().id(),
+                retry_state: retry_state_for_error(error),
+                error_kind: error_kind_for_error(error),
+                error: error.to_string(),
+            })
+            .collect::<Vec<_>>();
+        failed_folders.sort_unstable_by_key(|entry| (entry.owner_id, entry.folder_id));
+        self.inventory_fetch_stats.send_replace(InventoryFetchStats {
+            folders_known,
+            folders_pending,
+            folders_in_flight,
+            folders_done: folders_complete,
+            folders_failed,
+            background_done: self.inventory_background_done,
+            failed_folders,
+        });
         self.inventory_fetch.publish(InventoryLoadingStatus {
             folders_known,
             folders_complete,
-            folders_failed: self.inventory_failed.len(),
+            folders_failed,
             background_done: self.inventory_background_done,
             last_failure: self.inventory_last_failure.clone(),
         });
+    }
+}
+
+fn retry_state_for_error(error: &InventoryFetchError) -> InventoryRetryState {
+    match error {
+        InventoryFetchError::RetryExhausted(_) => InventoryRetryState::Exhausted,
+        InventoryFetchError::Cancelled => InventoryRetryState::Cancelled,
+        InventoryFetchError::CapabilityUnavailable
+        | InventoryFetchError::FolderTooLarge
+        | InventoryFetchError::InvalidResponse(_)
+        | InventoryFetchError::HttpStatus(_)
+        | InventoryFetchError::RequestFailed
+        | InventoryFetchError::Model(_) => InventoryRetryState::NonRetryable,
+    }
+}
+
+fn error_kind_for_error(error: &InventoryFetchError) -> InventoryErrorKind {
+    match error {
+        InventoryFetchError::CapabilityUnavailable => InventoryErrorKind::CapabilityUnavailable,
+        InventoryFetchError::FolderTooLarge => InventoryErrorKind::FolderTooLarge,
+        InventoryFetchError::InvalidResponse(_) => InventoryErrorKind::InvalidResponse,
+        InventoryFetchError::RetryExhausted(_) => InventoryErrorKind::RetryExhausted,
+        InventoryFetchError::HttpStatus(_) => InventoryErrorKind::HttpStatus,
+        InventoryFetchError::Cancelled => InventoryErrorKind::Cancelled,
+        InventoryFetchError::RequestFailed => InventoryErrorKind::RequestFailed,
+        InventoryFetchError::Model(_) => InventoryErrorKind::Model,
     }
 }
 

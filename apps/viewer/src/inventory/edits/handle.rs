@@ -1,16 +1,32 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
 use inventory::{CategoryKey, FolderType, ItemKey};
 use tokio::sync::{mpsc, mpsc::error::TrySendError, oneshot};
 
 use super::types::{EditOperation, EditRequest, InventoryEditOutcome, InventoryEditRejection};
+use crate::inspection::BoundedQueueStats;
 
 #[derive(Clone)]
 pub struct InventoryEditHandle {
     requests: mpsc::Sender<EditRequest>,
+    full_rejections: Arc<AtomicU64>,
 }
 
 impl InventoryEditHandle {
     pub(super) fn new(requests: mpsc::Sender<EditRequest>) -> Self {
-        Self { requests }
+        Self { requests, full_rejections: Arc::new(AtomicU64::new(0)) }
+    }
+
+    pub fn queue_stats(&self) -> BoundedQueueStats {
+        let capacity = self.requests.max_capacity();
+        BoundedQueueStats {
+            depth: capacity.saturating_sub(self.requests.capacity()),
+            capacity,
+            full_count: self.full_rejections.load(Ordering::Relaxed),
+        }
     }
 
     pub async fn create_folder(&self, parent: CategoryKey, name: impl Into<String>, preferred_type: FolderType) -> InventoryEditOutcome {
@@ -49,7 +65,10 @@ impl InventoryEditHandle {
         let (response, result) = oneshot::channel();
         match self.requests.try_send(EditRequest { operation, response }) {
             Ok(()) => result.await.unwrap_or(InventoryEditOutcome::Rejected(InventoryEditRejection::SessionEnded)),
-            Err(TrySendError::Full(_)) => InventoryEditOutcome::Rejected(InventoryEditRejection::QueueFull),
+            Err(TrySendError::Full(_)) => {
+                self.full_rejections.fetch_add(1, Ordering::Relaxed);
+                InventoryEditOutcome::Rejected(InventoryEditRejection::QueueFull)
+            }
             Err(TrySendError::Closed(_)) => InventoryEditOutcome::Rejected(InventoryEditRejection::SessionEnded),
         }
     }

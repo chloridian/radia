@@ -20,7 +20,7 @@ use std::{
     num::NonZeroU64,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -84,6 +84,13 @@ const NETWORK_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
 pub const DEFAULT_UPSTREAM_BYTES_PER_SECOND: NonZeroU64 = NonZeroU64::new(64_000).unwrap();
 const MAX_OUTBOUND_CHAT_MESSAGE_BYTES: usize = 8 * 1024 - 6 - 4 - 40 - (1 + u8::MAX as usize * 4);
 const MAX_OUTBOUND_OBJECT_REQUESTS: usize = u8::MAX as usize;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct QueueStats {
+    pub depth: usize,
+    pub capacity: usize,
+    pub full_count: u64,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionOptions {
@@ -169,6 +176,10 @@ impl Session {
 impl Session {
     pub fn handle(&self) -> SessionHandle {
         self.handle.clone()
+    }
+
+    pub fn event_queue_depth_capacity(&self) -> (usize, usize) {
+        (self.events.len(), self.events.max_capacity())
     }
 
     pub async fn recv_event(&mut self) -> Option<Event> {
@@ -360,12 +371,36 @@ impl Drop for Session {
 #[derive(Clone)]
 pub struct SessionHandle {
     commands: Sender<Command>,
+    command_queue_full: Arc<AtomicU64>,
     disconnect_requested: watch::Sender<bool>,
     command_admission_closed: Arc<Mutex<bool>>,
     worker_finished: watch::Receiver<bool>,
 }
 
 impl SessionHandle {
+    pub(super) fn new(
+        commands: Sender<Command>,
+        disconnect_requested: watch::Sender<bool>,
+        worker_finished: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            commands,
+            command_queue_full: Arc::new(AtomicU64::new(0)),
+            disconnect_requested,
+            command_admission_closed: Arc::new(Mutex::new(false)),
+            worker_finished,
+        }
+    }
+
+    pub fn command_queue_stats(&self) -> QueueStats {
+        let capacity = self.commands.max_capacity();
+        QueueStats {
+            depth: capacity.saturating_sub(self.commands.capacity()),
+            capacity,
+            full_count: self.command_queue_full.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn is_disconnect_requested(&self) -> bool {
         *self.disconnect_requested.borrow()
     }
@@ -388,7 +423,13 @@ impl SessionHandle {
         if *admission_closed || *self.disconnect_requested.borrow() || *self.worker_finished.borrow() {
             return Err(Error::SessionClosed);
         }
-        try_send_command(&self.commands, Command::SendMessage { message, delivery }, Error::SimulatorConnectionClosed)
+        try_send_command(&self.commands, Command::SendMessage { message, delivery }, Error::SimulatorConnectionClosed).inspect_err(
+            |error| {
+                if matches!(error, Error::CommandQueueFull) {
+                    self.command_queue_full.fetch_add(1, Ordering::Relaxed);
+                }
+            },
+        )
     }
 
     pub async fn send_to(&self, simulator_id: SimulatorId, message: impl OutboundMessage, delivery: Delivery) -> Result<(), Error> {
@@ -402,7 +443,10 @@ impl SessionHandle {
                 return Err(Error::SessionClosed);
             }
             self.commands.try_send(Command::SendTo { simulator_id, message, delivery, completed }).map_err(|error| match error {
-                TrySendError::Full(_) => Error::SimulatorCommandQueueFull,
+                TrySendError::Full(_) => {
+                    self.command_queue_full.fetch_add(1, Ordering::Relaxed);
+                    Error::SimulatorCommandQueueFull
+                }
                 TrySendError::Closed(_) => Error::SessionClosed,
             })?;
         }
@@ -455,7 +499,10 @@ impl SessionHandle {
                 return Err(Error::SessionClosed);
             }
             self.commands.try_send(Command::ReplyRegionHandshake { simulator_id, flags, completed }).map_err(|error| match error {
-                TrySendError::Full(_) => Error::CommandQueueFull,
+                TrySendError::Full(_) => {
+                    self.command_queue_full.fetch_add(1, Ordering::Relaxed);
+                    Error::CommandQueueFull
+                }
                 TrySendError::Closed(_) => Error::SessionClosed,
             })?;
         }

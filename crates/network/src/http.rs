@@ -268,6 +268,20 @@ pub enum ErrorKind {
     InvalidUrl,
 }
 
+impl ErrorKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::ResourceExhausted => "resource_exhausted",
+            Self::HttpStatus => "http_status",
+            Self::InvalidResponse => "invalid_response",
+            Self::InvalidUrl => "invalid_url",
+        }
+    }
+}
+
 #[non_exhaustive]
 pub struct Error {
     pub kind: ErrorKind,

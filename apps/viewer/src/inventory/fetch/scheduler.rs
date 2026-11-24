@@ -2,6 +2,10 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
     fmt, iter,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -26,7 +30,7 @@ use super::{
     classify_request_error, legacy,
     state::{BackgroundRequest, SourceKind, enqueue_background, next_background_job},
 };
-use crate::inventory::InventoryEditHandle;
+use crate::{inspection::BoundedQueueStats, inventory::InventoryEditHandle};
 
 const REQUEST_CAPACITY: usize = 1024;
 const RESULT_CAPACITY: usize = 2;
@@ -90,10 +94,26 @@ pub struct InventoryFetchHandle {
 #[derive(Clone)]
 pub(crate) struct InventoryFetchRequests {
     sender: mpsc::Sender<ForegroundRequest>,
+    full_rejections: Arc<AtomicU64>,
     refresh_incomplete: watch::Sender<u64>,
 }
 
+impl InventoryFetchRequests {
+    fn new(sender: mpsc::Sender<ForegroundRequest>, refresh_incomplete: watch::Sender<u64>) -> Self {
+        Self { sender, full_rejections: Arc::new(AtomicU64::new(0)), refresh_incomplete }
+    }
+}
+
 impl InventoryFetchHandle {
+    pub fn queue_stats(&self) -> BoundedQueueStats {
+        let capacity = self.requests.sender.max_capacity();
+        BoundedQueueStats {
+            depth: capacity.saturating_sub(self.requests.sender.capacity()),
+            capacity,
+            full_count: self.requests.full_rejections.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn request_folder(&self, folder: CategoryKey) -> Result<oneshot::Receiver<InventoryFetchOutcome>, InventoryFetchRequestError> {
         let (completion, result) = oneshot::channel();
         self.send_request(ForegroundRequest { folder, completion: Some(completion) })?;
@@ -106,7 +126,10 @@ impl InventoryFetchHandle {
 
     fn send_request(&self, request: ForegroundRequest) -> Result<(), InventoryFetchRequestError> {
         self.requests.sender.try_send(request).map_err(|error| match error {
-            TrySendError::Full(_) => InventoryFetchRequestError::QueueFull,
+            TrySendError::Full(_) => {
+                self.requests.full_rejections.fetch_add(1, Ordering::Relaxed);
+                InventoryFetchRequestError::QueueFull
+            }
             TrySendError::Closed(_) => InventoryFetchRequestError::SessionEnded,
         })
     }
@@ -134,6 +157,7 @@ pub(crate) struct InventoryFetchController {
     events_tx: mpsc::Sender<InventoryFetchEvent>,
     events_rx: mpsc::Receiver<InventoryFetchEvent>,
     status_tx: watch::Sender<InventoryLoadingStatus>,
+    in_flight_count: Arc<AtomicUsize>,
     refresh_receiver: Option<watch::Receiver<u64>>,
     stop_tx: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
@@ -145,13 +169,14 @@ impl InventoryFetchController {
         let (events_tx, events_rx) = mpsc::channel(RESULT_CAPACITY);
         let (status_tx, status_rx) = watch::channel(InventoryLoadingStatus::default());
         let (refresh_incomplete, refresh_receiver) = watch::channel(0);
-        let requests = InventoryFetchRequests { sender: request_sender, refresh_incomplete };
+        let requests = InventoryFetchRequests::new(request_sender, refresh_incomplete);
         Self {
             handle: InventoryFetchHandle { requests, status: status_rx, edits },
             requests: Some(requests_rx),
             events_tx,
             events_rx,
             status_tx,
+            in_flight_count: Arc::new(AtomicUsize::new(0)),
             refresh_receiver: Some(refresh_receiver),
             stop_tx: None,
             task: None,
@@ -160,6 +185,10 @@ impl InventoryFetchController {
 
     pub(crate) fn handle(&self) -> InventoryFetchHandle {
         self.handle.clone()
+    }
+
+    pub(crate) fn in_flight_count(&self) -> usize {
+        self.in_flight_count.load(Ordering::Relaxed)
     }
 
     pub(crate) fn publish(&self, status: InventoryLoadingStatus) {
@@ -187,6 +216,7 @@ impl InventoryFetchController {
             model,
             requests,
             self.events_tx.clone(),
+            Arc::clone(&self.in_flight_count),
             refresh_receiver,
             cancellation,
             stop_rx,
@@ -245,16 +275,32 @@ struct JobCompletion {
     result: Result<Vec<FolderFetch>, InventoryFetchError>,
 }
 
+struct InFlightGauge(Arc<AtomicUsize>);
+
+impl InFlightGauge {
+    fn set(&self, count: usize) {
+        self.0.store(count, Ordering::Relaxed);
+    }
+}
+
+impl Drop for InFlightGauge {
+    fn drop(&mut self) {
+        self.0.store(0, Ordering::Relaxed);
+    }
+}
+
 async fn run_scheduler(
     client: Client,
     snapshot: InventorySnapshot,
     model: watch::Receiver<Option<InventorySnapshot>>,
     mut requests: mpsc::Receiver<ForegroundRequest>,
     events: mpsc::Sender<InventoryFetchEvent>,
+    in_flight_count: Arc<AtomicUsize>,
     mut refresh_incomplete: watch::Receiver<u64>,
     cancellation: Cancellation,
     mut stop: oneshot::Receiver<()>,
 ) {
+    let in_flight_gauge = InFlightGauge(in_flight_count);
     let discovered = match discover(&client, cancellation.clone(), &mut stop).await {
         Ok(discovered) => discovered,
         Err(InventoryFetchError::Cancelled) => return,
@@ -296,6 +342,7 @@ async fn run_scheduler(
     let mut background_done = false;
 
     loop {
+        in_flight_gauge.set(in_flight.len());
         while let Ok(request) = requests.try_recv() {
             queue_foreground_request(request, &mut foreground, &mut foreground_queued, &mut foreground_completions);
         }

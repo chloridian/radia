@@ -34,8 +34,11 @@ use prism::{
     px, rgb, rgb_to_hsla, size, surface, white,
 };
 use prism_wgpu::WgpuContextHandle;
-use render::{CompressionQuality, FrameInput, Renderer, TextureCompletion, scene};
-use tokio::{runtime::Handle, sync::watch};
+use render::{CompressionQuality, FrameInput, Renderer, TextureCompletion, scene, scene::EnvironmentChoice};
+use tokio::{
+    runtime::Handle,
+    sync::{mpsc as tokio_mpsc, watch},
+};
 use tracing::Instrument;
 use utils::Summary;
 use uuid::Uuid;
@@ -51,7 +54,11 @@ use super::{
 use crate::{
     agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
     camera::{CameraConfig, CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input},
-    gui::{scene as gui_scene, window_geometry},
+    gui::{inspection, scene as gui_scene, window_geometry},
+    inspection::{
+        CameraModeRequest, CameraStateSnapshot, EnvironmentOverrideSummary, GpuInfo, RenderStatsSnapshot, SceneQuerySummary,
+        SetCameraRequest, ViewportQuery,
+    },
     inventory::environments::EnvironmentMenu,
     logging::{LogControl, LogLevel},
     scene_feed::{SceneFeed, SceneSources},
@@ -76,6 +83,8 @@ pub(crate) struct SceneViewConfig {
     pub(crate) runtime: Handle,
     pub(crate) log_control: LogControl,
     pub(crate) settings: Arc<SettingsStore>,
+    pub(crate) render_stats: watch::Sender<RenderStatsSnapshot>,
+    pub(crate) viewport_queries: tokio_mpsc::Receiver<ViewportQuery>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,11 +115,13 @@ pub(crate) struct SceneView {
     texture_sender: mpsc::SyncSender<TextureCompletion>,
     texture_receiver: mpsc::Receiver<TextureCompletion>,
     dropped_textures: Arc<AtomicU64>,
+    texture_completions_dropped_total: u64,
     texture_drops: Summary<u64>,
     viewport_bounds: Rc<Cell<Bounds<Pixels>>>,
     viewport_size: [u32; 2],
     scale_factor: f32,
     frame_times: FrameTimes,
+    render_stats: watch::Sender<RenderStatsSnapshot>,
     next_frame: Instant,
     next_environment: Option<Instant>,
     next_sky: Option<Instant>,
@@ -254,6 +265,19 @@ impl SceneView {
             }
         }));
 
+        let mut viewport_queries = config.viewport_queries;
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(query) = viewport_queries.recv().await {
+                if query.is_closed() {
+                    continue;
+                }
+                if this.update(cx, |view, cx| view.handle_viewport_query(query, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         cx.spawn_in(window, async move |this, cx| {
             while wake_rx.next().await.is_some() {
                 if this
@@ -283,11 +307,13 @@ impl SceneView {
             texture_sender,
             texture_receiver,
             dropped_textures: Arc::new(AtomicU64::new(0)),
+            texture_completions_dropped_total: 0,
             texture_drops: Summary::new(TEXTURE_DROP_REPORT_INTERVAL),
             viewport_bounds: Rc::new(Cell::new(Bounds::default())),
             viewport_size: initial_size,
             scale_factor,
             frame_times: FrameTimes::default(),
+            render_stats: config.render_stats,
             next_frame: Instant::now(),
             next_environment: None,
             next_sky: None,
@@ -355,10 +381,14 @@ impl SceneView {
         };
         let format = handle.texture_format();
         let info = handle.adapter_info().clone();
+        let limits = device.limits();
         let [width, height] = self.viewport_size;
         match Renderer::new(device, queue, info, format, width, height) {
             Ok(renderer) => {
                 let info = renderer.adapter_info();
+                if let Some(publisher) = inspection(cx) {
+                    publisher.set_gpu_info(GpuInfo::from_wgpu(info, &limits));
+                }
                 tracing::info!(
                     backend = ?info.backend,
                     gpu = %info.name,
@@ -573,6 +603,181 @@ impl SceneView {
         }
     }
 
+    fn publish_render_stats(&self) {
+        let Some(renderer) = &self.renderer else { return };
+        let metrics = self.frame_times.metrics();
+        let snapshot = RenderStatsSnapshot {
+            frame_ms: metrics.map_or(0.0, |m| m.frametime_ms),
+            game_ms: metrics.map_or(0.0, |m| m.game_ms),
+            render_ms: metrics.map_or(0.0, |m| m.render_ms),
+            fps: metrics.map_or(0.0, |m| m.fps),
+            render_stats: renderer.stats(),
+            gpu_timings: renderer.gpu_timings(),
+            viewport_size: self.viewport_size,
+            frame_spikes: self.frame_times.spikes(),
+            texture_completions_capacity: render::max_texture_jobs(),
+            texture_completions_dropped: self.texture_completions_dropped_total,
+        };
+        self.render_stats.send_replace(snapshot);
+    }
+
+    fn handle_viewport_query(&mut self, query: ViewportQuery, cx: &mut Context<Self>) {
+        if query.is_closed() {
+            return;
+        }
+        match query {
+            ViewportQuery::SceneQuery { reply } => {
+                let summary = SceneQuerySummary {
+                    viewport_size: self.viewport_size,
+                    scene_sequence: self.feed.as_ref().map_or(0, |feed| feed.view.sequence()),
+                    ready: self.ready,
+                    has_camera: self.last_camera.is_some(),
+                };
+                drop(reply.send(summary));
+            }
+            ViewportQuery::ExplainObject { entity, reply } => {
+                let result =
+                    self.renderer.as_ref().zip(self.feed.as_ref()).map(|(renderer, feed)| renderer.explain_object(&feed.view, entity));
+                drop(reply.send(result));
+            }
+            ViewportQuery::PixelPick { x, y, reply } => {
+                let result = match (self.renderer.as_ref(), self.last_camera) {
+                    (Some(renderer), Some(camera)) => {
+                        let [width, height] = self.viewport_size;
+                        if width == 0 || height == 0 {
+                            Ok(None)
+                        } else {
+                            let ray = camera.ray([f64::from(x), f64::from(y)], self.viewport_size);
+                            renderer.pick_detailed(camera, ray)
+                        }
+                    }
+                    _ => Ok(None),
+                };
+                drop(reply.send(result));
+            }
+            ViewportQuery::BeginScreenshot { reply } => {
+                let readback = self.renderer.as_ref().and_then(Renderer::begin_capture_rgba);
+                drop(reply.send(readback));
+            }
+            ViewportQuery::EnvironmentOverride { reply } => {
+                let summary = match self.feed.as_ref().map(|feed| feed.environment_choice()) {
+                    Some(EnvironmentChoice::Local(_)) => {
+                        EnvironmentOverrideSummary { local_override: true, local_sky: true, local_water: true }
+                    }
+                    Some(EnvironmentChoice::Split { sky, water }) => EnvironmentOverrideSummary {
+                        local_override: sky.is_some() || water.is_some(),
+                        local_sky: sky.is_some(),
+                        local_water: water.is_some(),
+                    },
+                    Some(EnvironmentChoice::Shared) | None => EnvironmentOverrideSummary::default(),
+                };
+                reply.send(summary).ok();
+            }
+            ViewportQuery::CameraState { reply } => {
+                let snapshot = self.camera_state_snapshot(self.last_camera);
+                reply.send(snapshot).ok();
+            }
+            ViewportQuery::SetCamera { request, reply } => {
+                let result = self.apply_set_camera(request, cx);
+                reply.send(result).ok();
+            }
+        }
+    }
+
+    fn camera_state_snapshot(&self, camera: Option<scene::Camera>) -> CameraStateSnapshot {
+        let mode = match self.camera_mode {
+            CameraMode::Follow => CameraModeRequest::Follow,
+            CameraMode::Free => CameraModeRequest::Free,
+        };
+        match camera {
+            Some(camera) => {
+                let position = camera.position();
+                let direction = camera.direction();
+                CameraStateSnapshot {
+                    mode,
+                    position: Some([position.x, position.y, position.z]),
+                    direction: Some([direction.x, direction.y, direction.z]),
+                    vertical_fov_deg: Some(camera.vertical_fov().to_degrees()),
+                    draw_distance: Some(camera.draw_distance()),
+                    lod_factor: Some(f64::from(self.lod_factor)),
+                }
+            }
+            None => CameraStateSnapshot { mode, ..CameraStateSnapshot::default() },
+        }
+    }
+
+    fn apply_set_camera(&mut self, request: SetCameraRequest, cx: &mut Context<Self>) -> Result<CameraStateSnapshot, String> {
+        if request.mode.is_none() && request.position.is_none() && request.look_at.is_none() {
+            return Err("provide at least one of mode, position, or look_at".to_owned());
+        }
+        if request.mode == Some(CameraModeRequest::Follow) && (request.position.is_some() || request.look_at.is_some()) {
+            return Err("position and look_at cannot be set when mode is follow".to_owned());
+        }
+        if let Some(pos) = request.position
+            && !pos.iter().all(|v| v.is_finite())
+        {
+            return Err("position coordinates must be finite".to_owned());
+        }
+        if let Some(look_at) = request.look_at
+            && !look_at.iter().all(|v| v.is_finite())
+        {
+            return Err("look_at coordinates must be finite".to_owned());
+        }
+
+        let now = Instant::now();
+        if request.mode == Some(CameraModeRequest::Follow) {
+            self.transition_to_follow();
+            let pose = self.agent_pose();
+            let rotation = self.body_rotation.current();
+            let camera = self.camera_observation(pose, rotation, now).or(self.last_camera);
+            if let Some(camera) = camera {
+                self.last_camera = Some(camera);
+            }
+            cx.notify();
+            return Ok(self.camera_state_snapshot(camera));
+        }
+
+        let current = if self.camera_mode == CameraMode::Free
+            && let Some(camera) = &self.camera
+        {
+            Some(camera.current_position_and_focus(now))
+        } else if let Some(mut pose) = self.agent_pose() {
+            pose.rotation = self.body_rotation.current();
+            Some(self.follow_camera.current_position_and_focus(pose, now))
+        } else {
+            self.last_camera.map(|last| {
+                let pos = last.position();
+                (pos, pos + last.direction().as_dvec3() * 4.0)
+            })
+        };
+
+        let position = request
+            .position
+            .map(math::DVec3::from_array)
+            .or_else(|| current.map(|(pos, _)| pos))
+            .ok_or_else(|| "camera position is unavailable; provide both position and look_at".to_owned())?;
+        let focus = request
+            .look_at
+            .map(math::DVec3::from_array)
+            .or_else(|| current.map(|(_, focus)| focus))
+            .ok_or_else(|| "camera look_at is unavailable; provide both position and look_at".to_owned())?;
+        if (focus - position).length() < 0.02 {
+            return Err("position and look_at must be at least 0.02m apart".to_owned());
+        }
+
+        let mut orbit = OrbitCamera::from_follow_view(position, focus, self.draw_distance, self.lod_factor);
+        orbit.config = self.follow_camera.config;
+        let viewport = [self.viewport_size[0].max(1), self.viewport_size[1].max(1)];
+        let scene_camera = orbit.scene_camera(viewport, now).ok_or_else(|| "invalid camera pose".to_owned())?;
+
+        self.camera = Some(orbit);
+        self.camera_mode.detach_for_focus();
+        self.last_camera = Some(scene_camera);
+        self.dirty = true;
+        cx.notify();
+        Ok(self.camera_state_snapshot(Some(scene_camera)))
+    }
+
     fn agent_pose(&mut self) -> Option<world::WorldPose> {
         self.feed.as_mut()?.camera_pose()
     }
@@ -652,10 +857,11 @@ impl SceneView {
 
     fn complete_texture_jobs(&mut self) {
         let dropped = self.dropped_textures.swap(0, Ordering::Relaxed);
-        if dropped > 0
-            && let Some(dropped) = self.texture_drops.record(Instant::now(), |total| *total = total.saturating_add(dropped))
-        {
-            tracing::warn!(dropped, "texture completions dropped; queue full");
+        if dropped > 0 {
+            self.texture_completions_dropped_total = self.texture_completions_dropped_total.saturating_add(dropped);
+            if let Some(dropped) = self.texture_drops.record(Instant::now(), |total| *total = total.saturating_add(dropped)) {
+                tracing::warn!(dropped, "texture completions dropped; queue full");
+            }
         }
         if let Some(renderer) = &mut self.renderer {
             while let Ok(completion) = self.texture_receiver.try_recv() {
@@ -802,7 +1008,9 @@ impl SceneView {
                             && agent_pose.is_some_and(|agent_pose| self.follow_camera.moving(agent_pose, completed)))
                         || (self.camera_mode == CameraMode::Free && self.camera.as_ref().is_some_and(|camera| camera.moving(completed)));
                     if presented {
-                        self.frame_times.record(completed, game_work, render_work);
+                        let gpu_timings = self.renderer.as_ref().and_then(Renderer::gpu_timings);
+                        self.frame_times.record(completed, game_work, render_work, gpu_timings);
+                        self.publish_render_stats();
                         self.last_camera = observation;
                         self.next_frame =
                             if self.dirty { next_frame_deadline(scheduled_deadline, completed, frame_interval) } else { completed };

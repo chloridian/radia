@@ -3,7 +3,7 @@ use std::{
     fmt,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU8, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -14,6 +14,7 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, mpsc::error::TrySendError, watch},
     time,
 };
+use uuid::Uuid;
 use world::{
     Entity, EnvironmentRead, MAX_ENVIRONMENT_READ_BYTES, MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS,
     MAX_OBJECT_PAGE_ITEMS, MAX_PARCEL_READ_BYTES, MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES,
@@ -22,6 +23,8 @@ use world::{
     TerrainPageCursor, TerrainPatch, World, WorldChangeCursor, WorldChangePage, WorldChangeRecord, WorldReadBarrier, WorldReadError,
     WorldRevision,
 };
+
+use crate::inspection::BoundedQueueStats;
 
 const MAX_OUTSTANDING_READS: usize = 8;
 const MAX_RESERVED_REPLY_BYTES: usize =
@@ -64,6 +67,7 @@ struct ReadAdmission {
     requests: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
     state: AtomicU8,
+    busy_rejections: AtomicU64,
 }
 
 impl ReadAdmission {
@@ -75,11 +79,16 @@ impl ReadAdmission {
         }
     }
 
+    fn record_busy(&self) -> ReadError {
+        self.busy_rejections.fetch_add(1, Ordering::Relaxed);
+        ReadError::Busy
+    }
+
     fn reserve(&self, bytes: usize) -> Result<ReadPermit, ReadError> {
         self.check()?;
-        let requests = Arc::clone(&self.requests).try_acquire_owned().map_err(|_| ReadError::Busy)?;
-        let bytes = u32::try_from(bytes).map_err(|_| ReadError::Busy)?;
-        let bytes = Arc::clone(&self.bytes).try_acquire_many_owned(bytes).map_err(|_| ReadError::Busy)?;
+        let requests = Arc::clone(&self.requests).try_acquire_owned().map_err(|_| self.record_busy())?;
+        let bytes = u32::try_from(bytes).map_err(|_| self.record_busy())?;
+        let bytes = Arc::clone(&self.bytes).try_acquire_many_owned(bytes).map_err(|_| self.record_busy())?;
         Ok(ReadPermit { _requests: requests, _bytes: bytes })
     }
 }
@@ -116,6 +125,7 @@ impl<T> ReadResponder<T> {
 
 pub(crate) enum ReadRequest {
     Barrier(ReadResponder<WorldReadBarrier>),
+    Entity(Uuid, ReadResponder<Option<Entity>>),
     Objects(Option<Box<ObjectPageCursor>>, usize, ReadResponder<ObjectListPage>),
     Regions(Option<RegionPageCursor>, usize, ReadResponder<RegionPage>),
     Details(Vec<Entity>, Option<Box<ObjectDetailCursor>>, ReadResponder<ObjectDetailBatchPage>),
@@ -129,6 +139,7 @@ impl ReadRequest {
     pub(crate) fn serve(self, world: &World) {
         match self {
             Self::Barrier(reply) if !reply.cancelled() => reply.send(Ok(world.read_barrier())),
+            Self::Entity(id, reply) if !reply.cancelled() => reply.send(Ok(world.entity(id))),
             Self::Objects(cursor, limit, reply) if !reply.cancelled() => {
                 reply.send(world.object_list_page(cursor.map(|cursor| *cursor), limit).map_err(ReadError::World));
             }
@@ -172,6 +183,15 @@ pub struct WorldReader {
 }
 
 impl WorldReader {
+    pub fn queue_stats(&self) -> BoundedQueueStats {
+        let capacity = self.sender.max_capacity();
+        BoundedQueueStats {
+            depth: capacity.saturating_sub(self.sender.capacity()),
+            capacity,
+            full_count: self.budget.busy_rejections.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn revision(&self) -> Result<WorldRevision, ReadError> {
         self.budget.check()?;
         *self.revisions.borrow()
@@ -186,6 +206,10 @@ impl WorldReader {
 
     pub async fn barrier(&self) -> Result<WorldReadBarrier, ReadError> {
         self.request(size_of::<WorldReadBarrier>(), ReadRequest::Barrier).await
+    }
+
+    pub async fn entity(&self, id: Uuid) -> Result<Option<Entity>, ReadError> {
+        self.request(size_of::<Option<Entity>>(), |reply| ReadRequest::Entity(id, reply)).await
     }
 
     pub async fn objects(&self, cursor: Option<ObjectPageCursor>, limit: usize) -> Result<ObjectListPage, ReadError> {
@@ -257,8 +281,8 @@ impl WorldReader {
         let permit = self.budget.reserve(bytes)?;
         let (sender, response) = oneshot::channel();
         self.sender.try_send(build(ReadResponder { sender, permit })).map_err(|error| {
-            self.budget.check().err().unwrap_or(match error {
-                TrySendError::Full(_) => ReadError::Busy,
+            self.budget.check().err().unwrap_or_else(|| match error {
+                TrySendError::Full(_) => self.budget.record_busy(),
                 TrySendError::Closed(_) => ReadError::Shutdown,
             })
         })?;
@@ -271,7 +295,7 @@ impl WorldReader {
         pin_mut!(response, deadline);
         let delivered = futures::select_biased! {
             reply = response => reply.map_err(|_| self.budget.check().err().unwrap_or(ReadError::Shutdown))?,
-            _ = deadline => return Err(self.budget.check().err().unwrap_or(ReadError::Busy)),
+            _ = deadline => return Err(self.budget.check().err().unwrap_or_else(|| self.budget.record_busy())),
         };
         self.budget.check()?;
         delivered.result
@@ -293,6 +317,7 @@ impl WorldReadHost {
             requests: Arc::new(Semaphore::new(MAX_OUTSTANDING_READS)),
             bytes: Arc::new(Semaphore::new(MAX_RESERVED_REPLY_BYTES)),
             state: AtomicU8::new(ACTIVE),
+            busy_rejections: AtomicU64::new(0),
         });
         Self {
             receiver,
@@ -810,5 +835,19 @@ mod tests {
         }
         assert_eq!(reader.changed().await.unwrap(), world.revision());
         assert!(poll!(Box::pin(reader.changed()).as_mut()).is_pending());
+    }
+
+    #[tokio::test]
+    async fn entity_lookup_resolves_present_and_missing() {
+        let mut world = world();
+        let region = world.register_region().unwrap();
+        let entity = insert(&mut world, region, 42, 1, 1);
+        let mut service = WorldReadHost::new(&world, Handle::current());
+        let reader = service.reader();
+        assert_eq!(deliver(reader.entity(Uuid::from_u128(42)), &mut service, &world).await, Ok(Some(entity)));
+        assert_eq!(deliver(reader.entity(Uuid::from_u128(99)), &mut service, &world).await, Ok(None));
+        let source = UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0);
+        let _ = world.remove_object(source, NonZeroU32::new(1).unwrap()).unwrap();
+        assert_eq!(deliver(reader.entity(Uuid::from_u128(42)), &mut service, &world).await, Ok(None));
     }
 }

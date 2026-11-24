@@ -141,6 +141,10 @@ impl Default for EvictionHistory {
 }
 
 impl EvictionHistory {
+    pub(super) fn count(&self) -> u64 {
+        self.sequence.load(Ordering::Acquire)
+    }
+
     pub(super) fn record(&self, reason: EvictionReason) {
         let sequence = self.sequence.fetch_add(1, Ordering::AcqRel).saturating_add(1);
         let slot = usize::try_from(sequence.saturating_sub(1) % EVICTION_HISTORY_LEN as u64).unwrap_or(0);

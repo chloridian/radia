@@ -132,12 +132,7 @@ async fn handshake_reply_preserves_flags() {
     let (event_sender, mut events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
     let (_, worker_finished) = watch::channel(false);
-    let handle = SessionHandle {
-        commands: commands.clone(),
-        disconnect_requested: disconnect_signal.clone(),
-        command_admission_closed: Arc::new(Mutex::new(false)),
-        worker_finished,
-    };
+    let handle = SessionHandle::new(commands.clone(), disconnect_signal.clone(), worker_finished);
     let connection = connect_runtime(session, ResponseData::default()).await.expect("connect simulator runtime");
     let terminal = event_sender.clone().try_reserve_owned().expect("reserve terminal event slot");
     let client = spawn(connection.run(command_receiver, event_sender, disconnect_requested, terminal));
@@ -179,7 +174,7 @@ fn handshake_reply_reports_full_queue() {
     commands.try_send(Command::SubmitMfaCode("123456".into())).expect("fill command queue");
     let (disconnect_requested, _) = watch::channel(false);
     let (_, worker_finished) = watch::channel(false);
-    let handle = SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(Mutex::new(false)), worker_finished };
+    let handle = SessionHandle::new(commands, disconnect_requested, worker_finished);
 
     assert_matches!(handle.try_reply_region_handshake(SimulatorId::new(1), 7), Err(Error::CommandQueueFull));
 }

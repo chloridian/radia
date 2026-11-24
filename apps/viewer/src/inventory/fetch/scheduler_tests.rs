@@ -2,7 +2,7 @@ use std::{
     assert_matches,
     collections::{HashMap, HashSet},
     fmt::Write as _,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicUsize},
     time::{Duration, Instant},
 };
 
@@ -324,7 +324,7 @@ fn scheduler(client: Client, snapshot: inventory::InventorySnapshot) -> Schedule
     let (events_tx, events_rx) = mpsc::channel(RESULT_CAPACITY);
     let (model_tx, model_rx) = watch::channel(Some(snapshot.clone()));
     let (refresh_incomplete, refresh_receiver) = watch::channel(0);
-    let requests = InventoryFetchRequests { sender: request_sender, refresh_incomplete };
+    let requests = InventoryFetchRequests::new(request_sender, refresh_incomplete);
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let cancellation: Shared<BoxFuture<'static, ()>> = async move {
         drop(cancel_rx.await);
@@ -332,7 +332,17 @@ fn scheduler(client: Client, snapshot: inventory::InventorySnapshot) -> Schedule
     .boxed()
     .shared();
     let (stop_tx, stop_rx) = oneshot::channel();
-    let task = tokio::spawn(run_scheduler(client, snapshot, model_rx, requests_rx, events_tx, refresh_receiver, cancellation, stop_rx));
+    let task = tokio::spawn(run_scheduler(
+        client,
+        snapshot,
+        model_rx,
+        requests_rx,
+        events_tx,
+        Arc::new(AtomicUsize::new(0)),
+        refresh_receiver,
+        cancellation,
+        stop_rx,
+    ));
     (requests, events_rx, model_tx, task, cancel_tx, stop_tx)
 }
 

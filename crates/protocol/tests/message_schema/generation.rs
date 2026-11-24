@@ -22,7 +22,7 @@ use super::coverage::{ConformanceCategory, TYPED_MESSAGE_COVERAGE, typed_variant
 
 #[test]
 fn typed_inventory_matches_schema() {
-    assert_eq!(TYPED_MESSAGE_COVERAGE.len(), 48);
+    assert_eq!(TYPED_MESSAGE_COVERAGE.len(), 49);
     let mut schema_conforming = 0;
     let mut semantic_overrides = 0;
     let mut compatibility_overrides = 0;

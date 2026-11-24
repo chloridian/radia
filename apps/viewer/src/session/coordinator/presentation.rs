@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::AssetHandle,
+    inspection::SessionDiagnostics,
     inventory::{FavoriteLocation, InventoryFetchHandle, favorite_store::FavoriteStoreError, favorites::FavoritesError},
     remembered_login::RememberedLogin,
     session::{AgentMotionSample, ChatMessage, experience_environment::EnvironmentInbox},
@@ -162,6 +163,7 @@ pub(crate) struct SessionReadyUpdate {
     pub(crate) inventory_updates: watch::Receiver<Option<InventorySnapshot>>,
     pub(crate) inventory_fetch: Option<InventoryFetchHandle>,
     pub(crate) world_reader: WorldReader,
+    pub(crate) diagnostics: SessionDiagnostics,
 }
 
 pub(crate) struct FavoritesUpdate {

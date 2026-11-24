@@ -20,6 +20,8 @@ fn region_data(budget: &Budget, region: Region, origin: DVec3, textures: [Uuid; 
             region,
             info: RegionInfo { origin: Some(origin), ..RegionInfo::default() },
             terrain_settings: Some(settings(textures)),
+            water_height: None,
+            object_count: 0,
         },
         budget.reserve(512).unwrap(),
     )
@@ -364,7 +366,13 @@ fn terrain_background_keeps_resolution() {
     mirror.regions.insert(
         region,
         RegionData::new(
-            RegionSummary { region, info: RegionInfo::default(), terrain_settings: Some(settings(textures)) },
+            RegionSummary {
+                region,
+                info: RegionInfo::default(),
+                terrain_settings: Some(settings(textures)),
+                water_height: None,
+                object_count: 0,
+            },
             budget.reserve(512).unwrap(),
         ),
     );

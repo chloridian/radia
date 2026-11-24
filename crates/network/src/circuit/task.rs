@@ -144,7 +144,11 @@ impl ConnectionTask {
                 SelectedEvent::EventDelivery(permit) => {
                     Self::deliver_event(permit, &mut self.pending_notifications, &mut self.pending_events, &mut self.event_delivery_turn)
                 }
-                SelectedEvent::PingTick => self.ping_tick()?,
+                SelectedEvent::PingTick => {
+                    let stats = self.sample_circuit_stats(Instant::now());
+                    self.circuit_stats_sender.send_replace(stats);
+                    self.ping_tick()?
+                }
                 SelectedEvent::SendAgeDeadline => {
                     self.expire_sends()?;
                     RunControl::Continue
@@ -659,11 +663,13 @@ pub(super) async fn run(
     ack_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let mut ping_timer = time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
     ping_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let now = Instant::now();
     let (motion_status_sender, motion_status_receiver) = watch::channel(super::CircuitMotionStatus {
-        last_packet_received_at: Instant::now().into_std(),
+        last_packet_received_at: now.into_std(),
         measured_ping_delay: connection.circuit.measured_ping_delay_average(),
         connected: false,
     });
+    let (circuit_stats_sender, circuit_stats_receiver) = watch::channel(super::CircuitStats::default());
     ConnectionTask {
         connection,
         events,
@@ -690,6 +696,13 @@ pub(super) async fn run(
         packet_rejections: PacketRejections::default(),
         motion_status_sender,
         motion_status_receiver,
+        circuit_stats_sender,
+        circuit_stats_receiver,
+        stats_sample_at: now,
+        stats_sample_in: 0,
+        stats_sample_out: 0,
+        packets_in_per_sec: 0,
+        packets_out_per_sec: 0,
     }
     .run()
     .await

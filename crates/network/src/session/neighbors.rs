@@ -330,9 +330,9 @@ impl SessionDispatcher<'_> {
             self.state.register_root_connection(movement.data.region_handle);
         }
         let is_current = match &event {
-            Event::SimulatorConnected { simulator_id, .. } | Event::SimulatorMessage { simulator_id, .. } => {
-                is_current_simulator(*simulator_id, &self.state.simulators)
-            }
+            Event::SimulatorConnected { simulator_id, .. }
+            | Event::SimulatorMotionStatus { simulator_id, .. }
+            | Event::SimulatorMessage { simulator_id, .. } => is_current_simulator(*simulator_id, &self.state.simulators),
             _ => false,
         };
         if !is_current {
@@ -402,7 +402,7 @@ impl SessionDispatcher<'_> {
                 self.state.publish_session_ready(&self.events, &mut self.run_state).await?;
                 self.startup.mark_ready_published();
             }
-        } else if let Event::SimulatorMessage { simulator_id, .. } = &event {
+        } else if let Event::SimulatorMessage { simulator_id, .. } | Event::SimulatorMotionStatus { simulator_id, .. } = &event {
             self.state
                 .publish_simulator_event(
                     *simulator_id,

@@ -443,6 +443,17 @@ pub(crate) fn schema_conforming_fields(message: &Message) -> Option<Vec<BlockVal
         Message::ParcelOverlay(message) => {
             Some(vec![one(vec![FieldValue::S32(message.sequence_id), FieldValue::Bytes(message.data.clone())])])
         }
+        Message::SimStats(message) => Some(vec![
+            one(vec![
+                FieldValue::U32(message.region.region_x),
+                FieldValue::U32(message.region.region_y),
+                FieldValue::U32(message.region.region_flags),
+                FieldValue::U32(message.region.object_capacity),
+            ]),
+            many(message.stats.iter().map(|entry| vec![FieldValue::U32(entry.stat_id), FieldValue::F32(entry.stat_value)]).collect()),
+            one(message.pid.into_iter().map(FieldValue::S32).collect()),
+            many(message.region_info.iter().map(|info| info.region_flags_extended.into_iter().map(FieldValue::U64).collect()).collect()),
+        ]),
         Message::Schema(_) | Message::Unknown { .. } => None,
     }
 }

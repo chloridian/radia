@@ -5,11 +5,27 @@ use std::{
 };
 
 use math::{DVec3, Quat, Vec3, ray_intersects_bounds, ray_triangle_intersection};
+use uuid::Uuid;
+use world::{Entity, Region};
 
 use super::{GeometryRenderer, ShadingMode, items::ItemId};
 use crate::scene::{Camera, Object, SharedMesh};
 
 const MAX_PICK_TRIANGLES: usize = 250_000;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PickDetail {
+    pub point: DVec3,
+    pub entity: Option<Entity>,
+    pub object_id: Option<Uuid>,
+    pub region: Region,
+    pub face_range: Range<u32>,
+    pub material_slot: u8,
+    pub has_base_texture: bool,
+    pub has_emissive_texture: bool,
+    pub double_sided: bool,
+    pub blended: bool,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PickError {
@@ -49,6 +65,46 @@ impl GeometryRenderer {
         let result = query.result();
         self.log_pick(&query, outcome);
         Ok(result)
+    }
+
+    pub(crate) fn pick_detailed(&self, camera: Camera, ray: DVec3) -> Result<Option<PickDetail>, PickError> {
+        let mut query = PickQuery::new(camera, ray);
+        if !ray.is_finite() {
+            return Ok(None);
+        }
+        for id in &self.cache.visible {
+            let Some(item) = self.cache.items.get(*id) else { continue };
+            if !item.pickable {
+                continue;
+            }
+            let faces =
+                item.faces.iter().filter(|face| face.slot.is_some()).map(|face| (&face.indices, face.params.double_sided, face.order.3));
+            query.visit_item(item.id, &item.mesh, item.position, item.rotation, item.scale, item.invert_normals, item.shading, faces)?;
+        }
+        let Some(hit) = query.hit.as_ref() else {
+            return Ok(None);
+        };
+        let Some(point) = query.result() else {
+            return Ok(None);
+        };
+        let Some(item) = self.cache.index(hit.item_id).and_then(|index| self.cache.items.get(index)) else {
+            return Ok(None);
+        };
+        let face = item.faces.iter().find(|face| face.indices == hit.face_range && face.order.3 == hit.material_slot);
+        let has_base_texture = face.is_some_and(|face| face.images.base.is_some());
+        let has_emissive_texture = face.is_some_and(|face| face.images.emissive.is_some());
+        Ok(Some(PickDetail {
+            point,
+            entity: item.entity,
+            object_id: item.source.as_ref().map(|source| source.detail().summary.id),
+            region: item.region,
+            face_range: hit.face_range.clone(),
+            material_slot: hit.material_slot,
+            has_base_texture,
+            has_emissive_texture,
+            double_sided: face.is_some_and(|face| face.params.double_sided),
+            blended: face.is_some_and(|face| face.blended),
+        }))
     }
 
     fn log_pick(&self, query: &PickQuery, outcome: PickOutcome) {

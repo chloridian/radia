@@ -91,6 +91,7 @@ Source has no comments or doc comments, and that includes safety comments on `un
 - Use `assert_matches!` instead of `assert!(matches!(..))`, so failures print the actual value.
 - Keep test names short (`<subject>_<outcome>`, usually 2–5 words). Drop module/type/function names, setup, filler (`test_`, `should`, `when`, `returns`), and issue IDs; put details in assertion messages.
 - Ask before launching the gui viewer, driving a browser, or any computer use.
+- Read runtime behavior from the running viewer's `radia` MCP server instead of inferring it from code or logs: scene, rendering, assets, network, inventory, cache, and log state, before and after a fix. If no viewer is running, ask, then launch it with `cargo run --release -- --mcp` (server at `http://127.0.0.1:47100/mcp`).
 
 ## Versioning
 

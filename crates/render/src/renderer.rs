@@ -6,14 +6,16 @@ use std::{
 
 use math::DVec3;
 use wgpu::{
-    AdapterInfo, CommandEncoderDescriptor, Device, Extent3d, LoadOp, Operations, PollError, PollType, Queue, RenderPassColorAttachment,
-    RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPassTimestampWrites, StoreOp, Texture, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
+    AdapterInfo, Buffer, BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, CommandEncoderDescriptor, Device, Extent3d, LoadOp,
+    Operations, Origin3d, PollError, PollType, Queue, RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor,
+    RenderPassTimestampWrites, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
+use world::Entity;
 
 use crate::{
     environment::Evaluated,
-    geometry::{GeometryRenderer, PickError, Stats},
+    geometry::{GeometryRenderer, ObjectExplanation, PickDetail, PickError, Stats},
     gpu_timing::GpuTimings,
     pipeline::{PostProcess, SCENE_CLEAR, camera_view, projection},
     scene::{AgentPose, Camera, SceneView},
@@ -161,6 +163,43 @@ impl Renderer {
         self.geometry.pick(camera, ray)
     }
 
+    pub fn pick_detailed(&self, camera: Camera, ray: DVec3) -> Result<Option<PickDetail>, PickError> {
+        self.geometry.pick_detailed(camera, ray)
+    }
+
+    pub fn explain_object(&self, view: &SceneView, entity: Entity) -> ObjectExplanation {
+        self.geometry.explain_object(view, entity)
+    }
+
+    pub fn begin_capture_rgba(&self) -> Option<CaptureReadback> {
+        let texture = self.output_texture.as_ref()?;
+        let [width, height] = self.size;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let unpadded = width.checked_mul(4)?;
+        let align = COPY_BYTES_PER_ROW_ALIGNMENT;
+        let bytes_per_row = unpadded.checked_add(align - 1)? / align * align;
+        let buffer_size = u64::from(bytes_per_row).checked_mul(u64::from(height))?;
+        let buffer = self.device.create_buffer(&BufferDescriptor {
+            label: Some("Scene capture readback"),
+            size: buffer_size,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("Scene capture") });
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo { texture, mip_level: 0, origin: Origin3d::ZERO, aspect: TextureAspect::All },
+            TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bytes_per_row), rows_per_image: Some(height) },
+            },
+            Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([encoder.finish()]);
+        Some(CaptureReadback { device: Arc::clone(&self.device), buffer, width, height, bytes_per_row, format: self.unorm_format })
+    }
+
     pub fn next_texture_job(&mut self) -> Option<TextureJob> {
         self.geometry.next_texture_job()
     }
@@ -205,7 +244,7 @@ impl Renderer {
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: self.unorm_format,
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC,
             view_formats: &view_formats,
         }));
         let view = texture.create_view(&TextureViewDescriptor { format: Some(self.srgb_format), ..Default::default() });
@@ -323,6 +362,15 @@ pub struct Progress {
     pub redraw: bool,
     pub pending: bool,
     pub redraw_at: Option<Instant>,
+}
+
+pub struct CaptureReadback {
+    pub device: Arc<Device>,
+    pub buffer: Buffer,
+    pub width: u32,
+    pub height: u32,
+    pub bytes_per_row: u32,
+    pub format: TextureFormat,
 }
 
 pub struct Retirement {
