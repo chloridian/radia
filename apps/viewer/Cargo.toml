@@ -39,6 +39,7 @@ cvars.workspace = true
 inventory.workspace = true
 render.workspace = true
 rmcp.workspace = true
+schemars.workspace = true
 math.workspace = true
 network.workspace = true
 protocol.workspace = true
