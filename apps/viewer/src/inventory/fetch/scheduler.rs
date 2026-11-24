@@ -4,7 +4,7 @@ use std::{
     fmt, iter,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -30,7 +30,7 @@ use super::{
     classify_request_error, legacy,
     state::{BackgroundRequest, SourceKind, enqueue_background, next_background_job},
 };
-use crate::inventory::InventoryEditHandle;
+use crate::{inspection::BoundedQueueStats, inventory::InventoryEditHandle};
 
 const REQUEST_CAPACITY: usize = 1024;
 const RESULT_CAPACITY: usize = 2;
@@ -94,10 +94,26 @@ pub struct InventoryFetchHandle {
 #[derive(Clone)]
 pub(crate) struct InventoryFetchRequests {
     sender: mpsc::Sender<ForegroundRequest>,
+    full_rejections: Arc<AtomicU64>,
     refresh_incomplete: watch::Sender<u64>,
 }
 
+impl InventoryFetchRequests {
+    fn new(sender: mpsc::Sender<ForegroundRequest>, refresh_incomplete: watch::Sender<u64>) -> Self {
+        Self { sender, full_rejections: Arc::new(AtomicU64::new(0)), refresh_incomplete }
+    }
+}
+
 impl InventoryFetchHandle {
+    pub fn queue_stats(&self) -> BoundedQueueStats {
+        let capacity = self.requests.sender.max_capacity();
+        BoundedQueueStats {
+            depth: capacity.saturating_sub(self.requests.sender.capacity()),
+            capacity,
+            full_count: self.requests.full_rejections.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn request_folder(&self, folder: CategoryKey) -> Result<oneshot::Receiver<InventoryFetchOutcome>, InventoryFetchRequestError> {
         let (completion, result) = oneshot::channel();
         self.send_request(ForegroundRequest { folder, completion: Some(completion) })?;
@@ -110,7 +126,10 @@ impl InventoryFetchHandle {
 
     fn send_request(&self, request: ForegroundRequest) -> Result<(), InventoryFetchRequestError> {
         self.requests.sender.try_send(request).map_err(|error| match error {
-            TrySendError::Full(_) => InventoryFetchRequestError::QueueFull,
+            TrySendError::Full(_) => {
+                self.requests.full_rejections.fetch_add(1, Ordering::Relaxed);
+                InventoryFetchRequestError::QueueFull
+            }
             TrySendError::Closed(_) => InventoryFetchRequestError::SessionEnded,
         })
     }
@@ -150,7 +169,7 @@ impl InventoryFetchController {
         let (events_tx, events_rx) = mpsc::channel(RESULT_CAPACITY);
         let (status_tx, status_rx) = watch::channel(InventoryLoadingStatus::default());
         let (refresh_incomplete, refresh_receiver) = watch::channel(0);
-        let requests = InventoryFetchRequests { sender: request_sender, refresh_incomplete };
+        let requests = InventoryFetchRequests::new(request_sender, refresh_incomplete);
         Self {
             handle: InventoryFetchHandle { requests, status: status_rx, edits },
             requests: Some(requests_rx),

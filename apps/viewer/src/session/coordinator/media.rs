@@ -12,9 +12,12 @@ use tracing::field;
 use utils::Summary;
 use world::{ApplyError, Entity};
 
-use crate::session::{
-    object_media::{FetchError, ObjectMediaFetcher, ObjectMediaResult, ObjectMediaTarget, response_is_stale},
-    world::{MAX_WORLD_ENTITIES, ObjectMediaTargetCheck, ObjectMediaTargetCheckProgress, SessionWorld},
+use crate::{
+    inspection::BoundedQueueStats,
+    session::{
+        object_media::{FetchError, ObjectMediaFetcher, ObjectMediaResult, ObjectMediaTarget, response_is_stale},
+        world::{MAX_WORLD_ENTITIES, ObjectMediaTargetCheck, ObjectMediaTargetCheckProgress, SessionWorld},
+    },
 };
 
 const MAX_WAITING_OBJECT_MEDIA: usize = MAX_WORLD_ENTITIES;
@@ -162,6 +165,7 @@ pub(super) enum ObjectMediaIntake {
         waiting: WaitingObjectMedia,
         pending_flush: Option<(ObjectMediaTarget, ObjectMediaTargetCheck)>,
         summary: Summary<MediaSummary>,
+        queue_full_total: u64,
     },
     Disabled,
 }
@@ -186,7 +190,13 @@ impl ObjectMediaIntake {
             waiting: WaitingObjectMedia::default(),
             pending_flush: None,
             summary: Summary::new(MEDIA_SUMMARY_INTERVAL),
+            queue_full_total: 0,
         }
+    }
+
+    pub(super) fn queue_stats(&self) -> Option<BoundedQueueStats> {
+        let Self::Enabled { waiting, queue_full_total, .. } = self else { return None };
+        Some(BoundedQueueStats { depth: waiting.len(), capacity: MAX_WAITING_OBJECT_MEDIA, full_count: *queue_full_total })
     }
 
     pub(super) async fn next_result(&mut self) -> Option<ObjectMediaResult> {
@@ -235,6 +245,9 @@ impl ObjectMediaIntake {
             return;
         }
         if !waiting.insert(target) {
+            if let Self::Enabled { queue_full_total, .. } = self {
+                *queue_full_total = queue_full_total.saturating_add(1);
+            }
             self.record_summary(target, |summary| summary.queue_full = summary.queue_full.saturating_add(1));
         }
     }
@@ -242,6 +255,9 @@ impl ObjectMediaIntake {
     fn queue_for_validation(&mut self, target: ObjectMediaTarget) {
         let Self::Enabled { waiting, .. } = self else { return };
         if !waiting.insert(target) {
+            if let Self::Enabled { queue_full_total, .. } = self {
+                *queue_full_total = queue_full_total.saturating_add(1);
+            }
             self.record_summary(target, |summary| summary.queue_full = summary.queue_full.saturating_add(1));
         }
     }

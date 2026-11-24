@@ -104,10 +104,7 @@ fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
             return Err("no active viewer session".to_owned());
         };
         let (reply_tx, reply_rx) = oneshot::channel();
-        session
-            .viewport_queries
-            .try_send(ViewportQuery::SetCamera { request, reply: reply_tx })
-            .map_err(|_| "viewport query queue busy or closed".to_owned())?;
+        session.try_send_viewport_query(ViewportQuery::SetCamera { request, reply: reply_tx }).map_err(str::to_owned)?;
         let applied = reply_rx.await.map_err(|_| "viewport dropped set_camera request".to_owned())??;
 
         Ok(ToolContent::Json(json!({

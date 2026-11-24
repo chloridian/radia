@@ -115,6 +115,7 @@ pub(crate) struct SceneView {
     texture_sender: mpsc::SyncSender<TextureCompletion>,
     texture_receiver: mpsc::Receiver<TextureCompletion>,
     dropped_textures: Arc<AtomicU64>,
+    texture_completions_dropped_total: u64,
     texture_drops: Summary<u64>,
     viewport_bounds: Rc<Cell<Bounds<Pixels>>>,
     viewport_size: [u32; 2],
@@ -306,6 +307,7 @@ impl SceneView {
             texture_sender,
             texture_receiver,
             dropped_textures: Arc::new(AtomicU64::new(0)),
+            texture_completions_dropped_total: 0,
             texture_drops: Summary::new(TEXTURE_DROP_REPORT_INTERVAL),
             viewport_bounds: Rc::new(Cell::new(Bounds::default())),
             viewport_size: initial_size,
@@ -609,6 +611,8 @@ impl SceneView {
             gpu_timings: renderer.gpu_timings(),
             viewport_size: self.viewport_size,
             frame_spikes: self.frame_times.spikes(),
+            texture_completions_capacity: render::max_texture_jobs(),
+            texture_completions_dropped: self.texture_completions_dropped_total,
         };
         self.render_stats.send_replace(snapshot);
     }
@@ -849,10 +853,11 @@ impl SceneView {
 
     fn complete_texture_jobs(&mut self) {
         let dropped = self.dropped_textures.swap(0, Ordering::Relaxed);
-        if dropped > 0
-            && let Some(dropped) = self.texture_drops.record(Instant::now(), |total| *total = total.saturating_add(dropped))
-        {
-            tracing::warn!(dropped, "texture completions dropped; queue full");
+        if dropped > 0 {
+            self.texture_completions_dropped_total = self.texture_completions_dropped_total.saturating_add(dropped);
+            if let Some(dropped) = self.texture_drops.record(Instant::now(), |total| *total = total.saturating_add(dropped)) {
+                tracing::warn!(dropped, "texture completions dropped; queue full");
+            }
         }
         if let Some(renderer) = &mut self.renderer {
             while let Ok(completion) = self.texture_receiver.try_recv() {

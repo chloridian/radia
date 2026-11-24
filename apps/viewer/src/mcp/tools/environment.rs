@@ -167,7 +167,7 @@ fn handler(handle: ViewerInspectionHandle, _args: Value) -> ToolFuture {
         };
         let overrides = {
             let (reply_tx, reply_rx) = oneshot::channel();
-            if session.viewport_queries.try_send(ViewportQuery::EnvironmentOverride { reply: reply_tx }).is_ok() {
+            if session.try_send_viewport_query(ViewportQuery::EnvironmentOverride { reply: reply_tx }).is_ok() {
                 reply_rx.await.unwrap_or_default()
             } else {
                 EnvironmentOverrideSummary::default()

@@ -1,3 +1,5 @@
+use std::sync::{Arc, atomic::AtomicU64};
+
 use prism::{
     AnyElement, AnyWindowHandle, App, AppContext, Entity, Render, Subscription, TitlebarOptions, Window, WindowBounds, WindowId,
     WindowOptions,
@@ -119,6 +121,7 @@ pub(crate) fn start_session(
             assets: assets.clone(),
             render_stats: render_stats_rx,
             viewport_queries: viewport_queries_tx,
+            viewport_query_full: Arc::new(AtomicU64::new(0)),
             agent_motion: agent_motion.clone(),
             diagnostics,
         }));

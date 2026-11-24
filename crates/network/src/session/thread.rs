@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    future::Future,
-    sync::{Arc, Mutex},
-    thread,
-};
+use std::{collections::HashMap, future::Future, thread};
 
 use tokio::{
     runtime::Builder,
@@ -92,12 +87,7 @@ pub(super) fn start_at(credentials: LoginCredentials, options: SessionOptions, l
         .map_err(Error::WorkerStart)?;
 
     Ok(Session {
-        handle: SessionHandle {
-            commands: command_sender,
-            disconnect_requested: disconnect_sender,
-            command_admission_closed: Arc::new(Mutex::new(false)),
-            worker_finished,
-        },
+        handle: SessionHandle::new(command_sender, disconnect_sender, worker_finished),
         events,
         coverage_losses,
         coverage_changed,

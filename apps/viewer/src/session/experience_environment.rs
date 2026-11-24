@@ -1,7 +1,10 @@
 use std::{
     error::Error,
     fmt::{self, Display},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -12,6 +15,8 @@ use tokio::sync::{mpsc, mpsc::error::TrySendError};
 use utils::{AssetId, ExperienceId};
 use uuid::Uuid;
 use world::Region;
+
+use crate::inspection::BoundedQueueStats;
 
 pub(crate) enum PushOutcome {
     Accepted,
@@ -51,11 +56,29 @@ impl From<TrySendError<EnvironmentCommand>> for EnvironmentQueueError {
     }
 }
 
-pub(crate) struct EnvironmentSender(mpsc::Sender<EnvironmentCommand>);
+pub(crate) struct EnvironmentSender {
+    sender: mpsc::Sender<EnvironmentCommand>,
+    full_count: AtomicU64,
+}
 
 impl EnvironmentSender {
+    pub(crate) fn queue_stats(&self) -> BoundedQueueStats {
+        let capacity = self.sender.max_capacity();
+        BoundedQueueStats {
+            depth: capacity.saturating_sub(self.sender.capacity()),
+            capacity,
+            full_count: self.full_count.load(Ordering::Relaxed),
+        }
+    }
+
     pub(crate) fn try_send(&self, command: EnvironmentCommand) -> Result<(), EnvironmentQueueError> {
-        self.0.try_send(command).map_err(EnvironmentQueueError::from)
+        self.sender.try_send(command).map_err(|error| {
+            let error = EnvironmentQueueError::from(error);
+            if matches!(error, EnvironmentQueueError::Full) {
+                self.full_count.fetch_add(1, Ordering::Relaxed);
+            }
+            error
+        })
     }
 
     pub(crate) fn clear_region(&self, region: Region) -> Result<(), EnvironmentQueueError> {
@@ -84,7 +107,7 @@ pub(crate) struct EnvironmentInbox(Arc<Mutex<Option<mpsc::Receiver<EnvironmentCo
 impl EnvironmentInbox {
     pub(crate) fn channel() -> (EnvironmentSender, Self) {
         let (sender, receiver) = mpsc::channel(64);
-        (EnvironmentSender(sender), Self(Arc::new(Mutex::new(Some(receiver)))))
+        (EnvironmentSender { sender, full_count: AtomicU64::new(0) }, Self(Arc::new(Mutex::new(Some(receiver)))))
     }
 
     pub(crate) fn take(&self) -> Option<mpsc::Receiver<EnvironmentCommand>> {

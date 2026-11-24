@@ -47,10 +47,7 @@ fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
             );
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        session
-            .viewport_queries
-            .try_send(ViewportQuery::ExplainObject { entity, reply: reply_tx })
-            .map_err(|_| "viewport query queue busy or closed".to_owned())?;
+        session.try_send_viewport_query(ViewportQuery::ExplainObject { entity, reply: reply_tx }).map_err(str::to_owned)?;
         let render_explanation = reply_rx.await.map_err(|_| "viewport dropped explain request".to_owned())?;
 
         let render_json = render_explanation.map(|exp| {

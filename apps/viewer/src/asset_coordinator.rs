@@ -5,7 +5,7 @@ use std::{
     ops::Range,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -32,6 +32,8 @@ use tokio::{
 use tracing::Instrument;
 use utils::{AssetId, Summary};
 use world::Region;
+
+use crate::inspection::BoundedQueueStats;
 
 const COMMANDS: usize = 64;
 const MAX_MATERIALS_PER_POST: usize = 50;
@@ -341,6 +343,7 @@ enum RouteCommand {
 #[derive(Clone)]
 pub struct AssetHandle {
     requests: mpsc::Sender<AssetCommand>,
+    busy_rejections: Arc<AtomicU64>,
     active: Arc<AtomicBool>,
     runtime: Handle,
     budget: Budget,
@@ -351,6 +354,15 @@ pub struct AssetHandle {
 }
 
 impl AssetHandle {
+    pub fn command_queue_stats(&self) -> BoundedQueueStats {
+        let capacity = self.requests.max_capacity();
+        BoundedQueueStats {
+            depth: capacity.saturating_sub(self.requests.capacity()),
+            capacity,
+            full_count: self.busy_rejections.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn texture_events(&self) -> watch::Receiver<u64> {
         self.textures.subscribe()
     }
@@ -379,7 +391,13 @@ impl AssetHandle {
             pin_mut!(reserve);
             futures::select_biased! {
                 permit = reserve => permit.map_err(|_| RequestError::Closed)?,
-                _ = deadline => return Err(if self.active.load(Ordering::Acquire) { RequestError::Busy } else { RequestError::Closed }),
+                _ = deadline => {
+                    if self.active.load(Ordering::Acquire) {
+                        self.busy_rejections.fetch_add(1, Ordering::Relaxed);
+                        return Err(RequestError::Busy);
+                    }
+                    return Err(RequestError::Closed);
+                }
             }
         };
         permit.send(AssetCommand::TextureStats(reply));
@@ -387,7 +405,14 @@ impl AssetHandle {
         pin_mut!(response);
         futures::select_biased! {
             result = response => result.map_err(|_| RequestError::Closed),
-            _ = deadline => Err(if self.active.load(Ordering::Acquire) { RequestError::Busy } else { RequestError::Closed }),
+            _ = deadline => {
+                if self.active.load(Ordering::Acquire) {
+                    self.busy_rejections.fetch_add(1, Ordering::Relaxed);
+                    Err(RequestError::Busy)
+                } else {
+                    Err(RequestError::Closed)
+                }
+            }
         }
     }
 
@@ -430,7 +455,13 @@ impl AssetHandle {
             pin_mut!(reserve);
             futures::select_biased! {
                 permit = reserve => permit.map_err(|_| RequestError::Closed)?,
-                _ = deadline => return Err(if self.active.load(Ordering::Acquire) { RequestError::Busy } else { RequestError::Closed }),
+                _ = deadline => {
+                    if self.active.load(Ordering::Acquire) {
+                        self.busy_rejections.fetch_add(1, Ordering::Relaxed);
+                        return Err(RequestError::Busy);
+                    }
+                    return Err(RequestError::Closed);
+                }
             }
         };
         permit.send(AssetCommand::Demand(DemandRequest { region, resource, priority, importance, reply }));
@@ -494,6 +525,7 @@ impl AssetCoordinator {
         let store = cache.as_ref().map_or_else(|| Store::new(budget.clone()), |cache| Store::with_cache(budget.clone(), Arc::clone(cache)));
         let handle = AssetHandle {
             requests,
+            busy_rejections: Arc::new(AtomicU64::new(0)),
             active: Arc::clone(&active),
             runtime: runtime.clone(),
             budget,

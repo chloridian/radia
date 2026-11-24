@@ -39,10 +39,7 @@ fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        session
-            .viewport_queries
-            .try_send(ViewportQuery::PixelPick { x: x as f32, y: y as f32, reply: reply_tx })
-            .map_err(|_| "viewport query queue busy or closed".to_owned())?;
+        session.try_send_viewport_query(ViewportQuery::PixelPick { x: x as f32, y: y as f32, reply: reply_tx }).map_err(str::to_owned)?;
         let pick_result =
             reply_rx.await.map_err(|_| "viewport dropped pick request".to_owned())?.map_err(|e| format!("pick failed: {e}"))?;
 

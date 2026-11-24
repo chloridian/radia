@@ -3,7 +3,7 @@ use std::{
     fmt,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU8, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -23,6 +23,8 @@ use world::{
     TerrainPageCursor, TerrainPatch, World, WorldChangeCursor, WorldChangePage, WorldChangeRecord, WorldReadBarrier, WorldReadError,
     WorldRevision,
 };
+
+use crate::inspection::BoundedQueueStats;
 
 const MAX_OUTSTANDING_READS: usize = 8;
 const MAX_RESERVED_REPLY_BYTES: usize =
@@ -65,6 +67,7 @@ struct ReadAdmission {
     requests: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
     state: AtomicU8,
+    busy_rejections: AtomicU64,
 }
 
 impl ReadAdmission {
@@ -76,11 +79,16 @@ impl ReadAdmission {
         }
     }
 
+    fn record_busy(&self) -> ReadError {
+        self.busy_rejections.fetch_add(1, Ordering::Relaxed);
+        ReadError::Busy
+    }
+
     fn reserve(&self, bytes: usize) -> Result<ReadPermit, ReadError> {
         self.check()?;
-        let requests = Arc::clone(&self.requests).try_acquire_owned().map_err(|_| ReadError::Busy)?;
-        let bytes = u32::try_from(bytes).map_err(|_| ReadError::Busy)?;
-        let bytes = Arc::clone(&self.bytes).try_acquire_many_owned(bytes).map_err(|_| ReadError::Busy)?;
+        let requests = Arc::clone(&self.requests).try_acquire_owned().map_err(|_| self.record_busy())?;
+        let bytes = u32::try_from(bytes).map_err(|_| self.record_busy())?;
+        let bytes = Arc::clone(&self.bytes).try_acquire_many_owned(bytes).map_err(|_| self.record_busy())?;
         Ok(ReadPermit { _requests: requests, _bytes: bytes })
     }
 }
@@ -175,6 +183,15 @@ pub struct WorldReader {
 }
 
 impl WorldReader {
+    pub fn queue_stats(&self) -> BoundedQueueStats {
+        let capacity = self.sender.max_capacity();
+        BoundedQueueStats {
+            depth: capacity.saturating_sub(self.sender.capacity()),
+            capacity,
+            full_count: self.budget.busy_rejections.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn revision(&self) -> Result<WorldRevision, ReadError> {
         self.budget.check()?;
         *self.revisions.borrow()
@@ -264,8 +281,8 @@ impl WorldReader {
         let permit = self.budget.reserve(bytes)?;
         let (sender, response) = oneshot::channel();
         self.sender.try_send(build(ReadResponder { sender, permit })).map_err(|error| {
-            self.budget.check().err().unwrap_or(match error {
-                TrySendError::Full(_) => ReadError::Busy,
+            self.budget.check().err().unwrap_or_else(|| match error {
+                TrySendError::Full(_) => self.budget.record_busy(),
                 TrySendError::Closed(_) => ReadError::Shutdown,
             })
         })?;
@@ -278,7 +295,7 @@ impl WorldReader {
         pin_mut!(response, deadline);
         let delivered = futures::select_biased! {
             reply = response => reply.map_err(|_| self.budget.check().err().unwrap_or(ReadError::Shutdown))?,
-            _ = deadline => return Err(self.budget.check().err().unwrap_or(ReadError::Busy)),
+            _ = deadline => return Err(self.budget.check().err().unwrap_or_else(|| self.budget.record_busy())),
         };
         self.budget.check()?;
         delivered.result
@@ -300,6 +317,7 @@ impl WorldReadHost {
             requests: Arc::new(Semaphore::new(MAX_OUTSTANDING_READS)),
             bytes: Arc::new(Semaphore::new(MAX_RESERVED_REPLY_BYTES)),
             state: AtomicU8::new(ACTIVE),
+            busy_rejections: AtomicU64::new(0),
         });
         Self {
             receiver,

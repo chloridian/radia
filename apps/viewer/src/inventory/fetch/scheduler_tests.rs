@@ -324,7 +324,7 @@ fn scheduler(client: Client, snapshot: inventory::InventorySnapshot) -> Schedule
     let (events_tx, events_rx) = mpsc::channel(RESULT_CAPACITY);
     let (model_tx, model_rx) = watch::channel(Some(snapshot.clone()));
     let (refresh_incomplete, refresh_receiver) = watch::channel(0);
-    let requests = InventoryFetchRequests { sender: request_sender, refresh_incomplete };
+    let requests = InventoryFetchRequests::new(request_sender, refresh_incomplete);
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let cancellation: Shared<BoxFuture<'static, ()>> = async move {
         drop(cancel_rx.await);

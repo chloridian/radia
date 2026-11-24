@@ -1,13 +1,20 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
-use network::{CircuitMotionStatus, CircuitStats, SimulatorId, capabilities::Client as CapabilityClient};
+use network::{CircuitMotionStatus, CircuitStats, SessionHandle, SimulatorId, capabilities::Client as CapabilityClient};
 use render::{CaptureReadback, ObjectExplanation, PickDetail, PickError, Stats};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{
+    mpsc::{self, error::TrySendError},
+    oneshot, watch,
+};
 use uuid::Uuid;
 use world::{Entity, Region};
 
 use crate::{
     asset_coordinator::AssetHandle,
+    inventory::InventoryFetchHandle,
     logging::{LogControl, RecentLogs},
     session::AgentMotionSample,
     settings::SettingsStore,
@@ -56,6 +63,21 @@ impl FrameSpikeRing {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BoundedQueueStats {
+    pub depth: usize,
+    pub capacity: usize,
+    pub full_count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SessionQueuesSnapshot {
+    pub client_events_depth: usize,
+    pub client_events_capacity: usize,
+    pub experience_environment: BoundedQueueStats,
+    pub object_media: Option<BoundedQueueStats>,
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct RenderStatsSnapshot {
     pub frame_ms: f64,
@@ -66,6 +88,8 @@ pub struct RenderStatsSnapshot {
     pub gpu_timings: Option<(f64, f64)>,
     pub viewport_size: [u32; 2],
     pub frame_spikes: FrameSpikeRing,
+    pub texture_completions_capacity: usize,
+    pub texture_completions_dropped: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -189,6 +213,9 @@ pub struct SessionDiagnostics {
     pub object_cache: watch::Receiver<ObjectCacheStats>,
     pub inventory: watch::Receiver<InventoryFetchStats>,
     pub network: watch::Receiver<Vec<RegionNetworkHandle>>,
+    pub session_queues: watch::Receiver<SessionQueuesSnapshot>,
+    pub network_session: SessionHandle,
+    pub inventory_fetch: InventoryFetchHandle,
 }
 
 #[derive(Clone)]
@@ -197,8 +224,30 @@ pub struct SessionInspection {
     pub assets: AssetHandle,
     pub render_stats: watch::Receiver<RenderStatsSnapshot>,
     pub viewport_queries: mpsc::Sender<ViewportQuery>,
+    pub viewport_query_full: Arc<AtomicU64>,
     pub(crate) agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     pub diagnostics: SessionDiagnostics,
+}
+
+impl SessionInspection {
+    pub fn try_send_viewport_query(&self, query: ViewportQuery) -> Result<(), &'static str> {
+        self.viewport_queries.try_send(query).map_err(|error| match error {
+            TrySendError::Full(_) => {
+                self.viewport_query_full.fetch_add(1, Ordering::Relaxed);
+                "viewport query queue busy or closed"
+            }
+            TrySendError::Closed(_) => "viewport query queue busy or closed",
+        })
+    }
+
+    pub fn viewport_query_queue_stats(&self) -> BoundedQueueStats {
+        let capacity = self.viewport_queries.max_capacity();
+        BoundedQueueStats {
+            depth: capacity.saturating_sub(self.viewport_queries.capacity()),
+            capacity,
+            full_count: self.viewport_query_full.load(Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Clone)]

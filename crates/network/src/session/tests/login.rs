@@ -1,13 +1,4 @@
-use std::{
-    assert_matches,
-    collections::HashMap,
-    io,
-    net::SocketAddr,
-    str::from_utf8,
-    sync::{Arc, Mutex},
-    thread,
-    time::Duration,
-};
+use std::{assert_matches, collections::HashMap, io, net::SocketAddr, str::from_utf8, thread, time::Duration};
 
 use protocol::{
     lludp::{Message, Packet},
@@ -230,12 +221,7 @@ pub(super) fn spawn_session_client_with_event_probe(
     let coverage_changed = coverage_losses.subscribe();
     let (disconnect_requested, disconnect_signal) = watch::channel(false);
     let (worker_finished_sender, worker_finished) = watch::channel(false);
-    let handle = SessionHandle {
-        commands: commands.clone(),
-        disconnect_requested,
-        command_admission_closed: Arc::new(Mutex::new(false)),
-        worker_finished,
-    };
+    let handle = SessionHandle::new(commands.clone(), disconnect_requested, worker_finished);
     let session = Session {
         handle: handle.clone(),
         events: event_receiver,
@@ -281,12 +267,7 @@ pub(super) fn spawn_network_thread_session(
     let coverage_changed = coverage_losses.subscribe();
     let (disconnect_requested, disconnect_signal) = watch::channel(false);
     let (worker_finished_sender, worker_finished) = watch::channel(false);
-    let handle = SessionHandle {
-        commands: commands.clone(),
-        disconnect_requested,
-        command_admission_closed: Arc::new(Mutex::new(false)),
-        worker_finished,
-    };
+    let handle = SessionHandle::new(commands.clone(), disconnect_requested, worker_finished);
     let session = Session {
         handle: handle.clone(),
         events: event_receiver,

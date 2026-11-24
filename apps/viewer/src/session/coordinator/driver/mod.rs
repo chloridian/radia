@@ -51,7 +51,7 @@ use super::{
 };
 use crate::{
     asset_coordinator::AssetCoordinator,
-    inspection::{InventoryFetchStats, ObjectCacheStats, RegionNetworkHandle, SessionDiagnostics},
+    inspection::{InventoryFetchStats, ObjectCacheStats, RegionNetworkHandle, SessionDiagnostics, SessionQueuesSnapshot},
     inventory::{
         FolderApplyOutcome, FolderFetch, InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError,
         InventoryFetchEvent, MoveExpectation,
@@ -463,6 +463,7 @@ struct SessionDriver {
     region_motion_mapping: HashMap<world::Region, SimulatorId>,
     region_motion_sender: watch::Sender<Vec<(world::Region, watch::Receiver<CircuitMotionStatus>)>>,
     network_diagnostics: watch::Sender<Vec<RegionNetworkHandle>>,
+    session_queues: watch::Sender<SessionQueuesSnapshot>,
     region_lookup: Option<RegionLookup>,
     media: ObjectMediaIntake,
     recovery: RecoveryIntake,
@@ -629,6 +630,7 @@ impl SessionDriver {
         let camera = CameraUplink::new();
         let (region_motion_sender, _) = watch::channel(Vec::new());
         let (network_diagnostics, _) = watch::channel(Vec::new());
+        let (session_queues, _) = watch::channel(SessionQueuesSnapshot::default());
         let media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
         let recovery = RecoveryIntake::new();
         let (inventory_changes, _) = watch::channel(None);
@@ -700,6 +702,7 @@ impl SessionDriver {
             region_motion_mapping: HashMap::new(),
             region_motion_sender,
             network_diagnostics,
+            session_queues,
             region_lookup: None,
             media,
             recovery,
@@ -722,6 +725,21 @@ impl SessionDriver {
             }
             self.reads.publish(self.session_world.world());
             self.object_cache.persist_overrides(&self.session_world);
+            let (client_events_depth, client_events_capacity) = self.session.event_queue_depth_capacity();
+            let queues_snapshot = SessionQueuesSnapshot {
+                client_events_depth,
+                client_events_capacity,
+                experience_environment: self.environment_pushes.queue_stats(),
+                object_media: self.media.queue_stats(),
+            };
+            self.session_queues.send_if_modified(|current| {
+                if *current == queues_snapshot {
+                    false
+                } else {
+                    *current = queues_snapshot;
+                    true
+                }
+            });
             let cache_stats = self.object_cache.stats();
             self.object_cache_stats.send_if_modified(|current| {
                 if *current == cache_stats {
@@ -1922,6 +1940,9 @@ impl SessionDriver {
                 object_cache: self.object_cache_stats.subscribe(),
                 inventory: self.inventory_fetch_stats.subscribe(),
                 network: self.network_diagnostics.subscribe(),
+                session_queues: self.session_queues.subscribe(),
+                network_session: self.session_handle.clone(),
+                inventory_fetch: self.inventory_fetch.handle(),
             },
         }));
     }

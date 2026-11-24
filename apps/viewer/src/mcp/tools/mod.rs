@@ -7,6 +7,7 @@ mod inventory_fetch;
 mod logs;
 mod network_stats;
 mod pick;
+mod queues;
 mod screenshot;
 mod set_camera;
 mod set_log_level;
@@ -58,6 +59,7 @@ pub const TOOLS: &[ToolSpec] = &[
     screenshot::SPEC,
     explain_object::SPEC,
     pick::SPEC,
+    queues::SPEC,
     wait_for::SPEC,
     set_setting::SPEC,
     set_log_level::SPEC,

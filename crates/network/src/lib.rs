@@ -17,5 +17,5 @@ pub use self::{
     error::Error,
     event::{CapabilityEvent, CircuitMotionStatus, CircuitStats, Event, EventQueueBatchOrder, PacketOrder, SimulatorId},
     login::{AgentSession, Grid, LoginCredentials, StartLocation},
-    session::{DEFAULT_UPSTREAM_BYTES_PER_SECOND, MfaChallenge, OutboundMessage, Session, SessionHandle, SessionOptions},
+    session::{DEFAULT_UPSTREAM_BYTES_PER_SECOND, MfaChallenge, OutboundMessage, QueueStats, Session, SessionHandle, SessionOptions},
 };

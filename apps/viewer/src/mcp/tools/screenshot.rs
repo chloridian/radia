@@ -32,10 +32,7 @@ fn handler(handle: ViewerInspectionHandle, _args: Value) -> ToolFuture {
             return Err("no active scene session".to_owned());
         };
         let (reply_tx, reply_rx) = oneshot::channel();
-        session
-            .viewport_queries
-            .try_send(ViewportQuery::BeginScreenshot { reply: reply_tx })
-            .map_err(|_| "viewport query queue busy or closed".to_owned())?;
+        session.try_send_viewport_query(ViewportQuery::BeginScreenshot { reply: reply_tx }).map_err(str::to_owned)?;
         let readback = reply_rx
             .await
             .map_err(|_| "viewport dropped screenshot request".to_owned())?
