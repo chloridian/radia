@@ -9,7 +9,7 @@ use crate::{
 
 pub const SPEC: ToolSpec = ToolSpec {
     name: "set_camera",
-    description: "Changes local viewer state: set the local camera mode (follow or free) and/or free camera pose (position and look_at) on the GUI thread without moving the agent or sending anything to the simulator.",
+    description: "Changes local viewer state: set the local camera mode (follow or free) and/or free camera pose (position and look_at) on the GUI thread. Never moves the agent; camera pose reaches the simulator through the normal agent update like any manual camera move.",
     input_schema,
     handler,
     max_response_bytes: MAX_JSON_RESPONSE_BYTES,

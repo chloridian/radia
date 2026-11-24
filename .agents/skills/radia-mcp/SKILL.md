@@ -1,5 +1,5 @@
 ---
-name: viewer-mcp
+name: radia-mcp
 description: Inspect a running Radia viewer through its opt-in local loopback MCP server (--mcp).
 ---
 
@@ -14,7 +14,7 @@ cargo run --bin viewer -- --mcp
 cargo run --bin viewer -- --mcp-port 4040
 ```
 
-Startup prints `MCP server listening on http://127.0.0.1:<port>`. The default endpoint URL is `http://127.0.0.1:47100/` (the server accepts JSON-RPC `POST` requests on any path, including `/` and `/mcp`). Disconnecting an MCP client leaves the viewer running.
+Startup prints `MCP server listening on http://127.0.0.1:<port>`. The default endpoint URL is `http://127.0.0.1:47100/` (the server accepts JSON-RPC `POST` requests on any path, including `/` and `/mcp`). Clients register the server under the name `radia`. Disconnecting an MCP client leaves the viewer running.
 
 ## Available read-only tools
 
@@ -44,7 +44,7 @@ These tools change only local viewer state and never send grid mutations to simu
 |---|---|
 | `set_setting` | Change a local cvar setting by name through `SettingsStore` validation and persistence and return old and new values. |
 | `set_log_level` | Change the local runtime log filter (global level and/or per-target override) through `LogControl` and return the active filter. |
-| `set_camera` | Change the local camera mode (`follow` or `free`) and/or free camera pose (`position`, `look_at`) on the GUI thread without moving the agent or sending simulator traffic. |
+| `set_camera` | Change the local camera mode (`follow` or `free`) and/or free camera pose (`position`, `look_at`) on the GUI thread. Never moves the agent (camera pose reaches the simulator through the normal agent update, like any manual camera move). |
 
 ## Bounds and safety
 

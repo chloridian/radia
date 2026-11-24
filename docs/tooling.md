@@ -196,4 +196,4 @@ cargo run --bin viewer -- --mcp
 cargo run --bin viewer -- --mcp-port 4040
 ```
 
-When omitted, no listener is opened. See `.agents/skills/viewer-mcp/SKILL.md` for available tools and limits.
+When omitted, no listener is opened. See `.agents/skills/radia-mcp/SKILL.md` for available tools and limits.

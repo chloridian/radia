@@ -331,7 +331,7 @@ async fn dispatch_json_rpc(body: &[u8], handle: &ViewerInspectionHandle, config:
                     "tools": {}
                 },
                 "serverInfo": {
-                    "name": "radia-viewer",
+                    "name": "radia",
                     "version": env!("CARGO_PKG_VERSION")
                 }
             });
@@ -478,7 +478,7 @@ mod tests {
         let (status, body) = post_json(addr, &json!({"jsonrpc":"2.0","id":1,"method":"initialize"}).to_string()).await;
         assert_eq!(status, 200);
         let parsed: Value = serde_json::from_str(&body).expect("json response");
-        assert_eq!(parsed["result"]["serverInfo"]["name"], "radia-viewer");
+        assert_eq!(parsed["result"]["serverInfo"]["name"], "radia");
 
         let (status, body) = post_json(addr, &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}).to_string()).await;
         assert_eq!(status, 200);
