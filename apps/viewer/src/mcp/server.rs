@@ -63,7 +63,7 @@ impl McpServer {
         let listener = TcpListener::from_std(std_listener)?;
         let (shutdown, shutdown_rx) = watch::channel(false);
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_requests.max(1)));
-        let task = runtime.spawn(accept_loop(listener, handle, config, semaphore, shutdown_rx));
+        let task = runtime.spawn(accept_loop(listener, addr.port(), handle, config, semaphore, shutdown_rx));
         tracing::info!(%addr, "local MCP server listening");
         Ok(Self { addr, shutdown, task })
     }
@@ -80,6 +80,7 @@ impl McpServer {
 
 async fn accept_loop(
     listener: TcpListener,
+    port: u16,
     handle: ViewerInspectionHandle,
     config: McpServerConfig,
     semaphore: Arc<Semaphore>,
@@ -99,7 +100,7 @@ async fn accept_loop(
                         let handle = handle.clone();
                         let semaphore = Arc::clone(&semaphore);
                         tokio::spawn(async move {
-                            if let Err(error) = handle_connection(stream, handle, config, semaphore).await {
+                            if let Err(error) = handle_connection(stream, port, handle, config, semaphore).await {
                                 tracing::debug!(%error, "MCP client connection closed");
                             }
                         });
@@ -115,6 +116,7 @@ async fn accept_loop(
 
 async fn handle_connection(
     mut stream: TcpStream,
+    port: u16,
     handle: ViewerInspectionHandle,
     config: McpServerConfig,
     semaphore: Arc<Semaphore>,
@@ -132,6 +134,11 @@ async fn handle_connection(
             return Ok(());
         }
     };
+
+    if !is_allowed_host(request.host.as_deref(), port) || !is_allowed_origin(request.origin.as_deref()) {
+        write_http_response(&mut stream, 403, "Forbidden", b"{\"error\":\"forbidden host or origin\"}").await?;
+        return Ok(());
+    }
 
     if request.method != "POST" {
         write_http_response(&mut stream, 405, "Method Not Allowed", b"{\"error\":\"method not allowed\"}").await?;
@@ -156,6 +163,8 @@ async fn handle_connection(
 
 struct HttpRequest {
     method: String,
+    host: Option<String>,
+    origin: Option<String>,
     body: Vec<u8>,
 }
 
@@ -196,14 +205,29 @@ async fn read_http_request(stream: &mut TcpStream, max_body: usize) -> io::Resul
     };
 
     let mut content_length: usize = 0;
+    let mut host = None;
+    let mut origin = None;
     for line in lines {
-        if let Some((name, value)) = line.split_once(':')
-            && name.trim().eq_ignore_ascii_case("content-length")
-        {
-            let Ok(len) = value.trim().parse::<usize>() else {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("content-length") {
+            let Ok(len) = value.parse::<usize>() else {
                 return Ok(HttpRead::BadRequest("invalid content-length"));
             };
             content_length = len;
+        } else if name.eq_ignore_ascii_case("host") {
+            if host.is_some() {
+                return Ok(HttpRead::BadRequest("duplicate host header"));
+            }
+            host = Some(value.to_owned());
+        } else if name.eq_ignore_ascii_case("origin") {
+            if origin.is_some() {
+                return Ok(HttpRead::BadRequest("duplicate origin header"));
+            }
+            origin = Some(value.to_owned());
         }
     }
 
@@ -228,7 +252,42 @@ async fn read_http_request(stream: &mut TcpStream, max_body: usize) -> io::Resul
         body.extend_from_slice(&chunk[..read]);
     }
 
-    Ok(HttpRead::Request(HttpRequest { method: method.to_owned(), body }))
+    Ok(HttpRead::Request(HttpRequest { method: method.to_owned(), host, origin, body }))
+}
+
+fn is_allowed_host(host: Option<&str>, port: u16) -> bool {
+    let Some(host) = host else {
+        return false;
+    };
+    let Some((name, host_port)) = host.split_once(':') else {
+        return false;
+    };
+    host_port.bytes().all(|byte| byte.is_ascii_digit()) && host_port.parse::<u16>().ok() == Some(port) && is_loopback_host(name)
+}
+
+fn is_allowed_origin(origin: Option<&str>) -> bool {
+    let Some(origin) = origin else {
+        return true;
+    };
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    if authority.is_empty() || authority.contains(['/', '?', '#', '@']) {
+        return false;
+    }
+    let host = match authority.split_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) && port.parse::<u16>().is_ok() => host,
+        Some(_) => return false,
+        None => authority,
+    };
+    is_loopback_host(host)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost")
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -380,13 +439,16 @@ mod tests {
         logging::{LogLevel, RecentLogEntry, RecentLogs},
     };
 
-    async fn post_json(addr: SocketAddr, body: &str) -> (u16, String) {
+    async fn post_json_with_headers(addr: SocketAddr, host: Option<&str>, origin: Option<&str>, body: &str) -> (u16, String) {
         let mut stream = TcpStream::connect(addr).await.expect("connect to local MCP server");
-        let req = format!(
-            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-            body.len(),
-            body
-        );
+        let mut req = String::from("POST /mcp HTTP/1.1\r\n");
+        if let Some(host) = host {
+            req.push_str(&format!("Host: {host}\r\n"));
+        }
+        if let Some(origin) = origin {
+            req.push_str(&format!("Origin: {origin}\r\n"));
+        }
+        req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body));
         stream.write_all(req.as_bytes()).await.expect("write request");
         stream.flush().await.expect("flush request");
         let mut raw = Vec::new();
@@ -400,6 +462,11 @@ mod tests {
             .and_then(|code| code.parse::<u16>().ok())
             .expect("http status code");
         (status, resp_body.to_owned())
+    }
+
+    async fn post_json(addr: SocketAddr, body: &str) -> (u16, String) {
+        let host = format!("127.0.0.1:{}", addr.port());
+        post_json_with_headers(addr, Some(&host), None, body).await
     }
 
     #[tokio::test]
@@ -480,6 +547,47 @@ mod tests {
         assert_eq!(status, 200);
         let parsed: Value = serde_json::from_str(&body).expect("json response");
         assert_eq!(parsed["error"]["code"], -32002);
+
+        server.shutdown();
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_invalid_host_and_origin() {
+        let (_pub, handle) = inspection_channel(RecentLogs::default());
+        let server = McpServer::start(handle, McpServerConfig::default(), &Handle::current()).expect("start server");
+        let addr = server.addr();
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"initialize"}).to_string();
+        let valid_host = format!("127.0.0.1:{}", addr.port());
+        let evil_host = format!("evil.example:{}", addr.port());
+
+        for host in [None, Some("127.0.0.1"), Some(evil_host.as_str())] {
+            let (status, _) = post_json_with_headers(addr, host, None, &body).await;
+            assert_eq!(status, 403, "expected 403 for Host={host:?}");
+        }
+
+        for origin in ["http://evil.example", "http://localhost.evil.example:3000", "null"] {
+            let (status, _) = post_json_with_headers(addr, Some(&valid_host), Some(origin), &body).await;
+            assert_eq!(status, 403, "expected 403 for Origin={origin}");
+        }
+
+        server.shutdown();
+    }
+
+    #[tokio::test]
+    async fn mcp_accepts_loopback_host_and_origin() {
+        let (_pub, handle) = inspection_channel(RecentLogs::default());
+        let server = McpServer::start(handle, McpServerConfig::default(), &Handle::current()).expect("start server");
+        let addr = server.addr();
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"initialize"}).to_string();
+        let localhost_host = format!("localhost:{}", addr.port());
+        let ip_host = format!("127.0.0.1:{}", addr.port());
+        let ip_origin = format!("http://127.0.0.1:{}", addr.port());
+
+        let (status, _) = post_json_with_headers(addr, Some(&localhost_host), Some("http://localhost:3000"), &body).await;
+        assert_eq!(status, 200);
+
+        let (status, _) = post_json_with_headers(addr, Some(&ip_host), Some(&ip_origin), &body).await;
+        assert_eq!(status, 200);
 
         server.shutdown();
     }
