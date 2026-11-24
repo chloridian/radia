@@ -301,7 +301,7 @@ async fn neighbor_intro_precedes_udp_data() {
     );
     assert_matches!(
         next_neighbor_event(&mut event_receiver).await,
-        Event::SimulatorMotionStatus { simulator_id: id, motion_status } if id == simulator_id && motion_status.borrow().connected
+        Event::SimulatorMotionStatus { simulator_id: id, motion_status, .. } if id == simulator_id && motion_status.borrow().connected
     );
     assert_matches!(
         next_neighbor_event(&mut event_receiver).await,

@@ -55,7 +55,6 @@ pub struct CircuitMotionStatus {
     pub last_packet_received_at: Instant,
     pub measured_ping_delay: Option<Duration>,
     pub connected: bool,
-    pub stats: CircuitStats,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -233,6 +232,7 @@ pub enum Event {
     SimulatorMotionStatus {
         simulator_id: SimulatorId,
         motion_status: watch::Receiver<CircuitMotionStatus>,
+        circuit_stats: watch::Receiver<CircuitStats>,
     },
     SimulatorDisconnected {
         simulator_id: SimulatorId,
@@ -331,6 +331,7 @@ impl fmt::Debug for Event {
                 .debug_struct("SimulatorMotionStatus")
                 .field("simulator_id", &"[SESSION LOCAL]")
                 .field("motion_status", &"[OMITTED]")
+                .field("circuit_stats", &"[OMITTED]")
                 .finish(),
             Self::SimulatorDisconnected { .. } => formatter
                 .debug_struct("SimulatorDisconnected")

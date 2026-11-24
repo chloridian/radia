@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use network::{CircuitMotionStatus, SimulatorId, capabilities::Client as CapabilityClient};
+use network::{CircuitMotionStatus, CircuitStats, SimulatorId, capabilities::Client as CapabilityClient};
 use render::{CaptureReadback, ObjectExplanation, PickDetail, PickError, Stats};
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
@@ -181,6 +181,7 @@ pub struct RegionNetworkHandle {
     pub region_name: Option<String>,
     pub is_primary: bool,
     pub circuit: watch::Receiver<CircuitMotionStatus>,
+    pub stats: watch::Receiver<CircuitStats>,
     pub capabilities: Option<CapabilityClient>,
 }
 

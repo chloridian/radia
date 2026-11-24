@@ -439,6 +439,7 @@ impl ConnectionTask {
         match self.queue_event(Event::SimulatorMotionStatus {
             simulator_id: self.connection.simulator_id,
             motion_status: self.motion_status_receiver.clone(),
+            circuit_stats: self.circuit_stats_receiver.clone(),
         }) {
             NeighborEventQueueOutcome::ReceiverClosed => return Ok(Some(RunControl::Finish(None))),
             NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::BacklogFull => {}
@@ -547,33 +548,31 @@ impl ConnectionTask {
     fn record_motion_packet(&mut self, received_at: Instant) {
         let measured_ping_delay = self.connection.circuit.measured_ping_delay_average();
         let connected = self.phase.is_established();
-        let stats = self.sample_circuit_stats(received_at);
         self.motion_status_sender.send_modify(|status| {
             status.last_packet_received_at = received_at.into_std();
             status.measured_ping_delay = measured_ping_delay;
             status.connected = connected;
-            status.stats = stats;
         });
     }
 
     pub(super) fn sample_circuit_stats(&mut self, now: Instant) -> super::CircuitStats {
-        let (packets_in, packets_out, unacked, resent) = self.connection.circuit.packet_counts();
+        let counts = self.connection.circuit.packet_counts();
         let elapsed = now.saturating_duration_since(self.stats_sample_at);
         if elapsed >= Duration::from_secs(1) {
             let secs = elapsed.as_secs_f64();
-            self.packets_in_per_sec = ((packets_in.saturating_sub(self.stats_sample_in)) as f64 / secs).round() as u32;
-            self.packets_out_per_sec = ((packets_out.saturating_sub(self.stats_sample_out)) as f64 / secs).round() as u32;
+            self.packets_in_per_sec = ((counts.packets_in.saturating_sub(self.stats_sample_in)) as f64 / secs).round() as u32;
+            self.packets_out_per_sec = ((counts.packets_out.saturating_sub(self.stats_sample_out)) as f64 / secs).round() as u32;
             self.stats_sample_at = now;
-            self.stats_sample_in = packets_in;
-            self.stats_sample_out = packets_out;
+            self.stats_sample_in = counts.packets_in;
+            self.stats_sample_out = counts.packets_out;
         }
         super::CircuitStats {
-            packets_in,
-            packets_out,
+            packets_in: counts.packets_in,
+            packets_out: counts.packets_out,
             packets_in_per_sec: self.packets_in_per_sec,
             packets_out_per_sec: self.packets_out_per_sec,
-            unacked,
-            resent,
+            unacked: counts.unacked,
+            resent: counts.resent,
             throttle_sent: self.connection.agent_throttle_sent,
         }
     }

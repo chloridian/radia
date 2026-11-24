@@ -36,7 +36,14 @@ const RELIABLE_TIMEOUT_FACTOR: u32 = 5;
 const SEQUENCE_32_HALF_RANGE: u32 = 1 << 31;
 pub(crate) const MAX_ORDERED_SEQUENCE_DISTANCE: u32 = 1 << 30;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PacketCounts {
+    pub(crate) packets_in: u64,
+    pub(crate) packets_out: u64,
+    pub(crate) unacked: usize,
+    pub(crate) resent: u64,
+}
+
 pub(crate) enum CircuitError {
     InboundOnly,
     UnknownDirection,
@@ -158,8 +165,8 @@ impl Circuit {
         }
     }
 
-    pub(crate) fn packet_counts(&self) -> (u64, u64, usize, u64) {
-        (self.packets_in, self.packets_out, self.pending.len(), self.resent)
+    pub(crate) fn packet_counts(&self) -> PacketCounts {
+        PacketCounts { packets_in: self.packets_in, packets_out: self.packets_out, unacked: self.pending.len(), resent: self.resent }
     }
 
     pub(crate) fn retry_timeout(&self) -> Duration {

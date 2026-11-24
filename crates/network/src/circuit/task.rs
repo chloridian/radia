@@ -146,7 +146,7 @@ impl ConnectionTask {
                 }
                 SelectedEvent::PingTick => {
                     let stats = self.sample_circuit_stats(Instant::now());
-                    self.motion_status_sender.send_modify(|status| status.stats = stats);
+                    self.circuit_stats_sender.send_replace(stats);
                     self.ping_tick()?
                 }
                 SelectedEvent::SendAgeDeadline => {
@@ -668,8 +668,8 @@ pub(super) async fn run(
         last_packet_received_at: now.into_std(),
         measured_ping_delay: connection.circuit.measured_ping_delay_average(),
         connected: false,
-        stats: super::CircuitStats::default(),
     });
+    let (circuit_stats_sender, circuit_stats_receiver) = watch::channel(super::CircuitStats::default());
     ConnectionTask {
         connection,
         events,
@@ -696,6 +696,8 @@ pub(super) async fn run(
         packet_rejections: PacketRejections::default(),
         motion_status_sender,
         motion_status_receiver,
+        circuit_stats_sender,
+        circuit_stats_receiver,
         stats_sample_at: now,
         stats_sample_in: 0,
         stats_sample_out: 0,

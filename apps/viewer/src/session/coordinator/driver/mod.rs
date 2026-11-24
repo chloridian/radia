@@ -18,8 +18,8 @@ use futures::{
 };
 use inventory::{CategoryKey, Inventory, InventoryChild, InventoryNodeKey, InventoryPreparationCancellation, InventorySnapshot};
 use network::{
-    AgentSession, CircuitMotionStatus, CoverageLoss, CoverageLossReason, CoverageSource, Event, Grid, PacketOrder, SimulatorId,
-    capabilities::Client,
+    AgentSession, CircuitMotionStatus, CircuitStats, CoverageLoss, CoverageLossReason, CoverageSource, Event, Grid, PacketOrder,
+    SimulatorId, capabilities::Client,
 };
 use protocol::{
     lludp::Message,
@@ -459,6 +459,7 @@ struct SessionDriver {
     camera: CameraUplink,
     agent_motion: AgentMotionPublisher,
     motion_statuses: HashMap<SimulatorId, watch::Receiver<CircuitMotionStatus>>,
+    circuit_stats: HashMap<SimulatorId, watch::Receiver<CircuitStats>>,
     region_motion_mapping: HashMap<world::Region, SimulatorId>,
     region_motion_sender: watch::Sender<Vec<(world::Region, watch::Receiver<CircuitMotionStatus>)>>,
     network_diagnostics: watch::Sender<Vec<RegionNetworkHandle>>,
@@ -695,6 +696,7 @@ impl SessionDriver {
             camera,
             agent_motion: AgentMotionPublisher::new(),
             motion_statuses: HashMap::new(),
+            circuit_stats: HashMap::new(),
             region_motion_mapping: HashMap::new(),
             region_motion_sender,
             network_diagnostics,
@@ -1449,8 +1451,9 @@ impl SessionDriver {
                 self.publish_region_motion();
                 ControlFlow::Continue(())
             }
-            Event::SimulatorMotionStatus { simulator_id, motion_status } => {
+            Event::SimulatorMotionStatus { simulator_id, motion_status, circuit_stats } => {
                 self.motion_statuses.insert(simulator_id, motion_status);
+                self.circuit_stats.insert(simulator_id, circuit_stats);
                 self.publish_region_motion();
                 ControlFlow::Continue(())
             }
@@ -1887,6 +1890,7 @@ impl SessionDriver {
         }
         self.handoff.simulator_disconnected(&mut self.session_world, simulator_id);
         self.motion_statuses.remove(&simulator_id);
+        self.circuit_stats.remove(&simulator_id);
         self.simulator_capabilities.remove(&simulator_id);
         self.publish_region_motion();
         self.publish_network_diagnostics();
@@ -2036,6 +2040,7 @@ impl SessionDriver {
             .iter()
             .filter_map(|(region, simulator_id)| {
                 let circuit = self.motion_statuses.get(simulator_id)?.clone();
+                let stats = self.circuit_stats.get(simulator_id)?.clone();
                 let region_name = self.session_world.region_name(*simulator_id).map(str::to_owned);
                 let capabilities = self.simulator_capabilities.get(simulator_id).cloned();
                 Some(RegionNetworkHandle {
@@ -2044,6 +2049,7 @@ impl SessionDriver {
                     region_name,
                     is_primary: self.primary_simulator == Some(*simulator_id),
                     circuit,
+                    stats,
                     capabilities,
                 })
             })

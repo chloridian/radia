@@ -179,6 +179,8 @@ struct ConnectionTask {
     packet_rejections: receive::PacketRejections,
     motion_status_sender: watch::Sender<CircuitMotionStatus>,
     motion_status_receiver: watch::Receiver<CircuitMotionStatus>,
+    circuit_stats_sender: watch::Sender<CircuitStats>,
+    circuit_stats_receiver: watch::Receiver<CircuitStats>,
     stats_sample_at: Instant,
     stats_sample_in: u64,
     stats_sample_out: u64,

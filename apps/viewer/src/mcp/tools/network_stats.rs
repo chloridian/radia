@@ -1,5 +1,5 @@
 use network::{
-    CircuitMotionStatus,
+    CircuitMotionStatus, CircuitStats,
     capabilities::{CapabilityDiagnostics, CapabilityLastStatus},
     default_throttle_rates,
 };
@@ -34,6 +34,7 @@ struct RegionNetworkSnapshot {
     region_name: Option<String>,
     is_primary: bool,
     circuit: CircuitMotionStatus,
+    stats: CircuitStats,
     capabilities: Option<CapabilityDiagnostics>,
 }
 
@@ -62,7 +63,7 @@ fn format_network_snapshot(regions: &[RegionNetworkSnapshot], limit: usize) -> V
         .iter()
         .take(limit)
         .map(|entry| {
-            let stats = entry.circuit.stats;
+            let stats = entry.stats;
             let event_queue = entry.capabilities.as_ref().map(|caps| {
                 json!({
                     "state": caps.event_queue.state.as_str(),
@@ -131,6 +132,7 @@ fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
                 region_name: entry.region_name,
                 is_primary: entry.is_primary,
                 circuit: *entry.circuit.borrow(),
+                stats: *entry.stats.borrow(),
                 capabilities: entry.capabilities.as_ref().map(|client| client.diagnostics()),
             })
             .collect::<Vec<_>>();
@@ -177,15 +179,15 @@ mod tests {
                 last_packet_received_at: Instant::now(),
                 measured_ping_delay: Some(Duration::from_millis(45)),
                 connected: true,
-                stats: CircuitStats {
-                    packets_in: 120,
-                    packets_out: 80,
-                    packets_in_per_sec: 12,
-                    packets_out_per_sec: 8,
-                    unacked: 2,
-                    resent: 1,
-                    throttle_sent: true,
-                },
+            },
+            stats: CircuitStats {
+                packets_in: 120,
+                packets_out: 80,
+                packets_in_per_sec: 12,
+                packets_out_per_sec: 8,
+                unacked: 2,
+                resent: 1,
+                throttle_sent: true,
             },
             capabilities: Some(CapabilityDiagnostics {
                 event_queue: EventQueueStatus { state: EventQueueState::Connected, last_status: Some(200) },
