@@ -14,7 +14,7 @@ cargo run --bin viewer -- --mcp
 cargo run --bin viewer -- --mcp-port 4040
 ```
 
-Startup prints `MCP server listening on http://127.0.0.1:<port>`. The default endpoint URL is `http://127.0.0.1:47100/` (the server accepts JSON-RPC `POST` requests on any path, including `/` and `/mcp`). Clients register the server under the name `radia`. Disconnecting an MCP client leaves the viewer running.
+Startup prints `MCP server listening on http://127.0.0.1:<port>`. The default endpoint URL is `http://127.0.0.1:47100/mcp` (served via `rmcp`'s stateless Streamable HTTP transport). Clients register the server under the name `radia`. Disconnecting an MCP client leaves the viewer running.
 
 ## Available read-only tools
 
