@@ -1,6 +1,6 @@
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     mem,
     sync::{
         Arc, Weak,
@@ -9,7 +9,7 @@ use std::{
 };
 
 use assets::mesh::Mesh;
-use utils::AssetId;
+use utils::{AssetId, FastHashMap};
 use world::{PrimShape, SculptFlags, SculptType};
 
 use crate::scene::{
@@ -90,7 +90,7 @@ pub(super) const ENTRY_BYTES: usize = size_of::<MeshKey>() + size_of::<Entry>() 
 
 pub(in crate::scene) struct MeshCache {
     budget: Budget,
-    entries: HashMap<MeshKey, Entry>,
+    entries: FastHashMap<MeshKey, Entry>,
     queued: BTreeMap<QueueIndex, MeshKey>,
     blocked: BTreeMap<QueueIndex, MeshKey>,
     ready: BTreeMap<ReadyIndex, MeshKey>,
@@ -109,7 +109,7 @@ impl MeshCache {
     pub(in crate::scene) fn new(budget: Budget) -> Self {
         Self {
             budget,
-            entries: HashMap::new(),
+            entries: FastHashMap::default(),
             queued: BTreeMap::new(),
             blocked: BTreeMap::new(),
             ready: BTreeMap::new(),
@@ -486,6 +486,7 @@ mod tests {
     use std::assert_matches;
 
     use super::*;
+    use crate::scene::budget;
 
     fn key(detail: Detail) -> MeshKey {
         MeshKey { shape: PrimShape::default(), detail }
@@ -537,6 +538,8 @@ mod tests {
     #[test]
     fn shared_admission_releases_for_retry() {
         let budget = Budget::default();
+        let limit = budget::max_mesh_jobs();
+        let extra = (2..limit).map(|_| budget.mesh_work().expect("reserve extra mesh slot")).collect::<Vec<_>>();
         let mut a = MeshCache::new(budget.clone());
         let mut b = MeshCache::new(budget.clone());
         for detail in [Detail::Low, Detail::High] {
@@ -546,7 +549,7 @@ mod tests {
         let first = a.start().unwrap();
         let second = a.start().unwrap();
         assert!(b.start().is_none());
-        assert_eq!(budget.charged_bytes(), 8 * 1024 * 1024);
+        assert_eq!(budget.charged_bytes(), limit * 4 * 1024 * 1024);
         drop(first);
         let other = b.start().unwrap();
         assert!(a.start().is_none());
@@ -556,6 +559,7 @@ mod tests {
         a.complete(retried.run());
         assert!(matches!(a.get(key(Detail::Low)), PreparedMesh::Ready(_)));
         drop(other);
+        drop(extra);
         let retained = budget.charged_bytes();
         let completion = a.start().unwrap().run();
         let completion_charge = budget.charged_bytes();

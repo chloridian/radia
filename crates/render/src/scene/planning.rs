@@ -1,11 +1,12 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::BTreeMap,
     mem,
     ops::Bound::{Excluded, Unbounded},
 };
 
+use utils::{FastHashMap, FastHashSet};
 use uuid::Uuid;
-use world::Entity;
+use world::{Entity, Region};
 
 use crate::scene::{
     Budget, Camera, Detail, Geometry, MeshBuildError, MeshKey, Object, Placement, PreparedMesh,
@@ -69,9 +70,9 @@ enum ScanState {
 pub(in crate::scene) struct MeshPlanner {
     camera: Option<Camera>,
     meshes: MeshCache,
-    targets: HashMap<Entity, MeshTarget>,
-    target_users: HashMap<MeshKey, HashSet<Entity>>,
-    rejected: HashSet<Entity>,
+    targets: FastHashMap<Entity, MeshTarget>,
+    target_users: FastHashMap<MeshKey, FastHashSet<Entity>>,
+    rejected: FastHashSet<Entity>,
     last_retry_capacity_revision: Option<u64>,
     scan: ScanState,
 }
@@ -81,9 +82,9 @@ impl MeshPlanner {
         Self {
             camera: None,
             meshes: MeshCache::new(budget),
-            targets: HashMap::new(),
-            target_users: HashMap::new(),
-            rejected: HashSet::new(),
+            targets: FastHashMap::default(),
+            target_users: FastHashMap::default(),
+            rejected: FastHashSet::default(),
             last_retry_capacity_revision: None,
             scan: ScanState::Idle { dirty: false },
         }
@@ -111,6 +112,20 @@ impl MeshPlanner {
         if self.detach_target(entity).is_some() {
             self.invalidate_scan();
         }
+    }
+
+    pub(in crate::scene) fn retire(&mut self, region: Region, mirror: &Mirror) {
+        let retired = self
+            .targets
+            .keys()
+            .copied()
+            .filter(|entity| mirror.objects.get(entity).is_none_or(|object| object.detail().summary.address.region() == region))
+            .collect::<Vec<_>>();
+        for entity in retired {
+            self.detach_target(entity);
+        }
+        self.rejected.retain(|entity| mirror.objects.get(entity).is_some_and(|object| object.detail().summary.address.region() != region));
+        self.invalidate_scan();
     }
 
     pub(in crate::scene) fn reset(&mut self, budget: Budget) {

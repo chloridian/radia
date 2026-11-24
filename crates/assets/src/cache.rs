@@ -336,7 +336,7 @@ impl AssetCache {
         match self.prepared.lookup_bounded(storage_key, MAX_PREPARED_TEXTURE_BYTES) {
             storage::Lookup::Hit(value) => {
                 let bytes_read = u64::try_from(value.bytes.len()).unwrap_or(u64::MAX);
-                if let Some(decoded) = decode_prepared_texture(&value.bytes, key) {
+                if let Some(decoded) = decode_prepared_texture(value.bytes, key) {
                     self.counters.prepared_bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
                     self.counters.prepared_hits.fetch_add(1, Ordering::Relaxed);
                     Some(decoded)

@@ -657,7 +657,7 @@ async fn acquire_asset_demand(handle: AssetHandle, request: AssetRequest) -> Ass
         match handle.request_with_importance(request.region, request.request, request.priority, request.importance).await {
             Ok(demand) => return AssetStatusEvent { ticket: request.ticket, status: demand.status(), demand: Some(demand) },
             Err(RequestError::Busy) => {
-                time::sleep(Duration::from_millis(250)).await;
+                time::sleep(Duration::from_millis(10)).await;
             }
             Err(error) => {
                 let failure = match error {

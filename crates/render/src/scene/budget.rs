@@ -1,9 +1,19 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
 };
 
 pub const MEMORY_BYTES: usize = 256 * 1024 * 1024;
+const MIN_MESH_JOBS: usize = 2;
+const MAX_MESH_JOBS: usize = 6;
+
+pub(in crate::scene) fn max_mesh_jobs() -> usize {
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(|| thread::available_parallelism().map(usize::from).unwrap_or(4).clamp(MIN_MESH_JOBS, MAX_MESH_JOBS))
+}
 
 #[derive(Clone, Default)]
 pub struct Budget(Arc<Accounting>);
@@ -28,7 +38,8 @@ impl Budget {
     }
 
     pub(in crate::scene) fn mesh_work(&self) -> Option<MeshWork> {
-        self.0.mesh_jobs.try_update(Ordering::AcqRel, Ordering::Acquire, |jobs| (jobs < 2).then_some(jobs + 1)).ok()?;
+        let limit = max_mesh_jobs();
+        self.0.mesh_jobs.try_update(Ordering::AcqRel, Ordering::Acquire, |jobs| (jobs < limit).then_some(jobs + 1)).ok()?;
         let Some(lease) = self.reserve(4 * 1024 * 1024) else {
             self.0.mesh_jobs.fetch_sub(1, Ordering::AcqRel);
             return None;
