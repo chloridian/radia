@@ -8,7 +8,7 @@ use std::{
 
 use storage::{EvictionCandidate, EvictionPolicy, EvictionReason, EvictionScore, NamespaceId};
 
-use crate::{Kind, cache::MESH_NAMESPACE_IDS};
+use crate::{Kind, cache::namespace_kind};
 
 const RECENCY_SCALE: u128 = 1_000_000;
 const RECENCY_BUCKET: u64 = 64;
@@ -41,17 +41,7 @@ impl DecodeCosts {
     }
 
     fn for_namespace(&self, namespace: NamespaceId) -> u64 {
-        let index = if namespace == NamespaceId::new(0) {
-            0
-        } else if namespace == NamespaceId::new(1) {
-            1
-        } else if namespace == NamespaceId::new(2) {
-            2
-        } else if namespace == NamespaceId::new(3) {
-            3
-        } else if MESH_NAMESPACE_IDS.contains(&namespace) {
-            4
-        } else {
+        let Some(index) = namespace_kind(namespace).map(kind_index) else {
             return 0;
         };
         self.micros.get(index).map_or(0, |cost| cost.load(Ordering::Relaxed))

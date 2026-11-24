@@ -821,7 +821,7 @@ fn corrupt_mesh_lods_are_refetched() {
         if corruption == "hash" {
             let uuid = id.uuid().to_string();
             let shard = uuid.get(..2).expect("UUID shard");
-            let path = directory.path().join(format!("assets/meshes/lod/low/{shard}/{uuid}.llmesh"));
+            let path = directory.path().join(format!("assets/geometry/mesh/lod/low/{shard}/{uuid}.llmesh"));
             let mut stored = fs::read(&path).expect("read cached LOD");
             if let Some(first) = stored.first_mut() {
                 *first ^= 0xff;
@@ -1079,8 +1079,8 @@ fn mesh_blocks_are_protected_independently() {
     cache.put_complete(Request::MeshLod(high), high_record).expect("seed high LOD");
     let uuid = id.uuid().to_string();
     let shard = uuid.get(..2).expect("UUID shard");
-    assert!(directory.path().join(format!("assets/meshes/lod/low/{shard}/{uuid}.llmesh")).exists());
-    assert!(directory.path().join(format!("assets/meshes/lod/high/{shard}/{uuid}.llmesh")).exists());
+    assert!(directory.path().join(format!("assets/geometry/mesh/lod/low/{shard}/{uuid}.llmesh")).exists());
+    assert!(directory.path().join(format!("assets/geometry/mesh/lod/high/{shard}/{uuid}.llmesh")).exists());
     let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
     let route = store.register_route().expect("register route");
     let demand = store.request(route, Request::MeshLod(high), Priority::Visible, Instant::now()).expect("protect high LOD");
