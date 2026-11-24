@@ -1,71 +1,104 @@
-use serde_json::{Value, json};
-
-use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
-use crate::{
-    inspection::{InventoryFetchStats, ViewerInspectionHandle},
-    mcp::MAX_JSON_RESPONSE_BYTES,
+use rmcp::{
+    ErrorData,
+    handler::server::wrapper::{Json, Parameters},
+    tool, tool_router,
 };
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::{inspection::InventoryFetchStats, mcp::server::RadiaServer};
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
 
-pub const SPEC: ToolSpec = ToolSpec {
-    name: "inventory",
-    title: "Inventory Fetch Status",
-    description: "Return inventory folder fetch counts (pending, in flight, done, failed) and a bounded list of failed folders without item or asset data.",
-    annotations: ToolAnnotationsSpec::read_only(),
-    input_schema,
-    handler,
-    max_response_bytes: MAX_JSON_RESPONSE_BYTES,
-};
-
-fn input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT }
-        }
-    })
+#[derive(Deserialize, JsonSchema)]
+pub struct InventoryArgs {
+    #[schemars(description = "Maximum number of failed folders to return (1..=200).")]
+    pub limit: Option<usize>,
 }
 
-fn format_inventory_stats(stats: &InventoryFetchStats, limit: usize) -> Value {
+#[derive(Serialize, JsonSchema)]
+pub struct FailedFolderOutput {
+    pub folder_id: String,
+    pub owner_id: String,
+    pub retry_state: &'static str,
+    pub error_kind: &'static str,
+    pub error: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct InventoryOutput {
+    pub active_session: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folders_known: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_flight: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_done: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_folders: Option<Vec<FailedFolderOutput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+}
+
+#[tool_router(router = inventory_router, vis = "pub(super)")]
+impl RadiaServer {
+    #[tool(
+        name = "inventory",
+        title = "Inventory Fetch Status",
+        description = "Return inventory folder fetch counts (pending, in flight, done, failed) and a bounded list of failed folders without item or asset data.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    pub(crate) async fn inventory(&self, Parameters(args): Parameters<InventoryArgs>) -> Result<Json<InventoryOutput>, ErrorData> {
+        let Some(session) = self.handle.session() else {
+            return Ok(Json(InventoryOutput {
+                active_session: false,
+                folders_known: None,
+                pending: None,
+                in_flight: None,
+                done: None,
+                failed: None,
+                background_done: None,
+                failed_folders: None,
+                has_more: None,
+            }));
+        };
+        let limit = args.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+        let stats = session.diagnostics.inventory.borrow().clone();
+        Ok(Json(format_inventory_stats(&stats, limit)))
+    }
+}
+
+fn format_inventory_stats(stats: &InventoryFetchStats, limit: usize) -> InventoryOutput {
     let failed_folders = stats
         .failed_folders
         .iter()
         .take(limit)
-        .map(|folder| {
-            json!({
-                "folder_id": folder.folder_id.to_string(),
-                "owner_id": folder.owner_id.to_string(),
-                "retry_state": folder.retry_state,
-                "error_kind": folder.error_kind,
-                "error": folder.error,
-            })
+        .map(|folder| FailedFolderOutput {
+            folder_id: folder.folder_id.to_string(),
+            owner_id: folder.owner_id.to_string(),
+            retry_state: folder.retry_state,
+            error_kind: folder.error_kind,
+            error: folder.error.clone(),
         })
-        .collect::<Vec<_>>();
-    json!({
-        "active_session": true,
-        "folders_known": stats.folders_known,
-        "pending": stats.folders_pending,
-        "in_flight": stats.folders_in_flight,
-        "done": stats.folders_done,
-        "failed": stats.folders_failed,
-        "background_done": stats.background_done,
-        "failed_folders": failed_folders,
-        "has_more": stats.failed_folders.len() > limit,
-    })
-}
-
-fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
-    Box::pin(async move {
-        let Some(session) = handle.session() else {
-            return Ok(ToolContent::Json(json!({ "active_session": false })));
-        };
-        let limit =
-            args.get("limit").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()).unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-        let stats = session.diagnostics.inventory.borrow().clone();
-        Ok(ToolContent::Json(format_inventory_stats(&stats, limit)))
-    })
+        .collect();
+    InventoryOutput {
+        active_session: true,
+        folders_known: Some(stats.folders_known),
+        pending: Some(stats.folders_pending),
+        in_flight: Some(stats.folders_in_flight),
+        done: Some(stats.folders_done),
+        failed: Some(stats.folders_failed),
+        background_done: Some(stats.background_done),
+        failed_folders: Some(failed_folders),
+        has_more: Some(stats.failed_folders.len() > limit),
+    }
 }
 
 #[cfg(test)]
@@ -102,7 +135,7 @@ mod tests {
             ],
         };
 
-        let output = format_inventory_stats(&stats, 1);
+        let output = serde_json::to_value(format_inventory_stats(&stats, 1)).expect("serialize inventory");
         assert_eq!(output["pending"], 2);
         assert_eq!(output["in_flight"], 1);
         assert_eq!(output["done"], 5);

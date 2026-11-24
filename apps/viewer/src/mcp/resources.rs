@@ -1,19 +1,19 @@
 use rmcp::{
-    ErrorData,
+    ErrorData, RoleServer,
     model::{ErrorCode, ReadResourceResult, Resource, ResourceContents, ResourceTemplate},
+    service::RequestContext,
 };
-use serde_json::{Value, json};
-use tokio::time;
-use uuid::Uuid;
 
 use super::{
     MAX_PNG_RESPONSE_BYTES,
-    server::McpServerConfig,
-    tools::{ToolCallContext, ToolContent, find_tool, screenshot},
+    server::{RadiaServer, response_too_large_error},
+    tools::{
+        explain_object::explain_object_data, logs::logs_data, region::region_data, screenshot::capture_screenshot_base64,
+        settings::settings_data, stats::stats_data, world_query::world_summary_data,
+    },
 };
-use crate::inspection::ViewerInspectionHandle;
 
-pub const OBJECT_URI_TEMPLATE: &str = "viewer://object/{local_id}";
+pub const OBJECT_URI_TEMPLATE: &str = "viewer://object/{object_id}";
 const OBJECT_URI_PREFIX: &str = "viewer://object/";
 
 pub fn static_resources() -> Vec<Resource> {
@@ -45,7 +45,7 @@ pub fn static_resources() -> Vec<Resource> {
             "logs",
             "Recent Logs",
             "Recent WARN and ERROR log entries from the in-memory ring buffer.",
-            "text/plain",
+            "application/json",
         ),
         make_resource(
             "viewer://screenshot",
@@ -69,27 +69,71 @@ pub fn resource_for_tool(tool_name: &str) -> Option<Resource> {
     static_resources().into_iter().find(|resource| resource.name == tool_name)
 }
 
-pub async fn read_resource(
-    uri: &str,
-    handle: &ViewerInspectionHandle,
-    config: McpServerConfig,
-    ctx: ToolCallContext,
-) -> Result<ReadResourceResult, ErrorData> {
+pub async fn read_resource(server: &RadiaServer, uri: &str, context: RequestContext<RoleServer>) -> Result<ReadResourceResult, ErrorData> {
+    let max_json = server.config.max_response_bytes;
     match uri {
-        "viewer://world" => read_json_tool(uri, "world", json!({ "query": "summary" }), "application/json", handle, config).await,
-        "viewer://stats" => read_json_tool(uri, "stats", json!({}), "application/json", handle, config).await,
-        "viewer://region" => read_json_tool(uri, "region", json!({}), "application/json", handle, config).await,
-        "viewer://settings" => read_json_tool(uri, "settings", json!({}), "application/json", handle, config).await,
-        "viewer://logs" => read_json_tool(uri, "logs", json!({}), "text/plain", handle, config).await,
-        "viewer://screenshot" => read_screenshot_resource(uri, handle, config, ctx).await,
+        "viewer://world" => {
+            let data = world_summary_data(&server.handle).await.map_err(|msg| ErrorData::internal_error(msg, None))?;
+            encode_json_resource(uri, &data, max_json)
+        }
+        "viewer://stats" => {
+            let data = stats_data(&server.handle, None);
+            encode_json_resource(uri, &data, max_json)
+        }
+        "viewer://region" => {
+            let data = region_data(&server.handle).await.map_err(|msg| ErrorData::internal_error(msg, None))?;
+            encode_json_resource(uri, &data, max_json)
+        }
+        "viewer://settings" => {
+            let data = settings_data(&server.handle, None, None);
+            encode_json_resource(uri, &data, max_json)
+        }
+        "viewer://logs" => {
+            let data = logs_data(&server.handle, None, None).map_err(|msg| ErrorData::internal_error(msg, None))?;
+            encode_json_resource(uri, &data, max_json)
+        }
+        "viewer://screenshot" => {
+            let (data_base64, _, _) =
+                capture_screenshot_base64(&server.handle, context).await.map_err(|msg| ErrorData::internal_error(msg, None))?;
+            if data_base64.len() > MAX_PNG_RESPONSE_BYTES {
+                return Err(response_too_large_error());
+            }
+            Ok(ReadResourceResult::new(vec![ResourceContents::BlobResourceContents {
+                uri: uri.to_owned(),
+                mime_type: Some("image/png".to_owned()),
+                blob: data_base64,
+                meta: None,
+            }]))
+        }
         _ => {
-            if let Some(id_segment) = uri.strip_prefix(OBJECT_URI_PREFIX) {
-                read_object_resource(uri, id_segment, handle, config).await
+            if let Some(object_id) = uri.strip_prefix(OBJECT_URI_PREFIX) {
+                if object_id.is_empty() {
+                    return Err(ErrorData::invalid_params("object_id is required", None));
+                }
+                let data = explain_object_data(&server.handle, object_id).await.map_err(|msg| ErrorData::invalid_params(msg, None))?;
+                if data.active_session == Some(false) || data.found == Some(false) {
+                    return Err(ErrorData::resource_not_found(format!("unknown object: {object_id}"), None));
+                }
+                encode_json_resource(uri, &data, max_json)
             } else {
                 Err(ErrorData::resource_not_found(format!("unknown resource: {uri}"), None))
             }
         }
     }
+}
+
+fn encode_json_resource<T: serde::Serialize>(uri: &str, value: &T, max_bytes: usize) -> Result<ReadResourceResult, ErrorData> {
+    let text =
+        serde_json::to_string(value).map_err(|error| ErrorData::new(ErrorCode(-32603), format!("serialize failed: {error}"), None))?;
+    if text.len() > max_bytes {
+        return Err(response_too_large_error());
+    }
+    Ok(ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
+        uri: uri.to_owned(),
+        mime_type: Some("application/json".to_owned()),
+        text,
+        meta: None,
+    }]))
 }
 
 fn make_resource(uri: &str, name: &str, title: &str, description: &str, mime_type: &str) -> Resource {
@@ -98,113 +142,4 @@ fn make_resource(uri: &str, name: &str, title: &str, description: &str, mime_typ
     resource.description = Some(description.to_owned());
     resource.mime_type = Some(mime_type.to_owned());
     resource
-}
-
-async fn read_json_tool(
-    uri: &str,
-    tool_name: &str,
-    args: Value,
-    mime_type: &str,
-    handle: &ViewerInspectionHandle,
-    config: McpServerConfig,
-) -> Result<ReadResourceResult, ErrorData> {
-    let Some(tool) = find_tool(tool_name) else {
-        return Err(ErrorData::internal_error("backing tool missing", None));
-    };
-    let outcome = time::timeout(config.request_timeout, (tool.handler)(handle.clone(), args))
-        .await
-        .map_err(|_| ErrorData::new(ErrorCode(-32001), "resource read timed out", None))?;
-    let content = outcome.map_err(|message| ErrorData::internal_error(message, None))?;
-    let ToolContent::Json(value) = content else {
-        return Err(ErrorData::internal_error("unexpected non-JSON tool output", None));
-    };
-    let text = value.to_string();
-    let limit = tool.max_response_bytes.min(config.max_response_bytes);
-    if text.len() > limit {
-        return Err(ErrorData::new(ErrorCode(-32002), "response exceeded size limit", None));
-    }
-    Ok(ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
-        uri: uri.to_owned(),
-        mime_type: Some(mime_type.to_owned()),
-        text,
-        meta: None,
-    }]))
-}
-
-async fn read_screenshot_resource(
-    uri: &str,
-    handle: &ViewerInspectionHandle,
-    config: McpServerConfig,
-    ctx: ToolCallContext,
-) -> Result<ReadResourceResult, ErrorData> {
-    let outcome = time::timeout(config.request_timeout, screenshot::call_with_context(handle.clone(), json!({}), ctx))
-        .await
-        .map_err(|_| ErrorData::new(ErrorCode(-32001), "resource read timed out", None))?;
-    let content = outcome.map_err(|message| ErrorData::internal_error(message, None))?;
-    let ToolContent::ImagePng { data_base64, .. } = content else {
-        return Err(ErrorData::internal_error("unexpected non-image screenshot output", None));
-    };
-    if data_base64.len() > MAX_PNG_RESPONSE_BYTES {
-        return Err(ErrorData::new(ErrorCode(-32002), "response exceeded size limit", None));
-    }
-    Ok(ReadResourceResult::new(vec![ResourceContents::BlobResourceContents {
-        uri: uri.to_owned(),
-        mime_type: Some("image/png".to_owned()),
-        blob: data_base64,
-        meta: None,
-    }]))
-}
-
-async fn read_object_resource(
-    uri: &str,
-    id_segment: &str,
-    handle: &ViewerInspectionHandle,
-    config: McpServerConfig,
-) -> Result<ReadResourceResult, ErrorData> {
-    if id_segment.is_empty() {
-        return Err(ErrorData::invalid_params("object id is required", None));
-    }
-    let object_id = if Uuid::parse_str(id_segment).is_ok() {
-        id_segment.to_owned()
-    } else if let Ok(local_id) = id_segment.parse::<u32>() {
-        let Some(session) = handle.session() else {
-            return Err(ErrorData::resource_not_found(format!("unknown object: {id_segment}"), None));
-        };
-        let page = session
-            .world
-            .objects(None, 256)
-            .await
-            .map_err(|error| ErrorData::internal_error(format!("world objects query failed: {error}"), None))?;
-        let Some(found) = page.objects.into_iter().find(|item| item.address.local_id().get() == local_id) else {
-            return Err(ErrorData::resource_not_found(format!("unknown object: {id_segment}"), None));
-        };
-        found.id.to_string()
-    } else {
-        return Err(ErrorData::invalid_params(format!("invalid object id: {id_segment}"), None));
-    };
-
-    let Some(tool) = find_tool("explain_object") else {
-        return Err(ErrorData::internal_error("backing tool missing", None));
-    };
-    let outcome = time::timeout(config.request_timeout, (tool.handler)(handle.clone(), json!({ "object_id": object_id })))
-        .await
-        .map_err(|_| ErrorData::new(ErrorCode(-32001), "resource read timed out", None))?;
-    let content = outcome.map_err(|message| ErrorData::internal_error(message, None))?;
-    let ToolContent::Json(value) = content else {
-        return Err(ErrorData::internal_error("unexpected non-JSON tool output", None));
-    };
-    if value.get("active_session").and_then(Value::as_bool) == Some(false) || value.get("found").and_then(Value::as_bool) == Some(false) {
-        return Err(ErrorData::resource_not_found(format!("unknown object: {id_segment}"), None));
-    }
-    let text = value.to_string();
-    let limit = tool.max_response_bytes.min(config.max_response_bytes);
-    if text.len() > limit {
-        return Err(ErrorData::new(ErrorCode(-32002), "response exceeded size limit", None));
-    }
-    Ok(ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
-        uri: uri.to_owned(),
-        mime_type: Some("application/json".to_owned()),
-        text,
-        meta: None,
-    }]))
 }

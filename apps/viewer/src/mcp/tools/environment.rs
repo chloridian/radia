@@ -1,29 +1,125 @@
 use assets::{DayCycle, EnvironmentDescription, EnvironmentSettings, Sky, Water};
+use rmcp::{ErrorData, handler::server::wrapper::Json, tool, tool_router};
+use schemars::JsonSchema;
+use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use world::{EnvironmentAssignment, EnvironmentRead, EnvironmentSource};
 
-use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{
-    inspection::{EnvironmentOverrideSummary, ViewerInspectionHandle, ViewportQuery},
-    mcp::MAX_JSON_RESPONSE_BYTES,
+    inspection::{EnvironmentOverrideSummary, ViewportQuery},
+    mcp::server::RadiaServer,
 };
 
-pub const SPEC: ToolSpec = ToolSpec {
-    name: "environment",
-    title: "Region Environment",
-    description: "Return active sky, water, and day-cycle values and source (region, parcel, local override) for the agent's region without asset UUIDs.",
-    annotations: ToolAnnotationsSpec::read_only(),
-    input_schema,
-    handler,
-    max_response_bytes: MAX_JSON_RESPONSE_BYTES,
-};
+#[derive(Serialize, JsonSchema)]
+pub struct LocalOverrideOutput {
+    pub active: bool,
+    pub sky: bool,
+    pub water: bool,
+}
 
-fn input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {}
-    })
+#[derive(Serialize, JsonSchema)]
+pub struct EnvironmentAssignmentOutput {
+    pub source_kind: &'static str,
+    pub version: Option<u32>,
+    pub day_length_seconds: Option<u32>,
+    pub day_offset_seconds: Option<i32>,
+    pub altitudes: Option<[f32; 3]>,
+    pub settings: Value,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ParcelEnvironmentOutput {
+    pub parcel_local_id: u32,
+    pub assignment: Option<EnvironmentAssignmentOutput>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct EnvironmentOutput {
+    pub active_session: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hydration_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_override: Option<LocalOverrideOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region_assignment: Option<EnvironmentAssignmentOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parcel: Option<ParcelEnvironmentOutput>,
+}
+
+#[tool_router(router = environment_router, vis = "pub(super)")]
+impl RadiaServer {
+    #[tool(
+        name = "environment",
+        title = "Region Environment",
+        description = "Return active sky, water, and day-cycle values and source (region, parcel, local override) for the agent's region without asset UUIDs.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    pub(crate) async fn environment(&self) -> Result<Json<EnvironmentOutput>, ErrorData> {
+        let Some(session) = self.handle.session() else {
+            return Ok(Json(EnvironmentOutput {
+                active_session: false,
+                region: None,
+                hydration_revision: None,
+                source: None,
+                local_override: None,
+                region_assignment: None,
+                parcel: None,
+            }));
+        };
+        let primary_region = session.diagnostics.network.borrow().iter().find(|entry| entry.is_primary).map(|entry| entry.region);
+        let region = match primary_region {
+            Some(region) => region,
+            None => {
+                let page = session
+                    .world
+                    .regions(None, 1)
+                    .await
+                    .map_err(|e| ErrorData::internal_error(format!("regions query failed: {e}"), None))?;
+                let Some(first) = page.regions.first() else {
+                    return Ok(Json(EnvironmentOutput {
+                        active_session: true,
+                        region: None,
+                        hydration_revision: None,
+                        source: None,
+                        local_override: None,
+                        region_assignment: None,
+                        parcel: None,
+                    }));
+                };
+                first.region
+            }
+        };
+        let Some(read) = session
+            .world
+            .environment(region)
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("environment query failed: {e}"), None))?
+        else {
+            return Ok(Json(EnvironmentOutput {
+                active_session: true,
+                region: Some(region.get()),
+                hydration_revision: None,
+                source: None,
+                local_override: None,
+                region_assignment: None,
+                parcel: None,
+            }));
+        };
+        let overrides = {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if session.try_send_viewport_query(ViewportQuery::EnvironmentOverride { reply: reply_tx }).is_ok() {
+                reply_rx.await.unwrap_or_default()
+            } else {
+                EnvironmentOverrideSummary::default()
+            }
+        };
+        Ok(Json(format_environment(&read, overrides)))
+    }
 }
 
 fn format_sky(sky: &Sky) -> Value {
@@ -93,7 +189,7 @@ fn format_day_cycle(day: &DayCycle) -> Value {
     })
 }
 
-fn format_assignment(assignment: &EnvironmentAssignment) -> Value {
+fn format_assignment(assignment: &EnvironmentAssignment) -> EnvironmentAssignmentOutput {
     let (source_kind, settings) = match &assignment.source {
         EnvironmentSource::Inherit => ("inherit", Value::Null),
         EnvironmentSource::Asset(_) => ("asset", Value::Null),
@@ -106,17 +202,17 @@ fn format_assignment(assignment: &EnvironmentAssignment) -> Value {
             ("inline", decoded.unwrap_or(Value::Null))
         }
     };
-    json!({
-        "source_kind": source_kind,
-        "version": assignment.version,
-        "day_length_seconds": assignment.day_length_seconds,
-        "day_offset_seconds": assignment.day_offset_seconds,
-        "altitudes": assignment.altitudes,
-        "settings": settings,
-    })
+    EnvironmentAssignmentOutput {
+        source_kind,
+        version: assignment.version,
+        day_length_seconds: assignment.day_length_seconds,
+        day_offset_seconds: assignment.day_offset_seconds,
+        altitudes: assignment.altitudes,
+        settings,
+    }
 }
 
-fn format_environment(read: &EnvironmentRead, overrides: EnvironmentOverrideSummary) -> Value {
+fn format_environment(read: &EnvironmentRead, overrides: EnvironmentOverrideSummary) -> EnvironmentOutput {
     let parcel_active =
         read.parcel.as_ref().and_then(|parcel| parcel.assignment.as_ref()).is_some_and(|a| !matches!(a.source, EnvironmentSource::Inherit));
     let effective_source = if overrides.local_override {
@@ -128,55 +224,22 @@ fn format_environment(read: &EnvironmentRead, overrides: EnvironmentOverrideSumm
     } else {
         "default"
     };
-    json!({
-        "active_session": true,
-        "region": read.region.get(),
-        "hydration_revision": read.hydration_revision.get(),
-        "source": effective_source,
-        "local_override": {
-            "active": overrides.local_override,
-            "sky": overrides.local_sky,
-            "water": overrides.local_water,
-        },
-        "region_assignment": read.region_assignment.as_ref().map(format_assignment),
-        "parcel": read.parcel.as_ref().map(|parcel| {
-            json!({
-                "parcel_local_id": parcel.parcel.get(),
-                "assignment": parcel.assignment.as_ref().map(format_assignment),
-            })
+    EnvironmentOutput {
+        active_session: true,
+        region: Some(read.region.get()),
+        hydration_revision: Some(read.hydration_revision.get()),
+        source: Some(effective_source),
+        local_override: Some(LocalOverrideOutput {
+            active: overrides.local_override,
+            sky: overrides.local_sky,
+            water: overrides.local_water,
         }),
-    })
-}
-
-fn handler(handle: ViewerInspectionHandle, _args: Value) -> ToolFuture {
-    Box::pin(async move {
-        let Some(session) = handle.session() else {
-            return Ok(ToolContent::Json(json!({ "active_session": false })));
-        };
-        let primary_region = session.diagnostics.network.borrow().iter().find(|entry| entry.is_primary).map(|entry| entry.region);
-        let region = match primary_region {
-            Some(region) => region,
-            None => {
-                let page = session.world.regions(None, 1).await.map_err(|e| format!("regions query failed: {e}"))?;
-                let Some(first) = page.regions.first() else {
-                    return Ok(ToolContent::Json(json!({ "active_session": true, "region": null })));
-                };
-                first.region
-            }
-        };
-        let Some(read) = session.world.environment(region).await.map_err(|e| format!("environment query failed: {e}"))? else {
-            return Ok(ToolContent::Json(json!({ "active_session": true, "region": region.get(), "environment": null })));
-        };
-        let overrides = {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            if session.try_send_viewport_query(ViewportQuery::EnvironmentOverride { reply: reply_tx }).is_ok() {
-                reply_rx.await.unwrap_or_default()
-            } else {
-                EnvironmentOverrideSummary::default()
-            }
-        };
-        Ok(ToolContent::Json(format_environment(&read, overrides)))
-    })
+        region_assignment: read.region_assignment.as_ref().map(format_assignment),
+        parcel: read.parcel.as_ref().map(|parcel| ParcelEnvironmentOutput {
+            parcel_local_id: parcel.parcel.get(),
+            assignment: parcel.assignment.as_ref().map(format_assignment),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -218,9 +281,11 @@ mod tests {
             parcel: None,
         };
         let output = format_environment(&read, EnvironmentOverrideSummary::default());
-        assert_eq!(output["source"], "region");
-        assert_eq!(output["region_assignment"]["source_kind"], "asset");
-        assert_eq!(output["region_assignment"]["day_length_seconds"], 14400);
-        assert!(!output.to_string().contains(&secret_asset.to_string()));
+        assert_eq!(output.source, Some("region"));
+        let assignment = output.region_assignment.as_ref().expect("region assignment");
+        assert_eq!(assignment.source_kind, "asset");
+        assert_eq!(assignment.day_length_seconds, Some(14400));
+        let serialized = serde_json::to_string(&output).expect("serialize environment");
+        assert!(!serialized.contains(&secret_asset.to_string()));
     }
 }

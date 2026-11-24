@@ -26,7 +26,7 @@ Tool guide:
 - Assets and textures: `textures` (fetch/decode queues, discard histogram, GPU memory), `queues` (bounded subsystem queues).
 - Network: `network` (per-region circuits, throttles, EventQueueGet, capabilities).
 - Logs, inventory, cache, settings: `logs` (recent WARN/ERROR), `inventory` (folder fetch counts/failures), `cache` (object/asset cache stats), `settings` (cvars and provenance).
-- Resources: `viewer://world`, `viewer://stats`, `viewer://region`, `viewer://settings`, `viewer://logs`, `viewer://screenshot`, and `viewer://object/{local_id}`.
+- Resources: `viewer://world`, `viewer://stats`, `viewer://region`, `viewer://settings`, `viewer://logs`, `viewer://screenshot`, and `viewer://object/{object_id}`.
 
 Debugging order: start with `build`, then `stats` and `world`, then `explain_object` or `pick` for specific objects, then `logs`.
 Use `wait_for` instead of sleeping or polling when waiting for `world_revision`, `asset_queue_empty`, or `texture_event`.

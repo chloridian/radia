@@ -1,30 +1,33 @@
 use std::{borrow::Cow, sync::Arc};
 
 use cvars::{CvarError, CvarValue, ValueDomain, lookup_by_name};
-use serde_json::{Value, json};
-
-use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec, settings::cvar_value_to_json};
-use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES, settings::SettingsStore};
-
-pub const SPEC: ToolSpec = ToolSpec {
-    name: "set_setting",
-    title: "Set Setting",
-    description: "Changes local viewer state: set a local cvar setting by name through SettingsStore validation and persistence.",
-    annotations: ToolAnnotationsSpec::local_write(),
-    input_schema,
-    handler,
-    max_response_bytes: MAX_JSON_RESPONSE_BYTES,
+use rmcp::{
+    ErrorData,
+    handler::server::wrapper::{Json, Parameters},
+    tool, tool_router,
 };
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-fn input_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["name", "value"],
-        "properties": {
-            "name": { "type": "string" },
-            "value": {}
-        }
-    })
+use super::settings::cvar_value_to_json;
+use crate::{mcp::server::RadiaServer, settings::SettingsStore};
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SetSettingArgs {
+    #[schemars(description = "CVar name to update.")]
+    pub name: String,
+    #[schemars(description = "New JSON value matching the CVar's type and bounds.")]
+    pub value: Value,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SetSettingOutput {
+    pub name: &'static str,
+    pub old_value: Value,
+    pub new_value: Value,
+    pub revision: u64,
+    pub pending_restart: bool,
 }
 
 fn json_to_cvar_value(name: &'static str, domain: ValueDomain, value: &Value) -> Result<CvarValue, CvarError> {
@@ -52,33 +55,34 @@ fn json_to_cvar_value(name: &'static str, domain: ValueDomain, value: &Value) ->
     }
 }
 
-fn apply_setting(settings: &Arc<SettingsStore>, name: &str, raw_value: &Value) -> Result<Value, String> {
+fn apply_setting(settings: &Arc<SettingsStore>, name: &str, raw_value: &Value) -> Result<SetSettingOutput, String> {
     let descriptor = lookup_by_name(name).ok_or_else(|| CvarError::UnknownName(name.to_owned()).to_string())?;
     let parsed = json_to_cvar_value(descriptor.name, descriptor.domain, raw_value).map_err(|e| e.to_string())?;
     let (old_value, new_value, outcome) = settings.set_by_name(name, &parsed).map_err(|e| e.to_string())?;
-    Ok(json!({
-        "name": descriptor.name,
-        "old_value": cvar_value_to_json(&old_value),
-        "new_value": cvar_value_to_json(&new_value),
-        "revision": outcome.revision.get(),
-        "pending_restart": outcome.pending_restart,
-    }))
+    Ok(SetSettingOutput {
+        name: descriptor.name,
+        old_value: cvar_value_to_json(&old_value),
+        new_value: cvar_value_to_json(&new_value),
+        revision: outcome.revision.get(),
+        pending_restart: outcome.pending_restart,
+    })
 }
 
-fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
-    Box::pin(async move {
-        let Some(settings) = handle.settings() else {
-            return Err("settings store is unavailable".to_owned());
+#[tool_router(router = set_setting_router, vis = "pub(super)")]
+impl RadiaServer {
+    #[tool(
+        name = "set_setting",
+        title = "Set Setting",
+        description = "Changes local viewer state: set a local cvar setting by name through SettingsStore validation and persistence.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    pub(crate) async fn set_setting(&self, Parameters(args): Parameters<SetSettingArgs>) -> Result<Json<SetSettingOutput>, ErrorData> {
+        let Some(settings) = self.handle.settings() else {
+            return Err(ErrorData::internal_error("settings store is unavailable", None));
         };
-        let Some(name) = args.get("name").and_then(Value::as_str) else {
-            return Err("name is required".to_owned());
-        };
-        let Some(value) = args.get("value") else {
-            return Err("value is required".to_owned());
-        };
-        let result = apply_setting(&settings, name, value)?;
-        Ok(ToolContent::Json(result))
-    })
+        let output = apply_setting(&settings, &args.name, &args.value).map_err(|msg| ErrorData::invalid_params(msg, None))?;
+        Ok(Json(output))
+    }
 }
 
 #[cfg(test)]
@@ -110,8 +114,8 @@ mod tests {
         assert!(out_of_bounds.contains("outside declared bounds"), "unexpected error: {out_of_bounds}");
 
         let result = apply_setting(&store, "render.draw_distance", &json!(256.0)).expect("valid setting change");
-        assert_eq!(result["name"], "render.draw_distance");
-        assert_eq!(result["new_value"], 256.0);
+        assert_eq!(result.name, "render.draw_distance");
+        assert_eq!(result.new_value, 256.0);
         assert_eq!(store.get(RENDER_DRAW_DISTANCE), 256.0);
 
         let (reloaded, report) = SettingsStore::load_or_default(path, None);

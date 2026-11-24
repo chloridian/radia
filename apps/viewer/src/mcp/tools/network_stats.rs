@@ -3,32 +3,82 @@ use network::{
     capabilities::{CapabilityDiagnostics, CapabilityLastStatus},
     default_throttle_rates,
 };
-use serde_json::{Value, json};
+use rmcp::{
+    ErrorData,
+    handler::server::wrapper::{Json, Parameters},
+    tool, tool_router,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use world::Region;
 
-use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
-use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
+use crate::mcp::server::RadiaServer;
 
 const DEFAULT_LIMIT: usize = 32;
 const MAX_LIMIT: usize = 100;
 
-pub const SPEC: ToolSpec = ToolSpec {
-    name: "network",
-    title: "Network Diagnostics",
-    description: "Return per-region circuit packet stats, throttle settings, EventQueueGet state, and capability statuses without URLs or session IDs.",
-    annotations: ToolAnnotationsSpec::read_only(),
-    input_schema,
-    handler,
-    max_response_bytes: MAX_JSON_RESPONSE_BYTES,
-};
+#[derive(Deserialize, JsonSchema)]
+pub struct NetworkArgs {
+    #[schemars(description = "Maximum number of regions and capabilities per region to return (1..=100).")]
+    pub limit: Option<usize>,
+}
 
-fn input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT }
-        }
-    })
+#[derive(Clone, Copy, Serialize, JsonSchema)]
+pub struct ThrottleRatesOutput {
+    pub resend_bps: f32,
+    pub land_bps: f32,
+    pub wind_bps: f32,
+    pub cloud_bps: f32,
+    pub task_bps: f32,
+    pub texture_bps: f32,
+    pub asset_bps: f32,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct CircuitStatsOutput {
+    pub packets_in: u64,
+    pub packets_out: u64,
+    pub packets_in_per_sec: u32,
+    pub packets_out_per_sec: u32,
+    pub unacked: usize,
+    pub resent: u64,
+    pub throttle_sent: bool,
+    pub throttle_rates: ThrottleRatesOutput,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct EventQueueOutput {
+    pub state: &'static str,
+    pub last_status: Option<u16>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct CapabilityOutput {
+    pub name: String,
+    pub granted: bool,
+    pub last_status: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct RegionNetworkOutput {
+    pub region: u64,
+    pub name: Option<String>,
+    pub is_primary: bool,
+    pub connected: bool,
+    pub ping_ms: Option<f64>,
+    pub circuit: CircuitStatsOutput,
+    pub event_queue: Option<EventQueueOutput>,
+    pub capabilities: Vec<CapabilityOutput>,
+    pub has_more_capabilities: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct NetworkOutput {
+    pub active_session: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regions: Option<Vec<RegionNetworkOutput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
 }
 
 struct RegionNetworkSnapshot {
@@ -40,92 +90,19 @@ struct RegionNetworkSnapshot {
     capabilities: Option<CapabilityDiagnostics>,
 }
 
-fn format_capability_status(status: CapabilityLastStatus) -> Value {
-    match status {
-        CapabilityLastStatus::Http(code) => Value::from(code.to_string()),
-        CapabilityLastStatus::Cancelled => Value::from("cancelled"),
-        CapabilityLastStatus::SessionClosed => Value::from("session_closed"),
-        CapabilityLastStatus::Transport(kind) => Value::from(format!("{kind:?}")),
-        CapabilityLastStatus::Error => Value::from("error"),
-    }
-}
-
-fn format_network_snapshot(regions: &[RegionNetworkSnapshot], limit: usize) -> Value {
-    let throttle = default_throttle_rates();
-    let throttle_json = json!({
-        "resend_bps": throttle.resend_bits_per_second,
-        "land_bps": throttle.land_bits_per_second,
-        "wind_bps": throttle.wind_bits_per_second,
-        "cloud_bps": throttle.cloud_bits_per_second,
-        "task_bps": throttle.task_bits_per_second,
-        "texture_bps": throttle.texture_bits_per_second,
-        "asset_bps": throttle.asset_bits_per_second,
-    });
-    let entries = regions
-        .iter()
-        .take(limit)
-        .map(|entry| {
-            let stats = entry.stats;
-            let event_queue = entry.capabilities.as_ref().map(|caps| {
-                json!({
-                    "state": caps.event_queue.state.as_str(),
-                    "last_status": caps.event_queue.last_status,
-                })
-            });
-            let (capabilities, has_more_capabilities) = match &entry.capabilities {
-                Some(caps) => {
-                    let list = caps
-                        .capabilities
-                        .iter()
-                        .take(limit)
-                        .map(|cap| {
-                            json!({
-                                "name": cap.name.as_ref(),
-                                "granted": cap.granted,
-                                "last_status": cap.last_status.map(format_capability_status),
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    (list, caps.capabilities.len() > limit)
-                }
-                None => (Vec::new(), false),
-            };
-            json!({
-                "region": entry.region.get(),
-                "name": entry.region_name,
-                "is_primary": entry.is_primary,
-                "connected": entry.circuit.connected,
-                "ping_ms": entry.circuit.measured_ping_delay.map(|d| d.as_secs_f64() * 1000.0),
-                "circuit": {
-                    "packets_in": stats.packets_in,
-                    "packets_out": stats.packets_out,
-                    "packets_in_per_sec": stats.packets_in_per_sec,
-                    "packets_out_per_sec": stats.packets_out_per_sec,
-                    "unacked": stats.unacked,
-                    "resent": stats.resent,
-                    "throttle_sent": stats.throttle_sent,
-                    "throttle_rates": throttle_json,
-                },
-                "event_queue": event_queue,
-                "capabilities": capabilities,
-                "has_more_capabilities": has_more_capabilities,
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "active_session": true,
-        "regions": entries,
-        "has_more": regions.len() > limit,
-    })
-}
-
-fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
-    Box::pin(async move {
-        let Some(session) = handle.session() else {
-            return Ok(ToolContent::Json(json!({ "active_session": false })));
+#[tool_router(router = network_router, vis = "pub(super)")]
+impl RadiaServer {
+    #[tool(
+        name = "network",
+        title = "Network Diagnostics",
+        description = "Return per-region circuit packet stats, throttle settings, EventQueueGet state, and capability statuses without URLs or session IDs.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    pub(crate) async fn network(&self, Parameters(args): Parameters<NetworkArgs>) -> Result<Json<NetworkOutput>, ErrorData> {
+        let Some(session) = self.handle.session() else {
+            return Ok(Json(NetworkOutput { active_session: false, regions: None, has_more: None }));
         };
-        let limit =
-            args.get("limit").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()).unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+        let limit = args.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
         let handles = session.diagnostics.network.borrow().clone();
         let snapshots = handles
             .into_iter()
@@ -138,8 +115,79 @@ fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
                 capabilities: entry.capabilities.as_ref().map(|client| client.diagnostics()),
             })
             .collect::<Vec<_>>();
-        Ok(ToolContent::Json(format_network_snapshot(&snapshots, limit)))
-    })
+        Ok(Json(format_network_snapshot(&snapshots, limit)))
+    }
+}
+
+fn format_capability_status(status: CapabilityLastStatus) -> String {
+    match status {
+        CapabilityLastStatus::Http(code) => code.to_string(),
+        CapabilityLastStatus::Cancelled => "cancelled".to_owned(),
+        CapabilityLastStatus::SessionClosed => "session_closed".to_owned(),
+        CapabilityLastStatus::Transport(kind) => format!("{kind:?}"),
+        CapabilityLastStatus::Error => "error".to_owned(),
+    }
+}
+
+fn format_network_snapshot(regions: &[RegionNetworkSnapshot], limit: usize) -> NetworkOutput {
+    let throttle = default_throttle_rates();
+    let throttle_rates = ThrottleRatesOutput {
+        resend_bps: throttle.resend_bits_per_second,
+        land_bps: throttle.land_bits_per_second,
+        wind_bps: throttle.wind_bits_per_second,
+        cloud_bps: throttle.cloud_bits_per_second,
+        task_bps: throttle.task_bits_per_second,
+        texture_bps: throttle.texture_bits_per_second,
+        asset_bps: throttle.asset_bits_per_second,
+    };
+    let entries = regions
+        .iter()
+        .take(limit)
+        .map(|entry| {
+            let stats = entry.stats;
+            let event_queue = entry
+                .capabilities
+                .as_ref()
+                .map(|caps| EventQueueOutput { state: caps.event_queue.state.as_str(), last_status: caps.event_queue.last_status });
+            let (capabilities, has_more_capabilities) = match &entry.capabilities {
+                Some(caps) => {
+                    let list = caps
+                        .capabilities
+                        .iter()
+                        .take(limit)
+                        .map(|cap| CapabilityOutput {
+                            name: cap.name.to_string(),
+                            granted: cap.granted,
+                            last_status: cap.last_status.map(format_capability_status),
+                        })
+                        .collect();
+                    (list, caps.capabilities.len() > limit)
+                }
+                None => (Vec::new(), false),
+            };
+            RegionNetworkOutput {
+                region: entry.region.get(),
+                name: entry.region_name.clone(),
+                is_primary: entry.is_primary,
+                connected: entry.circuit.connected,
+                ping_ms: entry.circuit.measured_ping_delay.map(|d| d.as_secs_f64() * 1000.0),
+                circuit: CircuitStatsOutput {
+                    packets_in: stats.packets_in,
+                    packets_out: stats.packets_out,
+                    packets_in_per_sec: stats.packets_in_per_sec,
+                    packets_out_per_sec: stats.packets_out_per_sec,
+                    unacked: stats.unacked,
+                    resent: stats.resent,
+                    throttle_sent: stats.throttle_sent,
+                    throttle_rates,
+                },
+                event_queue,
+                capabilities,
+                has_more_capabilities,
+            }
+        })
+        .collect();
+    NetworkOutput { active_session: true, regions: Some(entries), has_more: Some(regions.len() > limit) }
 }
 
 #[cfg(test)]
@@ -208,7 +256,7 @@ mod tests {
             }),
         }];
 
-        let output = format_network_snapshot(&regions, 1);
+        let output = serde_json::to_value(format_network_snapshot(&regions, 1)).expect("serialize network");
         let text = output.to_string();
         assert!(!text.contains("http://"));
         assert!(!text.contains("https://"));

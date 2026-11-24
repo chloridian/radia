@@ -1,60 +1,61 @@
-use std::{future, time::Duration};
+use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::{Value, json};
+use rmcp::{
+    ErrorData, RoleServer,
+    model::{CallToolResult, ContentBlock, ProgressNotificationParam},
+    service::RequestContext,
+    tool, tool_router,
+};
+use serde_json::json;
 use tokio::{sync::oneshot, task};
 use wgpu::{MapMode, PollType};
 
-use super::{ToolAnnotationsSpec, ToolCallContext, ToolContent, ToolFuture, ToolSpec};
 use crate::{
     inspection::{ViewerInspectionHandle, ViewportQuery},
-    mcp::{MAX_PNG_RESPONSE_BYTES, png::encode_rgba_png},
+    mcp::{png::encode_rgba_png, server::RadiaServer},
 };
 
-pub const SPEC: ToolSpec = ToolSpec {
-    name: "screenshot",
-    title: "Viewport Screenshot",
-    description: "Capture the current viewport texture as a PNG image without blocking the GUI thread.",
-    annotations: ToolAnnotationsSpec::read_only(),
-    input_schema,
-    handler,
-    max_response_bytes: MAX_PNG_RESPONSE_BYTES,
-};
-
-fn input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {}
-    })
+#[tool_router(router = screenshot_router, vis = "pub(super)")]
+impl RadiaServer {
+    #[tool(
+        name = "screenshot",
+        title = "Viewport Screenshot",
+        description = "Capture the current viewport texture as a PNG image without blocking the GUI thread.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    pub(crate) async fn screenshot(&self, context: RequestContext<RoleServer>) -> Result<CallToolResult, ErrorData> {
+        let (data_base64, width, height) =
+            capture_screenshot_base64(&self.handle, context).await.map_err(|msg| ErrorData::internal_error(msg, None))?;
+        Ok(CallToolResult::success(vec![
+            ContentBlock::image(data_base64, "image/png"),
+            ContentBlock::text(json!({ "width": width, "height": height }).to_string()),
+        ]))
+    }
 }
 
-fn handler(handle: ViewerInspectionHandle, _args: Value) -> ToolFuture {
-    Box::pin(run_screenshot(handle, None))
-}
-
-pub(in crate::mcp) fn call_with_context(handle: ViewerInspectionHandle, _args: Value, ctx: ToolCallContext) -> ToolFuture {
-    Box::pin(run_screenshot(handle, Some(ctx)))
-}
-
-async fn run_screenshot(handle: ViewerInspectionHandle, ctx: Option<ToolCallContext>) -> Result<ToolContent, String> {
+pub(in crate::mcp) async fn capture_screenshot_base64(
+    handle: &ViewerInspectionHandle,
+    context: RequestContext<RoleServer>,
+) -> Result<(String, u32, u32), String> {
     let Some(session) = handle.session() else {
         return Err("no active scene session".to_owned());
     };
     let (reply_tx, reply_rx) = oneshot::channel();
     session.try_send_viewport_query(ViewportQuery::BeginScreenshot { reply: reply_tx }).map_err(str::to_owned)?;
 
-    if let Some(ctx) = &ctx {
-        ctx.report_progress(0.0, Some(1.0), Some("waiting for viewport frame".to_owned())).await;
+    if let Some(progress_token) = context.meta.get_progress_token() {
+        let mut param = ProgressNotificationParam::new(progress_token, 0.0);
+        param.total = Some(1.0);
+        param.message = Some("waiting for viewport frame".to_owned());
+        if let Err(error) = context.peer.notify_progress(param).await {
+            tracing::debug!(%error, "MCP screenshot progress notification dropped");
+        }
     }
 
     let readback = tokio::select! {
         biased;
-        () = async {
-            match &ctx {
-                Some(ctx) => ctx.cancelled().await,
-                None => future::pending::<()>().await,
-            }
-        } => return Err("screenshot cancelled".to_owned()),
+        () = context.ct.cancelled() => return Err("screenshot cancelled".to_owned()),
         reply = reply_rx => {
             reply
                 .map_err(|_| "viewport dropped screenshot request".to_owned())?
@@ -62,7 +63,7 @@ async fn run_screenshot(handle: ViewerInspectionHandle, ctx: Option<ToolCallCont
         }
     };
 
-    if ctx.as_ref().is_some_and(ToolCallContext::is_cancelled) {
+    if context.ct.is_cancelled() {
         return Err("screenshot cancelled".to_owned());
     }
 
@@ -80,7 +81,7 @@ async fn run_screenshot(handle: ViewerInspectionHandle, ctx: Option<ToolCallCont
 
     map_rx.await.map_err(|_| "buffer map callback dropped".to_owned())?.map_err(|e| format!("buffer map failed: {e}"))?;
 
-    if ctx.as_ref().is_some_and(ToolCallContext::is_cancelled) {
+    if context.ct.is_cancelled() {
         readback.buffer.unmap();
         return Err("screenshot cancelled".to_owned());
     }
@@ -101,6 +102,5 @@ async fn run_screenshot(handle: ViewerInspectionHandle, ctx: Option<ToolCallCont
     .await
     .map_err(|e| format!("png encode task failed: {e}"))??;
 
-    let data_base64 = STANDARD.encode(&png_bytes);
-    Ok(ToolContent::ImagePng { data_base64, width, height })
+    Ok((STANDARD.encode(&png_bytes), width, height))
 }

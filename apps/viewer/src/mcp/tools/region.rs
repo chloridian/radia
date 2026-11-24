@@ -1,26 +1,76 @@
+use rmcp::{ErrorData, handler::server::wrapper::Json, tool, tool_router};
+use schemars::JsonSchema;
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use world::{ParcelFlags, ParcelRead};
 
-use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{
     inspection::{RegionSimStats, ViewerInspectionHandle},
-    mcp::MAX_JSON_RESPONSE_BYTES,
+    mcp::server::RadiaServer,
 };
 
-pub const SPEC: ToolSpec = ToolSpec {
-    name: "region",
-    title: "Region & Parcel Stats",
-    description: "Return the agent's current region name, handle, latest simulator stats (SimStats), and current parcel name, area, and flags.",
-    annotations: ToolAnnotationsSpec::read_only(),
-    input_schema,
-    handler,
-    max_response_bytes: MAX_JSON_RESPONSE_BYTES,
-};
+#[derive(Serialize, JsonSchema)]
+pub struct RegionIdentityOutput {
+    pub id: u64,
+    pub region_id: Option<String>,
+    pub name: Option<String>,
+    pub handle: Option<u64>,
+    pub origin: Option<[f64; 3]>,
+}
 
-fn input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {}
+#[derive(Serialize, JsonSchema)]
+pub struct RegionOutput {
+    pub active_session: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<RegionIdentityOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parcel: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sim_stats: Option<Value>,
+}
+
+#[tool_router(router = region_router, vis = "pub(super)")]
+impl RadiaServer {
+    #[tool(
+        name = "region",
+        title = "Region & Parcel Stats",
+        description = "Return the agent's current region name, handle, latest simulator stats (SimStats), and current parcel name, area, and flags.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    pub(crate) async fn region(&self) -> Result<Json<RegionOutput>, ErrorData> {
+        let output = region_data(&self.handle).await.map_err(|msg| ErrorData::internal_error(msg, None))?;
+        Ok(Json(output))
+    }
+}
+
+pub(in crate::mcp) async fn region_data(handle: &ViewerInspectionHandle) -> Result<RegionOutput, String> {
+    let Some(session) = handle.session() else {
+        return Ok(RegionOutput { active_session: false, region: None, parcel: None, sim_stats: None });
+    };
+
+    let agent_region = (*session.agent_motion.borrow())
+        .map(|sample| sample.region)
+        .or_else(|| session.diagnostics.network.borrow().iter().find(|entry| entry.is_primary).map(|entry| entry.region));
+    let Some(region) = agent_region else {
+        return Ok(RegionOutput { active_session: true, region: None, parcel: None, sim_stats: None });
+    };
+
+    let regions = session.world.regions(None, 64).await.map_err(|e| format!("regions query failed: {e}"))?;
+    let region_entry = regions.regions.into_iter().find(|entry| entry.region == region);
+    let parcel = session.world.parcel_state(region).await.map_err(|e| format!("parcel query failed: {e}"))?;
+    let sim_stats = session.diagnostics.sim_stats.borrow().get(&region).cloned();
+
+    Ok(RegionOutput {
+        active_session: true,
+        region: Some(RegionIdentityOutput {
+            id: region.get(),
+            region_id: region_entry.as_ref().and_then(|entry| entry.info.region_id).map(|id| id.to_string()),
+            name: region_entry.as_ref().and_then(|entry| entry.info.name.clone()),
+            handle: region_entry.as_ref().and_then(|entry| entry.info.handle).map(|handle| handle.get()),
+            origin: region_entry.as_ref().and_then(|entry| entry.info.resolved_origin()).map(|origin| [origin.x, origin.y, origin.z]),
+        }),
+        parcel: parcel.as_ref().map(format_parcel),
+        sim_stats: sim_stats.as_ref().map(format_sim_stats),
     })
 }
 
@@ -143,41 +193,6 @@ fn format_sim_stats(stats: &RegionSimStats) -> Value {
         map.insert("other".into(), Value::Array(other));
     }
     Value::Object(map)
-}
-
-fn handler(handle: ViewerInspectionHandle, _args: Value) -> ToolFuture {
-    Box::pin(async move {
-        let Some(session) = handle.session() else {
-            return Ok(ToolContent::Json(json!({ "active_session": false })));
-        };
-
-        let agent_region = (*session.agent_motion.borrow())
-            .map(|sample| sample.region)
-            .or_else(|| session.diagnostics.network.borrow().iter().find(|entry| entry.is_primary).map(|entry| entry.region));
-        let Some(region) = agent_region else {
-            return Ok(ToolContent::Json(json!({ "active_session": true, "region": null })));
-        };
-
-        let regions = session.world.regions(None, 64).await.map_err(|e| format!("regions query failed: {e}"))?;
-        let region_entry = regions.regions.into_iter().find(|entry| entry.region == region);
-        let parcel = session.world.parcel_state(region).await.map_err(|e| format!("parcel query failed: {e}"))?;
-        let sim_stats = session.diagnostics.sim_stats.borrow().get(&region).cloned();
-
-        let region_json = json!({
-            "id": region.get(),
-            "region_id": region_entry.as_ref().and_then(|entry| entry.info.region_id).map(|id| id.to_string()),
-            "name": region_entry.as_ref().and_then(|entry| entry.info.name.as_deref()),
-            "handle": region_entry.as_ref().and_then(|entry| entry.info.handle).map(|handle| handle.get()),
-            "origin": region_entry.as_ref().and_then(|entry| entry.info.resolved_origin()).map(|origin| [origin.x, origin.y, origin.z]),
-        });
-
-        Ok(ToolContent::Json(json!({
-            "active_session": true,
-            "region": region_json,
-            "parcel": parcel.as_ref().map(format_parcel),
-            "sim_stats": sim_stats.as_ref().map(format_sim_stats),
-        })))
-    })
 }
 
 #[cfg(test)]

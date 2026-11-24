@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     error::Error,
     fmt, io,
     net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener},
@@ -7,23 +6,22 @@ use std::{
     time::Duration,
 };
 
-use axum::{
-    Router,
-    extract::{Request, State},
-    http::{StatusCode, header},
-    middleware::{self, Next},
-    response::{IntoResponse, Response},
-};
+use axum::Router;
 use futures::Stream;
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
-    model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ClientJsonRpcMessage, CompleteRequestParams, CompleteResult, ContentBlock,
-        ErrorCode, GetPromptRequestParams, GetPromptResponse, Implementation, JsonObject, ListPromptsResult, ListResourceTemplatesResult,
-        ListResourcesResult, ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities,
-        ServerConfig, ServerJsonRpcMessage, Tool, ToolAnnotations,
+    handler::server::{
+        router::{prompt::PromptRouter, tool::ToolRouter},
+        tool::ToolCallContext,
     },
+    model::{
+        CallToolRequestParams, CallToolResponse, ClientJsonRpcMessage, CompleteRequestParams, CompleteResult, ContentBlock, ErrorCode,
+        Implementation, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
+        ReadResourceResponse, ServerCapabilities, ServerConfig, ServerJsonRpcMessage,
+    },
+    prompt_handler,
     service::RequestContext,
+    tool_handler,
     transport::{
         common::server_side_http::ServerSseMessage,
         streamable_http_server::{
@@ -35,19 +33,17 @@ use rmcp::{
         },
     },
 };
-use serde_json::{Value, json};
 use tokio::{
     net::TcpListener,
     runtime::Handle,
-    sync::{Mutex, Semaphore, watch},
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore, watch},
     task::JoinHandle,
     time,
 };
 
 use super::{
-    MAX_CONCURRENT_REQUESTS, MAX_JSON_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_SESSIONS, REQUEST_TIMEOUT, SERVER_INSTRUCTIONS,
-    SESSION_IDLE_TIMEOUT, prompts, resources,
-    tools::{TOOLS, ToolCallContext, ToolContent, find_tool, screenshot, wait_for},
+    MAX_CONCURRENT_REQUESTS, MAX_JSON_RESPONSE_BYTES, MAX_PNG_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_SESSIONS, REQUEST_TIMEOUT,
+    SERVER_INSTRUCTIONS, SESSION_IDLE_TIMEOUT, prompts, resources, tools,
 };
 use crate::inspection::ViewerInspectionHandle;
 
@@ -95,18 +91,19 @@ impl McpServer {
         let (shutdown, mut shutdown_rx) = watch::channel(false);
 
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_requests.max(1)));
-        let handler = RadiaMcpHandler { handle, config, semaphore: Arc::clone(&semaphore) };
+        let server_handler = RadiaServer::new(handle, config, Arc::clone(&semaphore));
         let mut http_config = StreamableHttpServerConfig::default();
         http_config.legacy_session_mode = true;
         http_config.json_response = false;
         http_config.max_request_body_bytes = config.max_request_bytes;
-        http_config = http_config.with_allowed_hosts([format!("127.0.0.1:{}", addr.port()), format!("localhost:{}", addr.port())]);
+        http_config = http_config
+            .with_allowed_hosts([format!("127.0.0.1:{}", addr.port()), format!("localhost:{}", addr.port())])
+            .with_allowed_origins(["http://127.0.0.1:*", "https://127.0.0.1:*", "http://localhost:*", "https://localhost:*"]);
         let cancellation_token = http_config.cancellation_token.clone();
 
         let session_manager = Arc::new(BoundedSessionManager::new(config.max_sessions, config.session_idle_timeout));
-        let service = StreamableHttpService::new(move || Ok(handler.clone()), session_manager, http_config);
-        let guard_state = GuardState { port: addr.port() };
-        let router = Router::new().nest_service("/mcp", service).layer(middleware::from_fn_with_state(guard_state, guard_middleware));
+        let service = StreamableHttpService::new(move || Ok(server_handler.clone()), session_manager, http_config);
+        let router = Router::new().nest_service("/mcp", service);
 
         let task = runtime.spawn(async move {
             let server = axum::serve(listener, router).with_graceful_shutdown(async move {
@@ -138,6 +135,115 @@ impl McpServer {
     pub fn shutdown(self) {
         self.shutdown.send_replace(true);
         self.task.abort();
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct RadiaServer {
+    pub(super) handle: ViewerInspectionHandle,
+    pub(super) config: McpServerConfig,
+    semaphore: Arc<Semaphore>,
+    tool_router: ToolRouter<Self>,
+    prompt_router: PromptRouter<Self>,
+}
+
+impl RadiaServer {
+    fn new(handle: ViewerInspectionHandle, config: McpServerConfig, semaphore: Arc<Semaphore>) -> Self {
+        Self { handle, config, semaphore, tool_router: tools::build_tool_router(), prompt_router: prompts::build_prompt_router() }
+    }
+
+    fn acquire_permit(&self) -> Result<OwnedSemaphorePermit, ErrorData> {
+        Arc::clone(&self.semaphore)
+            .try_acquire_owned()
+            .map_err(|_| ErrorData::new(ErrorCode(-32000), "server busy: concurrency limit reached", None))
+    }
+}
+
+pub(super) fn response_too_large_error() -> ErrorData {
+    ErrorData::new(ErrorCode(-32002), "response exceeded size limit", None)
+}
+
+#[tool_handler(router = self.tool_router)]
+#[prompt_handler(router = self.prompt_router)]
+impl ServerHandler for RadiaServer {
+    fn get_info(&self) -> ServerConfig {
+        let capabilities = ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().enable_completions().build();
+        ServerConfig::new(capabilities)
+            .with_server_info(Implementation::new("radia", env!("CARGO_PKG_VERSION")))
+            .with_instructions(SERVER_INSTRUCTIONS)
+    }
+
+    async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResponse, ErrorData> {
+        let _permit = self.acquire_permit()?;
+        let tool_name = request.name.clone();
+        let ct = context.ct.clone();
+        let tcc = ToolCallContext::new(self, request, context);
+        let outcome = tokio::select! {
+            biased;
+            () = ct.cancelled() => {
+                return Err(ErrorData::new(ErrorCode(-32000), "request cancelled", None));
+            }
+            outcome = time::timeout(self.config.request_timeout, self.tool_router.call(tcc)) => outcome,
+        };
+        let mut response = match outcome {
+            Ok(result) => result?,
+            Err(_) => return Err(ErrorData::new(ErrorCode(-32001), "tool call timed out", None)),
+        };
+        if let CallToolResponse::Complete(ref mut result) = response {
+            if result.is_error != Some(true)
+                && matches!(tool_name.as_ref(), "screenshot" | "world" | "logs")
+                && let Some(link) = resources::resource_for_tool(tool_name.as_ref())
+            {
+                result.content.push(ContentBlock::resource_link(link));
+            }
+            let max_bytes = if tool_name.as_ref() == "screenshot" { MAX_PNG_RESPONSE_BYTES } else { self.config.max_response_bytes };
+            let encoded_len = serde_json::to_vec(result).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
+            if encoded_len > max_bytes {
+                return Err(response_too_large_error());
+            }
+        }
+        Ok(response)
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        Ok(ListResourcesResult::with_all_items(resources::static_resources()))
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        Ok(ListResourceTemplatesResult::with_all_items(resources::resource_templates()))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        let _permit = self.acquire_permit()?;
+        let ct = context.ct.clone();
+        let outcome = tokio::select! {
+            biased;
+            () = ct.cancelled() => {
+                return Err(ErrorData::new(ErrorCode(-32000), "request cancelled", None));
+            }
+            outcome = time::timeout(self.config.request_timeout, resources::read_resource(self, &request.uri, context)) => outcome,
+        };
+        let result = match outcome {
+            Ok(result) => result?,
+            Err(_) => return Err(ErrorData::new(ErrorCode(-32001), "resource read timed out", None)),
+        };
+        Ok(ReadResourceResponse::Complete(result))
+    }
+
+    async fn complete(&self, request: CompleteRequestParams, _context: RequestContext<RoleServer>) -> Result<CompleteResult, ErrorData> {
+        Ok(prompts::complete(&request, &self.handle).await)
     }
 }
 
@@ -235,221 +341,6 @@ impl SessionManager for BoundedSessionManager {
     }
 }
 
-#[derive(Clone)]
-struct GuardState {
-    port: u16,
-}
-
-async fn guard_middleware(State(state): State<GuardState>, request: Request, next: Next) -> Response {
-    let mut hosts = request.headers().get_all(header::HOST).iter();
-    let host = match (hosts.next(), hosts.next()) {
-        (Some(value), None) => value.to_str().ok(),
-        _ => None,
-    };
-    if !is_allowed_host(host, state.port) {
-        return (StatusCode::FORBIDDEN, "{\"error\":\"forbidden host or origin\"}").into_response();
-    }
-
-    let mut origins = request.headers().get_all(header::ORIGIN).iter();
-    let origin = match (origins.next(), origins.next()) {
-        (None, _) => Some(None),
-        (Some(value), None) => value.to_str().ok().map(Some),
-        _ => None,
-    };
-    let Some(origin) = origin else {
-        return (StatusCode::FORBIDDEN, "{\"error\":\"forbidden host or origin\"}").into_response();
-    };
-    if !is_allowed_origin(origin) {
-        return (StatusCode::FORBIDDEN, "{\"error\":\"forbidden host or origin\"}").into_response();
-    }
-
-    next.run(request).await
-}
-
-#[derive(Clone)]
-struct RadiaMcpHandler {
-    handle: ViewerInspectionHandle,
-    config: McpServerConfig,
-    semaphore: Arc<Semaphore>,
-}
-
-impl ServerHandler for RadiaMcpHandler {
-    fn get_info(&self) -> ServerConfig {
-        let capabilities = ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().enable_completions().build();
-        ServerConfig::new(capabilities)
-            .with_server_info(Implementation::new("radia", env!("CARGO_PKG_VERSION")))
-            .with_instructions(SERVER_INSTRUCTIONS)
-    }
-
-    async fn list_resources(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListResourcesResult, ErrorData> {
-        Ok(ListResourcesResult::with_all_items(resources::static_resources()))
-    }
-
-    async fn list_resource_templates(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListResourceTemplatesResult, ErrorData> {
-        Ok(ListResourceTemplatesResult::with_all_items(resources::resource_templates()))
-    }
-
-    async fn read_resource(
-        &self,
-        request: ReadResourceRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResponse, ErrorData> {
-        let Ok(_permit) = Arc::clone(&self.semaphore).try_acquire_owned() else {
-            return Err(ErrorData::new(ErrorCode(-32000), "server busy: concurrency limit reached", None));
-        };
-        let ct = context.ct.clone();
-        let tool_ctx = ToolCallContext::new(context);
-        let result = tokio::select! {
-            biased;
-            () = ct.cancelled() => {
-                return Err(ErrorData::new(ErrorCode(-32000), "request cancelled", None));
-            }
-            result = resources::read_resource(&request.uri, &self.handle, self.config, tool_ctx) => result?,
-        };
-        Ok(ReadResourceResponse::Complete(result))
-    }
-
-    async fn list_prompts(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListPromptsResult, ErrorData> {
-        Ok(ListPromptsResult::with_all_items(prompts::list_prompts()))
-    }
-
-    async fn get_prompt(
-        &self,
-        request: GetPromptRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<GetPromptResponse, ErrorData> {
-        Ok(GetPromptResponse::Complete(prompts::get_prompt(&request)?))
-    }
-
-    async fn complete(&self, request: CompleteRequestParams, _context: RequestContext<RoleServer>) -> Result<CompleteResult, ErrorData> {
-        Ok(prompts::complete(&request, &self.handle).await)
-    }
-
-    async fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, ErrorData> {
-        let tools = TOOLS
-            .iter()
-            .map(|tool| {
-                let schema = match (tool.input_schema)() {
-                    Value::Object(map) => map,
-                    _ => JsonObject::new(),
-                };
-                let mut annotations = ToolAnnotations::new().read_only(tool.annotations.read_only).open_world(tool.annotations.open_world);
-                if let Some(destructive) = tool.annotations.destructive {
-                    annotations = annotations.destructive(destructive);
-                }
-                if let Some(idempotent) = tool.annotations.idempotent {
-                    annotations = annotations.idempotent(idempotent);
-                }
-                Tool::new_with_raw(tool.name, Some(Cow::Borrowed(tool.description)), Arc::new(schema))
-                    .with_title(tool.title)
-                    .with_annotations(annotations)
-            })
-            .collect();
-        Ok(ListToolsResult::with_all_items(tools))
-    }
-
-    async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResponse, ErrorData> {
-        let Ok(_permit) = Arc::clone(&self.semaphore).try_acquire_owned() else {
-            return Err(ErrorData::new(ErrorCode(-32000), "server busy: concurrency limit reached", None));
-        };
-        let Some(tool) = find_tool(request.name.as_ref()) else {
-            return Err(ErrorData::invalid_params("unknown tool", None));
-        };
-        let arguments = request.arguments.map(Value::Object).unwrap_or_else(|| json!({}));
-        let ct = context.ct.clone();
-        let tool_ctx = ToolCallContext::new(context);
-        let call_future = match tool.name {
-            "wait_for" => wait_for::call_with_context(self.handle.clone(), arguments, tool_ctx),
-            "screenshot" => screenshot::call_with_context(self.handle.clone(), arguments, tool_ctx),
-            _ => (tool.handler)(self.handle.clone(), arguments),
-        };
-        let outcome = tokio::select! {
-            biased;
-            () = ct.cancelled() => {
-                return Err(ErrorData::new(ErrorCode(-32000), "request cancelled", None));
-            }
-            outcome = time::timeout(self.config.request_timeout, call_future) => outcome,
-        };
-        let (mut result, max_bytes) = match outcome {
-            Ok(Ok(ToolContent::Json(value))) => {
-                let limit = tool.max_response_bytes.min(self.config.max_response_bytes);
-                (CallToolResult::success(vec![ContentBlock::text(value.to_string())]), limit)
-            }
-            Ok(Ok(ToolContent::ImagePng { data_base64, width, height })) => (
-                CallToolResult::success(vec![
-                    ContentBlock::image(data_base64, "image/png"),
-                    ContentBlock::text(json!({ "width": width, "height": height }).to_string()),
-                ]),
-                tool.max_response_bytes,
-            ),
-            Ok(Err(message)) => (CallToolResult::error(vec![ContentBlock::text(message)]), self.config.max_response_bytes),
-            Err(_) => return Err(ErrorData::new(ErrorCode(-32001), "tool call timed out", None)),
-        };
-        if result.is_error == Some(false)
-            && matches!(tool.name, "screenshot" | "world" | "logs")
-            && let Some(link) = resources::resource_for_tool(tool.name)
-        {
-            result.content.push(ContentBlock::resource_link(link));
-        }
-        let encoded_len = serde_json::to_vec(&result).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
-        if encoded_len > max_bytes {
-            return Err(ErrorData::new(ErrorCode(-32002), "response exceeded size limit", None));
-        }
-        Ok(CallToolResponse::Complete(result))
-    }
-}
-
-fn is_allowed_host(host: Option<&str>, port: u16) -> bool {
-    let Some(host) = host else {
-        return false;
-    };
-    let Some((name, host_port)) = host.split_once(':') else {
-        return false;
-    };
-    host_port.bytes().all(|byte| byte.is_ascii_digit()) && host_port.parse::<u16>().ok() == Some(port) && is_loopback_host(name)
-}
-
-fn is_allowed_origin(origin: Option<&str>) -> bool {
-    let Some(origin) = origin else {
-        return true;
-    };
-    let Some((scheme, authority)) = origin.split_once("://") else {
-        return false;
-    };
-    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
-        return false;
-    }
-    if authority.is_empty() || authority.contains(['/', '?', '#', '@']) {
-        return false;
-    }
-    let host = match authority.split_once(':') {
-        Some((host, port)) if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) && port.parse::<u16>().is_ok() => host,
-        Some(_) => return false,
-        None => authority,
-    };
-    is_loopback_host(host)
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost")
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -471,9 +362,10 @@ mod tests {
         sync::{mpsc, watch},
         task,
     };
+    use uuid::Uuid;
     use world::{World, WorldLimits};
 
-    use super::{McpServer, McpServerConfig, TOOLS};
+    use super::{McpServer, McpServerConfig};
     use crate::{
         asset_coordinator::AssetCoordinator,
         inspection::{
@@ -564,13 +456,40 @@ mod tests {
 
         let (session_id, init_parsed) = open_session(&client, addr).await;
         assert_eq!(init_parsed["result"]["serverInfo"]["name"], "radia");
+        assert!(init_parsed["result"]["instructions"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(init_parsed["result"]["capabilities"]["tools"].is_object());
+        assert!(init_parsed["result"]["capabilities"]["resources"].is_object());
+        assert!(init_parsed["result"]["capabilities"]["prompts"].is_object());
+        assert!(init_parsed["result"]["capabilities"]["completions"].is_object());
 
         let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
         let (status, _, body) = post_mcp(&client, addr, Some(&session_id), &list).await;
         assert_eq!(status, 200, "list body: {body}");
         let parsed = parse_mcp_payload(&body);
         let tools = parsed["result"]["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), TOOLS.len());
+        assert_eq!(tools.len(), 21);
+
+        let mut non_read_only = Vec::new();
+        for tool in tools {
+            let name = tool["name"].as_str().expect("tool name");
+            assert!(tool["title"].as_str().is_some_and(|t| !t.trim().is_empty()), "tool {name} missing title");
+            assert!(tool["inputSchema"].is_object(), "tool {name} missing inputSchema");
+            if name != "screenshot" {
+                assert!(tool["outputSchema"].is_object(), "tool {name} missing outputSchema");
+            }
+            let ann = tool["annotations"].as_object().unwrap_or_else(|| panic!("tool {name} missing annotations"));
+            let read_only = ann.get("readOnlyHint").and_then(Value::as_bool).unwrap_or(false);
+            if !read_only {
+                non_read_only.push(name.to_owned());
+                assert_eq!(ann.get("destructiveHint").and_then(Value::as_bool), Some(false));
+                assert_eq!(ann.get("idempotentHint").and_then(Value::as_bool), Some(true));
+                assert_eq!(ann.get("openWorldHint").and_then(Value::as_bool), Some(name == "set_camera"));
+            } else {
+                assert_eq!(ann.get("openWorldHint").and_then(Value::as_bool), Some(false));
+            }
+        }
+        non_read_only.sort_unstable();
+        assert_eq!(non_read_only, vec!["set_camera", "set_log_level", "set_setting"]);
 
         let call = json!({
             "jsonrpc": "2.0",
@@ -582,6 +501,7 @@ mod tests {
         assert_eq!(status, 200, "call body: {body}");
         let parsed = parse_mcp_payload(&body);
         assert_eq!(parsed["result"]["isError"], false);
+        assert!(parsed["result"]["structuredContent"].is_object());
         let text = parsed["result"]["content"][0]["text"].as_str().expect("text content");
         assert!(text.contains("sample warning"));
 
@@ -687,7 +607,7 @@ mod tests {
             .expect("send oversized request");
         assert_eq!(response.status().as_u16(), 413);
 
-        let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "logs" }});
+        let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "logs", "arguments": {} }});
         let (status, _, body) = post_mcp(&client, addr, Some(&session_id), &call).await;
         assert_eq!(status, 200);
         let parsed = parse_mcp_payload(&body);
@@ -697,18 +617,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_cap_rejects_excess_sessions() {
+    async fn session_cap_rejects_excess_and_concurrent_sessions() {
         let (_pub, handle) = inspection_channel(RecentLogs::default());
         let config = McpServerConfig { max_sessions: 2, ..McpServerConfig::default() };
         let server = McpServer::start(handle, config, &Handle::current()).expect("start server");
         let addr = server.addr();
         let client = Client::new();
 
-        let _first = open_session(&client, addr).await;
-        let _second = open_session(&client, addr).await;
+        let mut tasks = Vec::new();
+        for _ in 0..5 {
+            let client = client.clone();
+            tasks.push(tokio::spawn(async move { post_mcp(&client, addr, None, &init_payload()).await.0 }));
+        }
+        let mut ok_count = 0usize;
+        for task in tasks {
+            if task.await.expect("init task finished") == 200 {
+                ok_count += 1;
+            }
+        }
+        assert_eq!(ok_count, 2, "concurrent initializes must not exceed max_sessions");
 
         let (status, _, _) = post_mcp(&client, addr, None, &init_payload()).await;
-        assert_ne!(status, 200, "third session beyond cap must be rejected");
+        assert_ne!(status, 200, "extra session beyond cap must be rejected");
 
         server.shutdown();
     }
@@ -744,7 +674,7 @@ mod tests {
         assert_eq!(status, 200, "resources/templates/list body: {body}");
         let parsed = parse_mcp_payload(&body);
         let templates = parsed["result"]["resourceTemplates"].as_array().expect("templates array");
-        assert!(templates.iter().any(|entry| entry["uriTemplate"] == "viewer://object/{local_id}"));
+        assert!(templates.iter().any(|entry| entry["uriTemplate"] == "viewer://object/{object_id}"));
 
         let tool_req = json!({"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": { "name": "logs", "arguments": {} }});
         let (_, _, tool_body) = post_mcp(&client, addr, Some(&session_id), &tool_req).await;
@@ -756,7 +686,9 @@ mod tests {
         let res_text = parse_mcp_payload(&read_body)["result"]["contents"][0]["text"].as_str().expect("resource text").to_owned();
         assert_eq!(res_text, tool_text);
 
-        let missing_req = json!({"jsonrpc": "2.0", "id": 14, "method": "resources/read", "params": { "uri": "viewer://object/999999" }});
+        let unknown_uuid = Uuid::from_u128(0x1234_5678);
+        let missing_req =
+            json!({"jsonrpc": "2.0", "id": 14, "method": "resources/read", "params": { "uri": format!("viewer://object/{unknown_uuid}") }});
         let (status, _, missing_body) = post_mcp(&client, addr, Some(&session_id), &missing_req).await;
         assert_eq!(status, 200);
         assert!(parse_mcp_payload(&missing_body).get("error").is_some(), "expected MCP error for unknown object, got: {missing_body}");
@@ -788,39 +720,22 @@ mod tests {
         let missing_req = json!({"jsonrpc": "2.0", "id": 21, "method": "prompts/get", "params": { "name": "diagnose_object" }});
         let (status, _, missing_body) = post_mcp(&client, addr, Some(&session_id), &missing_req).await;
         assert_eq!(status, 200);
-        assert!(parse_mcp_payload(&missing_body).get("error").is_some(), "expected MCP error for missing local_id, got: {missing_body}");
+        assert!(parse_mcp_payload(&missing_body).get("error").is_some(), "expected MCP error for missing object_id, got: {missing_body}");
 
+        let target_uuid = Uuid::from_u128(42).to_string();
         let ok_req = json!({
             "jsonrpc": "2.0",
             "id": 22,
             "method": "prompts/get",
-            "params": { "name": "diagnose_object", "arguments": { "local_id": "42" } }
+            "params": { "name": "diagnose_object", "arguments": { "object_id": target_uuid } }
         });
         let (status, _, ok_body) = post_mcp(&client, addr, Some(&session_id), &ok_req).await;
         assert_eq!(status, 200, "prompts/get body: {ok_body}");
         let messages = parse_mcp_payload(&ok_body)["result"]["messages"].as_array().expect("messages array").clone();
         assert!(!messages.is_empty());
-        assert!(messages[0]["content"]["text"].as_str().expect("prompt text").contains("42"));
+        assert!(messages[0]["content"]["text"].as_str().expect("prompt text").contains(&target_uuid));
 
         server.shutdown();
-    }
-
-    #[test]
-    fn tool_registry_titles_and_annotations() {
-        let mut non_read_only = Vec::new();
-        for tool in TOOLS {
-            assert!(!tool.title.trim().is_empty(), "tool {} missing title", tool.name);
-            if !tool.annotations.read_only {
-                non_read_only.push(tool.name);
-                assert_eq!(tool.annotations.destructive, Some(false), "tool {} must not be destructive", tool.name);
-                assert_eq!(tool.annotations.idempotent, Some(true), "tool {} must be idempotent", tool.name);
-                assert_eq!(tool.annotations.open_world, tool.name == "set_camera", "unexpected open_world for {}", tool.name);
-            } else {
-                assert!(!tool.annotations.open_world, "read tool {} must have open_world=false", tool.name);
-            }
-        }
-        non_read_only.sort_unstable();
-        assert_eq!(non_read_only, vec!["set_camera", "set_log_level", "set_setting"]);
     }
 
     #[tokio::test]

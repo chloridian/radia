@@ -1,49 +1,40 @@
-use serde_json::{Value, json};
+use rmcp::{
+    ErrorData,
+    handler::server::wrapper::{Json, Parameters},
+    tool, tool_router,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
-use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
 use crate::{
-    inspection::ViewerInspectionHandle,
     logging::{LogControl, LogLevel},
-    mcp::MAX_JSON_RESPONSE_BYTES,
+    mcp::server::RadiaServer,
 };
 
-pub const SPEC: ToolSpec = ToolSpec {
-    name: "set_log_level",
-    title: "Set Log Level",
-    description: "Change the local viewer's runtime log filter (global level and/or per-target override) through LogControl and return the active filter.",
-    annotations: ToolAnnotationsSpec::local_write(),
-    input_schema,
-    handler,
-    max_response_bytes: MAX_JSON_RESPONSE_BYTES,
-};
-
-fn input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "level": { "type": "string", "enum": ["error", "warn", "info", "debug", "trace"] },
-            "target": { "type": "string" },
-            "target_level": { "type": "string", "enum": ["error", "warn", "info", "debug", "trace", "clear"] }
-        }
-    })
+#[derive(Deserialize, JsonSchema)]
+pub struct SetLogLevelArgs {
+    #[schemars(description = "Global log level: error, warn, info, debug, or trace.")]
+    pub level: Option<String>,
+    #[schemars(description = "Rust tracing target name for a per-target override.")]
+    pub target: Option<String>,
+    #[schemars(description = "Per-target log level: error, warn, info, debug, trace, or clear.")]
+    pub target_level: Option<String>,
 }
 
-fn apply_log_level(control: &LogControl, args: &Value) -> Result<Value, String> {
-    let level = match args.get("level") {
-        Some(raw) => {
-            let text = raw.as_str().ok_or_else(|| "level must be a string".to_owned())?;
-            let parsed = LogLevel::from_directive(text).ok_or_else(|| format!("invalid log level `{text}`"))?;
-            Some(parsed)
-        }
+#[derive(Serialize, JsonSchema)]
+pub struct SetLogLevelOutput {
+    pub level: String,
+    pub filter: String,
+}
+
+fn apply_log_level(control: &LogControl, args: &SetLogLevelArgs) -> Result<SetLogLevelOutput, String> {
+    let level = match args.level.as_deref() {
+        Some(text) => Some(LogLevel::from_directive(text).ok_or_else(|| format!("invalid log level `{text}`"))?),
         None => None,
     };
-    let target = match args.get("target") {
-        Some(raw) => {
-            let name = raw.as_str().ok_or_else(|| "target must be a string".to_owned())?;
-            let level_raw = args
-                .get("target_level")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "target_level is required when target is specified".to_owned())?;
+    let target = match args.target.as_deref() {
+        Some(name) => {
+            let level_raw = args.target_level.as_deref().ok_or_else(|| "target_level is required when target is specified".to_owned())?;
             let target_level = if level_raw == "clear" {
                 None
             } else {
@@ -52,7 +43,7 @@ fn apply_log_level(control: &LogControl, args: &Value) -> Result<Value, String> 
             Some((name, target_level))
         }
         None => {
-            if args.get("target_level").is_some() {
+            if args.target_level.is_some() {
                 return Err("target is required when target_level is specified".to_owned());
             }
             None
@@ -62,27 +53,29 @@ fn apply_log_level(control: &LogControl, args: &Value) -> Result<Value, String> 
         return Err("at least one of level or target is required".to_owned());
     }
     let filter = control.set_filter(level, target).map_err(|e| e.to_string())?;
-    Ok(json!({
-        "level": control.level().label().to_ascii_lowercase(),
-        "filter": filter,
-    }))
+    Ok(SetLogLevelOutput { level: control.level().label().to_ascii_lowercase(), filter })
 }
 
-fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
-    Box::pin(async move {
-        let Some(control) = handle.log_control() else {
-            return Err("log control is unavailable".to_owned());
+#[tool_router(router = set_log_level_router, vis = "pub(super)")]
+impl RadiaServer {
+    #[tool(
+        name = "set_log_level",
+        title = "Set Log Level",
+        description = "Change the local viewer's runtime log filter (global level and/or per-target override) through LogControl and return the active filter.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    pub(crate) async fn set_log_level(&self, Parameters(args): Parameters<SetLogLevelArgs>) -> Result<Json<SetLogLevelOutput>, ErrorData> {
+        let Some(control) = self.handle.log_control() else {
+            return Err(ErrorData::internal_error("log control is unavailable", None));
         };
-        let result = apply_log_level(&control, &args)?;
-        Ok(ToolContent::Json(result))
-    })
+        let output = apply_log_level(&control, &args).map_err(|msg| ErrorData::invalid_params(msg, None))?;
+        Ok(Json(output))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
-    use super::apply_log_level;
+    use super::{SetLogLevelArgs, apply_log_level};
     use crate::logging::{LogControl, LogLevel};
 
     #[test]
@@ -90,20 +83,34 @@ mod tests {
         let control = LogControl::noop();
         let initial_filter = control.filter();
 
-        assert!(apply_log_level(&control, &json!({ "level": "verbose" })).is_err());
-        assert!(apply_log_level(&control, &json!({ "target": "render,viewer=trace", "target_level": "debug" })).is_err());
-        assert!(apply_log_level(&control, &json!({ "target": "", "target_level": "debug" })).is_err());
-        assert!(apply_log_level(&control, &json!({ "target": "render" })).is_err());
-        assert!(apply_log_level(&control, &json!({})).is_err());
+        assert!(apply_log_level(&control, &SetLogLevelArgs { level: Some("verbose".into()), target: None, target_level: None }).is_err());
+        assert!(
+            apply_log_level(
+                &control,
+                &SetLogLevelArgs { level: None, target: Some("render,viewer=trace".into()), target_level: Some("debug".into()) },
+            )
+            .is_err()
+        );
+        assert!(
+            apply_log_level(&control, &SetLogLevelArgs { level: None, target: Some(String::new()), target_level: Some("debug".into()) })
+                .is_err()
+        );
+        assert!(apply_log_level(&control, &SetLogLevelArgs { level: None, target: Some("render".into()), target_level: None }).is_err());
+        assert!(apply_log_level(&control, &SetLogLevelArgs { level: None, target: None, target_level: None }).is_err());
         assert_eq!(control.filter(), initial_filter);
 
-        let updated =
-            apply_log_level(&control, &json!({ "level": "debug", "target": "render", "target_level": "trace" })).expect("valid filter");
+        let updated = apply_log_level(
+            &control,
+            &SetLogLevelArgs { level: Some("debug".into()), target: Some("render".into()), target_level: Some("trace".into()) },
+        )
+        .expect("valid filter");
         assert_eq!(control.level(), LogLevel::Debug);
-        assert_eq!(updated["level"], "debug");
-        assert!(updated["filter"].as_str().expect("filter string").contains("render=trace"));
+        assert_eq!(updated.level, "debug");
+        assert!(updated.filter.contains("render=trace"));
 
-        let cleared = apply_log_level(&control, &json!({ "target": "render", "target_level": "clear" })).expect("clear target");
-        assert!(!cleared["filter"].as_str().expect("filter string").contains("render=trace"));
+        let cleared =
+            apply_log_level(&control, &SetLogLevelArgs { level: None, target: Some("render".into()), target_level: Some("clear".into()) })
+                .expect("clear target");
+        assert!(!cleared.filter.contains("render=trace"));
     }
 }

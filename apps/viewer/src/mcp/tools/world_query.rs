@@ -1,129 +1,190 @@
-use serde_json::{Value, json};
+use rmcp::{
+    ErrorData,
+    handler::server::wrapper::{Json, Parameters},
+    tool, tool_router,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use world::{ObjectDetail, ObjectDetailResult, WorldRevision};
 
-use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec, format_shape, lookup_object_entity};
-use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
+use super::{ShapeOutput, format_shape, lookup_object_entity};
+use crate::{inspection::ViewerInspectionHandle, mcp::server::RadiaServer};
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 100;
 
-pub const SPEC: ToolSpec = ToolSpec {
-    name: "world",
-    title: "World Query",
-    description: "Query active regions, bounded object lists, or object properties by UUID.",
-    annotations: ToolAnnotationsSpec::read_only(),
-    input_schema,
-    handler,
-    max_response_bytes: MAX_JSON_RESPONSE_BYTES,
-};
-
-fn input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "query": { "type": "string", "enum": ["summary", "regions", "objects", "object"] },
-            "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT },
-            "object_id": { "type": "string" }
-        }
-    })
+#[derive(Deserialize, JsonSchema)]
+pub struct WorldArgs {
+    #[schemars(description = "Query mode: 'summary', 'regions', 'objects', or 'object'. Defaults to 'summary'.")]
+    pub query: Option<String>,
+    #[schemars(description = "Maximum number of items to return (1..=100).")]
+    pub limit: Option<usize>,
+    #[schemars(description = "Object UUID (required when query='object').")]
+    pub object_id: Option<String>,
 }
 
-fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
-    Box::pin(async move {
-        let Some(session) = handle.session() else {
-            return Ok(ToolContent::Json(json!({ "active_session": false })));
-        };
-        let query = args.get("query").and_then(Value::as_str).unwrap_or("summary");
-        let limit =
-            args.get("limit").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()).unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-        let revision = session.world.revision().map_err(|e| format!("world revision failed: {e}"))?;
+#[derive(Serialize, JsonSchema)]
+pub struct WorldRegionItemOutput {
+    pub region: u64,
+    pub name: Option<String>,
+    pub handle: String,
+}
 
-        match query {
-            "summary" => {
-                let regions = session.world.regions(None, 32).await.map_err(|e| format!("regions query failed: {e}"))?;
-                let objects = session.world.objects(None, limit).await.map_err(|e| format!("objects query failed: {e}"))?;
-                Ok(ToolContent::Json(json!({
-                    "active_session": true,
-                    "revision": revision.get(),
-                    "region_count": regions.regions.len(),
-                    "objects_returned": objects.objects.len(),
-                    "has_more_objects": objects.next.is_some(),
-                })))
-            }
+#[derive(Serialize, JsonSchema)]
+pub struct WorldObjectItemOutput {
+    pub entity: String,
+    pub id: String,
+    pub region: u64,
+    pub local_id: u32,
+    pub kind: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct WorldObjectDetailOutput {
+    pub found: bool,
+    pub revision: u64,
+    pub entity: String,
+    pub id: String,
+    pub region: u64,
+    pub local_id: u32,
+    pub kind: String,
+    pub shape: Option<ShapeOutput>,
+    pub is_physical: bool,
+    pub attachment_point: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum WorldOutput {
+    Inactive { active_session: bool },
+    Summary { active_session: bool, revision: u64, region_count: usize, objects_returned: usize, has_more_objects: bool },
+    Regions { revision: u64, regions: Vec<WorldRegionItemOutput>, has_more: bool },
+    Objects { revision: u64, objects: Vec<WorldObjectItemOutput>, has_more: bool },
+    ObjectNotFound { found: bool, object_id: String },
+    ObjectDetail(WorldObjectDetailOutput),
+}
+
+#[tool_router(router = world_router, vis = "pub(super)")]
+impl RadiaServer {
+    #[tool(
+        name = "world",
+        title = "World Query",
+        description = "Query active regions, bounded object lists, or object properties by UUID.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    pub(crate) async fn world(&self, Parameters(args): Parameters<WorldArgs>) -> Result<Json<WorldOutput>, ErrorData> {
+        let query = args.query.as_deref().unwrap_or("summary");
+        let limit = args.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+        let output = match query {
+            "summary" => world_summary_data(&self.handle).await.map_err(|msg| ErrorData::internal_error(msg, None))?,
             "regions" => {
-                let page = session.world.regions(None, limit).await.map_err(|e| format!("regions query failed: {e}"))?;
-                let regions: Vec<Value> = page
+                let Some(session) = self.handle.session() else {
+                    return Ok(Json(WorldOutput::Inactive { active_session: false }));
+                };
+                let revision =
+                    session.world.revision().map_err(|e| ErrorData::internal_error(format!("world revision failed: {e}"), None))?;
+                let page = session
+                    .world
+                    .regions(None, limit)
+                    .await
+                    .map_err(|e| ErrorData::internal_error(format!("regions query failed: {e}"), None))?;
+                let regions = page
                     .regions
                     .into_iter()
-                    .map(|region| {
-                        json!({
-                            "region": region.region.get(),
-                            "name": region.info.name,
-                            "handle": format!("{:?}", region.info.handle),
-                        })
+                    .map(|region| WorldRegionItemOutput {
+                        region: region.region.get(),
+                        name: region.info.name,
+                        handle: format!("{:?}", region.info.handle),
                     })
                     .collect();
-                Ok(ToolContent::Json(json!({
-                    "revision": revision.get(),
-                    "regions": regions,
-                    "has_more": page.next.is_some(),
-                })))
+                WorldOutput::Regions { revision: revision.get(), regions, has_more: page.next.is_some() }
             }
             "objects" => {
-                let page = session.world.objects(None, limit).await.map_err(|e| format!("objects query failed: {e}"))?;
-                let objects: Vec<Value> = page
+                let Some(session) = self.handle.session() else {
+                    return Ok(Json(WorldOutput::Inactive { active_session: false }));
+                };
+                let revision =
+                    session.world.revision().map_err(|e| ErrorData::internal_error(format!("world revision failed: {e}"), None))?;
+                let page = session
+                    .world
+                    .objects(None, limit)
+                    .await
+                    .map_err(|e| ErrorData::internal_error(format!("objects query failed: {e}"), None))?;
+                let objects = page
                     .objects
                     .into_iter()
-                    .map(|item| {
-                        json!({
-                            "entity": format!("{:?}", item.entity),
-                            "id": item.id.to_string(),
-                            "region": item.address.region().get(),
-                            "local_id": item.address.local_id(),
-                            "kind": format!("{:?}", item.kind),
-                        })
+                    .map(|item| WorldObjectItemOutput {
+                        entity: format!("{:?}", item.entity),
+                        id: item.id.to_string(),
+                        region: item.address.region().get(),
+                        local_id: item.address.local_id().get(),
+                        kind: format!("{:?}", item.kind),
                     })
                     .collect();
-                Ok(ToolContent::Json(json!({
-                    "revision": revision.get(),
-                    "objects": objects,
-                    "has_more": page.next.is_some(),
-                })))
+                WorldOutput::Objects { revision: revision.get(), objects, has_more: page.next.is_some() }
             }
             "object" => {
-                let Some(id_str) = args.get("object_id").and_then(Value::as_str) else {
-                    return Err("object_id is required for query=object".to_owned());
+                let Some(session) = self.handle.session() else {
+                    return Ok(Json(WorldOutput::Inactive { active_session: false }));
                 };
-                let Some(entity) = lookup_object_entity(&session.world, id_str).await? else {
-                    return Ok(ToolContent::Json(json!({ "found": false, "object_id": id_str })));
+                let Some(id_str) = args.object_id.as_deref() else {
+                    return Err(ErrorData::invalid_params("object_id is required for query=object", None));
                 };
-                let batch = session.world.details(&[entity]).await.map_err(|e| format!("details query failed: {e}"))?;
+                let revision =
+                    session.world.revision().map_err(|e| ErrorData::internal_error(format!("world revision failed: {e}"), None))?;
+                let Some(entity) =
+                    lookup_object_entity(&session.world, id_str).await.map_err(|msg| ErrorData::invalid_params(msg, None))?
+                else {
+                    return Ok(Json(WorldOutput::ObjectNotFound { found: false, object_id: id_str.to_owned() }));
+                };
+                let batch = session
+                    .world
+                    .details(&[entity])
+                    .await
+                    .map_err(|e| ErrorData::internal_error(format!("details query failed: {e}"), None))?;
                 let Some(detail) = batch.details.into_iter().find_map(|entry| match entry {
                     ObjectDetailResult::Found(detail) => Some(detail),
                     _ => None,
                 }) else {
-                    return Ok(ToolContent::Json(json!({ "found": false, "object_id": id_str })));
+                    return Ok(Json(WorldOutput::ObjectNotFound { found: false, object_id: id_str.to_owned() }));
                 };
-                Ok(ToolContent::Json(format_object_detail(revision, &detail)))
+                WorldOutput::ObjectDetail(format_object_detail(revision, &detail))
             }
-            other => Err(format!("unknown world query: {other}")),
-        }
+            other => return Err(ErrorData::invalid_params(format!("unknown world query: {other}"), None)),
+        };
+        Ok(Json(output))
+    }
+}
+
+pub(in crate::mcp) async fn world_summary_data(handle: &ViewerInspectionHandle) -> Result<WorldOutput, String> {
+    let Some(session) = handle.session() else {
+        return Ok(WorldOutput::Inactive { active_session: false });
+    };
+    let revision = session.world.revision().map_err(|e| format!("world revision failed: {e}"))?;
+    let regions = session.world.regions(None, 32).await.map_err(|e| format!("regions query failed: {e}"))?;
+    let objects = session.world.objects(None, DEFAULT_LIMIT).await.map_err(|e| format!("objects query failed: {e}"))?;
+    Ok(WorldOutput::Summary {
+        active_session: true,
+        revision: revision.get(),
+        region_count: regions.regions.len(),
+        objects_returned: objects.objects.len(),
+        has_more_objects: objects.next.is_some(),
     })
 }
 
-fn format_object_detail(revision: WorldRevision, detail: &ObjectDetail) -> Value {
-    json!({
-        "found": true,
-        "revision": revision.get(),
-        "entity": format!("{:?}", detail.summary.entity),
-        "id": detail.summary.id.to_string(),
-        "region": detail.summary.address.region().get(),
-        "local_id": detail.summary.address.local_id(),
-        "kind": format!("{:?}", detail.summary.kind),
-        "shape": detail.shape.as_ref().map(format_shape),
-        "is_physical": detail.is_physical,
-        "attachment_point": detail.attachment_point.map(|point| format!("{point:?}")),
-    })
+fn format_object_detail(revision: WorldRevision, detail: &ObjectDetail) -> WorldObjectDetailOutput {
+    WorldObjectDetailOutput {
+        found: true,
+        revision: revision.get(),
+        entity: format!("{:?}", detail.summary.entity),
+        id: detail.summary.id.to_string(),
+        region: detail.summary.address.region().get(),
+        local_id: detail.summary.address.local_id().get(),
+        kind: format!("{:?}", detail.summary.kind),
+        shape: detail.shape.as_ref().map(format_shape),
+        is_physical: detail.is_physical,
+        attachment_point: detail.attachment_point.map(|point| format!("{point:?}")),
+    }
 }
 
 #[cfg(test)]
@@ -165,7 +226,7 @@ mod tests {
         drop(world.observe_object(observation).expect("observe mesh"));
         let entity = world.entity(mesh_id).expect("mesh entity");
         let mesh_detail = world.object_detail(entity).expect("mesh detail");
-        let mesh_output = format_object_detail(world.revision(), &mesh_detail);
+        let mesh_output = serde_json::to_value(format_object_detail(world.revision(), &mesh_detail)).expect("serialize mesh");
         assert_eq!(mesh_output["shape"]["kind"], "mesh");
         assert_eq!(mesh_output["shape"]["flags"]["invert"], true);
         assert!(!mesh_output.to_string().contains(&secret_mesh.to_string()));
@@ -182,7 +243,7 @@ mod tests {
         drop(world.observe_object(sculpt_obs).expect("observe sculpt"));
         let sculpt_entity = world.entity(sculpt_id).expect("sculpt entity");
         let sculpt_detail = world.object_detail(sculpt_entity).expect("sculpt detail");
-        let sculpt_output = format_object_detail(world.revision(), &sculpt_detail);
+        let sculpt_output = serde_json::to_value(format_object_detail(world.revision(), &sculpt_detail)).expect("serialize sculpt");
         assert_eq!(sculpt_output["shape"]["kind"], "sculpt");
         assert_eq!(sculpt_output["shape"]["sculpt_type"], "torus");
         assert_eq!(sculpt_output["shape"]["flags"]["mirror"], true);

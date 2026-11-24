@@ -1,46 +1,42 @@
-use std::{
-    future,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use rmcp::{
+    ErrorData, RoleServer,
+    handler::server::wrapper::{Json, Parameters},
+    model::{ErrorCode, ProgressNotificationParam},
+    service::RequestContext,
+    tool, tool_router,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use tokio::time::{self, MissedTickBehavior};
 
-use super::{ToolAnnotationsSpec, ToolCallContext, ToolContent, ToolFuture, ToolSpec};
-use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
+use crate::mcp::server::RadiaServer;
 
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 const MAX_TIMEOUT_MS: u64 = 30_000;
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
-pub const SPEC: ToolSpec = ToolSpec {
-    name: "wait_for",
-    title: "Wait For Event",
-    description: "Wait on watch channels until world_revision >= target, asset_queue_empty, or texture_event advances, with a hard timeout.",
-    annotations: ToolAnnotationsSpec::read_only(),
-    input_schema,
-    handler,
-    max_response_bytes: MAX_JSON_RESPONSE_BYTES,
-};
-
-fn input_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["condition"],
-        "properties": {
-            "condition": { "type": "string", "enum": ["world_revision", "asset_queue_empty", "texture_event"] },
-            "revision": { "type": "integer", "minimum": 0 },
-            "timeout_ms": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS }
-        }
-    })
+#[derive(Deserialize, JsonSchema)]
+pub struct WaitForArgs {
+    #[schemars(description = "Condition to wait for: 'world_revision', 'asset_queue_empty', or 'texture_event'.")]
+    pub condition: String,
+    #[schemars(description = "Target World revision (required when condition='world_revision').")]
+    pub revision: Option<u64>,
+    #[schemars(description = "Timeout in milliseconds (1..=30000).")]
+    pub timeout_ms: Option<u64>,
 }
 
-fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
-    Box::pin(run_wait_for(handle, args, None))
-}
-
-pub(in crate::mcp) fn call_with_context(handle: ViewerInspectionHandle, args: Value, ctx: ToolCallContext) -> ToolFuture {
-    Box::pin(run_wait_for(handle, args, Some(ctx)))
+#[derive(Serialize, JsonSchema)]
+pub struct WaitForOutput {
+    pub satisfied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timed_out: Option<bool>,
+    pub condition: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -53,7 +49,7 @@ enum WaitOutcome<T> {
 async fn await_with_cancellation_and_progress<T, F>(
     condition: &str,
     timeout: Duration,
-    ctx: Option<&ToolCallContext>,
+    context: &RequestContext<RoleServer>,
     future: F,
 ) -> WaitOutcome<T>
 where
@@ -64,143 +60,161 @@ where
     tokio::pin!(deadline);
     tokio::pin!(future);
 
-    let report_progress = ctx.is_some_and(ToolCallContext::has_progress_token);
+    let progress_token = context.meta.get_progress_token();
+    let report_progress = progress_token.is_some();
     let mut progress_tick = time::interval_at(time::Instant::now() + PROGRESS_INTERVAL, PROGRESS_INTERVAL);
     progress_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
             biased;
-            () = async {
-                match ctx {
-                    Some(ctx) => ctx.cancelled().await,
-                    None => future::pending::<()>().await,
-                }
-            } => return WaitOutcome::Cancelled,
+            () = context.ct.cancelled() => return WaitOutcome::Cancelled,
             result = &mut future => return WaitOutcome::Ready(result),
             () = &mut deadline => return WaitOutcome::TimedOut,
             _ = progress_tick.tick(), if report_progress => {
-                if let Some(ctx) = ctx {
-                    ctx.report_progress(
-                        started.elapsed().as_secs_f64(),
-                        Some(timeout.as_secs_f64()),
-                        Some(format!("waiting for {condition}")),
-                    )
-                    .await;
+                if let Some(token) = progress_token.clone() {
+                    let mut param = ProgressNotificationParam::new(token, started.elapsed().as_secs_f64());
+                    param.total = Some(timeout.as_secs_f64());
+                    param.message = Some(format!("waiting for {condition}"));
+                    if let Err(error) = context.peer.notify_progress(param).await {
+                        tracing::debug!(%error, "MCP wait_for progress notification dropped");
+                    }
                 }
             }
         }
     }
 }
 
-async fn run_wait_for(handle: ViewerInspectionHandle, args: Value, ctx: Option<ToolCallContext>) -> Result<ToolContent, String> {
-    let Some(session) = handle.session() else {
-        return Err("no active scene session".to_owned());
-    };
-    let Some(condition) = args.get("condition").and_then(Value::as_str) else {
-        return Err("condition is required".to_owned());
-    };
-    let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(DEFAULT_TIMEOUT_MS).clamp(1, MAX_TIMEOUT_MS);
-    let timeout = Duration::from_millis(timeout_ms);
+#[tool_router(router = wait_for_router, vis = "pub(super)")]
+impl RadiaServer {
+    #[tool(
+        name = "wait_for",
+        title = "Wait For Event",
+        description = "Wait on watch channels until world_revision >= target, asset_queue_empty, or texture_event advances, with a hard timeout.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    pub(crate) async fn wait_for(
+        &self,
+        Parameters(args): Parameters<WaitForArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<WaitForOutput>, ErrorData> {
+        let Some(session) = self.handle.session() else {
+            return Err(ErrorData::internal_error("no active scene session", None));
+        };
+        let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).clamp(1, MAX_TIMEOUT_MS);
+        let timeout = Duration::from_millis(timeout_ms);
 
-    match condition {
-        "world_revision" => {
-            let Some(target) = args.get("revision").and_then(Value::as_u64) else {
-                return Err("revision is required for condition=world_revision".to_owned());
-            };
-            let mut world = session.world.clone();
-            let current = world.revision().map_err(|e| format!("world revision failed: {e}"))?;
-            if current.get() >= target {
-                return Ok(ToolContent::Json(json!({
-                    "satisfied": true,
-                    "condition": condition,
-                    "revision": current.get(),
-                })));
-            }
-            let waited = await_with_cancellation_and_progress(condition, timeout, ctx.as_ref(), async {
-                loop {
-                    let rev = world.changed().await.map_err(|e| format!("world watch closed: {e}"))?;
-                    if rev.get() >= target {
-                        return Ok(rev.get());
+        match args.condition.as_str() {
+            "world_revision" => {
+                let Some(target) = args.revision else {
+                    return Err(ErrorData::invalid_params("revision is required for condition=world_revision", None));
+                };
+                let mut world = session.world.clone();
+                let current = world.revision().map_err(|e| ErrorData::internal_error(format!("world revision failed: {e}"), None))?;
+                if current.get() >= target {
+                    return Ok(Json(WaitForOutput {
+                        satisfied: true,
+                        timed_out: None,
+                        condition: args.condition,
+                        revision: Some(current.get()),
+                        event: None,
+                    }));
+                }
+                let waited = await_with_cancellation_and_progress(&args.condition, timeout, &context, async {
+                    loop {
+                        let rev = world.changed().await.map_err(|e| format!("world watch closed: {e}"))?;
+                        if rev.get() >= target {
+                            return Ok(rev.get());
+                        }
+                    }
+                })
+                .await;
+                match waited {
+                    WaitOutcome::Ready(Ok(rev)) => Ok(Json(WaitForOutput {
+                        satisfied: true,
+                        timed_out: None,
+                        condition: args.condition,
+                        revision: Some(rev),
+                        event: None,
+                    })),
+                    WaitOutcome::Ready(Err(error)) => Err(ErrorData::internal_error(error, None)),
+                    WaitOutcome::Cancelled => Err(ErrorData::new(ErrorCode(-32000), "wait_for cancelled", None)),
+                    WaitOutcome::TimedOut => {
+                        let latest = world.revision().map(|rev| rev.get()).unwrap_or(current.get());
+                        Ok(Json(WaitForOutput {
+                            satisfied: false,
+                            timed_out: Some(true),
+                            condition: args.condition,
+                            revision: Some(latest),
+                            event: None,
+                        }))
                     }
                 }
-            })
-            .await;
-            match waited {
-                WaitOutcome::Ready(Ok(rev)) => Ok(ToolContent::Json(json!({
-                    "satisfied": true,
-                    "condition": condition,
-                    "revision": rev,
-                }))),
-                WaitOutcome::Ready(Err(error)) => Err(error),
-                WaitOutcome::Cancelled => Err("wait_for cancelled".to_owned()),
-                WaitOutcome::TimedOut => {
-                    let latest = world.revision().map(|rev| rev.get()).unwrap_or(current.get());
-                    Ok(ToolContent::Json(json!({
-                        "satisfied": false,
-                        "timed_out": true,
-                        "condition": condition,
-                        "revision": latest,
-                    })))
+            }
+            "asset_queue_empty" => {
+                let mut watch = session.assets.queue_stats_watch();
+                if watch.borrow_and_update().is_empty() {
+                    return Ok(Json(WaitForOutput {
+                        satisfied: true,
+                        timed_out: None,
+                        condition: args.condition,
+                        revision: None,
+                        event: None,
+                    }));
                 }
-            }
-        }
-        "asset_queue_empty" => {
-            let mut watch = session.assets.queue_stats_watch();
-            if watch.borrow_and_update().is_empty() {
-                return Ok(ToolContent::Json(json!({
-                    "satisfied": true,
-                    "condition": condition,
-                })));
-            }
-            let waited = await_with_cancellation_and_progress(condition, timeout, ctx.as_ref(), async {
-                loop {
-                    watch.changed().await.map_err(|_| "asset queue watch closed".to_owned())?;
-                    if watch.borrow_and_update().is_empty() {
-                        return Ok(());
+                let waited = await_with_cancellation_and_progress(&args.condition, timeout, &context, async {
+                    loop {
+                        watch.changed().await.map_err(|_| "asset queue watch closed".to_owned())?;
+                        if watch.borrow_and_update().is_empty() {
+                            return Ok(());
+                        }
                     }
+                })
+                .await;
+                match waited {
+                    WaitOutcome::Ready(Ok(())) => {
+                        Ok(Json(WaitForOutput { satisfied: true, timed_out: None, condition: args.condition, revision: None, event: None }))
+                    }
+                    WaitOutcome::Ready(Err(error)) => Err(ErrorData::internal_error(error, None)),
+                    WaitOutcome::Cancelled => Err(ErrorData::new(ErrorCode(-32000), "wait_for cancelled", None)),
+                    WaitOutcome::TimedOut => Ok(Json(WaitForOutput {
+                        satisfied: false,
+                        timed_out: Some(true),
+                        condition: args.condition,
+                        revision: None,
+                        event: None,
+                    })),
                 }
-            })
-            .await;
-            match waited {
-                WaitOutcome::Ready(Ok(())) => Ok(ToolContent::Json(json!({
-                    "satisfied": true,
-                    "condition": condition,
-                }))),
-                WaitOutcome::Ready(Err(error)) => Err(error),
-                WaitOutcome::Cancelled => Err("wait_for cancelled".to_owned()),
-                WaitOutcome::TimedOut => Ok(ToolContent::Json(json!({
-                    "satisfied": false,
-                    "timed_out": true,
-                    "condition": condition,
-                }))),
             }
-        }
-        "texture_event" => {
-            let mut watch = session.assets.texture_events();
-            let initial = *watch.borrow_and_update();
-            let waited = await_with_cancellation_and_progress(condition, timeout, ctx.as_ref(), async {
-                watch.changed().await.map_err(|_| "texture event watch closed".to_owned())?;
-                Ok(*watch.borrow_and_update())
-            })
-            .await;
-            match waited {
-                WaitOutcome::Ready(Ok(event)) => Ok(ToolContent::Json(json!({
-                    "satisfied": true,
-                    "condition": condition,
-                    "event": event,
-                }))),
-                WaitOutcome::Ready(Err(error)) => Err(error),
-                WaitOutcome::Cancelled => Err("wait_for cancelled".to_owned()),
-                WaitOutcome::TimedOut => Ok(ToolContent::Json(json!({
-                    "satisfied": false,
-                    "timed_out": true,
-                    "condition": condition,
-                    "event": initial,
-                }))),
+            "texture_event" => {
+                let mut watch = session.assets.texture_events();
+                let initial = *watch.borrow_and_update();
+                let waited = await_with_cancellation_and_progress(&args.condition, timeout, &context, async {
+                    watch.changed().await.map_err(|_| "texture event watch closed".to_owned())?;
+                    Ok(*watch.borrow_and_update())
+                })
+                .await;
+                match waited {
+                    WaitOutcome::Ready(Ok(event)) => Ok(Json(WaitForOutput {
+                        satisfied: true,
+                        timed_out: None,
+                        condition: args.condition,
+                        revision: None,
+                        event: Some(event),
+                    })),
+                    WaitOutcome::Ready(Err(error)) => Err(ErrorData::internal_error(error, None)),
+                    WaitOutcome::Cancelled => Err(ErrorData::new(ErrorCode(-32000), "wait_for cancelled", None)),
+                    WaitOutcome::TimedOut => Ok(Json(WaitForOutput {
+                        satisfied: false,
+                        timed_out: Some(true),
+                        condition: args.condition,
+                        revision: None,
+                        event: Some(initial),
+                    })),
+                }
             }
+            other => Err(ErrorData::invalid_params(format!("unknown wait_for condition: {other}"), None)),
         }
-        other => Err(format!("unknown wait_for condition: {other}")),
     }
 }
 

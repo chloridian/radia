@@ -1,30 +1,69 @@
 use cvars::{CvarSnapshot, CvarValue, descriptors};
-use serde_json::{Value, json};
+use rmcp::{
+    ErrorData,
+    handler::server::wrapper::{Json, Parameters},
+    tool, tool_router,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
-use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
+use crate::{inspection::ViewerInspectionHandle, mcp::server::RadiaServer};
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 500;
 
-pub const SPEC: ToolSpec = ToolSpec {
-    name: "settings",
-    title: "Viewer Settings",
-    description: "Return current cvar values and provenance.",
-    annotations: ToolAnnotationsSpec::read_only(),
-    input_schema,
-    handler,
-    max_response_bytes: MAX_JSON_RESPONSE_BYTES,
-};
+#[derive(Deserialize, JsonSchema)]
+pub struct SettingsArgs {
+    #[schemars(description = "Optional CVar name prefix filter.")]
+    pub prefix: Option<String>,
+    #[schemars(description = "Maximum number of settings to return (1..=500).")]
+    pub limit: Option<usize>,
+}
 
-fn input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "prefix": { "type": "string" },
-            "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT }
-        }
-    })
+#[derive(Serialize, JsonSchema)]
+pub struct SettingEntryOutput {
+    pub name: &'static str,
+    pub value: Value,
+    pub source: String,
+    pub unit: Option<&'static str>,
+    pub apply: String,
+    pub persistence: String,
+    pub pending_restart: Option<Value>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct SettingsOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Vec<SettingEntryOutput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+}
+
+#[tool_router(router = settings_router, vis = "pub(super)")]
+impl RadiaServer {
+    #[tool(
+        name = "settings",
+        title = "Viewer Settings",
+        description = "Return current cvar values and provenance.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    pub(crate) async fn settings(&self, Parameters(args): Parameters<SettingsArgs>) -> Result<Json<SettingsOutput>, ErrorData> {
+        Ok(Json(settings_data(&self.handle, args.prefix.as_deref(), args.limit)))
+    }
+}
+
+pub(in crate::mcp) fn settings_data(handle: &ViewerInspectionHandle, prefix: Option<&str>, limit: Option<usize>) -> SettingsOutput {
+    let Some(settings) = handle.settings() else {
+        return SettingsOutput { available: Some(false), revision: None, settings: None, has_more: None };
+    };
+    let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let snapshot = settings.snapshot();
+    format_settings_snapshot(&snapshot, prefix, limit)
 }
 
 pub(super) fn cvar_value_to_json(value: &CvarValue) -> Value {
@@ -38,40 +77,23 @@ pub(super) fn cvar_value_to_json(value: &CvarValue) -> Value {
     }
 }
 
-fn format_settings_snapshot(snapshot: &CvarSnapshot, prefix: Option<&str>, limit: usize) -> Value {
+fn format_settings_snapshot(snapshot: &CvarSnapshot, prefix: Option<&str>, limit: usize) -> SettingsOutput {
     let mut matched = descriptors().iter().filter(|desc| prefix.is_none_or(|prefix| desc.name.starts_with(prefix)));
     let mut entries = Vec::new();
     for desc in matched.by_ref().take(limit) {
         let provenance = snapshot.provenance(desc.id);
-        entries.push(json!({
-            "name": desc.name,
-            "value": cvar_value_to_json(&provenance.value),
-            "source": format!("{:?}", provenance.source),
-            "unit": desc.unit,
-            "apply": format!("{:?}", desc.apply),
-            "persistence": format!("{:?}", desc.persistence),
-            "pending_restart": provenance.pending_restart_value.as_ref().map(cvar_value_to_json),
-        }));
+        entries.push(SettingEntryOutput {
+            name: desc.name,
+            value: cvar_value_to_json(&provenance.value),
+            source: format!("{:?}", provenance.source),
+            unit: desc.unit,
+            apply: format!("{:?}", desc.apply),
+            persistence: format!("{:?}", desc.persistence),
+            pending_restart: provenance.pending_restart_value.as_ref().map(cvar_value_to_json),
+        });
     }
     let has_more = matched.next().is_some();
-    json!({
-        "revision": snapshot.revision().get(),
-        "settings": entries,
-        "has_more": has_more,
-    })
-}
-
-fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
-    Box::pin(async move {
-        let Some(settings) = handle.settings() else {
-            return Ok(ToolContent::Json(json!({ "available": false })));
-        };
-        let prefix = args.get("prefix").and_then(Value::as_str);
-        let limit =
-            args.get("limit").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()).unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-        let snapshot = settings.snapshot();
-        Ok(ToolContent::Json(format_settings_snapshot(&snapshot, prefix, limit)))
-    })
+    SettingsOutput { available: None, revision: Some(snapshot.revision().get()), settings: Some(entries), has_more: Some(has_more) }
 }
 
 #[cfg(test)]
@@ -85,8 +107,8 @@ mod tests {
         let registry = CvarRegistry::new();
         let snapshot = registry.snapshot();
         let output = format_settings_snapshot(&snapshot, None, 2);
-        let items = output["settings"].as_array().expect("settings array");
+        let items = output.settings.expect("settings vec");
         assert_eq!(items.len(), 2);
-        assert_eq!(output["has_more"], true);
+        assert_eq!(output.has_more, Some(true));
     }
 }

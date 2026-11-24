@@ -1,29 +1,81 @@
+use rmcp::{
+    ErrorData,
+    handler::server::wrapper::{Json, Parameters},
+    tool, tool_router,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use world::{MAX_WORLD_CHANGE_PAGE_ITEMS, WorldChange, WorldChangeClasses, WorldChangeCursor, WorldChangeRecord, WorldEntityRemovalReason};
 
-use super::{ToolAnnotationsSpec, ToolContent, ToolFuture, ToolSpec};
-use crate::{inspection::ViewerInspectionHandle, mcp::MAX_JSON_RESPONSE_BYTES};
+use crate::mcp::server::RadiaServer;
 
 const DEFAULT_LIMIT: usize = 50;
 
-pub const SPEC: ToolSpec = ToolSpec {
-    name: "changes",
-    title: "World Changes",
-    description: "Return a bounded page of the World change stream using an optional cursor and returning the next cursor.",
-    annotations: ToolAnnotationsSpec::read_only(),
-    input_schema,
-    handler,
-    max_response_bytes: MAX_JSON_RESPONSE_BYTES,
-};
+#[derive(Deserialize, JsonSchema)]
+pub struct ChangesArgs {
+    #[schemars(description = "Opaque cursor token from a previous changes response.")]
+    pub cursor: Option<String>,
+    #[schemars(description = "Maximum number of change records to return (1..=MAX_WORLD_CHANGE_PAGE_ITEMS).")]
+    pub limit: Option<usize>,
+}
 
-fn input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "cursor": { "type": "string" },
-            "limit": { "type": "integer", "minimum": 1, "maximum": MAX_WORLD_CHANGE_PAGE_ITEMS }
-        }
-    })
+#[derive(Serialize, JsonSchema)]
+pub struct ChangesOutput {
+    pub active_session: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changes: Option<Vec<Value>>,
+}
+
+#[tool_router(router = changes_router, vis = "pub(super)")]
+impl RadiaServer {
+    #[tool(
+        name = "changes",
+        title = "World Changes",
+        description = "Return a bounded page of the World change stream using an optional cursor and returning the next cursor.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    pub(crate) async fn changes(&self, Parameters(args): Parameters<ChangesArgs>) -> Result<Json<ChangesOutput>, ErrorData> {
+        let Some(session) = self.handle.session() else {
+            return Ok(Json(ChangesOutput {
+                active_session: false,
+                observed_revision: None,
+                completed_revision: None,
+                next_cursor: None,
+                has_more: None,
+                changes: None,
+            }));
+        };
+        let limit = args.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_WORLD_CHANGE_PAGE_ITEMS);
+        let cursor = match args.cursor.as_deref() {
+            Some(token) => WorldChangeCursor::decode(token).ok_or_else(|| ErrorData::invalid_params("invalid cursor", None))?,
+            None => {
+                session.world.barrier().await.map_err(|e| ErrorData::internal_error(format!("world barrier failed: {e}"), None))?.changes
+            }
+        };
+        let page = session
+            .world
+            .changes(cursor, limit)
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("changes query failed: {e}"), None))?;
+        let changes = page.records.iter().map(format_record).collect();
+        Ok(Json(ChangesOutput {
+            active_session: true,
+            observed_revision: Some(page.observed_revision.get()),
+            completed_revision: Some(page.completed_revision.get()),
+            next_cursor: Some(page.cursor.encode()),
+            has_more: Some(page.has_more),
+            changes: Some(changes),
+        }))
+    }
 }
 
 fn change_classes_list(classes: WorldChangeClasses) -> Vec<&'static str> {
@@ -165,34 +217,6 @@ fn format_record(record: &WorldChangeRecord) -> Value {
             "entities_removed": entities_removed,
         }),
     }
-}
-
-fn handler(handle: ViewerInspectionHandle, args: Value) -> ToolFuture {
-    Box::pin(async move {
-        let Some(session) = handle.session() else {
-            return Ok(ToolContent::Json(json!({ "active_session": false })));
-        };
-        let limit = args
-            .get("limit")
-            .and_then(Value::as_u64)
-            .and_then(|n| usize::try_from(n).ok())
-            .unwrap_or(DEFAULT_LIMIT)
-            .clamp(1, MAX_WORLD_CHANGE_PAGE_ITEMS);
-        let cursor = match args.get("cursor").and_then(Value::as_str) {
-            Some(token) => WorldChangeCursor::decode(token).ok_or_else(|| "invalid cursor".to_owned())?,
-            None => session.world.barrier().await.map_err(|e| format!("world barrier failed: {e}"))?.changes,
-        };
-        let page = session.world.changes(cursor, limit).await.map_err(|e| format!("changes query failed: {e}"))?;
-        let changes = page.records.iter().map(format_record).collect::<Vec<_>>();
-        Ok(ToolContent::Json(json!({
-            "active_session": true,
-            "observed_revision": page.observed_revision.get(),
-            "completed_revision": page.completed_revision.get(),
-            "next_cursor": page.cursor.encode(),
-            "has_more": page.has_more,
-            "changes": changes,
-        })))
-    })
 }
 
 #[cfg(test)]
