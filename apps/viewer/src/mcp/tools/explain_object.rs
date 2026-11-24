@@ -1,3 +1,4 @@
+use render::{MeshResidency, VisibilityStatus};
 use rmcp::{
     ErrorData,
     handler::server::wrapper::{Json, Parameters},
@@ -6,9 +7,9 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
-use world::{ObjectDetail, ObjectDetailResult};
+use world::{AttachmentPoint, ObjectDetail, ObjectDetailResult};
 
-use super::{ShapeOutput, format_shape, lookup_object_entity};
+use super::{ShapeOutput, format_shape, lookup_object_entity, world_query::format_kind};
 use crate::{
     inspection::{ViewerInspectionHandle, ViewportQuery},
     mcp::server::Handler,
@@ -45,21 +46,20 @@ pub struct RenderExplanationOutput {
     pub has_mesh: bool,
     pub mesh_matches_geometry: bool,
     pub in_cache: bool,
-    pub visibility: String,
-    pub mesh_residency: String,
+    pub visibility: &'static str,
+    pub mesh_residency: &'static str,
     pub faces: Vec<FaceExplanationOutput>,
 }
 
 #[derive(Serialize, JsonSchema)]
 pub struct WorldDetailOutput {
-    pub entity: String,
     pub id: String,
     pub region: u64,
     pub local_id: u32,
     pub kind: String,
     pub shape: Option<ShapeOutput>,
     pub is_physical: bool,
-    pub attachment_point: Option<String>,
+    pub attachment_point: Option<u8>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -146,8 +146,17 @@ pub(in crate::mcp) async fn explain_object_data(handle: &ViewerInspectionHandle,
             has_mesh: exp.has_mesh,
             mesh_matches_geometry: exp.mesh_matches_geometry,
             in_cache: exp.in_cache,
-            visibility: format!("{:?}", exp.visibility),
-            mesh_residency: format!("{:?}", exp.mesh_residency),
+            visibility: match exp.visibility {
+                VisibilityStatus::Visible => "visible",
+                VisibilityStatus::Culled => "culled",
+                VisibilityStatus::NotCached => "not_cached",
+            },
+            mesh_residency: match exp.mesh_residency {
+                MeshResidency::Resident => "resident",
+                MeshResidency::Pending => "pending",
+                MeshResidency::BudgetBlocked => "budget_blocked",
+                MeshResidency::NoMesh => "no_mesh",
+            },
             faces,
         }
     });
@@ -163,14 +172,13 @@ pub(in crate::mcp) async fn explain_object_data(handle: &ViewerInspectionHandle,
 
 fn format_world_detail(detail: &ObjectDetail) -> WorldDetailOutput {
     WorldDetailOutput {
-        entity: format!("{:?}", detail.summary.entity),
         id: detail.summary.id.to_string(),
         region: detail.summary.address.region().get(),
         local_id: detail.summary.address.local_id().get(),
-        kind: format!("{:?}", detail.summary.kind),
+        kind: format_kind(detail.summary.kind),
         shape: detail.shape.as_ref().map(format_shape),
         is_physical: detail.is_physical,
-        attachment_point: detail.attachment_point.map(|point| format!("{point:?}")),
+        attachment_point: detail.attachment_point.map(AttachmentPoint::get),
     }
 }
 

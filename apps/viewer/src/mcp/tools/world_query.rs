@@ -5,7 +5,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use world::{ObjectDetail, ObjectDetailResult, WorldRevision};
+use world::{AttachmentPoint, Kind, ObjectDetail, ObjectDetailResult, RegionHandle, WorldRevision};
 
 use super::{ShapeOutput, format_shape, lookup_object_entity};
 use crate::{inspection::ViewerInspectionHandle, mcp::server::Handler};
@@ -37,12 +37,11 @@ pub struct WorldArgs {
 pub struct WorldRegionItemOutput {
     pub region: u64,
     pub name: Option<String>,
-    pub handle: String,
+    pub handle: Option<u64>,
 }
 
 #[derive(Serialize, JsonSchema)]
 pub struct WorldObjectItemOutput {
-    pub entity: String,
     pub id: String,
     pub region: u64,
     pub local_id: u32,
@@ -53,21 +52,20 @@ pub struct WorldObjectItemOutput {
 pub struct WorldObjectDetailOutput {
     pub found: bool,
     pub revision: u64,
-    pub entity: String,
     pub id: String,
     pub region: u64,
     pub local_id: u32,
     pub kind: String,
     pub shape: Option<ShapeOutput>,
     pub is_physical: bool,
-    pub attachment_point: Option<String>,
+    pub attachment_point: Option<u8>,
 }
 
 #[derive(Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum WorldOutput {
     Inactive { active_session: bool },
-    Summary { active_session: bool, revision: u64, region_count: usize, objects_returned: usize, has_more_objects: bool },
+    Summary { active_session: bool, revision: u64, region_count: usize },
     Regions { revision: u64, regions: Vec<WorldRegionItemOutput>, has_more: bool },
     Objects { revision: u64, objects: Vec<WorldObjectItemOutput>, has_more: bool },
     ObjectNotFound { found: bool, object_id: String },
@@ -104,7 +102,7 @@ impl Handler {
                     .map(|region| WorldRegionItemOutput {
                         region: region.region.get(),
                         name: region.info.name,
-                        handle: format!("{:?}", region.info.handle),
+                        handle: region.info.handle.map(RegionHandle::get),
                     })
                     .collect();
                 WorldOutput::Regions { revision: revision.get(), regions, has_more: page.next.is_some() }
@@ -124,11 +122,10 @@ impl Handler {
                     .objects
                     .into_iter()
                     .map(|item| WorldObjectItemOutput {
-                        entity: format!("{:?}", item.entity),
                         id: item.id.to_string(),
                         region: item.address.region().get(),
                         local_id: item.address.local_id().get(),
-                        kind: format!("{:?}", item.kind),
+                        kind: format_kind(item.kind),
                     })
                     .collect();
                 WorldOutput::Objects { revision: revision.get(), objects, has_more: page.next.is_some() }
@@ -171,28 +168,28 @@ pub(in crate::mcp) async fn world_summary_data(handle: &ViewerInspectionHandle) 
     };
     let revision = session.world.revision().map_err(|e| format!("world revision failed: {e}"))?;
     let regions = session.world.regions(None, 32).await.map_err(|e| format!("regions query failed: {e}"))?;
-    let objects = session.world.objects(None, DEFAULT_LIMIT).await.map_err(|e| format!("objects query failed: {e}"))?;
-    Ok(WorldOutput::Summary {
-        active_session: true,
-        revision: revision.get(),
-        region_count: regions.regions.len(),
-        objects_returned: objects.objects.len(),
-        has_more_objects: objects.next.is_some(),
-    })
+    Ok(WorldOutput::Summary { active_session: true, revision: revision.get(), region_count: regions.regions.len() })
+}
+
+pub(super) fn format_kind(kind: Kind) -> String {
+    match kind {
+        Kind::Avatar => "avatar".to_owned(),
+        Kind::Object => "object".to_owned(),
+        Kind::Unknown(code) => format!("unknown({code})"),
+    }
 }
 
 fn format_object_detail(revision: WorldRevision, detail: &ObjectDetail) -> WorldObjectDetailOutput {
     WorldObjectDetailOutput {
         found: true,
         revision: revision.get(),
-        entity: format!("{:?}", detail.summary.entity),
         id: detail.summary.id.to_string(),
         region: detail.summary.address.region().get(),
         local_id: detail.summary.address.local_id().get(),
-        kind: format!("{:?}", detail.summary.kind),
+        kind: format_kind(detail.summary.kind),
         shape: detail.shape.as_ref().map(format_shape),
         is_physical: detail.is_physical,
-        attachment_point: detail.attachment_point.map(|point| format!("{point:?}")),
+        attachment_point: detail.attachment_point.map(AttachmentPoint::get),
     }
 }
 

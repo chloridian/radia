@@ -119,61 +119,54 @@ fn removal_reason_str(reason: WorldEntityRemovalReason) -> &'static str {
 fn format_record(record: &WorldChangeRecord) -> Value {
     let revision = record.revision.get();
     match record.change {
-        WorldChange::EntityAdded { id, entity, address } => json!({
+        WorldChange::EntityAdded { id, address, .. } => json!({
             "revision": revision,
             "kind": "entity_added",
             "id": id.to_string(),
-            "entity": format!("{entity:?}"),
             "region": address.region().get(),
             "local_id": address.local_id(),
         }),
-        WorldChange::EntityUpdated { id, entity, classes } => json!({
+        WorldChange::EntityUpdated { id, classes, .. } => json!({
             "revision": revision,
             "kind": "entity_updated",
             "id": id.to_string(),
-            "entity": format!("{entity:?}"),
             "classes": change_classes_list(classes),
             "reparented": classes.contains(WorldChangeClasses::RELATIONSHIP),
         }),
-        WorldChange::SubtreeInvalidated { id, entity } => json!({
+        WorldChange::SubtreeInvalidated { id, .. } => json!({
             "revision": revision,
             "kind": "subtree_invalidated",
             "id": id.to_string(),
-            "entity": format!("{entity:?}"),
         }),
-        WorldChange::SubtreeRemovalPending { id, entity, region, order, block_ordinal } => json!({
+        WorldChange::SubtreeRemovalPending { id, region, order, block_ordinal, .. } => json!({
             "revision": revision,
             "kind": "subtree_removal_pending",
             "id": id.to_string(),
-            "entity": format!("{entity:?}"),
             "region": region.get(),
             "order": order,
             "block_ordinal": block_ordinal,
         }),
-        WorldChange::EntityRemoved { id, entity, address, reason } => json!({
+        WorldChange::EntityRemoved { id, address, reason, .. } => json!({
             "revision": revision,
             "kind": if reason == WorldEntityRemovalReason::Killed { "kill" } else { "entity_removed" },
             "id": id.to_string(),
-            "entity": format!("{entity:?}"),
             "region": address.region().get(),
             "local_id": address.local_id(),
             "reason": removal_reason_str(reason),
         }),
-        WorldChange::EntityRebound { id, entity, from, to } => json!({
+        WorldChange::EntityRebound { id, from, to, .. } => json!({
             "revision": revision,
             "kind": "entity_rebound",
             "id": id.to_string(),
-            "entity": format!("{entity:?}"),
             "from_region": from.region().get(),
             "from_local_id": from.local_id(),
             "to_region": to.region().get(),
             "to_local_id": to.local_id(),
         }),
-        WorldChange::EntityTransferred { id, entity, from, to } => json!({
+        WorldChange::EntityTransferred { id, from, to, .. } => json!({
             "revision": revision,
             "kind": "entity_transferred",
             "id": id.to_string(),
-            "entity": format!("{entity:?}"),
             "from_region": from.region().get(),
             "from_local_id": from.local_id(),
             "to_region": to.region().get(),
@@ -199,12 +192,15 @@ fn format_record(record: &WorldChangeRecord) -> Value {
             "kind": "parcel_updated",
             "region": region.get(),
         }),
-        WorldChange::TerrainPatchUpdated { region, patch } => json!({
-            "revision": revision,
-            "kind": "terrain_patch_updated",
-            "region": region.get(),
-            "patch": format!("{patch:?}"),
-        }),
+        WorldChange::TerrainPatchUpdated { region, patch } => {
+            let (x, y) = patch.coordinates();
+            json!({
+                "revision": revision,
+                "kind": "terrain_patch_updated",
+                "region": region.get(),
+                "patch": [x, y],
+            })
+        }
         WorldChange::WaterHeightUpdated(region) => json!({
             "revision": revision,
             "kind": "water_height_updated",

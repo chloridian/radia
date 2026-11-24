@@ -1,4 +1,4 @@
-use cvars::{CvarSnapshot, CvarValue, descriptors};
+use cvars::{ApplyScope, CvarSnapshot, CvarValue, Layer, PersistenceScope, descriptors};
 use rmcp::{
     ErrorData,
     handler::server::wrapper::{Json, Parameters},
@@ -25,10 +25,10 @@ pub struct SettingsArgs {
 pub struct SettingEntryOutput {
     pub name: &'static str,
     pub value: Value,
-    pub source: String,
+    pub source: &'static str,
     pub unit: Option<&'static str>,
-    pub apply: String,
-    pub persistence: String,
+    pub apply: &'static str,
+    pub persistence: &'static str,
     pub pending_restart: Option<Value>,
 }
 
@@ -85,10 +85,22 @@ fn format_settings_snapshot(snapshot: &CvarSnapshot, prefix: Option<&str>, limit
         entries.push(SettingEntryOutput {
             name: desc.name,
             value: cvar_value_to_json(&provenance.value),
-            source: format!("{:?}", provenance.source),
+            source: match provenance.source {
+                Layer::Default => "default",
+                Layer::Preset => "preset",
+                Layer::Global => "global",
+                Layer::StartupDeveloper => "startup_developer",
+                Layer::Session => "session",
+            },
             unit: desc.unit,
-            apply: format!("{:?}", desc.apply),
-            persistence: format!("{:?}", desc.persistence),
+            apply: match desc.apply {
+                ApplyScope::Live => "live",
+                ApplyScope::RestartRequired => "restart_required",
+            },
+            persistence: match desc.persistence {
+                PersistenceScope::Global => "global",
+                PersistenceScope::SessionOnly => "session_only",
+            },
             pending_restart: provenance.pending_restart_value.as_ref().map(cvar_value_to_json),
         });
     }

@@ -26,8 +26,6 @@ pub struct PickOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub point: Option<[f64; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub entity: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub object_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<u64>,
@@ -59,7 +57,6 @@ impl Handler {
                 active_session: Some(false),
                 hit: None,
                 point: None,
-                entity: None,
                 object_id: None,
                 region: None,
                 face_range: None,
@@ -84,7 +81,6 @@ impl Handler {
                 active_session: None,
                 hit: Some(true),
                 point: Some([detail.point.x, detail.point.y, detail.point.z]),
-                entity: detail.entity.map(|entity| format!("{entity:?}")),
                 object_id: detail.object_id.map(|id| id.to_string()),
                 region: Some(detail.region.get()),
                 face_range: Some([detail.face_range.start, detail.face_range.end]),
@@ -98,7 +94,6 @@ impl Handler {
                 active_session: None,
                 hit: Some(false),
                 point: None,
-                entity: None,
                 object_id: None,
                 region: None,
                 face_range: None,

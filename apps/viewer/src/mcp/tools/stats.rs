@@ -1,3 +1,4 @@
+use render::OmissionReason;
 use rmcp::{
     ErrorData,
     handler::server::wrapper::{Json, Parameters},
@@ -47,7 +48,7 @@ pub struct RenderStatsOutput {
     pub pending_textures: usize,
     pub omitted_faces: usize,
     pub mesh_budget_blocked: usize,
-    pub omission_reason: Option<String>,
+    pub omission_reason: Option<&'static str>,
     pub mesh_bytes: usize,
     pub texture_bytes: usize,
     pub texture_count: usize,
@@ -69,9 +70,16 @@ pub struct AssetQueueOutput {
 }
 
 #[derive(Serialize, JsonSchema)]
+pub struct AssetMemoryOutput {
+    pub charged_bytes: usize,
+    pub resident_bytes: usize,
+    pub high_water_bytes: usize,
+}
+
+#[derive(Serialize, JsonSchema)]
 pub struct AssetsStatsOutput {
     pub queue: AssetQueueOutput,
-    pub memory: String,
+    pub memory: AssetMemoryOutput,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -143,7 +151,11 @@ pub(in crate::mcp) fn stats_data(handle: &ViewerInspectionHandle, limit: Option<
             pending_textures: rs.pending_textures,
             omitted_faces: rs.omitted_faces,
             mesh_budget_blocked: rs.mesh_budget_blocked,
-            omission_reason: rs.omission_reason.map(|reason| format!("{reason:?}")),
+            omission_reason: rs.omission_reason.map(|reason| match reason {
+                OmissionReason::InstanceBufferBudget => "instance_buffer_budget",
+                OmissionReason::MeshMemoryBudget => "mesh_memory_budget",
+                OmissionReason::CombinedBudgets => "combined_budgets",
+            }),
             mesh_bytes: rs.mesh_bytes,
             texture_bytes: rs.texture_bytes,
             texture_count: rs.texture_count,
@@ -162,7 +174,11 @@ pub(in crate::mcp) fn stats_data(handle: &ViewerInspectionHandle, limit: Option<
                 running_other_decodes: queue.running_other_decodes,
                 empty: queue.is_empty(),
             },
-            memory: format!("{memory:?}"),
+            memory: AssetMemoryOutput {
+                charged_bytes: memory.charged_bytes,
+                resident_bytes: memory.resident_bytes,
+                high_water_bytes: memory.high_water_bytes,
+            },
         }),
     }
 }

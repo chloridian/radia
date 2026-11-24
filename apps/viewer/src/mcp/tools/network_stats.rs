@@ -124,7 +124,7 @@ fn format_capability_status(status: CapabilityLastStatus) -> String {
         CapabilityLastStatus::Http(code) => code.to_string(),
         CapabilityLastStatus::Cancelled => "cancelled".to_owned(),
         CapabilityLastStatus::SessionClosed => "session_closed".to_owned(),
-        CapabilityLastStatus::Transport(kind) => format!("{kind:?}"),
+        CapabilityLastStatus::Transport(kind) => kind.as_str().to_owned(),
         CapabilityLastStatus::Error => "error".to_owned(),
     }
 }
