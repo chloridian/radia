@@ -5,7 +5,6 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use world::{MAX_WORLD_CHANGE_PAGE_ITEMS, WorldChange, WorldChangeClasses, WorldChangeCursor, WorldChangeRecord, WorldEntityRemovalReason};
 
 use crate::mcp::server::Handler;
@@ -32,7 +31,27 @@ pub struct ChangesOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_more: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub changes: Option<Vec<Value>>,
+    pub changes: Option<Vec<WorldChangeOutput>>,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorldChangeOutput {
+    EntityAdded { revision: u64, id: String, region: u64, local_id: u32 },
+    EntityUpdated { revision: u64, id: String, classes: Vec<ChangeClassOutput>, reparented: bool },
+    SubtreeInvalidated { revision: u64, id: String },
+    SubtreeRemovalPending { revision: u64, id: String, region: u64, order: u64, block_ordinal: u32 },
+    Kill { revision: u64, id: String, region: u64, local_id: u32, reason: RemovalReasonOutput },
+    EntityRemoved { revision: u64, id: String, region: u64, local_id: u32, reason: RemovalReasonOutput },
+    EntityRebound { revision: u64, id: String, from_region: u64, from_local_id: u32, to_region: u64, to_local_id: u32 },
+    EntityTransferred { revision: u64, id: String, from_region: u64, from_local_id: u32, to_region: u64, to_local_id: u32 },
+    RegionRegistered { revision: u64, region: u64 },
+    RegionUpdated { revision: u64, region: u64 },
+    EnvironmentUpdated { revision: u64, region: u64 },
+    ParcelUpdated { revision: u64, region: u64 },
+    TerrainPatchUpdated { revision: u64, region: u64, patch: [u8; 2] },
+    WaterHeightUpdated { revision: u64, region: u64 },
+    RegionRetired { revision: u64, region: u64, entities_removed: usize },
 }
 
 #[tool_router(router = changes_router, vis = "pub(super)")]
@@ -80,7 +99,7 @@ impl Handler {
 
 #[derive(Clone, Copy, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-enum ChangeClassOutput {
+pub enum ChangeClassOutput {
     Pose,
     Motion,
     Scale,
@@ -93,7 +112,7 @@ enum ChangeClassOutput {
 
 #[derive(Clone, Copy, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-enum RemovalReasonOutput {
+pub enum RemovalReasonOutput {
     Killed,
     AddressReplaced,
     ParentCascade,
@@ -140,102 +159,64 @@ fn change_classes_list(classes: WorldChangeClasses) -> Vec<ChangeClassOutput> {
     list
 }
 
-fn format_record(record: &WorldChangeRecord) -> Value {
+fn format_record(record: &WorldChangeRecord) -> WorldChangeOutput {
     let revision = record.revision.get();
     match record.change {
-        WorldChange::EntityAdded { id, address, .. } => json!({
-            "revision": revision,
-            "kind": "entity_added",
-            "id": id.to_string(),
-            "region": address.region().get(),
-            "local_id": address.local_id(),
-        }),
-        WorldChange::EntityUpdated { id, classes, .. } => json!({
-            "revision": revision,
-            "kind": "entity_updated",
-            "id": id.to_string(),
-            "classes": change_classes_list(classes),
-            "reparented": classes.contains(WorldChangeClasses::RELATIONSHIP),
-        }),
-        WorldChange::SubtreeInvalidated { id, .. } => json!({
-            "revision": revision,
-            "kind": "subtree_invalidated",
-            "id": id.to_string(),
-        }),
-        WorldChange::SubtreeRemovalPending { id, region, order, block_ordinal, .. } => json!({
-            "revision": revision,
-            "kind": "subtree_removal_pending",
-            "id": id.to_string(),
-            "region": region.get(),
-            "order": order,
-            "block_ordinal": block_ordinal,
-        }),
-        WorldChange::EntityRemoved { id, address, reason, .. } => json!({
-            "revision": revision,
-            "kind": if reason == WorldEntityRemovalReason::Killed { "kill" } else { "entity_removed" },
-            "id": id.to_string(),
-            "region": address.region().get(),
-            "local_id": address.local_id(),
-            "reason": RemovalReasonOutput::from(reason),
-        }),
-        WorldChange::EntityRebound { id, from, to, .. } => json!({
-            "revision": revision,
-            "kind": "entity_rebound",
-            "id": id.to_string(),
-            "from_region": from.region().get(),
-            "from_local_id": from.local_id(),
-            "to_region": to.region().get(),
-            "to_local_id": to.local_id(),
-        }),
-        WorldChange::EntityTransferred { id, from, to, .. } => json!({
-            "revision": revision,
-            "kind": "entity_transferred",
-            "id": id.to_string(),
-            "from_region": from.region().get(),
-            "from_local_id": from.local_id(),
-            "to_region": to.region().get(),
-            "to_local_id": to.local_id(),
-        }),
-        WorldChange::RegionRegistered(region) => json!({
-            "revision": revision,
-            "kind": "region_registered",
-            "region": region.get(),
-        }),
-        WorldChange::RegionUpdated(region) => json!({
-            "revision": revision,
-            "kind": "region_updated",
-            "region": region.get(),
-        }),
-        WorldChange::EnvironmentUpdated(region) => json!({
-            "revision": revision,
-            "kind": "environment_updated",
-            "region": region.get(),
-        }),
-        WorldChange::ParcelUpdated(region) => json!({
-            "revision": revision,
-            "kind": "parcel_updated",
-            "region": region.get(),
-        }),
+        WorldChange::EntityAdded { id, address, .. } => WorldChangeOutput::EntityAdded {
+            revision,
+            id: id.to_string(),
+            region: address.region().get(),
+            local_id: address.local_id().get(),
+        },
+        WorldChange::EntityUpdated { id, classes, .. } => WorldChangeOutput::EntityUpdated {
+            revision,
+            id: id.to_string(),
+            classes: change_classes_list(classes),
+            reparented: classes.contains(WorldChangeClasses::RELATIONSHIP),
+        },
+        WorldChange::SubtreeInvalidated { id, .. } => WorldChangeOutput::SubtreeInvalidated { revision, id: id.to_string() },
+        WorldChange::SubtreeRemovalPending { id, region, order, block_ordinal, .. } => {
+            WorldChangeOutput::SubtreeRemovalPending { revision, id: id.to_string(), region: region.get(), order, block_ordinal }
+        }
+        WorldChange::EntityRemoved { id, address, reason, .. } => {
+            let id = id.to_string();
+            let region = address.region().get();
+            let local_id = address.local_id().get();
+            let reason_out = RemovalReasonOutput::from(reason);
+            if reason == WorldEntityRemovalReason::Killed {
+                WorldChangeOutput::Kill { revision, id, region, local_id, reason: reason_out }
+            } else {
+                WorldChangeOutput::EntityRemoved { revision, id, region, local_id, reason: reason_out }
+            }
+        }
+        WorldChange::EntityRebound { id, from, to, .. } => WorldChangeOutput::EntityRebound {
+            revision,
+            id: id.to_string(),
+            from_region: from.region().get(),
+            from_local_id: from.local_id().get(),
+            to_region: to.region().get(),
+            to_local_id: to.local_id().get(),
+        },
+        WorldChange::EntityTransferred { id, from, to, .. } => WorldChangeOutput::EntityTransferred {
+            revision,
+            id: id.to_string(),
+            from_region: from.region().get(),
+            from_local_id: from.local_id().get(),
+            to_region: to.region().get(),
+            to_local_id: to.local_id().get(),
+        },
+        WorldChange::RegionRegistered(region) => WorldChangeOutput::RegionRegistered { revision, region: region.get() },
+        WorldChange::RegionUpdated(region) => WorldChangeOutput::RegionUpdated { revision, region: region.get() },
+        WorldChange::EnvironmentUpdated(region) => WorldChangeOutput::EnvironmentUpdated { revision, region: region.get() },
+        WorldChange::ParcelUpdated(region) => WorldChangeOutput::ParcelUpdated { revision, region: region.get() },
         WorldChange::TerrainPatchUpdated { region, patch } => {
             let (x, y) = patch.coordinates();
-            json!({
-                "revision": revision,
-                "kind": "terrain_patch_updated",
-                "region": region.get(),
-                "patch": [x, y],
-            })
+            WorldChangeOutput::TerrainPatchUpdated { revision, region: region.get(), patch: [x, y] }
         }
-        WorldChange::WaterHeightUpdated(region) => json!({
-            "revision": revision,
-            "kind": "water_height_updated",
-            "region": region.get(),
-        }),
-        WorldChange::RegionRetired { region, entities_removed } => json!({
-            "revision": revision,
-            "kind": "region_retired",
-            "region": region.get(),
-            "entities_removed": entities_removed,
-        }),
+        WorldChange::WaterHeightUpdated(region) => WorldChangeOutput::WaterHeightUpdated { revision, region: region.get() },
+        WorldChange::RegionRetired { region, entities_removed } => {
+            WorldChangeOutput::RegionRetired { revision, region: region.get(), entities_removed }
+        }
     }
 }
 

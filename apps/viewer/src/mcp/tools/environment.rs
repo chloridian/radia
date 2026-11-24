@@ -2,7 +2,6 @@ use assets::{DayCycle, EnvironmentDescription, EnvironmentSettings, Sky, Water};
 use rmcp::{ErrorData, handler::server::wrapper::Json, tool, tool_router};
 use schemars::JsonSchema;
 use serde::Serialize;
-use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use world::{EnvironmentAssignment, EnvironmentRead, EnvironmentSource};
 
@@ -36,13 +35,167 @@ pub struct LocalOverrideOutput {
 }
 
 #[derive(Serialize, JsonSchema)]
+pub struct SkyCloudsOutput {
+    pub color: Option<[f32; 3]>,
+    pub density: [Option<[f32; 3]>; 2],
+    pub scale: Option<f32>,
+    pub scroll_rate: Option<[f32; 2]>,
+    pub shadow: Option<f32>,
+    pub variance: Option<f32>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct SkyHazeOutput {
+    pub ambient: Option<[f32; 3]>,
+    pub blue_density: Option<[f32; 3]>,
+    pub blue_horizon: Option<[f32; 3]>,
+    pub density_multiplier: Option<f32>,
+    pub distance_multiplier: Option<f32>,
+    pub density: Option<f32>,
+    pub horizon: Option<f32>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct SkyAtmosphereOutput {
+    pub planet_radius: Option<f32>,
+    pub bottom_radius: Option<f32>,
+    pub top_radius: Option<f32>,
+    pub sun_arc: Option<f32>,
+    pub moisture: Option<f32>,
+    pub droplet_radius: Option<f32>,
+    pub ice: Option<f32>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct SkyOutput {
+    pub sun_rotation: Option<[f32; 4]>,
+    pub sun_scale: Option<f32>,
+    pub moon_rotation: Option<[f32; 4]>,
+    pub moon_scale: Option<f32>,
+    pub sunlight: Option<[f32; 3]>,
+    pub moon_brightness: Option<f32>,
+    pub star_brightness: Option<f32>,
+    pub gamma: Option<f32>,
+    pub glow: Option<[f32; 3]>,
+    pub max_y: Option<f32>,
+    pub dome_offset: Option<f32>,
+    pub dome_radius: Option<f32>,
+    pub reflection_probe_ambiance: Option<f32>,
+    pub clouds: SkyCloudsOutput,
+    pub haze: SkyHazeOutput,
+    pub atmosphere: SkyAtmosphereOutput,
+}
+
+impl From<&Sky> for SkyOutput {
+    fn from(sky: &Sky) -> Self {
+        Self {
+            sun_rotation: sky.sun.rotation,
+            sun_scale: sky.sun.scale,
+            moon_rotation: sky.moon.rotation,
+            moon_scale: sky.moon.scale,
+            sunlight: sky.sunlight,
+            moon_brightness: sky.moon_brightness,
+            star_brightness: sky.star_brightness,
+            gamma: sky.gamma,
+            glow: sky.glow,
+            max_y: sky.max_y,
+            dome_offset: sky.dome_offset,
+            dome_radius: sky.dome_radius,
+            reflection_probe_ambiance: sky.reflection_probe_ambiance,
+            clouds: SkyCloudsOutput {
+                color: sky.clouds.color,
+                density: sky.clouds.density,
+                scale: sky.clouds.scale,
+                scroll_rate: sky.clouds.scroll_rate,
+                shadow: sky.clouds.shadow,
+                variance: sky.clouds.variance,
+            },
+            haze: SkyHazeOutput {
+                ambient: sky.haze.ambient,
+                blue_density: sky.haze.blue_density,
+                blue_horizon: sky.haze.blue_horizon,
+                density_multiplier: sky.haze.density_multiplier,
+                distance_multiplier: sky.haze.distance_multiplier,
+                density: sky.haze.density,
+                horizon: sky.haze.horizon,
+            },
+            atmosphere: SkyAtmosphereOutput {
+                planet_radius: sky.atmosphere.planet_radius,
+                bottom_radius: sky.atmosphere.bottom_radius,
+                top_radius: sky.atmosphere.top_radius,
+                sun_arc: sky.atmosphere.sun_arc,
+                moisture: sky.atmosphere.moisture,
+                droplet_radius: sky.atmosphere.droplet_radius,
+                ice: sky.atmosphere.ice,
+            },
+        }
+    }
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct WaterOutput {
+    pub fog_color: Option<[f32; 3]>,
+    pub fog_density: Option<f32>,
+    pub underwater_fog: Option<f32>,
+    pub blur: Option<f32>,
+    pub fresnel_offset: Option<f32>,
+    pub fresnel_scale: Option<f32>,
+    pub normal_scale: Option<[f32; 3]>,
+    pub scale_above: Option<f32>,
+    pub scale_below: Option<f32>,
+    pub waves: [Option<[f32; 2]>; 2],
+}
+
+impl From<&Water> for WaterOutput {
+    fn from(water: &Water) -> Self {
+        Self {
+            fog_color: water.fog_color,
+            fog_density: water.fog_density,
+            underwater_fog: water.underwater_fog,
+            blur: water.blur,
+            fresnel_offset: water.fresnel_offset,
+            fresnel_scale: water.fresnel_scale,
+            normal_scale: water.normal_scale,
+            scale_above: water.scale_above,
+            scale_below: water.scale_below,
+            waves: water.waves,
+        }
+    }
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct DayCycleOutput {
+    pub water_keyframe_count: usize,
+    pub sky_track_keyframe_counts: Vec<usize>,
+    pub water_positions: Vec<f32>,
+}
+
+impl From<&DayCycle> for DayCycleOutput {
+    fn from(day: &DayCycle) -> Self {
+        Self {
+            water_keyframe_count: day.water().len(),
+            sky_track_keyframe_counts: day.skies().iter().map(Vec::len).collect(),
+            water_positions: day.water().iter().take(16).map(|frame| frame.position()).collect(),
+        }
+    }
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EnvironmentSettingsOutput {
+    Sky { sky: SkyOutput },
+    Water { water: WaterOutput },
+    DayCycle { day_cycle: DayCycleOutput },
+}
+
+#[derive(Serialize, JsonSchema)]
 pub struct EnvironmentAssignmentOutput {
     pub source_kind: EnvironmentSourceKindOutput,
     pub version: Option<u32>,
     pub day_length_seconds: Option<u32>,
     pub day_offset_seconds: Option<i32>,
     pub altitudes: Option<[f32; 3]>,
-    pub settings: Value,
+    pub settings: Option<EnvironmentSettingsOutput>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -139,84 +292,17 @@ impl Handler {
     }
 }
 
-fn format_sky(sky: &Sky) -> Value {
-    json!({
-        "sun_rotation": sky.sun.rotation,
-        "sun_scale": sky.sun.scale,
-        "moon_rotation": sky.moon.rotation,
-        "moon_scale": sky.moon.scale,
-        "sunlight": sky.sunlight,
-        "moon_brightness": sky.moon_brightness,
-        "star_brightness": sky.star_brightness,
-        "gamma": sky.gamma,
-        "glow": sky.glow,
-        "max_y": sky.max_y,
-        "dome_offset": sky.dome_offset,
-        "dome_radius": sky.dome_radius,
-        "reflection_probe_ambiance": sky.reflection_probe_ambiance,
-        "clouds": {
-            "color": sky.clouds.color,
-            "density": sky.clouds.density,
-            "scale": sky.clouds.scale,
-            "scroll_rate": sky.clouds.scroll_rate,
-            "shadow": sky.clouds.shadow,
-            "variance": sky.clouds.variance,
-        },
-        "haze": {
-            "ambient": sky.haze.ambient,
-            "blue_density": sky.haze.blue_density,
-            "blue_horizon": sky.haze.blue_horizon,
-            "density_multiplier": sky.haze.density_multiplier,
-            "distance_multiplier": sky.haze.distance_multiplier,
-            "density": sky.haze.density,
-            "horizon": sky.haze.horizon,
-        },
-        "atmosphere": {
-            "planet_radius": sky.atmosphere.planet_radius,
-            "bottom_radius": sky.atmosphere.bottom_radius,
-            "top_radius": sky.atmosphere.top_radius,
-            "sun_arc": sky.atmosphere.sun_arc,
-            "moisture": sky.atmosphere.moisture,
-            "droplet_radius": sky.atmosphere.droplet_radius,
-            "ice": sky.atmosphere.ice,
-        },
-    })
-}
-
-fn format_water(water: &Water) -> Value {
-    json!({
-        "fog_color": water.fog_color,
-        "fog_density": water.fog_density,
-        "underwater_fog": water.underwater_fog,
-        "blur": water.blur,
-        "fresnel_offset": water.fresnel_offset,
-        "fresnel_scale": water.fresnel_scale,
-        "normal_scale": water.normal_scale,
-        "scale_above": water.scale_above,
-        "scale_below": water.scale_below,
-        "waves": water.waves,
-    })
-}
-
-fn format_day_cycle(day: &DayCycle) -> Value {
-    json!({
-        "water_keyframe_count": day.water().len(),
-        "sky_track_keyframe_counts": day.skies().iter().map(Vec::len).collect::<Vec<_>>(),
-        "water_positions": day.water().iter().take(16).map(|frame| frame.position()).collect::<Vec<_>>(),
-    })
-}
-
 fn format_assignment(assignment: &EnvironmentAssignment) -> EnvironmentAssignmentOutput {
     let (source_kind, settings) = match &assignment.source {
-        EnvironmentSource::Inherit => (EnvironmentSourceKindOutput::Inherit, Value::Null),
-        EnvironmentSource::Asset(_) => (EnvironmentSourceKindOutput::Asset, Value::Null),
+        EnvironmentSource::Inherit => (EnvironmentSourceKindOutput::Inherit, None),
+        EnvironmentSource::Asset(_) => (EnvironmentSourceKindOutput::Asset, None),
         EnvironmentSource::Inline(bytes) => {
             let decoded = EnvironmentDescription::decode(bytes).ok().map(|description| match &description.settings {
-                EnvironmentSettings::Sky(sky) => json!({ "kind": "sky", "sky": format_sky(sky) }),
-                EnvironmentSettings::Water(water) => json!({ "kind": "water", "water": format_water(water) }),
-                EnvironmentSettings::DayCycle(day) => json!({ "kind": "day_cycle", "day_cycle": format_day_cycle(day) }),
+                EnvironmentSettings::Sky(sky) => EnvironmentSettingsOutput::Sky { sky: SkyOutput::from(sky.as_ref()) },
+                EnvironmentSettings::Water(water) => EnvironmentSettingsOutput::Water { water: WaterOutput::from(water.as_ref()) },
+                EnvironmentSettings::DayCycle(day) => EnvironmentSettingsOutput::DayCycle { day_cycle: DayCycleOutput::from(day) },
             });
-            (EnvironmentSourceKindOutput::Inline, decoded.unwrap_or(Value::Null))
+            (EnvironmentSourceKindOutput::Inline, decoded)
         }
     };
     EnvironmentAssignmentOutput {
