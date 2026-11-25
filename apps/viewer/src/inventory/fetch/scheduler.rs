@@ -905,7 +905,12 @@ async fn execute_background_ais(
             Err(RequestFailure::Forbidden | RequestFailure::FolderTooLarge) if depth > 0 => {
                 depth /= 2;
             }
-            Err(RequestFailure::Forbidden | RequestFailure::FolderTooLarge | RequestFailure::Missing(_)) if job.folders.len() > 1 => {
+            Err(
+                RequestFailure::Forbidden
+                | RequestFailure::FolderTooLarge
+                | RequestFailure::Missing(_)
+                | RequestFailure::InvalidResponse(_),
+            ) if job.folders.len() > 1 => {
                 return JobOutcome::SplitBatch;
             }
             Err(RequestFailure::Forbidden | RequestFailure::FolderTooLarge) => {

@@ -993,6 +993,68 @@ async fn transient_failure_retries() {
 }
 
 #[tokio::test]
+async fn ais_batch_missing_folder_splits() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let owner = InventoryOwner::new(Uuid::from_u128(1));
+    let root = key(owner, 41);
+    let omitted = key(owner, 42);
+    let present = key(owner, 43);
+    let mut inventory = Inventory::new(category(root, None), None, InventoryLimits::default()).expect("valid inventory root");
+    let (_requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    peer.grant(&[("InventoryAPIv3", "/ais")]).await;
+
+    let root_request = peer.next().await;
+    assert_eq!(root_request.path, format!("/ais/category/{}/children?depth=16", root.id().uuid()));
+    root_request.respond(200, root_response(root, &[omitted, present])).await;
+    let (fetch, applied) = take_folder_event(next_event(&mut events).await, root);
+    apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply root response");
+
+    let batch_request = peer.next().await;
+    assert_eq!(
+        batch_request.path,
+        format!("/ais/category/{}/children?depth=16&children={},{}", root.id().uuid(), omitted.id().uuid(), present.id().uuid())
+    );
+    batch_request.respond(200, empty_folder_response(present, 2)).await;
+
+    let first_request = peer.next().await;
+    let second_request = peer.next().await;
+    let omitted_path = format!("/ais/category/{}/children?depth=0", omitted.id().uuid());
+    let present_path = format!("/ais/category/{}/children?depth=0", present.id().uuid());
+    let (omitted_request, present_request) =
+        if first_request.path == omitted_path { (first_request, second_request) } else { (second_request, first_request) };
+    assert_eq!(omitted_request.path, omitted_path);
+    assert_eq!(present_request.path, present_path);
+    omitted_request.respond(404, "").await;
+    present_request.respond(200, empty_folder_response(present, 2)).await;
+
+    let mut omitted_reported = false;
+    let mut present_applied = false;
+    loop {
+        match next_event(&mut events).await {
+            InventoryFetchEvent::Failed { folder, error } => {
+                assert_eq!(folder, omitted);
+                assert_matches!(error, InventoryFetchError::HttpStatus(404));
+                omitted_reported = true;
+            }
+            InventoryFetchEvent::Folder { fetch, applied } => {
+                assert_eq!(fetch.folder, present);
+                apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply present folder response");
+                present_applied = true;
+            }
+            InventoryFetchEvent::BackgroundDone => break,
+        }
+    }
+    assert!(omitted_reported);
+    assert!(present_applied);
+    assert!(inventory.snapshot().is_complete(present));
+    assert!(!inventory.snapshot().is_complete(omitted));
+
+    drop(stop);
+    task.await.expect("scheduler task completes");
+}
+
+#[tokio::test]
 async fn missing_folder_keeps_walk_retryable() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
