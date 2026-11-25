@@ -2577,7 +2577,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.10.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2617,7 +2617,7 @@ dependencies = [
 [[package]]
 name = "gpui-ce"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2694,7 +2694,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.10.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "anyhow",
  "core-text",
@@ -2729,7 +2729,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.10.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2740,7 +2740,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.10.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "gpui-base",
  "gpui-ce",
@@ -2752,7 +2752,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.10.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "anyhow",
  "gpui-ce",
@@ -2766,7 +2766,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_collections"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "gpui_ce_util",
  "indexmap",
@@ -2776,7 +2776,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_derive_refineable"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2786,7 +2786,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_linux"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -2817,7 +2817,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_macos"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -2867,7 +2867,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_macros"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "heck",
  "proc-macro-crate",
@@ -2879,7 +2879,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_parley"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "anyhow",
  "fontique",
@@ -2893,7 +2893,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_platform"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "console_error_panic_hook",
  "gpui-ce",
@@ -2907,7 +2907,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_refineable"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "gpui_ce_derive_refineable",
 ]
@@ -2915,7 +2915,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_render"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "anyhow",
  "gpui-ce",
@@ -2931,7 +2931,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_scheduler"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "async-task",
  "backtrace",
@@ -2946,7 +2946,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_shared_string"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "schemars",
  "serde",
@@ -2956,7 +2956,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_sum_tree"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "heapless",
  "rayon",
@@ -2966,7 +2966,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_tokio"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "anyhow",
  "gpui-ce",
@@ -2977,7 +2977,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_util"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "anyhow",
  "log",
@@ -2987,7 +2987,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_web"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3012,7 +3012,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_wgpu"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -3044,7 +3044,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_winit"
 version = "0.4.0"
-source = "git+https://github.com/hymenaei/prism#f52c558c4feaa4d2b31521c66e259b344e58261d"
+source = "git+https://github.com/hymenaei/prism#ed625b012f28d3d751c2a26acf1b874ccde6ddf2"
 dependencies = [
  "accesskit",
  "accesskit_windows",
