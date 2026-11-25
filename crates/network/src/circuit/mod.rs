@@ -206,8 +206,11 @@ struct ConnectionTask {
     stats_sample_at: Instant,
     stats_sample_in: u64,
     stats_sample_out: u64,
+    stats_sample_bytes_in: u64,
+    bytes_in: u64,
     packets_in_per_sec: u32,
     packets_out_per_sec: u32,
+    bytes_in_per_sec: u64,
 }
 
 impl Drop for ConnectionTask {

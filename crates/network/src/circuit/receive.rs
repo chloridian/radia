@@ -227,6 +227,7 @@ impl ConnectionTask {
     }
 
     fn receive_packet(&mut self, bytes: &[u8]) -> Result<RunControl, ConnectionError> {
+        self.bytes_in = self.bytes_in.saturating_add(bytes.len() as u64);
         let frame = match Packet::inspect(bytes) {
             Ok(frame) => frame,
             Err(_) => {
@@ -562,18 +563,23 @@ impl ConnectionTask {
             let secs = elapsed.as_secs_f64();
             self.packets_in_per_sec = ((counts.packets_in.saturating_sub(self.stats_sample_in)) as f64 / secs).round() as u32;
             self.packets_out_per_sec = ((counts.packets_out.saturating_sub(self.stats_sample_out)) as f64 / secs).round() as u32;
+            self.bytes_in_per_sec = ((self.bytes_in.saturating_sub(self.stats_sample_bytes_in)) as f64 / secs).round() as u64;
             self.stats_sample_at = now;
             self.stats_sample_in = counts.packets_in;
             self.stats_sample_out = counts.packets_out;
+            self.stats_sample_bytes_in = self.bytes_in;
         }
         super::CircuitStats {
             packets_in: counts.packets_in,
             packets_out: counts.packets_out,
             packets_in_per_sec: self.packets_in_per_sec,
             packets_out_per_sec: self.packets_out_per_sec,
+            bytes_in: self.bytes_in,
+            bytes_in_per_sec: self.bytes_in_per_sec,
             unacked: counts.unacked,
             resent: counts.resent,
             throttle_sent: self.connection.agent_throttle_sent,
+            throttle_rates: self.connection.throttle_rates,
         }
     }
 

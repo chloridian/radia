@@ -1,7 +1,6 @@
 use network::{
     CircuitMotionStatus, CircuitStats,
     capabilities::{CapabilityDiagnostics, CapabilityLastStatus, EventQueueState},
-    default_throttle_rates,
 };
 use rmcp::{
     ErrorData,
@@ -40,6 +39,8 @@ pub struct CircuitStatsOutput {
     pub packets_out: u64,
     pub packets_in_per_sec: u32,
     pub packets_out_per_sec: u32,
+    pub bytes_in: u64,
+    pub bytes_in_per_sec: u64,
     pub unacked: usize,
     pub resent: u64,
     pub throttle_sent: bool,
@@ -140,21 +141,21 @@ fn format_capability_status(status: CapabilityLastStatus) -> String {
 }
 
 fn format_network_snapshot(regions: &[RegionNetworkSnapshot], limit: usize) -> NetworkOutput {
-    let throttle = default_throttle_rates();
-    let throttle_rates = ThrottleRatesOutput {
-        resend_bps: throttle.resend_bits_per_second,
-        land_bps: throttle.land_bits_per_second,
-        wind_bps: throttle.wind_bits_per_second,
-        cloud_bps: throttle.cloud_bits_per_second,
-        task_bps: throttle.task_bits_per_second,
-        texture_bps: throttle.texture_bits_per_second,
-        asset_bps: throttle.asset_bits_per_second,
-    };
     let entries = regions
         .iter()
         .take(limit)
         .map(|entry| {
             let stats = entry.stats;
+            let throttle = stats.throttle_rates;
+            let throttle_rates = ThrottleRatesOutput {
+                resend_bps: throttle.resend_bits_per_second,
+                land_bps: throttle.land_bits_per_second,
+                wind_bps: throttle.wind_bits_per_second,
+                cloud_bps: throttle.cloud_bits_per_second,
+                task_bps: throttle.task_bits_per_second,
+                texture_bps: throttle.texture_bits_per_second,
+                asset_bps: throttle.asset_bits_per_second,
+            };
             let event_queue = entry.capabilities.as_ref().map(|caps| EventQueueOutput {
                 state: match caps.event_queue.state {
                     EventQueueState::Starting => EventQueueStateOutput::Starting,
@@ -192,6 +193,8 @@ fn format_network_snapshot(regions: &[RegionNetworkSnapshot], limit: usize) -> N
                     packets_out: stats.packets_out,
                     packets_in_per_sec: stats.packets_in_per_sec,
                     packets_out_per_sec: stats.packets_out_per_sec,
+                    bytes_in: stats.bytes_in,
+                    bytes_in_per_sec: stats.bytes_in_per_sec,
                     unacked: stats.unacked,
                     resent: stats.resent,
                     throttle_sent: stats.throttle_sent,
@@ -216,6 +219,7 @@ mod tests {
     use network::{
         CircuitMotionStatus, CircuitStats,
         capabilities::{CapabilityDiagnostics, CapabilityLastStatus, CapabilityRequestStatus, EventQueueState, EventQueueStatus},
+        throttle_rates_for_bandwidth_kbps,
     };
     use world::{World, WorldLimits};
 
@@ -237,6 +241,7 @@ mod tests {
             max_recovery_targets: 4,
         });
         let region = world.register_region().expect("register region");
+        let sent_rates = throttle_rates_for_bandwidth_kbps(16_000);
         let regions = vec![RegionNetworkSnapshot {
             region,
             region_name: Some("Ahern".to_owned()),
@@ -251,9 +256,12 @@ mod tests {
                 packets_out: 80,
                 packets_in_per_sec: 12,
                 packets_out_per_sec: 8,
+                bytes_in: 64_000,
+                bytes_in_per_sec: 8_192,
                 unacked: 2,
                 resent: 1,
                 throttle_sent: true,
+                throttle_rates: sent_rates,
             },
             capabilities: Some(CapabilityDiagnostics {
                 event_queue: EventQueueStatus { state: EventQueueState::Connected, last_status: Some(200) },
@@ -282,5 +290,8 @@ mod tests {
         assert_eq!(output["regions"][0]["event_queue"]["state"], "connected");
         assert_eq!(output["regions"][0]["has_more_capabilities"], true);
         assert_eq!(output["regions"][0]["capabilities"].as_array().unwrap().len(), 1);
+        assert_eq!(output["regions"][0]["circuit"]["bytes_in"], 64_000);
+        assert_eq!(output["regions"][0]["circuit"]["bytes_in_per_sec"], 8_192);
+        assert_eq!(output["regions"][0]["circuit"]["throttle_rates"]["task_bps"].as_f64().unwrap() as f32, sent_rates.task_bits_per_second);
     }
 }
