@@ -88,6 +88,8 @@ pub struct SessionQueuesSnapshot {
 #[derive(Clone, Copy, Default)]
 pub struct RenderStatsSnapshot {
     pub frame_ms: f64,
+    pub frame_p50_ms: f64,
+    pub frame_p99_ms: f64,
     pub game_ms: f64,
     pub render_ms: f64,
     pub fps: f64,

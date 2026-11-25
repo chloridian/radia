@@ -5,6 +5,7 @@ use crate::inspection::{FrameSpike, FrameSpikeRing};
 const SMOOTHING_ALPHA: f64 = 0.15;
 const STALE_FRAME_GAP: Duration = Duration::from_secs(1);
 const MEDIAN_WINDOW: usize = 64;
+const FRAME_WINDOW: usize = 128;
 const MIN_MEDIAN_SAMPLES: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +19,8 @@ pub(super) enum MetricStatus {
 pub(super) struct FrameMetrics {
     pub(super) fps: f64,
     pub(super) frametime_ms: f64,
+    pub(super) frame_p50_ms: f64,
+    pub(super) frame_p99_ms: f64,
     pub(super) game_ms: f64,
     pub(super) render_ms: f64,
 }
@@ -30,6 +33,9 @@ pub(super) struct FrameTimes {
     recent_work_ms: [f64; MEDIAN_WINDOW],
     recent_head: usize,
     recent_len: usize,
+    recent_frame_ms: [f64; FRAME_WINDOW],
+    frame_head: usize,
+    frame_len: usize,
     spikes: FrameSpikeRing,
 }
 
@@ -43,6 +49,9 @@ impl Default for FrameTimes {
             recent_work_ms: [0.0; MEDIAN_WINDOW],
             recent_head: 0,
             recent_len: 0,
+            recent_frame_ms: [0.0; FRAME_WINDOW],
+            frame_head: 0,
+            frame_len: 0,
             spikes: FrameSpikeRing::default(),
         }
     }
@@ -53,19 +62,29 @@ impl FrameTimes {
         let game_ms = game_work.as_secs_f64() * 1000.0;
         let render_ms = render_work.as_secs_f64() * 1000.0;
         let work_ms = game_ms + render_ms;
-        let present_delta_ms = if let Some(previous) = self.last_presented {
+        let (present_delta_ms, frame_sample_ms) = if let Some(previous) = self.last_presented {
             let delta = presented.saturating_duration_since(previous);
             let delta_ms = delta.as_secs_f64() * 1000.0;
             if delta > Duration::ZERO && delta <= STALE_FRAME_GAP {
                 self.frametime_ms = Some(smooth(self.frametime_ms, delta_ms));
+                (delta_ms, Some(delta_ms))
             } else if delta > STALE_FRAME_GAP {
                 self.frametime_ms = Some(work_ms);
+                (delta_ms, Some(work_ms))
+            } else {
+                (delta_ms, None)
             }
-            delta_ms
         } else {
             self.frametime_ms = Some(work_ms);
-            work_ms
+            (work_ms, Some(work_ms))
         };
+        if let Some(sample_ms) = frame_sample_ms {
+            self.recent_frame_ms[self.frame_head] = sample_ms;
+            self.frame_head = (self.frame_head + 1) % FRAME_WINDOW;
+            if self.frame_len < FRAME_WINDOW {
+                self.frame_len += 1;
+            }
+        }
         if let Some(median) = self.median_work_ms()
             && median > 0.0
             && work_ms > 2.0 * median
@@ -85,11 +104,24 @@ impl FrameTimes {
     pub(super) fn metrics(&self) -> Option<FrameMetrics> {
         let frametime_ms = self.frametime_ms?;
         let fps = if frametime_ms > 0.0 { 1000.0 / frametime_ms } else { 0.0 };
-        Some(FrameMetrics { fps, frametime_ms, game_ms: self.game_ms?, render_ms: self.render_ms? })
+        let frame_p50_ms = self.percentile_frame_ms(0.50).unwrap_or(frametime_ms);
+        let frame_p99_ms = self.percentile_frame_ms(0.99).unwrap_or(frametime_ms);
+        Some(FrameMetrics { fps, frametime_ms, frame_p50_ms, frame_p99_ms, game_ms: self.game_ms?, render_ms: self.render_ms? })
     }
 
     pub(super) fn spikes(&self) -> FrameSpikeRing {
         self.spikes
+    }
+
+    fn percentile_frame_ms(&self, percentile: f64) -> Option<f64> {
+        if self.frame_len == 0 {
+            return None;
+        }
+        let mut scratch = self.recent_frame_ms;
+        let slice = &mut scratch[..self.frame_len];
+        let rank = ((self.frame_len as f64 * percentile).ceil() as usize).saturating_sub(1).min(self.frame_len - 1);
+        let (_, value, _) = slice.select_nth_unstable_by(rank, f64::total_cmp);
+        Some(*value)
     }
 
     fn median_work_ms(&self) -> Option<f64> {
@@ -268,6 +300,20 @@ mod tests {
         assert!((spikes[31].work_ms - 56.0).abs() < 0.1);
         assert!((spikes[31].frame_ms - 16.0).abs() < 0.1);
         assert_eq!(spikes[31].gpu_timings_ms, Some((3.0, 4.0)));
+    }
+
+    #[test]
+    fn frame_percentiles_from_fixed_samples() {
+        let mut times = FrameTimes::default();
+        let mut now = Instant::now();
+        times.record(now, Duration::from_millis(1), Duration::ZERO, None);
+        for sample_ms in 2..=100_u64 {
+            now += Duration::from_millis(sample_ms);
+            times.record(now, Duration::from_millis(1), Duration::from_millis(1), None);
+        }
+        let metrics = times.metrics().expect("metrics available");
+        assert!((metrics.frame_p50_ms - 50.0).abs() < 0.01, "p50 was {}", metrics.frame_p50_ms);
+        assert!((metrics.frame_p99_ms - 99.0).abs() < 0.01, "p99 was {}", metrics.frame_p99_ms);
     }
 
     #[test]

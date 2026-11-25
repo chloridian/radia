@@ -628,6 +628,8 @@ impl SceneView {
         let metrics = self.frame_times.metrics();
         let snapshot = RenderStatsSnapshot {
             frame_ms: metrics.map_or(0.0, |m| m.frametime_ms),
+            frame_p50_ms: metrics.map_or(0.0, |m| m.frame_p50_ms),
+            frame_p99_ms: metrics.map_or(0.0, |m| m.frame_p99_ms),
             game_ms: metrics.map_or(0.0, |m| m.game_ms),
             render_ms: metrics.map_or(0.0, |m| m.render_ms),
             fps: metrics.map_or(0.0, |m| m.fps),

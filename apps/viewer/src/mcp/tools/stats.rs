@@ -31,6 +31,8 @@ pub struct FrameSpikeOutput {
 pub struct FrameStatsOutput {
     pub fps: f64,
     pub frame_ms: f64,
+    pub frame_p50_ms: f64,
+    pub frame_p99_ms: f64,
     pub game_ms: f64,
     pub render_ms: f64,
     pub gpu_timings_ms: Option<(f64, f64)>,
@@ -144,6 +146,8 @@ pub(in crate::mcp) fn stats_data(handle: &ViewerInspectionHandle, limit: Option<
         frame: Some(FrameStatsOutput {
             fps: render_snapshot.fps,
             frame_ms: render_snapshot.frame_ms,
+            frame_p50_ms: render_snapshot.frame_p50_ms,
+            frame_p99_ms: render_snapshot.frame_p99_ms,
             game_ms: render_snapshot.game_ms,
             render_ms: render_snapshot.render_ms,
             gpu_timings_ms: render_snapshot.gpu_timings,
