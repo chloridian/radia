@@ -43,7 +43,7 @@ pub use self::{
     pick::{PickDetail, PickError},
 };
 use crate::{
-    Limits,
+    Limits, WorkerBudget,
     pipeline::{FACE_INDEX_BYTES, Pipeline, Sky, SurfacePipelines, VoidWater},
     scene::{AgentPose, Camera, MAX_REGIONS, MeshId, ViewVersion},
     texture::{GeometryTextureState, TextureCompletion, TextureJob, TextureState, Textures},
@@ -383,8 +383,12 @@ impl GeometryRenderer {
         self.textures.state().revision
     }
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat, limits: Limits) -> Self {
+        Self::new_with_workers(device, queue, format, limits, WorkerBudget::new(limits.worker_threads))
+    }
+
+    pub(crate) fn new_with_workers(device: &Device, queue: &Queue, format: TextureFormat, limits: Limits, workers: WorkerBudget) -> Self {
         let memory = Arc::new(Accounting::new(limits.mesh_bytes));
-        let textures = Textures::new(device, queue, limits);
+        let textures = Textures::new_with_workers(device, queue, limits, workers);
         let instances = InstanceBuffers::new(device, &memory, INITIAL_FACE_INSTANCES);
         let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout, &textures, &instances.instances);
         let void_water = VoidWater::new(device, format, &textures);

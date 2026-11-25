@@ -34,7 +34,7 @@ use prism::{
     px, rgb, rgb_to_hsla, size, surface, white,
 };
 use prism_wgpu::WgpuContextHandle;
-use render::{CompressionQuality, FrameInput, Renderer, TextureCompletion, scene, scene::EnvironmentChoice};
+use render::{CompressionQuality, FrameInput, Renderer, TextureCompletion, WorkerBudget, WorkerKind, scene, scene::EnvironmentChoice};
 use tokio::{
     runtime::Handle,
     sync::{mpsc as tokio_mpsc, watch},
@@ -65,6 +65,7 @@ use crate::{
     scene_feed::{SceneFeed, SceneSources},
     session::AgentMotionSample,
     settings::SettingsStore,
+    worker_pool::WorkerPool,
 };
 
 const TEXTURE_DROP_REPORT_INTERVAL: Duration = Duration::from_secs(10);
@@ -136,7 +137,9 @@ pub(crate) struct SceneView {
     failed: bool,
     settings: Arc<SettingsStore>,
     startup_limits: StartupLimits,
-    texture_jobs: usize,
+    worker_threads: usize,
+    workers: WorkerBudget,
+    worker_pool: WorkerPool,
     vram: Option<Vram>,
     lod_factor: f32,
     draw_distance: f32,
@@ -168,13 +171,17 @@ impl SceneView {
         let focus_handle = cx.focus_handle();
         let (wake_tx, mut wake_rx) = async_mpsc::channel::<()>(1);
         let feed_wake = wake_tx.clone();
-        let feed = SceneFeed::start(
+        let worker_threads = config.startup_limits.worker_threads;
+        let workers = config.scene_budget.workers();
+        let worker_pool = WorkerPool::new(worker_threads);
+        let feed = SceneFeed::start_with_workers(
             config.sources,
             config.agent_id,
             config.camera,
             config.movement,
             config.agent_motion,
             config.scene_budget,
+            worker_pool.clone(),
             config.runtime,
             move || {
                 let mut wake = feed_wake.clone();
@@ -182,8 +189,7 @@ impl SceneView {
             },
         );
 
-        let texture_jobs = config.startup_limits.texture_jobs;
-        let (texture_sender, texture_receiver) = mpsc::sync_channel(texture_jobs);
+        let (texture_sender, texture_receiver) = mpsc::sync_channel(worker_threads);
         let settings = config.settings;
         let snapshot = settings.snapshot();
         let lod_factor = snapshot.get(SCENE_LOD_FACTOR);
@@ -335,7 +341,9 @@ impl SceneView {
             failed: false,
             settings,
             startup_limits: config.startup_limits,
-            texture_jobs,
+            worker_threads,
+            workers,
+            worker_pool,
             vram: None,
             lod_factor,
             draw_distance,
@@ -400,7 +408,7 @@ impl SceneView {
         let render_limits = self.startup_limits.resolve_render(vram, &self.settings.snapshot());
         let limits = device.limits();
         let [width, height] = self.viewport_size;
-        match Renderer::new(device, queue, info, format, width, height, render_limits) {
+        match Renderer::new_with_workers(device, queue, info, format, width, height, render_limits, self.workers.clone()) {
             Ok(renderer) => {
                 let info = renderer.adapter_info();
                 if let Some(publisher) = inspection(cx) {
@@ -416,7 +424,7 @@ impl SceneView {
                     texture_soft_cap_mib = render_limits.texture_soft_cap_bytes / (1024 * 1024),
                     mesh_memory_mib = render_limits.mesh_bytes / (1024 * 1024),
                     texture_staging_mib = render_limits.texture_staging_bytes / (1024 * 1024),
-                    texture_jobs = render_limits.texture_jobs,
+                    worker_threads = render_limits.worker_threads,
                     "scene GPU initialized"
                 );
                 self.renderer = Some(renderer);
@@ -640,9 +648,10 @@ impl SceneView {
             gpu_timings: renderer.gpu_timings(),
             viewport_size: self.viewport_size,
             frame_spikes: self.frame_times.spikes(),
-            texture_completions_capacity: self.texture_jobs,
+            texture_completions_capacity: self.worker_threads,
             texture_completions_dropped: self.texture_completions_dropped_total,
             detail_batch_waits: self.feed.as_ref().map_or(0, |feed| feed.view.detail_batch_waits()),
+            workers: self.workers.stats(),
         };
         self.render_stats.send_replace(snapshot);
     }
@@ -910,7 +919,14 @@ impl SceneView {
             let dropped = Arc::clone(&self.dropped_textures);
             let mut wake = self.wake_tx.clone();
             let span = tracing::Span::current();
-            let work = feed.runtime.spawn_blocking(move || span.in_scope(|| job.run(CompressionQuality::Fast)));
+            let visible = job.is_visible();
+            let workers = self.workers.clone();
+            let work = self.worker_pool.spawn(visible, move || {
+                let started = Instant::now();
+                let completion = span.in_scope(|| job.run(CompressionQuality::Fast));
+                workers.record_busy(WorkerKind::Texture, started.elapsed());
+                completion
+            });
             drop(
                 feed.runtime.spawn(
                     async move {

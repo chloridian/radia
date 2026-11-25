@@ -437,7 +437,7 @@ mod tests {
     fn work_released_on_complete() {
         let (device, queue) = vulkan_device();
         let mut textures = Textures::new(&device, &queue, Limits::default());
-        let limit = textures.memory.max_jobs;
+        let limit = textures.memory.workers.capacity();
         let handles: Vec<_> = (200..200 + limit as u128 + 1).map(|id| loaded(id, true)).collect();
         for texture in &handles[..limit] {
             textures.request(texture, 1, Priority::Visible);

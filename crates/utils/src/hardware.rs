@@ -9,7 +9,10 @@ use std::thread;
 #[cfg(target_os = "macos")]
 use libc::{c_void, size_t, sysctlbyname};
 #[cfg(target_os = "windows")]
-use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows_sys::Win32::System::{
+    SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
+    Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Vram {
@@ -41,6 +44,28 @@ impl Hardware {
 pub fn available_ram_bytes() -> Option<u64> {
     platform_available_ram_bytes()
 }
+
+pub fn set_current_thread_below_normal_priority() {
+    platform_set_thread_below_normal_priority();
+}
+
+#[cfg(target_os = "windows")]
+fn platform_set_thread_below_normal_priority() {
+    let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) };
+}
+
+#[cfg(target_os = "linux")]
+fn platform_set_thread_below_normal_priority() {
+    let _ = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
+}
+
+#[cfg(target_os = "macos")]
+fn platform_set_thread_below_normal_priority() {
+    let _ = unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+fn platform_set_thread_below_normal_priority() {}
 
 fn total_ram_bytes() -> Option<u64> {
     platform_total_ram_bytes()

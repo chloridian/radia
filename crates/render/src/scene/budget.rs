@@ -5,11 +5,14 @@ use std::sync::{
 
 use utils::hardware::Hardware;
 
-use crate::limits::worker_split;
+use crate::{
+    limits::auto_worker_threads,
+    workers::{WorkerBudget, WorkerKind, WorkerPermit},
+};
 
 const MIB: usize = 1024 * 1024;
 const DEFAULT_MEMORY_BYTES: usize = 256 * MIB;
-const DEFAULT_MESH_JOBS: usize = 4;
+const DEFAULT_WORKER_THREADS: usize = 4;
 
 pub const UNBOUNDED_MEMORY_BYTES: usize = usize::MAX;
 pub const MIN_CAPPED_MEMORY_BYTES: usize = DEFAULT_MEMORY_BYTES;
@@ -17,19 +20,18 @@ pub const MIN_CAPPED_MEMORY_BYTES: usize = DEFAULT_MEMORY_BYTES;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
     pub memory_bytes: usize,
-    pub mesh_jobs: usize,
+    pub worker_threads: usize,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { memory_bytes: DEFAULT_MEMORY_BYTES, mesh_jobs: DEFAULT_MESH_JOBS }
+        Self { memory_bytes: DEFAULT_MEMORY_BYTES, worker_threads: DEFAULT_WORKER_THREADS }
     }
 }
 
 impl Limits {
     pub fn derive(hardware: &Hardware) -> Self {
-        let (_, mesh_jobs) = worker_split(hardware.cores);
-        Self { memory_bytes: UNBOUNDED_MEMORY_BYTES, mesh_jobs }
+        Self { memory_bytes: UNBOUNDED_MEMORY_BYTES, worker_threads: auto_worker_threads(hardware.cores) }
     }
 }
 
@@ -44,25 +46,27 @@ impl Default for Budget {
 
 impl Budget {
     pub fn new(limits: Limits) -> Self {
-        Self(Arc::new(Accounting {
-            used: AtomicUsize::new(0),
-            peak: AtomicUsize::new(0),
-            mesh_jobs: AtomicUsize::new(0),
-            memory_bytes: limits.memory_bytes,
-            mesh_jobs_limit: limits.mesh_jobs.max(1),
-        }))
+        Self::with_workers(limits, WorkerBudget::new(limits.worker_threads))
+    }
+
+    pub fn with_workers(limits: Limits, workers: WorkerBudget) -> Self {
+        Self(Arc::new(Accounting { used: AtomicUsize::new(0), peak: AtomicUsize::new(0), workers, memory_bytes: limits.memory_bytes }))
     }
 
     pub fn limits(&self) -> Limits {
-        Limits { memory_bytes: self.0.memory_bytes, mesh_jobs: self.0.mesh_jobs_limit }
+        Limits { memory_bytes: self.0.memory_bytes, worker_threads: self.0.workers.capacity() }
     }
 
     pub fn memory_bytes(&self) -> usize {
         self.0.memory_bytes
     }
 
-    pub fn mesh_jobs(&self) -> usize {
-        self.0.mesh_jobs_limit
+    pub fn worker_threads(&self) -> usize {
+        self.0.workers.capacity()
+    }
+
+    pub fn workers(&self) -> WorkerBudget {
+        self.0.workers.clone()
     }
 
     pub fn charged_bytes(&self) -> usize {
@@ -85,33 +89,25 @@ impl Budget {
     }
 
     pub(in crate::scene) fn mesh_work(&self) -> Option<MeshWork> {
-        let limit = self.0.mesh_jobs_limit;
-        self.0.mesh_jobs.try_update(Ordering::AcqRel, Ordering::Acquire, |jobs| (jobs < limit).then_some(jobs + 1)).ok()?;
+        let permit = self.0.workers.try_acquire(WorkerKind::Mesh)?;
         let Some(lease) = self.reserve(4 * 1024 * 1024) else {
-            self.0.mesh_jobs.fetch_sub(1, Ordering::AcqRel);
+            drop(permit);
             return None;
         };
-        Some(MeshWork { lease, budget: self.clone() })
+        Some(MeshWork { lease, _permit: permit })
     }
 }
 
 struct Accounting {
     used: AtomicUsize,
     peak: AtomicUsize,
-    mesh_jobs: AtomicUsize,
+    workers: WorkerBudget,
     memory_bytes: usize,
-    mesh_jobs_limit: usize,
 }
 
 pub(in crate::scene) struct MeshWork {
     pub(in crate::scene) lease: Lease,
-    budget: Budget,
-}
-
-impl Drop for MeshWork {
-    fn drop(&mut self) {
-        self.budget.0.mesh_jobs.fetch_sub(1, Ordering::AcqRel);
-    }
+    _permit: WorkerPermit,
 }
 
 pub(in crate::scene) struct Lease {

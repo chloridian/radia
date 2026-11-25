@@ -89,8 +89,9 @@ mod tests {
                 staging: memory.reserve(8 * 8 * 4).unwrap(),
                 work: memory.work().unwrap(),
                 compress: false,
+                visible: true,
             };
-            let others: Vec<_> = (1..memory.max_jobs).map(|_| memory.work().unwrap()).collect();
+            let others: Vec<_> = (1..memory.workers.capacity()).map(|_| memory.work().unwrap()).collect();
             assert!(memory.work().is_none());
             let completion = job.run(CompressionQuality::Fast);
             match &completion.data {

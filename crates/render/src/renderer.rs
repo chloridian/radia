@@ -14,7 +14,7 @@ use wgpu::{
 use world::Entity;
 
 use crate::{
-    Limits,
+    Limits, WorkerBudget,
     environment::Evaluated,
     geometry::{GeometryRenderer, ObjectExplanation, PickDetail, PickError, Stats},
     gpu_timing::GpuTimings,
@@ -87,6 +87,20 @@ impl Renderer {
         height: u32,
         limits: Limits,
     ) -> Result<Self, Error> {
+        let workers = WorkerBudget::new(limits.worker_threads);
+        Self::new_with_workers(device, queue, info, format, width, height, limits, workers)
+    }
+
+    pub fn new_with_workers(
+        device: Arc<Device>,
+        queue: Arc<Queue>,
+        info: AdapterInfo,
+        format: TextureFormat,
+        width: u32,
+        height: u32,
+        limits: Limits,
+        workers: WorkerBudget,
+    ) -> Result<Self, Error> {
         let srgb_format = format.add_srgb_suffix();
         if !srgb_format.is_srgb() {
             return Err(Error::UnsupportedColorFormat);
@@ -99,7 +113,7 @@ impl Renderer {
             timestamp_queries,
             "scene renderer configured"
         );
-        let geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float, limits);
+        let geometry = GeometryRenderer::new_with_workers(&device, &queue, TextureFormat::Rgba16Float, limits, workers);
         let gpu_timings = if timestamp_queries { GpuTimings::new(&device, queue.get_timestamp_period()) } else { None };
         let postprocess = PostProcess::new(&device, &queue, srgb_format);
         let mut renderer = Self {

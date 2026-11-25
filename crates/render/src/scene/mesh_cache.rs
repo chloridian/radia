@@ -12,7 +12,10 @@ use assets::mesh::Mesh;
 use utils::{AssetId, FastHashMap};
 use world::{PrimShape, SculptFlags, SculptType};
 
-use crate::scene::{Budget, Detail, MeshBuildError, SharedMesh, budget::MeshWork, mesh::retained_bytes, prim::tessellate};
+use crate::{
+    scene::{Budget, Detail, MeshBuildError, SharedMesh, budget::MeshWork, mesh::retained_bytes, prim::tessellate},
+    workers::WorkerKind,
+};
 
 const HASH_ENTRY_OVERHEAD_BYTES: usize = 64;
 
@@ -42,11 +45,16 @@ pub enum PreparedMesh {
 
 pub(in crate::scene) struct PrimJob {
     key: MeshKey,
+    priority: u32,
     work: MeshWork,
     cancelled: Arc<AtomicBool>,
 }
 
 impl PrimJob {
+    pub(in crate::scene) fn is_visible(&self) -> bool {
+        self.priority > 0
+    }
+
     pub fn run(self) -> PrimCompletion {
         let result = tessellate(self.key.shape, self.key.detail, &self.cancelled);
         PrimCompletion { key: self.key, result, work: self.work, cancelled: self.cancelled }
@@ -247,6 +255,7 @@ impl MeshCache {
             }
             State::Running(_) | State::Failed(_) => {}
         }
+        self.budget.workers().set_queued(WorkerKind::Mesh, self.queued.len());
     }
 
     fn remove_indexes(&mut self, key: MeshKey) {
@@ -275,6 +284,7 @@ impl MeshCache {
         if let Some(index) = entry.unused.take() {
             self.unused.remove(&index);
         }
+        self.budget.workers().set_queued(WorkerKind::Mesh, self.queued.len());
     }
 
     pub(in crate::scene) fn release(&mut self, key: MeshKey) {
@@ -355,10 +365,13 @@ impl MeshCache {
         }
         let work = self.budget.mesh_work()?;
         let (_, key) = self.queued.pop_first()?;
+        self.budget.workers().set_queued(WorkerKind::Mesh, self.queued.len());
         let cancelled = Arc::new(AtomicBool::new(false));
-        self.entries.get_mut(&key).expect("selected queue entry").state = State::Running(Arc::downgrade(&cancelled));
+        let entry = self.entries.get_mut(&key).expect("selected queue entry");
+        let priority = entry.priority;
+        entry.state = State::Running(Arc::downgrade(&cancelled));
         self.running.push(key);
-        Some(PrimJob { key, work, cancelled })
+        Some(PrimJob { key, priority, work, cancelled })
     }
 
     pub(in crate::scene) fn waiting(&self) -> bool {
@@ -532,7 +545,7 @@ mod tests {
     #[test]
     fn shared_admission_releases_for_retry() {
         let budget = Budget::default();
-        let limit = budget.mesh_jobs();
+        let limit = budget.worker_threads();
         let extra = (2..limit).map(|_| budget.mesh_work().expect("reserve extra mesh slot")).collect::<Vec<_>>();
         let mut a = MeshCache::new(budget.clone());
         let mut b = MeshCache::new(budget.clone());

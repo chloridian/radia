@@ -105,6 +105,17 @@ pub struct InventoryQueueStatsOutput {
 }
 
 #[derive(Serialize, JsonSchema)]
+pub struct WorkerStatsOutput {
+    pub capacity: usize,
+    pub texture_running: usize,
+    pub texture_queued: usize,
+    pub texture_busy_ms: f64,
+    pub mesh_running: usize,
+    pub mesh_queued: usize,
+    pub mesh_busy_ms: f64,
+}
+
+#[derive(Serialize, JsonSchema)]
 pub struct StatsOutput {
     pub active_session: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -119,6 +130,8 @@ pub struct StatsOutput {
     pub world_reads: Option<WorldReadsStatsOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inventory: Option<InventoryQueueStatsOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workers: Option<WorkerStatsOutput>,
 }
 
 #[tool_router(router = stats_router, vis = "pub(super)")]
@@ -144,6 +157,7 @@ pub(in crate::mcp) fn stats_data(handle: &ViewerInspectionHandle, limit: Option<
             assets: None,
             world_reads: None,
             inventory: None,
+            workers: None,
         };
     };
     let limit = limit.unwrap_or(FRAME_SPIKE_CAPACITY).clamp(1, FRAME_SPIKE_CAPACITY);
@@ -222,5 +236,14 @@ pub(in crate::mcp) fn stats_data(handle: &ViewerInspectionHandle, limit: Option<
             outstanding_reads_full: session.world.outstanding_reads_full(),
         }),
         inventory: Some(InventoryQueueStatsOutput { background_depth, background_peak_depth }),
+        workers: Some(WorkerStatsOutput {
+            capacity: render_snapshot.workers.capacity,
+            texture_running: render_snapshot.workers.texture_running,
+            texture_queued: render_snapshot.workers.texture_queued,
+            texture_busy_ms: render_snapshot.workers.texture_busy_ns as f64 / 1_000_000.0,
+            mesh_running: render_snapshot.workers.mesh_running,
+            mesh_queued: render_snapshot.workers.mesh_queued,
+            mesh_busy_ms: render_snapshot.workers.mesh_busy_ns as f64 / 1_000_000.0,
+        }),
     }
 }

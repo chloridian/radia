@@ -13,4 +13,5 @@ mod session;
 pub mod settings;
 #[cfg(test)]
 mod test_helpers;
+mod worker_pool;
 pub mod world_reader;

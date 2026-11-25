@@ -4,7 +4,7 @@ use cvars::{
 };
 use network::{default_throttle_rates, throttle_rates_for_bandwidth_kbps};
 use protocol::messages::ThrottleRates;
-use render::{auto_worker_threads, scene, split_worker_threads};
+use render::{auto_worker_threads, scene};
 use utils::hardware::{Hardware, Vram};
 
 const MIB: usize = 1024 * 1024;
@@ -15,7 +15,7 @@ pub struct StartupLimits {
     pub hardware: Hardware,
     pub assets: assets::Limits,
     pub scene: scene::Limits,
-    pub texture_jobs: usize,
+    pub worker_threads: usize,
     pub texture_staging_bytes: usize,
     pub throttle_rates: ThrottleRates,
 }
@@ -27,7 +27,7 @@ impl Default for StartupLimits {
             hardware: Hardware { cores: 4, ram_bytes: 0, vram: None },
             assets: assets::Limits::default(),
             scene: scene::Limits::default(),
-            texture_jobs: render.texture_jobs,
+            worker_threads: render.worker_threads,
             texture_staging_bytes: render.texture_staging_bytes,
             throttle_rates: default_throttle_rates(),
         }
@@ -38,9 +38,8 @@ impl StartupLimits {
     pub fn resolve(hardware: Hardware, snapshot: &CvarSnapshot) -> Self {
         let derived_render = render::Limits::derive(&hardware);
         let auto_workers = auto_worker_threads(hardware.cores);
-        let total_workers = resolve_count(snapshot, RENDER_WORKER_THREADS, auto_workers);
-        let (texture_jobs, mesh_jobs) = split_worker_threads(total_workers);
-        let derived_assets = assets::Limits::derive(total_workers);
+        let worker_threads = resolve_count(snapshot, RENDER_WORKER_THREADS, auto_workers);
+        let derived_assets = assets::Limits::derive(worker_threads);
         let raw_ram_cap = snapshot.get(MEMORY_MAX_RAM_MIB);
         let (assets, memory_bytes) = if raw_ram_cap == 0 {
             (derived_assets, scene::UNBOUNDED_MEMORY_BYTES)
@@ -51,7 +50,14 @@ impl StartupLimits {
         let texture_staging_bytes = derived_render.texture_staging_bytes;
         let throttle_rates = resolve_throttle_rates(snapshot);
 
-        Self { hardware, assets, scene: scene::Limits { memory_bytes, mesh_jobs }, texture_jobs, texture_staging_bytes, throttle_rates }
+        Self {
+            hardware,
+            assets,
+            scene: scene::Limits { memory_bytes, worker_threads },
+            worker_threads,
+            texture_staging_bytes,
+            throttle_rates,
+        }
     }
 
     pub fn resolve_render(&self, vram: Option<Vram>, snapshot: &CvarSnapshot) -> render::Limits {
@@ -65,7 +71,7 @@ impl StartupLimits {
             texture_soft_cap_bytes: derived.texture_soft_cap_bytes,
             mesh_bytes: derived.mesh_bytes,
             texture_staging_bytes: self.texture_staging_bytes,
-            texture_jobs: self.texture_jobs,
+            worker_threads: self.worker_threads,
         }
     }
 
@@ -142,7 +148,8 @@ mod tests {
         let startup = StartupLimits::resolve(hardware, &registry.snapshot());
 
         assert_eq!(startup.scene.memory_bytes, scene::UNBOUNDED_MEMORY_BYTES);
-        assert_eq!(startup.texture_jobs + startup.scene.mesh_jobs, 14);
+        assert_eq!(startup.worker_threads, 14);
+        assert_eq!(startup.scene.worker_threads, 14);
         assert_eq!(startup.assets.work_bytes, 14 * 128 * MIB);
         assert_eq!(startup.assets.texture_work_bytes, (14 * 128 * 3 / 8) * MIB);
         assert_eq!(startup.throttle_rates, default_throttle_rates());
@@ -169,8 +176,8 @@ mod tests {
         assert_eq!(startup.assets.texture_work_bytes, 192 * MIB);
         assert_eq!(startup.scene.memory_bytes, 256 * MIB);
         assert_eq!(startup.assets.work_bytes + startup.scene.memory_bytes, 768 * MIB);
-        assert_eq!(startup.texture_jobs, 6);
-        assert_eq!(startup.scene.mesh_jobs, 6);
+        assert_eq!(startup.worker_threads, 12);
+        assert_eq!(startup.scene.worker_threads, 12);
         assert_eq!(startup.texture_staging_bytes, render::Limits::derive(&hardware).texture_staging_bytes);
         assert_eq!(startup.throttle_rates, throttle_rates_for_bandwidth_kbps(16_000));
 
@@ -178,7 +185,7 @@ mod tests {
         assert_eq!(render.mesh_bytes, 64 * MIB);
         assert_eq!(render.texture_soft_cap_bytes, 1024 * MIB);
         assert_eq!(render.texture_staging_bytes, startup.texture_staging_bytes);
-        assert_eq!(render.texture_jobs, 6);
+        assert_eq!(render.worker_threads, 12);
 
         let mut larger_cap = CvarRegistry::new();
         larger_cap.set(MEMORY_MAX_RAM_MIB, Layer::Global, 2048).unwrap();

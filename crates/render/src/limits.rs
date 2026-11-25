@@ -12,14 +12,14 @@ const DEFAULT_MESH_BYTES: usize = 64 * MIB;
 const MAX_MESH_BYTES: usize = 1024 * MIB;
 const DEFAULT_TEXTURE_STAGING_BYTES: usize = 48 * MIB;
 const MAX_TEXTURE_STAGING_BYTES: usize = 512 * MIB;
-const DEFAULT_TEXTURE_JOBS: usize = 4;
+const DEFAULT_WORKER_THREADS: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
     pub texture_soft_cap_bytes: usize,
     pub mesh_bytes: usize,
     pub texture_staging_bytes: usize,
-    pub texture_jobs: usize,
+    pub worker_threads: usize,
 }
 
 impl Default for Limits {
@@ -28,7 +28,7 @@ impl Default for Limits {
             texture_soft_cap_bytes: DEFAULT_TEXTURE_SOFT_CAP_BYTES,
             mesh_bytes: DEFAULT_MESH_BYTES,
             texture_staging_bytes: DEFAULT_TEXTURE_STAGING_BYTES,
-            texture_jobs: DEFAULT_TEXTURE_JOBS,
+            worker_threads: DEFAULT_WORKER_THREADS,
         }
     }
 }
@@ -39,7 +39,7 @@ impl Limits {
     }
 
     pub fn derive_with_vram_policy(hardware: &Hardware, max_vram_budget_bytes: Option<u64>, vram_divisor: u32) -> Self {
-        let (texture_jobs, _) = worker_split(hardware.cores);
+        let worker_threads = auto_worker_threads(hardware.cores);
         let usable_ram = hardware.usable_ram_bytes();
         let texture_staging_bytes =
             usize::try_from(usable_ram / 128).unwrap_or(usize::MAX).clamp(DEFAULT_TEXTURE_STAGING_BYTES, MAX_TEXTURE_STAGING_BYTES) / MIB
@@ -57,23 +57,12 @@ impl Limits {
         let other_gpu = (mesh_bytes + DEPTH_BYTES + INSTANCE_BUFFER_BYTES) as u64;
         let texture_soft_cap_bytes =
             usize::try_from(target.saturating_sub(other_gpu)).unwrap_or(usize::MAX).max(MIN_TEXTURE_SOFT_CAP_BYTES) / MIB * MIB;
-        Self { texture_soft_cap_bytes, mesh_bytes, texture_staging_bytes, texture_jobs }
+        Self { texture_soft_cap_bytes, mesh_bytes, texture_staging_bytes, worker_threads }
     }
-}
-
-pub fn split_worker_threads(total: usize) -> (usize, usize) {
-    let total = total.max(2);
-    let texture_jobs = total.div_ceil(2).max(1);
-    let mesh_jobs = total.saturating_sub(texture_jobs).max(1);
-    (texture_jobs, mesh_jobs)
 }
 
 pub fn auto_worker_threads(cores: usize) -> usize {
     cores.saturating_sub(RESERVED_THREADS).max(2)
-}
-
-pub(crate) fn worker_split(cores: usize) -> (usize, usize) {
-    split_worker_threads(auto_worker_threads(cores))
 }
 
 #[cfg(test)]
@@ -88,9 +77,10 @@ mod tests {
         let hardware = Hardware { cores: 4, ram_bytes: 8 * 1024 * 1024 * 1024, vram: None };
         let render = Limits::derive(&hardware);
         let scene_limits = scene::Limits::derive(&hardware);
-        let workers = render.texture_jobs + scene_limits.mesh_jobs;
+        let workers = render.worker_threads;
         let asset_limits = assets::Limits::derive(workers);
 
+        assert_eq!(scene_limits.worker_threads, workers);
         assert_eq!(render.texture_soft_cap_bytes, MIN_TEXTURE_SOFT_CAP_BYTES);
         assert!(render.mesh_bytes >= DEFAULT_MESH_BYTES);
         assert!(render.texture_staging_bytes >= DEFAULT_TEXTURE_STAGING_BYTES);
@@ -110,9 +100,10 @@ mod tests {
         };
         let render = Limits::derive(&hardware);
         let scene_limits = scene::Limits::derive(&hardware);
-        let workers = render.texture_jobs + scene_limits.mesh_jobs;
+        let workers = render.worker_threads;
         let asset_limits = assets::Limits::derive(workers);
 
+        assert_eq!(scene_limits.worker_threads, workers);
         assert!(workers <= hardware.cores - RESERVED_THREADS);
         assert!(workers >= 2);
         assert_eq!(scene_limits.memory_bytes, scene::UNBOUNDED_MEMORY_BYTES);

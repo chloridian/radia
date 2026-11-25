@@ -8,7 +8,7 @@ use std::{
 
 use network::{CircuitMotionStatus, CircuitStats, SessionHandle, SimulatorId, capabilities::Client as CapabilityClient};
 use protocol::messages::SimStats;
-use render::{CaptureReadback, ObjectExplanation, PickDetail, PickError, Stats};
+use render::{CaptureReadback, ObjectExplanation, PickDetail, PickError, Stats, WorkerStats};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{
@@ -100,6 +100,7 @@ pub struct RenderStatsSnapshot {
     pub texture_completions_capacity: usize,
     pub texture_completions_dropped: u64,
     pub detail_batch_waits: u64,
+    pub workers: WorkerStats,
 }
 
 #[derive(Clone, Debug, Default)]

@@ -29,7 +29,10 @@ use wgpu::{
 use world::Region;
 
 pub use self::compression::CompressionQuality;
-use crate::Limits;
+use crate::{
+    Limits,
+    workers::{WorkerBudget, WorkerKind, WorkerPermit},
+};
 
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(10);
@@ -64,28 +67,20 @@ struct Accounting {
     gpu: AtomicUsize,
     textures: AtomicUsize,
     staging: AtomicUsize,
-    jobs: AtomicUsize,
     staging_bytes: usize,
-    max_jobs: usize,
+    workers: WorkerBudget,
 }
 
 impl Default for Accounting {
     fn default() -> Self {
         let limits = Limits::default();
-        Self::new(limits.texture_staging_bytes, limits.texture_jobs)
+        Self::new(limits.texture_staging_bytes, WorkerBudget::new(limits.worker_threads))
     }
 }
 
 impl Accounting {
-    fn new(staging_bytes: usize, max_jobs: usize) -> Self {
-        Self {
-            gpu: AtomicUsize::new(0),
-            textures: AtomicUsize::new(0),
-            staging: AtomicUsize::new(0),
-            jobs: AtomicUsize::new(0),
-            staging_bytes,
-            max_jobs: max_jobs.max(1),
-        }
+    fn new(staging_bytes: usize, workers: WorkerBudget) -> Self {
+        Self { gpu: AtomicUsize::new(0), textures: AtomicUsize::new(0), staging: AtomicUsize::new(0), staging_bytes, workers }
     }
 
     fn reserve(self: &Arc<Self>, bytes: usize) -> Option<Lease> {
@@ -96,10 +91,8 @@ impl Accounting {
         Some(Lease { memory: self.clone(), bytes })
     }
 
-    fn work(self: &Arc<Self>) -> Option<Work> {
-        let limit = self.max_jobs;
-        self.jobs.try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < limit).then_some(n + 1)).ok()?;
-        Some(Work(self.clone()))
+    fn work(&self) -> Option<WorkerPermit> {
+        self.workers.try_acquire(WorkerKind::Texture)
     }
 }
 
@@ -138,14 +131,6 @@ impl Drop for GpuCharge {
     }
 }
 
-struct Work(Arc<Accounting>);
-
-impl Drop for Work {
-    fn drop(&mut self) {
-        self.0.jobs.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 pub struct TextureJob {
     id: TextureId,
     input: PixelSource,
@@ -154,8 +139,15 @@ pub struct TextureJob {
     cancelled: Arc<AtomicBool>,
     life: Arc<()>,
     staging: Lease,
-    work: Work,
+    work: WorkerPermit,
     compress: bool,
+    visible: bool,
+}
+
+impl TextureJob {
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
 }
 
 pub struct TextureCompletion {
@@ -164,7 +156,7 @@ pub struct TextureCompletion {
     life: Arc<()>,
     data: Conversion,
     revision: u64,
-    _work: Work,
+    _work: WorkerPermit,
 }
 
 enum Conversion {
@@ -408,7 +400,12 @@ impl Textures {
     pub(crate) fn uploading(&self) -> bool {
         self.entries.values().any(|entry| matches!(entry.state, TextureUploadState::Uploading { .. }))
     }
+    #[cfg(test)]
     pub(crate) fn new(device: &Device, queue: &Queue, limits: Limits) -> Self {
+        Self::new_with_workers(device, queue, limits, WorkerBudget::new(limits.worker_threads))
+    }
+
+    pub(crate) fn new_with_workers(device: &Device, queue: &Queue, limits: Limits, workers: WorkerBudget) -> Self {
         let material_entries: Vec<_> = (0..2)
             .flat_map(|image| {
                 [
@@ -612,7 +609,7 @@ impl Textures {
             revision: 0,
             geometry_revision: 0,
             queue: queue.clone(),
-            memory: Arc::new(Accounting::new(limits.texture_staging_bytes, limits.texture_jobs)),
+            memory: Arc::new(Accounting::new(limits.texture_staging_bytes, workers)),
             conversion_failures: Summary::new(FAILURE_LOG_INTERVAL),
             entries: HashMap::new(),
             cap_bytes: Arc::new(AtomicUsize::new(0)),
@@ -719,17 +716,32 @@ impl Textures {
         }
         entry.revision = info.revision;
         entry.evicted = false;
-        let job = TextureJob { id, input, texture: texture.downgrade(), revision: info.revision, cancelled, life, staging, work, compress };
-        if priority == Priority::Visible {
+        let visible = priority == Priority::Visible;
+        let job = TextureJob {
+            id,
+            input,
+            texture: texture.downgrade(),
+            revision: info.revision,
+            cancelled,
+            life,
+            staging,
+            work,
+            compress,
+            visible,
+        };
+        if visible {
             self.visible_jobs.push_back(job);
         } else {
             self.background_jobs.push_back(job);
         }
+        self.memory.workers.set_queued(WorkerKind::Texture, self.visible_jobs.len() + self.background_jobs.len());
         self.changed(id);
     }
 
     pub(crate) fn next_conversion_job(&mut self) -> Option<TextureJob> {
-        self.visible_jobs.pop_front().or_else(|| self.background_jobs.pop_front())
+        let job = self.visible_jobs.pop_front().or_else(|| self.background_jobs.pop_front());
+        self.memory.workers.set_queued(WorkerKind::Texture, self.visible_jobs.len() + self.background_jobs.len());
+        job
     }
 
     pub(crate) fn complete(&mut self, completion: TextureCompletion) {
@@ -791,6 +803,7 @@ impl Textures {
         }
         self.visible_jobs.retain(|job| job.texture.is_alive() && !job.cancelled.load(Ordering::Acquire));
         self.background_jobs.retain(|job| job.texture.is_alive() && !job.cancelled.load(Ordering::Acquire));
+        self.memory.workers.set_queued(WorkerKind::Texture, self.visible_jobs.len() + self.background_jobs.len());
     }
 
     fn trim(&mut self, epoch: u64) {
@@ -994,7 +1007,7 @@ impl Textures {
         TextureState {
             revision: self.revision,
             staging: self.staging_bytes(),
-            jobs: self.memory.jobs.load(Ordering::Acquire),
+            jobs: self.memory.workers.active_for(WorkerKind::Texture),
             cap: self.soft_cap,
             lifecycle: self.event_revision(),
         }
@@ -1241,7 +1254,7 @@ mod tests {
     #[test]
     fn work_lease_bounded() {
         let memory = Arc::new(Accounting::default());
-        let limit = memory.max_jobs;
+        let limit = memory.workers.capacity();
         let mut held: Vec<_> = (0..limit).map(|_| memory.work().expect("work slot within limit")).collect();
         assert!(memory.work().is_none());
         held.pop();
