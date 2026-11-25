@@ -1,20 +1,23 @@
 use cvars::{
-    CvarKey, CvarSnapshot, GENERAL_MAX_RAM_BUDGET_MIB, RENDER_MAX_VRAM_BUDGET_MIB, RENDER_TEXTURE_VRAM_DIVISOR, RENDER_WORKER_THREADS,
-    ValueDomain,
+    CvarKey, CvarSnapshot, GENERAL_MAX_RAM_BUDGET_MIB, NETWORK_MAX_BANDWIDTH_KBPS, RENDER_MAX_VRAM_BUDGET_MIB, RENDER_TEXTURE_VRAM_DIVISOR,
+    RENDER_WORKER_THREADS, ValueDomain,
 };
+use network::{default_throttle_rates, throttle_rates_for_bandwidth_kbps};
+use protocol::messages::ThrottleRates;
 use render::{RESERVED_THREADS, scene, split_worker_threads};
 use utils::hardware::{Hardware, Vram};
 
 const MIB: usize = 1024 * 1024;
 const MIN_DECODE_RESERVE_BYTES: usize = 64 * MIB;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StartupLimits {
     pub hardware: Hardware,
     pub assets: assets::Limits,
     pub scene: scene::Limits,
     pub texture_jobs: usize,
     pub texture_staging_bytes: usize,
+    pub throttle_rates: ThrottleRates,
 }
 
 impl Default for StartupLimits {
@@ -26,6 +29,7 @@ impl Default for StartupLimits {
             scene: scene::Limits::default(),
             texture_jobs: render.texture_jobs,
             texture_staging_bytes: render.texture_staging_bytes,
+            throttle_rates: default_throttle_rates(),
         }
     }
 }
@@ -45,8 +49,9 @@ impl StartupLimits {
             resolve_capped_ram(derived_assets, cap_bytes)
         };
         let texture_staging_bytes = derived_render.texture_staging_bytes;
+        let throttle_rates = resolve_throttle_rates(snapshot);
 
-        Self { hardware, assets, scene: scene::Limits { memory_bytes, mesh_jobs }, texture_jobs, texture_staging_bytes }
+        Self { hardware, assets, scene: scene::Limits { memory_bytes, mesh_jobs }, texture_jobs, texture_staging_bytes, throttle_rates }
     }
 
     pub fn resolve_render(&self, vram: Option<Vram>, snapshot: &CvarSnapshot) -> render::Limits {
@@ -69,6 +74,15 @@ impl StartupLimits {
         let bytes = self.resolve_render(vram, snapshot).texture_soft_cap_bytes;
         u32::try_from(bytes / MIB).unwrap_or(u32::MAX)
     }
+}
+
+pub fn resolve_throttle_rates(snapshot: &CvarSnapshot) -> ThrottleRates {
+    let raw = snapshot.get(NETWORK_MAX_BANDWIDTH_KBPS);
+    if raw == 0 {
+        return default_throttle_rates();
+    }
+    let kbps = u32::try_from(clamp_i64_to_domain(NETWORK_MAX_BANDWIDTH_KBPS, raw)).unwrap_or(u32::MAX);
+    throttle_rates_for_bandwidth_kbps(Some(kbps))
 }
 
 pub fn parse_max_texture_resolution(value: &str) -> u32 {
@@ -110,7 +124,8 @@ fn clamp_i64_to_domain(key: CvarKey<i64>, value: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use cvars::{
-        CvarRegistry, GENERAL_MAX_RAM_BUDGET_MIB, Layer, RENDER_MAX_VRAM_BUDGET_MIB, RENDER_TEXTURE_VRAM_DIVISOR, RENDER_WORKER_THREADS,
+        CvarRegistry, GENERAL_MAX_RAM_BUDGET_MIB, Layer, NETWORK_MAX_BANDWIDTH_KBPS, RENDER_MAX_VRAM_BUDGET_MIB,
+        RENDER_TEXTURE_VRAM_DIVISOR, RENDER_WORKER_THREADS,
     };
     use utils::hardware::{Hardware, Vram};
 
@@ -131,6 +146,7 @@ mod tests {
         assert_eq!(startup.texture_jobs + startup.scene.mesh_jobs, 14);
         assert_eq!(startup.assets.work_bytes, 14 * 128 * MIB);
         assert_eq!(startup.assets.texture_work_bytes, (14 * 128 * 3 / 8) * MIB);
+        assert_eq!(startup.throttle_rates, default_throttle_rates());
     }
 
     #[test]
@@ -145,6 +161,7 @@ mod tests {
         registry.set(RENDER_WORKER_THREADS, Layer::Global, 12).unwrap();
         registry.set(RENDER_MAX_VRAM_BUDGET_MIB, Layer::Global, 1792).unwrap();
         registry.set(RENDER_TEXTURE_VRAM_DIVISOR, Layer::Global, 4).unwrap();
+        registry.set(NETWORK_MAX_BANDWIDTH_KBPS, Layer::Global, 16_000).unwrap();
         registry.lock_startup_values();
         let snapshot = registry.snapshot();
 
@@ -156,6 +173,7 @@ mod tests {
         assert_eq!(startup.texture_jobs, 6);
         assert_eq!(startup.scene.mesh_jobs, 6);
         assert_eq!(startup.texture_staging_bytes, render::Limits::derive(&hardware).texture_staging_bytes);
+        assert_eq!(startup.throttle_rates, throttle_rates_for_bandwidth_kbps(Some(16_000)));
 
         let render = startup.resolve_render(hardware.vram, &snapshot);
         assert_eq!(render.mesh_bytes, 64 * MIB);

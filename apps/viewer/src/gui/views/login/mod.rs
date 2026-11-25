@@ -10,7 +10,7 @@ use std::{
 
 use futures::{channel::oneshot, executor, future::join};
 use inventory::{CategoryKey, FolderType, InventorySnapshot};
-use network::{AgentSession, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
+use network::{AgentSession, Grid, LoginCredentials, MfaChallenge, SessionHandle, SessionOptions, StartLocation};
 use prism::{
     AppContext, Context, Window,
     component::{
@@ -522,7 +522,8 @@ impl LoginScreen {
     ) {
         self.prepare_session_attempt(cx);
         let remember_login = self.remember_login;
-        let network_session = match Session::start(credentials).map_err(|error| error.to_string()) {
+        let options = SessionOptions::default().with_throttle_rates(gui::startup_limits(cx).throttle_rates);
+        let network_session = match Session::start_with_options(credentials, options).map_err(|error| error.to_string()) {
             Ok(session) => session,
             Err(error) => {
                 self.login_phase = LoginPhase::Idle;

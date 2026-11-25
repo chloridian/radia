@@ -6,7 +6,7 @@ use std::{
 };
 
 use llsd::Value;
-use protocol::{lludp::Message, login::ResponseData};
+use protocol::{lludp::Message, login::ResponseData, messages::ThrottleRates};
 #[cfg(test)]
 use tokio::time;
 use tokio::{
@@ -195,6 +195,7 @@ pub(super) struct SessionState {
     pub(super) packet_memory: SimulatorMemoryBudget,
     pub(super) coverage_losses: CoverageLossLedger,
     pub(super) outbound_budget: Option<OutboundBudget>,
+    pub(super) throttle_rates: ThrottleRates,
     pub(super) handoff_generation: Option<u64>,
 }
 

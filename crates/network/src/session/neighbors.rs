@@ -197,6 +197,7 @@ impl SessionState {
         let packet_memory = self.packet_memory.for_neighbor();
         let connection_packet_memory = packet_memory.clone();
         let outbound_budget = self.outbound_budget.as_ref().expect("session pacing budget exists").handle();
+        let throttle_rates = self.throttle_rates;
         let (primary_state, primary_state_receiver) = watch::channel(PrimaryState::Neighbor { generation: 0 });
         let (command_sender, command_receiver) = mpsc::channel(NEIGHBOR_COMMAND_CAPACITY);
         let (logout_sender, logout_receiver) = mpsc::channel(1);
@@ -216,6 +217,7 @@ impl SessionState {
                         budget: outbound_budget,
                         owned_budget: None,
                         transport: None,
+                        throttle_rates,
                     },
                 )
                 .await

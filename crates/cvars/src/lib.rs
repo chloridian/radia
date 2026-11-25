@@ -730,6 +730,13 @@ mod tests {
         registry.set(GENERAL_MAX_RAM_BUDGET_MIB, Layer::Session, 0).expect("auto zero is valid");
         registry.set(GENERAL_MAX_RAM_BUDGET_MIB, Layer::Session, 256).expect("range min is valid");
         registry.set(GENERAL_MAX_RAM_BUDGET_MIB, Layer::Session, 65536).expect("range max is valid");
+        assert_matches!(
+            registry.set(NETWORK_MAX_BANDWIDTH_KBPS, Layer::Session, 499),
+            Err(CvarError::OutOfBounds { name: "network.max_bandwidth_kbps" })
+        );
+        registry.set(NETWORK_MAX_BANDWIDTH_KBPS, Layer::Session, 0).expect("auto zero is valid");
+        registry.set(NETWORK_MAX_BANDWIDTH_KBPS, Layer::Session, 500).expect("range min is valid");
+        registry.set(NETWORK_MAX_BANDWIDTH_KBPS, Layer::Session, 50000).expect("range max is valid");
         assert_eq!(registry.get(RENDER_DRAW_DISTANCE), 512.0);
     }
 

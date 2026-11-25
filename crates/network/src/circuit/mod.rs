@@ -87,6 +87,29 @@ pub fn default_throttle_rates() -> ThrottleRates {
     DEFAULT_AGENT_THROTTLE_RATES
 }
 
+pub fn throttle_rates_for_bandwidth_kbps(max_bandwidth_kbps: Option<u32>) -> ThrottleRates {
+    let Some(kbps) = max_bandwidth_kbps.filter(|kbps| *kbps > 0) else {
+        return DEFAULT_AGENT_THROTTLE_RATES;
+    };
+    let auto_total = f64::from(DEFAULT_AGENT_THROTTLE_RATES.resend_bits_per_second)
+        + f64::from(DEFAULT_AGENT_THROTTLE_RATES.land_bits_per_second)
+        + f64::from(DEFAULT_AGENT_THROTTLE_RATES.wind_bits_per_second)
+        + f64::from(DEFAULT_AGENT_THROTTLE_RATES.cloud_bits_per_second)
+        + f64::from(DEFAULT_AGENT_THROTTLE_RATES.task_bits_per_second)
+        + f64::from(DEFAULT_AGENT_THROTTLE_RATES.texture_bits_per_second)
+        + f64::from(DEFAULT_AGENT_THROTTLE_RATES.asset_bits_per_second);
+    let scale = (f64::from(kbps) * 1000.0) / auto_total;
+    ThrottleRates {
+        resend_bits_per_second: (f64::from(DEFAULT_AGENT_THROTTLE_RATES.resend_bits_per_second) * scale) as f32,
+        land_bits_per_second: (f64::from(DEFAULT_AGENT_THROTTLE_RATES.land_bits_per_second) * scale) as f32,
+        wind_bits_per_second: (f64::from(DEFAULT_AGENT_THROTTLE_RATES.wind_bits_per_second) * scale) as f32,
+        cloud_bits_per_second: (f64::from(DEFAULT_AGENT_THROTTLE_RATES.cloud_bits_per_second) * scale) as f32,
+        task_bits_per_second: (f64::from(DEFAULT_AGENT_THROTTLE_RATES.task_bits_per_second) * scale) as f32,
+        texture_bits_per_second: (f64::from(DEFAULT_AGENT_THROTTLE_RATES.texture_bits_per_second) * scale) as f32,
+        asset_bits_per_second: (f64::from(DEFAULT_AGENT_THROTTLE_RATES.asset_bits_per_second) * scale) as f32,
+    }
+}
+
 pub(super) struct SimulatorConnectionOptions {
     pub(super) simulator_id: SimulatorId,
     pub(super) region_handle: Option<u64>,
@@ -95,6 +118,7 @@ pub(super) struct SimulatorConnectionOptions {
     pub(super) budget: OutboundBudgetHandle,
     pub(super) owned_budget: Option<OutboundBudget>,
     pub(super) transport: Option<UdpTransport>,
+    pub(super) throttle_rates: ThrottleRates,
 }
 
 pub(super) struct SimulatorConnection {
@@ -110,6 +134,7 @@ pub(super) struct SimulatorConnection {
     initial_movement_sent: bool,
     primary_state: PrimaryState,
     agent_throttle_sent: bool,
+    throttle_rates: ThrottleRates,
     coverage_losses: CoverageLossLedger,
     pacer: ConnectionPacer,
     _owned_budget: Option<OutboundBudget>,
@@ -224,8 +249,16 @@ impl SimulatorConnection {
     }
 
     pub(super) async fn connect(session: AgentSession, options: SimulatorConnectionOptions) -> Result<Self, ConnectionError> {
-        let SimulatorConnectionOptions { simulator_id, region_handle, coverage_losses, primary_state, budget, owned_budget, transport } =
-            options;
+        let SimulatorConnectionOptions {
+            simulator_id,
+            region_handle,
+            coverage_losses,
+            primary_state,
+            budget,
+            owned_budget,
+            transport,
+            throttle_rates,
+        } = options;
         let is_primary = region_handle.is_none();
         let pacer = budget.register(simulator_id.get(), is_primary).await?;
         let primary_state_receiver = primary_state.unwrap_or_else(|| {
@@ -258,6 +291,7 @@ impl SimulatorConnection {
             initial_movement_sent: false,
             primary_state: if is_primary { PrimaryState::Connecting } else { PrimaryState::Neighbor { generation: 0 } },
             agent_throttle_sent: false,
+            throttle_rates,
             coverage_losses,
             pacer,
             _owned_budget: owned_budget,

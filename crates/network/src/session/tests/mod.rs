@@ -317,7 +317,16 @@ pub(crate) async fn connect_test_connection(
     };
     SimulatorConnection::connect(
         session,
-        SimulatorConnectionOptions { simulator_id, region_handle, coverage_losses, primary_state, budget, owned_budget, transport },
+        SimulatorConnectionOptions {
+            simulator_id,
+            region_handle,
+            coverage_losses,
+            primary_state,
+            budget,
+            owned_budget,
+            transport,
+            throttle_rates: default_throttle_rates(),
+        },
     )
     .await
 }

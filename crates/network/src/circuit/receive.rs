@@ -687,7 +687,7 @@ impl ConnectionTask {
                     if dispatch_allowed && !self.connection.agent_throttle_sent {
                         queue_internal(
                             &mut self.outbound,
-                            super::agent_throttle_message(&self.connection.session),
+                            super::agent_throttle_message(&self.connection.session, self.connection.throttle_rates),
                             Delivery::Reliable,
                             TrafficClass::Control,
                             MovementSend::None,
