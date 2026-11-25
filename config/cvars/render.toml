@@ -31,7 +31,6 @@ help = "Maximum viewport frame rate in frames per second."
 type = "i64"
 default = 0
 range = [128, 4096]
-auto = true
 unit = "MiB"
 persistent = true
 apply = "live"
@@ -41,7 +40,6 @@ help = "Target memory cap in MiB for decoded textures before background eviction
 type = "i64"
 default = 0
 range = [16, 1024]
-auto = true
 unit = "MiB"
 persistent = true
 apply = "restart_required"
@@ -51,7 +49,6 @@ help = "GPU memory budget in MiB for resident scene meshes (0 = auto)."
 type = "i64"
 default = 0
 range = [16, 1024]
-auto = true
 unit = "MiB"
 persistent = true
 apply = "restart_required"
@@ -61,7 +58,6 @@ help = "CPU staging memory budget in MiB for texture uploads (0 = auto)."
 type = "i64"
 default = 0
 range = [1, 64]
-auto = true
 persistent = true
 apply = "restart_required"
 help = "Maximum background texture decode jobs (0 = auto)."
@@ -70,7 +66,6 @@ help = "Maximum background texture decode jobs (0 = auto)."
 type = "i64"
 default = 0
 range = [1, 64]
-auto = true
 persistent = true
 apply = "restart_required"
 help = "Maximum background mesh preparation jobs (0 = auto)."

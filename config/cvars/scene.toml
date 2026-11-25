@@ -11,7 +11,6 @@ help = "Distance multiplier for mesh and prim level-of-detail switching."
 type = "i64"
 default = 0
 range = [64, 4096]
-auto = true
 unit = "MiB"
 persistent = true
 apply = "restart_required"

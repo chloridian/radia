@@ -85,7 +85,7 @@ pub enum Visibility {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ValueDomain {
     Bool,
-    I64 { min: i64, max: i64, auto: bool },
+    I64 { min: i64, max: i64 },
     F32 { min: f32, max: f32, step: Option<f32> },
     F64 { min: f64, max: f64, step: Option<f64> },
     String { max_len: usize },
@@ -107,11 +107,11 @@ impl ValueDomain {
     pub fn validate(self, name: &'static str, value: &CvarValue) -> Result<CvarValue, CvarError> {
         match (self, value) {
             (Self::Bool, CvarValue::Bool(flag)) => Ok(CvarValue::Bool(*flag)),
-            (Self::I64 { min, max, auto }, CvarValue::I64(number)) => {
-                if (auto && *number == 0) || (*number >= min && *number <= max) {
-                    Ok(CvarValue::I64(*number))
-                } else {
+            (Self::I64 { min, max }, CvarValue::I64(number)) => {
+                if (*number < min) || (*number > max) {
                     Err(CvarError::OutOfBounds { name })
+                } else {
+                    Ok(CvarValue::I64(*number))
                 }
             }
             (Self::F32 { min, max, .. }, CvarValue::F32(number)) => {
@@ -269,8 +269,13 @@ pub struct CvarDescriptor {
 }
 
 impl CvarDescriptor {
-    pub const fn auto(&self) -> bool {
-        matches!(self.domain, ValueDomain::I64 { auto: true, .. })
+    fn validate(&self, value: &CvarValue) -> Result<CvarValue, CvarError> {
+        if let (CvarValue::I64(0), ValueDomain::I64 { min, max }, CvarValue::I64(0)) = (&self.default, self.domain, value)
+            && !(min..=max).contains(&0)
+        {
+            return Ok(CvarValue::I64(0));
+        }
+        self.domain.validate(self.name, value)
     }
 }
 
@@ -408,7 +413,7 @@ impl CvarRegistry {
     pub fn set_value(&mut self, id: CvarId, layer: Layer, value: &CvarValue) -> Result<CvarRevision, CvarError> {
         let descriptor = id.descriptor();
         let slot = Self::validate_layer(descriptor, layer)?;
-        let validated = descriptor.domain.validate(descriptor.name, value)?;
+        let validated = descriptor.validate(value)?;
         let normalized = if layer == Layer::Global && validated == descriptor.default { None } else { Some(validated) };
         if self.layers[slot][id.0] != normalized {
             self.layers[slot][id.0] = normalized;
@@ -431,7 +436,7 @@ impl CvarRegistry {
         for (name, value) in entries {
             let descriptor = lookup_by_name(name).ok_or_else(|| CvarError::UnknownName((*name).to_owned()))?;
             let slot = Self::validate_layer(descriptor, layer)?;
-            let validated = descriptor.domain.validate(descriptor.name, value)?;
+            let validated = descriptor.validate(value)?;
             let normalized = if layer == Layer::Global && validated == descriptor.default { None } else { Some(validated) };
             staged.push((slot, descriptor.id.0, normalized));
         }
@@ -456,7 +461,7 @@ impl CvarRegistry {
         for (name, value) in entries {
             let descriptor = lookup_by_name(name).ok_or_else(|| CvarError::UnknownName((*name).to_owned()))?;
             Self::validate_layer(descriptor, layer)?;
-            let validated = descriptor.domain.validate(descriptor.name, value)?;
+            let validated = descriptor.validate(value)?;
             let normalized = if layer == Layer::Global && validated == descriptor.default { None } else { Some(validated) };
             next[descriptor.id.0] = normalized;
         }
@@ -614,8 +619,6 @@ mod tests {
         assert_eq!(RENDER_DRAW_DISTANCE.default_value(), 512.0);
         assert_eq!(SCENE_LOD_FACTOR.default_value(), 1.0);
         assert_eq!(RENDER_TEXTURE_SOFT_CAP_MIB.default_value(), 0);
-        assert!(RENDER_TEXTURE_SOFT_CAP_MIB.descriptor().auto());
-        assert!(!RENDER_MAX_FPS.descriptor().auto());
         assert_eq!(snapshot.get(RENDER_DRAW_DISTANCE), 512.0);
         assert_eq!(snapshot.get(SCENE_LOD_FACTOR), 1.0);
         assert_eq!(snapshot.get(RENDER_TEXTURE_SOFT_CAP_MIB), 0);
@@ -695,15 +698,17 @@ mod tests {
             Err(CvarError::LayerNotAllowed { name: "render.draw_distance", layer: Layer::Default })
         );
         assert_matches!(
-            registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, 64),
+            registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, 127),
             Err(CvarError::OutOfBounds { name: "render.texture_soft_cap_mib" })
         );
         assert_matches!(
             registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, -1),
             Err(CvarError::OutOfBounds { name: "render.texture_soft_cap_mib" })
         );
+        assert_matches!(registry.set(RENDER_MAX_FPS, Layer::Session, 0), Err(CvarError::OutOfBounds { name: "render.max_fps" }));
         registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, 0).expect("auto zero is valid");
         registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, 128).expect("range min is valid");
+        registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, 4096).expect("range max is valid");
         assert_eq!(registry.get(RENDER_DRAW_DISTANCE), 512.0);
     }
 
