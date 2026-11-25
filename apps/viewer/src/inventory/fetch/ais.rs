@@ -46,12 +46,12 @@ pub(super) async fn fetch_batch_once(
     is_library: bool,
 ) -> Result<Vec<FolderFetch>, RequestFailure> {
     let parent_id = parent.id().uuid().to_string();
-    let child_ids = folders.iter().map(|folder| folder.id().uuid().to_string()).collect::<Vec<_>>();
+    let child_ids = folders.iter().map(|folder| folder.id().uuid()).collect::<Vec<_>>();
     let url = capability
         .with_path_segments(&["category", &parent_id, "children"])
         .map_err(|_| RequestFailure::Failed)?
         .with_query_pair("depth", &depth.min(MAX_AIS_DEPTH).to_string())
-        .with_csv_query_pair("children", &child_ids);
+        .with_uuid_list_query_pair("children", &child_ids);
     let body = client
         .get_inventory_bytes_with_accept(&url, "application/llsd+xml", MAX_FETCH_RESPONSE_BYTES)
         .await

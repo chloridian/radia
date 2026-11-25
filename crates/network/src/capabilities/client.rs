@@ -19,6 +19,7 @@ use tokio::{
     time,
 };
 use tracing::Instrument;
+use uuid::Uuid;
 
 use super::{
     SetupError,
@@ -89,9 +90,9 @@ impl CapabilityUrl {
         Self { url, name: self.name.clone() }
     }
 
-    pub fn with_csv_query_pair(&self, name: &str, values: &[String]) -> Self {
+    pub fn with_uuid_list_query_pair(&self, name: &str, values: &[Uuid]) -> Self {
         let mut url = self.url.clone();
-        let joined = values.join(",");
+        let joined = values.iter().map(Uuid::to_string).collect::<Vec<_>>().join(",");
         let updated = match url.query() {
             Some(existing) if !existing.is_empty() => format!("{existing}&{name}={joined}"),
             _ => format!("{name}={joined}"),

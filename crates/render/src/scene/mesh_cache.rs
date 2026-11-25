@@ -764,7 +764,7 @@ mod tests {
             meshes.complete(job.run());
         }
         for key in in_view.iter().chain(&off_screen) {
-            assert!(matches!(meshes.get(*key), PreparedMesh::Ready(_)));
+            assert_matches!(status(meshes.get(*key)), MeshStatus::Ready);
         }
         for key in &off_screen {
             meshes.release(*key);
@@ -785,13 +785,13 @@ mod tests {
         }
         assert_eq!(meshes.evict_pressure_turn(), 0, "no further evictions once only in-view meshes remain");
         for key in &in_view {
-            assert!(matches!(meshes.get(*key), PreparedMesh::Ready(_)), "in-view meshes must be kept under pressure");
+            assert_matches!(status(meshes.get(*key)), MeshStatus::Ready, "in-view meshes must be kept under pressure");
         }
 
         budget.set_pressure(Pressure::Normal);
         assert!(meshes.request(extra_offscreen, 0), "off-screen admissions recover under Normal pressure");
         let job = meshes.start().expect("recovered off-screen mesh starts");
         meshes.complete(job.run());
-        assert!(matches!(meshes.get(extra_offscreen), PreparedMesh::Ready(_)));
+        assert_matches!(status(meshes.get(extra_offscreen)), MeshStatus::Ready);
     }
 }

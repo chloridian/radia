@@ -1,9 +1,9 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
 
-use utils::hardware::{Hardware, Pressure};
+use utils::hardware::{AtomicPressure, Hardware, Pressure};
 
 use crate::{
     limits::auto_worker_threads,
@@ -55,25 +55,16 @@ impl Budget {
             peak: AtomicUsize::new(0),
             workers,
             memory_bytes: limits.memory_bytes,
-            pressure: AtomicU8::new(0),
+            pressure: AtomicPressure::new(Pressure::Normal),
         }))
     }
 
     pub fn set_pressure(&self, level: Pressure) {
-        let encoded = match level {
-            Pressure::Normal => 0,
-            Pressure::Low => 1,
-            Pressure::Critical => 2,
-        };
-        self.0.pressure.store(encoded, Ordering::Release);
+        self.0.pressure.store(level);
     }
 
     pub fn pressure(&self) -> Pressure {
-        match self.0.pressure.load(Ordering::Acquire) {
-            1 => Pressure::Low,
-            2 => Pressure::Critical,
-            _ => Pressure::Normal,
-        }
+        self.0.pressure.load()
     }
 
     pub fn limits(&self) -> Limits {
@@ -126,7 +117,7 @@ struct Accounting {
     peak: AtomicUsize,
     workers: WorkerBudget,
     memory_bytes: usize,
-    pressure: AtomicU8,
+    pressure: AtomicPressure,
 }
 
 pub(in crate::scene) struct MeshWork {

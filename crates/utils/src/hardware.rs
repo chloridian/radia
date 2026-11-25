@@ -4,7 +4,10 @@ use std::fs;
 use std::mem;
 #[cfg(target_os = "macos")]
 use std::ptr;
-use std::thread;
+use std::{
+    sync::atomic::{AtomicU8, Ordering},
+    thread,
+};
 
 #[cfg(target_os = "macos")]
 use libc::{c_void, size_t, sysctlbyname};
@@ -20,6 +23,45 @@ pub enum Pressure {
     Normal,
     Low,
     Critical,
+}
+
+impl Pressure {
+    const fn to_u8(self) -> u8 {
+        match self {
+            Self::Normal => 0,
+            Self::Low => 1,
+            Self::Critical => 2,
+        }
+    }
+
+    const fn from_u8(raw: u8) -> Self {
+        match raw {
+            1 => Self::Low,
+            2 => Self::Critical,
+            _ => Self::Normal,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AtomicPressure(AtomicU8);
+
+impl AtomicPressure {
+    pub const fn new(level: Pressure) -> Self {
+        Self(AtomicU8::new(level.to_u8()))
+    }
+
+    pub fn load(&self) -> Pressure {
+        Pressure::from_u8(self.0.load(Ordering::Acquire))
+    }
+
+    pub fn store(&self, level: Pressure) {
+        self.0.store(level.to_u8(), Ordering::Release);
+    }
+
+    pub fn swap(&self, level: Pressure) -> Pressure {
+        Pressure::from_u8(self.0.swap(level.to_u8(), Ordering::AcqRel))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

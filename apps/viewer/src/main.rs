@@ -111,7 +111,7 @@ fn main() -> io::Result<()> {
     }
 
     let hardware = Hardware::detect_cpu_and_ram();
-    let pressure = pressure::spawn_monitor(&services, hardware.ram_bytes);
+    let pressure = pressure::spawn_monitor(&services);
     let startup_limits = StartupLimits::resolve(hardware, &settings.snapshot());
     tracing::info!(
         cores = hardware.cores,
