@@ -738,3 +738,132 @@ async fn stalled_publication_preserves_intake() {
     assert!(feed.incoming.recv().await.is_none());
     assert_eq!(feed.view.status(), Status::Closed);
 }
+
+#[tokio::test]
+async fn cached_burst_reaches_scene() {
+    const BURST_OBJECTS: usize = 20_000;
+    let mut world = World::new(WorldLimits {
+        max_regions: 33,
+        max_entities: 65_536,
+        max_entities_per_region: 65_536,
+        max_tombstones_per_region: 4_096,
+        max_tombstones: 16_384,
+        max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(4_096),
+        max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(16_384),
+        max_journal_entries: 4_096,
+        max_journal_changes: 65_536,
+        max_region_name_bytes: 256,
+        max_recovery_targets: 65_536,
+    });
+    let region = world.register_region().unwrap();
+    let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap();
+    let terrain = TerrainPatch::new(0, 0, Box::new([20.0; world::TERRAIN_PATCH_SAMPLES])).unwrap();
+    let _ = world.observe_terrain_patch(UpdateSource::new(region, 1, Ordered(1), 0), terrain).unwrap();
+
+    let mut service = WorldReadHost::new(&world, Handle::current());
+    let assets = AssetCoordinator::new(Handle::current(), pending(), None);
+    let (_pushes, environments) = EnvironmentInbox::channel();
+    let (_agent_motion_sender, agent_motion) = watch::channel(None);
+    let mut feed = SceneFeed::start(
+        SceneSources {
+            reader: service.reader(),
+            environments,
+            assets: assets.handle(),
+            motion_circuits: watch::channel(Vec::new()).1,
+            inventory_updates: watch::channel(None).1,
+        },
+        Uuid::from_u128(1),
+        watch::channel(None).0,
+        watch::channel(None).0,
+        agent_motion,
+        Handle::current(),
+        || {},
+    );
+
+    time::timeout(Duration::from_secs(30), async {
+        let receiving = async {
+            while feed.view.status() != Status::Ready {
+                let batch = feed.incoming.recv().await.expect("scene feed stayed active before initial Ready");
+                feed.view.apply(batch).unwrap();
+            }
+        }
+        .fuse();
+        let serving = async {
+            loop {
+                let Err(request) = select_read(&mut service, pending::<()>()).await else { unreachable!() };
+                request.serve(&world);
+            }
+        }
+        .fuse();
+        pin_mut!(receiving, serving);
+        futures::select_biased! {
+            _ = receiving => {}
+            _ = serving => unreachable!(),
+        }
+    })
+    .await
+    .expect("initial Ready publication did not stall");
+
+    assert_eq!(feed.view.status(), Status::Ready);
+    assert!(feed.view.patch_count() > 0, "initial Ready must include terrain");
+
+    for index in 0..BURST_OBJECTS {
+        let seq = u64::try_from(index + 2).unwrap();
+        let local_id = NonZeroU32::new(u32::try_from(index + 1).unwrap()).unwrap();
+        let mut observation = ObjectObservation::new(
+            UpdateSource::new(region, u32::try_from(seq).unwrap(), Ordered(seq), 0),
+            Uuid::from_u128(100 + u128::from(seq)),
+            local_id,
+            Kind::Object,
+            ParentUpdate::Root,
+        );
+        observation.pose = Some(Pose {
+            position: Some(Vec3::new((index % 256) as f32, ((index / 256) % 256) as f32, 25.0)),
+            rotation: Some(Quat::IDENTITY),
+        });
+        observation.scale = Some(Vec3::ONE);
+        observation.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
+        let _ = world.observe_object(observation).unwrap();
+    }
+    service.publish(&world);
+
+    let burst_result = time::timeout(Duration::from_secs(30), async {
+        let receiving = async {
+            while feed.view.object_count() < BURST_OBJECTS || feed.view.status() != Status::Ready {
+                let Some(batch) = feed.incoming.recv().await else {
+                    return Err("scene feed exited before publishing burst");
+                };
+                feed.view.apply(batch).unwrap();
+            }
+            Ok(())
+        }
+        .fuse();
+        let serving = async {
+            loop {
+                let Err(request) = select_read(&mut service, pending::<()>()).await else { unreachable!() };
+                request.serve(&world);
+            }
+        }
+        .fuse();
+        pin_mut!(receiving, serving);
+        futures::select_biased! {
+            result = receiving => result,
+            _ = serving => unreachable!(),
+        }
+    })
+    .await;
+
+    assert_eq!(
+        burst_result,
+        Ok(Ok(())),
+        "cached burst must reach scene (status={:?}, objects={}, patches={})",
+        feed.view.status(),
+        feed.view.object_count(),
+        feed.view.patch_count(),
+    );
+    assert_eq!(feed.view.object_count(), BURST_OBJECTS);
+    assert!(feed.view.patch_count() > 0, "terrain patches must remain present after burst");
+
+    service.finish();
+    assets.stop().await;
+}
