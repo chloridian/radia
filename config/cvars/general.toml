@@ -20,3 +20,12 @@ range = [50, 5000]
 persistent = true
 apply = "live"
 help = "Maximum number of nearby chat messages retained in history."
+
+[general.max_ram_budget_mib]
+type = "i64"
+default = 0
+range = [256, 65536]
+unit = "MiB"
+persistent = true
+apply = "restart_required"
+help = "Optional cap in MiB on CPU memory for asset decoding and the scene geometry cache (0 = no cap; the viewer backs off when the system runs low on memory)."

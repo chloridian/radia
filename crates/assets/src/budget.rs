@@ -8,13 +8,11 @@ use std::{
 };
 
 use tokio::sync::watch;
-use utils::hardware::Hardware;
 
 const MIB: usize = 1024 * 1024;
 const DEFAULT_WORK_BYTES: usize = 512 * MIB;
 const DEFAULT_TEXTURE_WORK_BYTES: usize = 192 * MIB;
-const MAX_WORK_BYTES: usize = 4096 * MIB;
-const MAX_TEXTURE_WORK_BYTES: usize = 2048 * MIB;
+const WORK_BYTES_PER_WORKER: usize = 128 * MIB;
 pub(crate) const WORK_BYTES: usize = 32 * MIB;
 #[cfg(test)]
 pub(crate) const ASSET_WORK_BYTES: usize = DEFAULT_WORK_BYTES;
@@ -34,10 +32,14 @@ impl Default for Limits {
 }
 
 impl Limits {
-    pub fn derive(hardware: &Hardware) -> Self {
-        let usable = hardware.usable_ram_bytes();
-        let work_bytes = usize::try_from(usable / 12).unwrap_or(usize::MAX).clamp(DEFAULT_WORK_BYTES, MAX_WORK_BYTES) / MIB * MIB;
-        let texture_work_bytes = (work_bytes * 3 / 8).clamp(DEFAULT_TEXTURE_WORK_BYTES, MAX_TEXTURE_WORK_BYTES).min(work_bytes) / MIB * MIB;
+    pub fn derive(workers: usize) -> Self {
+        let work_bytes = workers.saturating_mul(WORK_BYTES_PER_WORKER).max(DEFAULT_WORK_BYTES);
+        Self::from_work_bytes(work_bytes)
+    }
+
+    pub fn from_work_bytes(work_bytes: usize) -> Self {
+        let work_bytes = work_bytes / MIB * MIB;
+        let texture_work_bytes = (work_bytes * 3 / 8) / MIB * MIB;
         Self { work_bytes, texture_work_bytes }
     }
 }

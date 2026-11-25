@@ -7,6 +7,7 @@ use prism::{
     assets::{Assets, icon_assets},
 };
 use prism_wgpu::WgpuDeviceRequirements;
+use render::scene;
 use tokio::runtime::Builder;
 use utils::hardware::Hardware;
 use viewer::{
@@ -117,7 +118,8 @@ fn main() -> io::Result<()> {
         reserved_threads = render::RESERVED_THREADS,
         asset_work_mib = startup_limits.assets.work_bytes / (1024 * 1024),
         asset_texture_work_mib = startup_limits.assets.texture_work_bytes / (1024 * 1024),
-        scene_memory_mib = startup_limits.scene.memory_bytes / (1024 * 1024),
+        scene_memory_mib = (startup_limits.scene.memory_bytes != scene::UNBOUNDED_MEMORY_BYTES)
+            .then_some(startup_limits.scene.memory_bytes / (1024 * 1024)),
         mesh_jobs = startup_limits.scene.mesh_jobs,
         texture_jobs = startup_limits.texture_jobs,
         texture_staging_mib = startup_limits.texture_staging_bytes / (1024 * 1024),

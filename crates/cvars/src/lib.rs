@@ -723,6 +723,13 @@ mod tests {
             Err(CvarError::InvalidEnumVariant { name: "render.max_texture_resolution", .. })
         );
         registry.set(RENDER_MAX_TEXTURE_RESOLUTION, Layer::Session, "512").expect("enum value is valid");
+        assert_matches!(
+            registry.set(GENERAL_MAX_RAM_BUDGET_MIB, Layer::Session, 255),
+            Err(CvarError::OutOfBounds { name: "general.max_ram_budget_mib" })
+        );
+        registry.set(GENERAL_MAX_RAM_BUDGET_MIB, Layer::Session, 0).expect("auto zero is valid");
+        registry.set(GENERAL_MAX_RAM_BUDGET_MIB, Layer::Session, 256).expect("range min is valid");
+        registry.set(GENERAL_MAX_RAM_BUDGET_MIB, Layer::Session, 65536).expect("range max is valid");
         assert_eq!(registry.get(RENDER_DRAW_DISTANCE), 512.0);
     }
 

@@ -9,8 +9,10 @@ use crate::limits::worker_split;
 
 const MIB: usize = 1024 * 1024;
 const DEFAULT_MEMORY_BYTES: usize = 256 * MIB;
-const MAX_MEMORY_BYTES: usize = 4096 * MIB;
 const DEFAULT_MESH_JOBS: usize = 4;
+
+pub const UNBOUNDED_MEMORY_BYTES: usize = usize::MAX;
+pub const MIN_CAPPED_MEMORY_BYTES: usize = DEFAULT_MEMORY_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
@@ -27,9 +29,7 @@ impl Default for Limits {
 impl Limits {
     pub fn derive(hardware: &Hardware) -> Self {
         let (_, mesh_jobs) = worker_split(hardware.cores);
-        let usable = hardware.usable_ram_bytes();
-        let memory_bytes = usize::try_from(usable / 24).unwrap_or(usize::MAX).clamp(DEFAULT_MEMORY_BYTES, MAX_MEMORY_BYTES) / MIB * MIB;
-        Self { memory_bytes, mesh_jobs }
+        Self { memory_bytes: UNBOUNDED_MEMORY_BYTES, mesh_jobs }
     }
 }
 

@@ -84,16 +84,15 @@ mod tests {
         let hardware = Hardware { cores: 4, ram_bytes: 8 * 1024 * 1024 * 1024, vram: None };
         let render = Limits::derive(&hardware);
         let scene_limits = scene::Limits::derive(&hardware);
-        let asset_limits = assets::Limits::derive(&hardware);
+        let workers = render.texture_jobs + scene_limits.mesh_jobs;
+        let asset_limits = assets::Limits::derive(workers);
 
         assert_eq!(render.texture_soft_cap_bytes, MIN_TEXTURE_SOFT_CAP_BYTES);
         assert!(render.mesh_bytes >= DEFAULT_MESH_BYTES);
         assert!(render.texture_staging_bytes >= DEFAULT_TEXTURE_STAGING_BYTES);
-        assert!(scene_limits.memory_bytes >= scene::Limits::default().memory_bytes);
-        assert!(asset_limits.work_bytes >= assets::Limits::default().work_bytes);
-        assert!(asset_limits.texture_work_bytes >= assets::Limits::default().texture_work_bytes);
-
-        let workers = render.texture_jobs + scene_limits.mesh_jobs;
+        assert_eq!(scene_limits.memory_bytes, scene::UNBOUNDED_MEMORY_BYTES);
+        assert_eq!(asset_limits.work_bytes, 512 * MIB);
+        assert_eq!(asset_limits.texture_work_bytes, 192 * MIB);
         assert!(workers <= hardware.cores - RESERVED_THREADS);
         assert!(workers >= 2);
     }
@@ -107,20 +106,28 @@ mod tests {
         };
         let render = Limits::derive(&hardware);
         let scene_limits = scene::Limits::derive(&hardware);
-        let asset_limits = assets::Limits::derive(&hardware);
-
         let workers = render.texture_jobs + scene_limits.mesh_jobs;
+        let asset_limits = assets::Limits::derive(workers);
+
         assert!(workers <= hardware.cores - RESERVED_THREADS);
         assert!(workers >= 2);
-
-        let ram_sum = (asset_limits.work_bytes + scene_limits.memory_bytes + render.texture_staging_bytes) as u64;
-        assert!(ram_sum <= hardware.usable_ram_bytes());
+        assert_eq!(scene_limits.memory_bytes, scene::UNBOUNDED_MEMORY_BYTES);
+        assert_eq!(asset_limits.work_bytes, workers * 128 * MIB);
+        assert_eq!(asset_limits.texture_work_bytes, asset_limits.work_bytes * 3 / 8);
 
         let vram = 24 * 1024 * 1024 * 1024_u64;
         let expected_target = vram.saturating_sub(512 * MIB as u64).min(vram * 4 / 5);
         let other_gpu = (render.mesh_bytes + DEPTH_BYTES + INSTANCE_BUFFER_BYTES) as u64;
         let expected_texture_cap = ((expected_target - other_gpu) as usize) / MIB * MIB;
         assert_eq!(render.texture_soft_cap_bytes, expected_texture_cap);
+    }
+
+    #[test]
+    fn decode_budgets_scale_with_workers() {
+        assert_eq!(assets::Limits::derive(2), assets::Limits { work_bytes: 512 * MIB, texture_work_bytes: 192 * MIB });
+        assert_eq!(assets::Limits::derive(4), assets::Limits { work_bytes: 512 * MIB, texture_work_bytes: 192 * MIB });
+        assert_eq!(assets::Limits::derive(12), assets::Limits { work_bytes: 1536 * MIB, texture_work_bytes: 576 * MIB });
+        assert_eq!(assets::Limits::derive(30), assets::Limits { work_bytes: 3840 * MIB, texture_work_bytes: 1440 * MIB });
     }
 
     #[test]
