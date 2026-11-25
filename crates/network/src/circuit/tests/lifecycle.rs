@@ -245,11 +245,8 @@ async fn primary_throttle_follows_movement_complete() {
 
 #[test]
 fn throttle_rates_scale_proportionally_with_override() {
-    let auto = throttle_rates_for_bandwidth_kbps(None);
-    assert_eq!(auto, DEFAULT_AGENT_THROTTLE_RATES);
-    assert_eq!(throttle_rates_for_bandwidth_kbps(Some(0)), DEFAULT_AGENT_THROTTLE_RATES);
-
-    let scaled = throttle_rates_for_bandwidth_kbps(Some(16_000));
+    let auto = DEFAULT_AGENT_THROTTLE_RATES;
+    let scaled = throttle_rates_for_bandwidth_kbps(16_000);
     let auto_fields = [
         auto.resend_bits_per_second,
         auto.land_bits_per_second,

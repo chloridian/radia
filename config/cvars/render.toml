@@ -27,23 +27,6 @@ persistent = true
 apply = "live"
 help = "Maximum viewport frame rate in frames per second."
 
-[render.max_vram_budget_mib]
-type = "i64"
-default = 0
-range = [1024, 65536]
-unit = "MiB"
-persistent = true
-apply = "live"
-help = "Maximum GPU VRAM budget in MiB before texture eviction (0 = auto)."
-
-[render.texture_vram_divisor]
-type = "i64"
-default = 1
-range = [1, 8]
-persistent = true
-apply = "live"
-help = "Divisor applied to detected VRAM when computing the automatic GPU VRAM budget."
-
 [render.max_texture_resolution]
 type = "enum"
 default = "2048"

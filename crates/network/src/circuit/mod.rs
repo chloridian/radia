@@ -87,10 +87,7 @@ pub fn default_throttle_rates() -> ThrottleRates {
     DEFAULT_AGENT_THROTTLE_RATES
 }
 
-pub fn throttle_rates_for_bandwidth_kbps(max_bandwidth_kbps: Option<u32>) -> ThrottleRates {
-    let Some(kbps) = max_bandwidth_kbps.filter(|kbps| *kbps > 0) else {
-        return DEFAULT_AGENT_THROTTLE_RATES;
-    };
+pub fn throttle_rates_for_bandwidth_kbps(kbps: u32) -> ThrottleRates {
     let auto_total = f64::from(DEFAULT_AGENT_THROTTLE_RATES.resend_bits_per_second)
         + f64::from(DEFAULT_AGENT_THROTTLE_RATES.land_bits_per_second)
         + f64::from(DEFAULT_AGENT_THROTTLE_RATES.wind_bits_per_second)

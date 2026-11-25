@@ -1,8 +1,0 @@
-[network.max_bandwidth_kbps]
-type = "i64"
-default = 0
-range = [500, 50000]
-unit = "kbps"
-persistent = true
-apply = "restart_required"
-help = "Maximum simulator bandwidth in kbps requested from each region (0 = auto)."

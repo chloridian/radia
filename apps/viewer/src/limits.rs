@@ -1,10 +1,10 @@
 use cvars::{
-    CvarKey, CvarSnapshot, GENERAL_MAX_RAM_BUDGET_MIB, NETWORK_MAX_BANDWIDTH_KBPS, RENDER_MAX_VRAM_BUDGET_MIB, RENDER_TEXTURE_VRAM_DIVISOR,
-    RENDER_WORKER_THREADS, ValueDomain,
+    CvarKey, CvarSnapshot, MEMORY_MAX_RAM_MIB, MEMORY_MAX_VRAM_MIB, MEMORY_VRAM_DIVISOR, NETWORK_MAX_BANDWIDTH_KBPS, RENDER_WORKER_THREADS,
+    ValueDomain,
 };
 use network::{default_throttle_rates, throttle_rates_for_bandwidth_kbps};
 use protocol::messages::ThrottleRates;
-use render::{RESERVED_THREADS, scene, split_worker_threads};
+use render::{auto_worker_threads, scene, split_worker_threads};
 use utils::hardware::{Hardware, Vram};
 
 const MIB: usize = 1024 * 1024;
@@ -37,15 +37,15 @@ impl Default for StartupLimits {
 impl StartupLimits {
     pub fn resolve(hardware: Hardware, snapshot: &CvarSnapshot) -> Self {
         let derived_render = render::Limits::derive(&hardware);
-        let auto_workers = hardware.cores.saturating_sub(RESERVED_THREADS).max(2);
+        let auto_workers = auto_worker_threads(hardware.cores);
         let total_workers = resolve_count(snapshot, RENDER_WORKER_THREADS, auto_workers);
         let (texture_jobs, mesh_jobs) = split_worker_threads(total_workers);
         let derived_assets = assets::Limits::derive(total_workers);
-        let raw_ram_cap = snapshot.get(GENERAL_MAX_RAM_BUDGET_MIB);
+        let raw_ram_cap = snapshot.get(MEMORY_MAX_RAM_MIB);
         let (assets, memory_bytes) = if raw_ram_cap == 0 {
             (derived_assets, scene::UNBOUNDED_MEMORY_BYTES)
         } else {
-            let cap_bytes = clamp_i64_to_domain(GENERAL_MAX_RAM_BUDGET_MIB, raw_ram_cap).saturating_mul(MIB);
+            let cap_bytes = clamp_i64_to_domain(MEMORY_MAX_RAM_MIB, raw_ram_cap).saturating_mul(MIB);
             resolve_capped_ram(derived_assets, cap_bytes)
         };
         let texture_staging_bytes = derived_render.texture_staging_bytes;
@@ -56,11 +56,10 @@ impl StartupLimits {
 
     pub fn resolve_render(&self, vram: Option<Vram>, snapshot: &CvarSnapshot) -> render::Limits {
         let hardware = Hardware { vram, ..self.hardware };
-        let raw_budget = snapshot.get(RENDER_MAX_VRAM_BUDGET_MIB);
+        let raw_budget = snapshot.get(MEMORY_MAX_VRAM_MIB);
         let max_vram_budget_bytes =
-            (raw_budget != 0).then(|| (clamp_i64_to_domain(RENDER_MAX_VRAM_BUDGET_MIB, raw_budget) as u64).saturating_mul(MIB as u64));
-        let vram_divisor =
-            u32::try_from(clamp_i64_to_domain(RENDER_TEXTURE_VRAM_DIVISOR, snapshot.get(RENDER_TEXTURE_VRAM_DIVISOR))).unwrap_or(1);
+            (raw_budget != 0).then(|| (clamp_i64_to_domain(MEMORY_MAX_VRAM_MIB, raw_budget) as u64).saturating_mul(MIB as u64));
+        let vram_divisor = u32::try_from(clamp_i64_to_domain(MEMORY_VRAM_DIVISOR, snapshot.get(MEMORY_VRAM_DIVISOR))).unwrap_or(1);
         let derived = render::Limits::derive_with_vram_policy(&hardware, max_vram_budget_bytes, vram_divisor);
         render::Limits {
             texture_soft_cap_bytes: derived.texture_soft_cap_bytes,
@@ -82,7 +81,7 @@ pub fn resolve_throttle_rates(snapshot: &CvarSnapshot) -> ThrottleRates {
         return default_throttle_rates();
     }
     let kbps = u32::try_from(clamp_i64_to_domain(NETWORK_MAX_BANDWIDTH_KBPS, raw)).unwrap_or(u32::MAX);
-    throttle_rates_for_bandwidth_kbps(Some(kbps))
+    throttle_rates_for_bandwidth_kbps(kbps)
 }
 
 pub fn parse_max_texture_resolution(value: &str) -> u32 {
@@ -124,8 +123,8 @@ fn clamp_i64_to_domain(key: CvarKey<i64>, value: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use cvars::{
-        CvarRegistry, GENERAL_MAX_RAM_BUDGET_MIB, Layer, NETWORK_MAX_BANDWIDTH_KBPS, RENDER_MAX_VRAM_BUDGET_MIB,
-        RENDER_TEXTURE_VRAM_DIVISOR, RENDER_WORKER_THREADS,
+        CvarRegistry, Layer, MEMORY_MAX_RAM_MIB, MEMORY_MAX_VRAM_MIB, MEMORY_VRAM_DIVISOR, NETWORK_MAX_BANDWIDTH_KBPS,
+        RENDER_WORKER_THREADS,
     };
     use utils::hardware::{Hardware, Vram};
 
@@ -157,10 +156,10 @@ mod tests {
             vram: Some(Vram { local_bytes: 24 * 1024 * 1024 * 1024, budget_bytes: None }),
         };
         let mut registry = CvarRegistry::new();
-        registry.set(GENERAL_MAX_RAM_BUDGET_MIB, Layer::Global, 768).unwrap();
+        registry.set(MEMORY_MAX_RAM_MIB, Layer::Global, 768).unwrap();
         registry.set(RENDER_WORKER_THREADS, Layer::Global, 12).unwrap();
-        registry.set(RENDER_MAX_VRAM_BUDGET_MIB, Layer::Global, 1792).unwrap();
-        registry.set(RENDER_TEXTURE_VRAM_DIVISOR, Layer::Global, 4).unwrap();
+        registry.set(MEMORY_MAX_VRAM_MIB, Layer::Global, 1792).unwrap();
+        registry.set(MEMORY_VRAM_DIVISOR, Layer::Global, 4).unwrap();
         registry.set(NETWORK_MAX_BANDWIDTH_KBPS, Layer::Global, 16_000).unwrap();
         registry.lock_startup_values();
         let snapshot = registry.snapshot();
@@ -173,7 +172,7 @@ mod tests {
         assert_eq!(startup.texture_jobs, 6);
         assert_eq!(startup.scene.mesh_jobs, 6);
         assert_eq!(startup.texture_staging_bytes, render::Limits::derive(&hardware).texture_staging_bytes);
-        assert_eq!(startup.throttle_rates, throttle_rates_for_bandwidth_kbps(Some(16_000)));
+        assert_eq!(startup.throttle_rates, throttle_rates_for_bandwidth_kbps(16_000));
 
         let render = startup.resolve_render(hardware.vram, &snapshot);
         assert_eq!(render.mesh_bytes, 64 * MIB);
@@ -182,7 +181,7 @@ mod tests {
         assert_eq!(render.texture_jobs, 6);
 
         let mut larger_cap = CvarRegistry::new();
-        larger_cap.set(GENERAL_MAX_RAM_BUDGET_MIB, Layer::Global, 2048).unwrap();
+        larger_cap.set(MEMORY_MAX_RAM_MIB, Layer::Global, 2048).unwrap();
         larger_cap.set(RENDER_WORKER_THREADS, Layer::Global, 12).unwrap();
         larger_cap.lock_startup_values();
         let larger = StartupLimits::resolve(hardware, &larger_cap.snapshot());
@@ -192,15 +191,15 @@ mod tests {
         assert_eq!(larger.assets.work_bytes + larger.scene.memory_bytes, 2048 * MIB);
 
         let mut min_cap = CvarRegistry::new();
-        min_cap.set(GENERAL_MAX_RAM_BUDGET_MIB, Layer::Global, 256).unwrap();
+        min_cap.set(MEMORY_MAX_RAM_MIB, Layer::Global, 256).unwrap();
         min_cap.lock_startup_values();
         let min = StartupLimits::resolve(hardware, &min_cap.snapshot());
         assert!(min.assets.work_bytes > 0);
         assert!(min.scene.memory_bytes > 0);
         assert_eq!(min.assets.work_bytes + min.scene.memory_bytes, 256 * MIB);
 
-        assert_eq!(clamp_i64_to_domain(RENDER_MAX_VRAM_BUDGET_MIB, 50), 1024);
-        assert_eq!(clamp_i64_to_domain(RENDER_MAX_VRAM_BUDGET_MIB, 999_999), 65536);
+        assert_eq!(clamp_i64_to_domain(MEMORY_MAX_VRAM_MIB, 50), 1024);
+        assert_eq!(clamp_i64_to_domain(MEMORY_MAX_VRAM_MIB, 999_999), 65536);
         assert_eq!(parse_max_texture_resolution("512"), 512);
         assert_eq!(parse_max_texture_resolution("1024"), 1024);
         assert_eq!(parse_max_texture_resolution("2048"), 2048);

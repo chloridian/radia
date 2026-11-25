@@ -68,8 +68,12 @@ pub fn split_worker_threads(total: usize) -> (usize, usize) {
     (texture_jobs, mesh_jobs)
 }
 
+pub fn auto_worker_threads(cores: usize) -> usize {
+    cores.saturating_sub(RESERVED_THREADS).max(2)
+}
+
 pub(crate) fn worker_split(cores: usize) -> (usize, usize) {
-    split_worker_threads(cores.saturating_sub(RESERVED_THREADS).max(2))
+    split_worker_threads(auto_worker_threads(cores))
 }
 
 #[cfg(test)]
