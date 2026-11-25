@@ -7,6 +7,7 @@ pub mod inventory;
 pub mod limits;
 pub mod logging;
 pub mod mcp;
+pub mod pressure;
 mod remembered_login;
 mod scene_feed;
 mod session;

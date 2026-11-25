@@ -14,6 +14,14 @@ use windows_sys::Win32::System::{
     Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL},
 };
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Pressure {
+    #[default]
+    Normal,
+    Low,
+    Critical,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Vram {
     pub local_bytes: u64,

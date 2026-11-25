@@ -15,7 +15,7 @@ use viewer::{
     inspection::inspection_channel,
     limits::StartupLimits,
     logging::{self, LogLevel},
-    mcp,
+    mcp, pressure,
     settings::{SettingsStore, default_settings_path},
 };
 
@@ -111,6 +111,7 @@ fn main() -> io::Result<()> {
     }
 
     let hardware = Hardware::detect_cpu_and_ram();
+    let _pressure = pressure::spawn_monitor(&services, hardware.ram_bytes);
     let startup_limits = StartupLimits::resolve(hardware, &settings.snapshot());
     tracing::info!(
         cores = hardware.cores,
