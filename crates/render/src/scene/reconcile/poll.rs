@@ -120,6 +120,46 @@ impl Reconciler {
                 return self.read(ReadQuery::Environment(region), now);
             }
         }
+        if self.world.read.is_idle() {
+            if self.world.barrier.is_none() {
+                return self.read(ReadQuery::Barrier, now);
+            }
+            if !self.world.regions.is_complete() {
+                return self.read(ReadQuery::Regions(self.world.regions.cursor()), now);
+            }
+            for _ in 0..WORK {
+                if let Some(entity) = self.preparation.scan.pop_front() {
+                    self.invalidate(entity);
+                } else if !self.preparation.expansion.is_empty() {
+                    if let Some(entity) = self.preparation.expansion.step(&self.state.dependencies) {
+                        self.invalidate(entity);
+                    }
+                } else {
+                    break;
+                }
+            }
+            if !self.world.pending.is_empty() {
+                let entities = self.world.pending.iter().take(MAX_OBJECT_DETAIL_BATCH_ITEMS).copied().collect();
+                return self.read(ReadQuery::Details(entities), now);
+            }
+            if !self.preparation.scan.is_empty() || !self.preparation.expansion.is_empty() {
+                return ReconcileStep::Continue;
+            }
+            self.preparation.expansion.clear();
+            if !self.world.objects.is_complete() {
+                return self.read(ReadQuery::Objects(self.world.objects.cursor()), now);
+            }
+            if self.publication.publish && !blocked {
+                self.publication.publish = false;
+                self.recovery.status = Status::Ready;
+                self.recovery.startup = false;
+                self.recovery.failures = 0;
+                let changes = self.collect_changes();
+                let replace = self.publication.replace;
+                self.publication.replace = false;
+                return ReconcileStep::Publish(self.batch(replace, changes));
+            }
+        }
         if !blocked {
             if mem::take(&mut self.preparation.build_due)
                 && let Some(job) = self.preparation.meshes.start().or_else(|| self.preparation.assets.start_sculpt())
@@ -173,44 +213,6 @@ impl Reconciler {
             } else {
                 ReconcileStep::Wait(now + POLL_DELAY)
             };
-        }
-        if self.world.barrier.is_none() {
-            return self.read(ReadQuery::Barrier, now);
-        }
-        if !self.world.regions.is_complete() {
-            return self.read(ReadQuery::Regions(self.world.regions.cursor()), now);
-        }
-        for _ in 0..WORK {
-            if let Some(entity) = self.preparation.scan.pop_front() {
-                self.invalidate(entity);
-            } else if !self.preparation.expansion.is_empty() {
-                if let Some(entity) = self.preparation.expansion.step(&self.state.dependencies) {
-                    self.invalidate(entity);
-                }
-            } else {
-                break;
-            }
-        }
-        if !self.world.pending.is_empty() {
-            let entities = self.world.pending.iter().take(MAX_OBJECT_DETAIL_BATCH_ITEMS).copied().collect();
-            return self.read(ReadQuery::Details(entities), now);
-        }
-        if !self.preparation.scan.is_empty() || !self.preparation.expansion.is_empty() {
-            return ReconcileStep::Continue;
-        }
-        self.preparation.expansion.clear();
-        if !self.world.objects.is_complete() {
-            return self.read(ReadQuery::Objects(self.world.objects.cursor()), now);
-        }
-        if self.publication.publish && !blocked {
-            self.publication.publish = false;
-            self.recovery.status = Status::Ready;
-            self.recovery.startup = false;
-            self.recovery.failures = 0;
-            let changes = self.collect_changes();
-            let replace = self.publication.replace;
-            self.publication.replace = false;
-            return ReconcileStep::Publish(self.batch(replace, changes));
         }
         if let Some(cursor) = self.world.changes.request_cursor() {
             return self.read(ReadQuery::Changes(cursor), now);
