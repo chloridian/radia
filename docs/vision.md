@@ -17,7 +17,8 @@ Any later edition should preserve the content the Classic baseline can show. If 
 - **Simplicity.** Prefer direct, cohesive designs. Don't add indirection, duplication, or abstraction that nothing needs.
 - **Safety and correctness.** Ownership is clear, invariants are strong, behavior is predictable, and untrusted data and failures are handled defensively.
 - **Maintainability.** Code is readable, APIs are intuitive, names mean something, and each subsystem has a defined job.
-- **Performance.** Overhead is low, interaction is responsive, and frame times are stable. We get there through sound architecture and measured optimization.
+- **Performance.** Interaction is responsive and frame times are stable, and frame time is never traded for anything else. Everything off the frame path, such as networking, fetching, decoding, mesh building, and uploads, runs as fast as the machine allows. We get there through sound architecture and measured optimization.
+- **Resource use.** Radia is a game and uses the machine it runs on. Worker counts, batch sizes, caches, and memory budgets come from the detected cores, RAM, and VRAM, with settings to override them, not from fixed constants sized for low-end hardware. It keeps fixed headroom for the OS and other programs and backs off under system memory pressure. In the background it throttles rendering but keeps World current and keeps loading, so the scene is ready when you return.
 - **Independence.** Existing designs get re-examined, Radia's own included. No decision is permanent because it is old.
 - **Compatibility.** Preserve external behavior and content semantics without inheriting the legacy implementation.
 - **Restraint.** Build for current requirements. Add an extension point when a concrete feature needs one, and skip speculative frameworks.

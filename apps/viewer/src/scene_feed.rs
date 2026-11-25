@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    fmt,
     future::Future,
     sync::{Arc, OnceLock},
     time::{Duration, Instant, SystemTime},
@@ -592,6 +593,31 @@ impl AssetSubscriptions {
     }
 }
 
+#[derive(Debug)]
+enum FeedExit {
+    Cancelled,
+    WorldClosed,
+    PublicationClosed,
+    PublicationFull,
+    ReconcilerClosed,
+    InputClosed(&'static str),
+    MeshWorker,
+}
+
+impl fmt::Display for FeedExit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("cancelled"),
+            Self::WorldClosed => f.write_str("world_closed"),
+            Self::PublicationClosed => f.write_str("publication_closed"),
+            Self::PublicationFull => f.write_str("publication_full"),
+            Self::ReconcilerClosed => f.write_str("reconciler_closed"),
+            Self::InputClosed(input) => write!(f, "input_closed({input})"),
+            Self::MeshWorker => f.write_str("mesh_worker"),
+        }
+    }
+}
+
 fn water_height(view: &SceneView, agent: &Object) -> Option<f64> {
     let region = agent.detail().summary.address.region();
     let height = view.water_height(region)?;
@@ -713,9 +739,12 @@ async fn run(
     pin_mut!(cancelled);
     let mut reads = FuturesUnordered::new();
     let mut meshes = FuturesUnordered::new();
-    loop {
-        if reader.revision().is_err() || cancelled.as_mut().now_or_never().is_some() {
-            break;
+    let exit = loop {
+        if reader.revision().is_err() {
+            break FeedExit::WorldClosed;
+        }
+        if cancelled.as_mut().now_or_never().is_some() {
+            break FeedExit::Cancelled;
         }
         if let Some(camera) = *camera.borrow_and_update() {
             scene.set_camera(camera);
@@ -743,9 +772,9 @@ async fn run(
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => {
                         tracing::error!("scene publication exceeded its single-batch limit");
-                        break;
+                        break FeedExit::PublicationFull;
                     }
-                    Err(TrySendError::Closed(_)) => break,
+                    Err(TrySendError::Closed(_)) => break FeedExit::PublicationClosed,
                 }
                 wake();
                 Some(Instant::now())
@@ -753,7 +782,7 @@ async fn run(
             ReconcileStep::Continue => Some(Instant::now()),
             ReconcileStep::Idle => None,
             ReconcileStep::Wait(until) => Some(until),
-            ReconcileStep::Closed => break,
+            ReconcileStep::Closed => break FeedExit::ReconcilerClosed,
         };
         let (asset_event, environment_changed) = {
             let reading = async { if reads.is_empty() { pending().await } else { reads.next().await.expect("nonempty reads") } }.fuse();
@@ -785,13 +814,13 @@ async fn run(
             let mut asset_event = None;
             let mut environment_changed = false;
             futures::select! {
-                _ = cancelled => break,
+                _ = cancelled => break FeedExit::Cancelled,
                 command = pushed => match command {
                     Some(command) => if let Err(error) = scene.push_environment_at(command.region, command.push, command.received_at) { tracing::warn!(region = command.region.get(), ?error, "experience environment push rejected"); },
-                    None => break,
+                    None => break FeedExit::InputClosed("environments"),
                 },
                 result = selected => {
-                    if result.is_err() { break; }
+                    if result.is_err() { break FeedExit::InputClosed("environment"); }
                     environment_changed = true;
                 },
                 (job, reply) = reading => {
@@ -804,16 +833,16 @@ async fn run(
                     Ok(completion) => scene.complete_mesh(completion),
                     Err(error) => {
                         tracing::error!(%error, "scene mesh worker stopped unexpectedly");
-                        break;
+                        break FeedExit::MeshWorker;
                     }
                 },
                 event = available => asset_event = event,
 
-                result = released => { if result.is_err() { break; } wake(); }
-                result = motion_updated => { if result.is_err() { break; } wake(); }
+                result = released => { if result.is_err() { break FeedExit::InputClosed("textures"); } wake(); }
+                result = motion_updated => { if result.is_err() { break FeedExit::InputClosed("agent_motion"); } wake(); }
                 _ = circuit_transition => wake(),
-                result = moved => { if result.is_err() { break; } }
-                result = changed => { if result.is_err() { break; } scene.notify_world_change(); }
+                result = moved => { if result.is_err() { break FeedExit::InputClosed("camera"); } }
+                result = changed => { if result.is_err() { break FeedExit::WorldClosed; } scene.notify_world_change(); }
                 _ = timer => {}
             }
             (asset_event, environment_changed)
@@ -830,7 +859,8 @@ async fn run(
         if let Some((ticket, status)) = asset_event {
             scene.complete_asset(ticket, status);
         }
-    }
+    };
+    tracing::info!(reason = %exit, "scene feed stopped");
     scene.close();
     wake();
 }

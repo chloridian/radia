@@ -2,12 +2,13 @@ use std::{assert_matches, ptr};
 
 use proptest::collection;
 use render::scene::{ApplyError, MAX_OBJECTS};
-use test_support::{allocation, allocation::CountingAllocator};
+use test_support::{allocation, allocation::CountingAllocator, texture::RGBA_J2C};
+use world::{FaceAppearance, SurfaceAppearance};
 
 use super::support::{
-    BTreeMap, BTreeSet, Budget, Duration, Instant, NonZeroU32, ParentUpdate, Placement, ProptestConfig, ReadFailure, ReadQuery, ReadReply,
-    ReconcileStep, Reconciler, RecoveryReason, Status, Uuid, WorldReadError, add, ids, move_root, positions, prop_assert_eq, proptest,
-    reply, settle, source, world, world_region,
+    AssetChange, AssetId, BTreeMap, BTreeSet, Budget, Duration, Instant, NonZeroU32, ObjectPatch, ParentUpdate, Placement, ProptestConfig,
+    ReadFailure, ReadQuery, ReadReply, ReconcileStep, Reconciler, RecoveryReason, Status, Uuid, WorldReadError, add, camera, ids,
+    move_root, positions, prepared_asset, prop_assert_eq, proptest, reply, settle, source, world, world_region,
 };
 
 #[global_allocator]
@@ -337,6 +338,69 @@ fn read_continuation_keeps_pending() {
     scene.complete_read(details, result, now);
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(ids(&view), BTreeSet::from([1]));
+}
+
+#[test]
+fn asset_churn_publishes_objects() {
+    let mut world = world();
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(camera(0.0));
+    settle(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(view.status(), Status::Ready);
+    assert_eq!(view.object_count(), 0);
+    let initial_revision = view.revision();
+
+    let object_count = 64u128;
+    for id in 1..=object_count {
+        add(&mut world, id, id as u32, ParentUpdate::Root, 10.0, id as u64 * 2);
+        let mut patch = ObjectPatch::new(source(&world, 0, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
+        patch.surface_appearance = Some(
+            SurfaceAppearance::new(
+                FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(1000 + id))), ..FaceAppearance::default() },
+                Vec::new(),
+            )
+            .unwrap(),
+        );
+        let _ = world.patch_object(patch).unwrap();
+    }
+    scene.notify_world_change();
+
+    let mut published_batches = 0usize;
+    let mut published_objects = false;
+    for _ in 0..64 {
+        match scene.poll(now) {
+            ReconcileStep::Read(job) => {
+                let result = reply(&world, &job);
+                scene.complete_read(job, result, now);
+            }
+            ReconcileStep::Publish(batch) => {
+                published_batches += 1;
+                view.apply(batch).unwrap();
+                if view.object_count() == object_count as usize && view.revision() == Some(world.revision()) {
+                    published_objects = true;
+                    break;
+                }
+            }
+            ReconcileStep::Asset(AssetChange::Request(request)) => {
+                scene.complete_asset(request.ticket, prepared_asset(request.request, RGBA_J2C.to_vec()));
+            }
+            ReconcileStep::Asset(_) => {}
+            ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
+            ReconcileStep::Continue => {}
+            ReconcileStep::Wait(until) => now = until,
+            ReconcileStep::Idle => break,
+            ReconcileStep::Closed => panic!("unexpected closure"),
+        }
+    }
+
+    assert!(
+        published_objects,
+        "objects must be published despite continuous asset churn (batches={published_batches}, objects={}, revision={:?}, initial={initial_revision:?}, world={:?})",
+        view.object_count(),
+        view.revision(),
+        world.revision(),
+    );
 }
 
 proptest! {
