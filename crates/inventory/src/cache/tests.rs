@@ -622,6 +622,40 @@ fn bootstrap_keeps_completeness_across_logins() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn resync_forgets_stale_completeness() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    seed_cache(directory.path(), 7)?;
+    let mut current = fixture(7)?;
+    apply_fetch(
+        &mut current.inventory,
+        current.folder,
+        ServerVersion::from_raw(7),
+        Some(1),
+        vec![InventoryChild::Item(current.item.clone())],
+    )?;
+    let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", current.agent, None)?;
+    block_on(cache.submit_resync(&current.inventory.snapshot(), &[current.folder])?.wait())?;
+
+    let before = current.inventory.snapshot();
+    let mut renamed = current.item.clone();
+    renamed.name = Arc::from("Renamed");
+    let changes = current.inventory.upsert_item(renamed)?;
+    let after = current.inventory.snapshot();
+    assert!(after.is_complete(current.folder));
+    block_on(cache.submit_changeset(&changes, &before, &after)?.wait())?;
+    block_on(cache.close())?;
+
+    let mut next = fixture(7)?;
+    let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", next.agent, None)?;
+    let load = block_on(cache.load(&next.inventory))?;
+    let skeleton = next.inventory.snapshot();
+    load.apply_to(&mut next.inventory, &skeleton, &HashSet::new())?;
+    assert!(!next.inventory.snapshot().is_complete(next.folder), "a resynced folder stays incomplete until a full fetch rewrites it");
+    block_on(cache.close())?;
+    Ok(())
+}
+
+#[test]
 fn incomplete_partial_write_stays_incomplete() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     seed_cache(directory.path(), 7)?;
@@ -890,7 +924,7 @@ fn two_processes_share_library_scope() -> Result<(), Box<dyn Error>> {
     child.wait_for_stdout("write-lock-held")?;
 
     let write = cache.submit_changeset(&changes, &before, &after)?;
-    let InventoryCacheWrite { result, control, identity, owners, affected_categories } = write;
+    let InventoryCacheWrite { result, control, identity, owners } = write;
     let busy = match result {
         Ok(receipt) => block_on(receipt.wait()),
         Err(error) => Err(error),
@@ -899,7 +933,7 @@ fn two_processes_share_library_scope() -> Result<(), Box<dyn Error>> {
     child.write_stdin(b"go\n")?;
     assert!(child.wait()?.success(), "child process failed; stdout: {}", child.stdout());
 
-    let failed_write = InventoryCacheWrite { result: Err(SqliteError::Busy), control, identity, owners, affected_categories };
+    let failed_write = InventoryCacheWrite { result: Err(SqliteError::Busy), control, identity, owners };
     assert_matches!(block_on(failed_write.wait()), Err(InventoryCacheError::Sqlite(SqliteError::Busy)));
     block_on(cache.close())?;
 

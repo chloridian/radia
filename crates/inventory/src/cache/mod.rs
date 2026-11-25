@@ -6,7 +6,7 @@ mod write;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     error::Error,
-    fmt, fs, io, iter, mem,
+    fmt, fs, io, iter,
     path::Path,
     sync::{
         Arc,
@@ -145,7 +145,6 @@ pub struct InventoryCacheWrite {
     control: SqliteControl,
     identity: CacheIdentity,
     owners: Vec<Uuid>,
-    affected_categories: Vec<CategoryKey>,
 }
 
 impl fmt::Debug for InventoryCacheWrite {
@@ -155,10 +154,6 @@ impl fmt::Debug for InventoryCacheWrite {
 }
 
 impl InventoryCacheWrite {
-    pub fn take_affected_categories(&mut self) -> Vec<CategoryKey> {
-        mem::take(&mut self.affected_categories)
-    }
-
     pub async fn wait(self) -> Result<(), InventoryCacheError> {
         let result = match self.result {
             Ok(receipt) => receipt.wait().await,
@@ -351,7 +346,13 @@ impl InventoryCache {
     pub fn submit_bootstrap(&self, snapshot: &InventorySnapshot) -> Result<InventoryCacheWrite, InventoryCacheError> {
         let batches = write::bootstrap(snapshot, &self.identity)?;
         let owners = self.identity.owners().collect();
-        Ok(self.submit(batches, owners, Vec::new()))
+        Ok(self.submit(batches, owners))
+    }
+
+    pub fn submit_resync(&self, snapshot: &InventorySnapshot, stale: &[CategoryKey]) -> Result<InventoryCacheWrite, InventoryCacheError> {
+        let batches = write::resync(snapshot, stale, &self.identity)?;
+        let owners = self.identity.owners().collect();
+        Ok(self.submit(batches, owners))
     }
 
     pub fn submit_changeset(
@@ -362,8 +363,8 @@ impl InventoryCache {
     ) -> Result<InventoryCacheWrite, InventoryCacheError> {
         let affected = write::affected_categories(changes, before, after);
         let owners = affected.iter().copied().map(|key| key.owner().id()).collect::<BTreeSet<_>>().into_iter().collect();
-        let batches = write::changeset(changes, after, &self.identity, affected.clone())?;
-        Ok(self.submit(batches, owners, affected))
+        let batches = write::changeset(changes, after, &self.identity, affected)?;
+        Ok(self.submit(batches, owners))
     }
 
     pub fn affected_categories(changes: &ChangeSet, before: &InventorySnapshot, after: &InventorySnapshot) -> Vec<CategoryKey> {
@@ -403,13 +404,12 @@ impl InventoryCache {
         result
     }
 
-    fn submit(&self, batches: Vec<SqliteBatch>, owners: Vec<Uuid>, affected_categories: Vec<CategoryKey>) -> InventoryCacheWrite {
+    fn submit(&self, batches: Vec<SqliteBatch>, owners: Vec<Uuid>) -> InventoryCacheWrite {
         InventoryCacheWrite {
             result: self.db.submit_batches(batches),
             control: self.db.control_handle(),
             identity: self.identity.clone(),
             owners,
-            affected_categories,
         }
     }
 }
