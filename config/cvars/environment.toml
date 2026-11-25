@@ -4,21 +4,3 @@ default = false
 persistent = true
 apply = "live"
 help = "Keep personal sky and water overrides across logins instead of resetting to Shared Environment."
-
-[environment.transition_duration_s]
-type = "f32"
-default = 5.0
-range = [0.0, 60.0]
-step = 0.5
-unit = "s"
-persistent = true
-apply = "live"
-help = "Duration in seconds for environment lighting and sky transitions."
-
-[environment.star_count]
-type = "i64"
-default = 1000
-range = [0, 10000]
-persistent = true
-apply = "restart_required"
-help = "Number of stars generated in the night sky."
