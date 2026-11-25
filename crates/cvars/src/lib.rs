@@ -85,7 +85,7 @@ pub enum Visibility {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ValueDomain {
     Bool,
-    I64 { min: i64, max: i64 },
+    I64 { min: i64, max: i64, auto: bool },
     F32 { min: f32, max: f32, step: Option<f32> },
     F64 { min: f64, max: f64, step: Option<f64> },
     String { max_len: usize },
@@ -107,11 +107,11 @@ impl ValueDomain {
     pub fn validate(self, name: &'static str, value: &CvarValue) -> Result<CvarValue, CvarError> {
         match (self, value) {
             (Self::Bool, CvarValue::Bool(flag)) => Ok(CvarValue::Bool(*flag)),
-            (Self::I64 { min, max }, CvarValue::I64(number)) => {
-                if (*number < min) || (*number > max) {
-                    Err(CvarError::OutOfBounds { name })
-                } else {
+            (Self::I64 { min, max, auto }, CvarValue::I64(number)) => {
+                if (auto && *number == 0) || (*number >= min && *number <= max) {
                     Ok(CvarValue::I64(*number))
+                } else {
+                    Err(CvarError::OutOfBounds { name })
                 }
             }
             (Self::F32 { min, max, .. }, CvarValue::F32(number)) => {
@@ -266,6 +266,12 @@ pub struct CvarDescriptor {
     pub apply: ApplyScope,
     pub visibility: Visibility,
     pub help: &'static str,
+}
+
+impl CvarDescriptor {
+    pub const fn auto(&self) -> bool {
+        matches!(self.domain, ValueDomain::I64 { auto: true, .. })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
@@ -607,10 +613,12 @@ mod tests {
 
         assert_eq!(RENDER_DRAW_DISTANCE.default_value(), 512.0);
         assert_eq!(SCENE_LOD_FACTOR.default_value(), 1.0);
-        assert_eq!(RENDER_TEXTURE_SOFT_CAP_MIB.default_value(), 1024);
+        assert_eq!(RENDER_TEXTURE_SOFT_CAP_MIB.default_value(), 0);
+        assert!(RENDER_TEXTURE_SOFT_CAP_MIB.descriptor().auto());
+        assert!(!RENDER_MAX_FPS.descriptor().auto());
         assert_eq!(snapshot.get(RENDER_DRAW_DISTANCE), 512.0);
         assert_eq!(snapshot.get(SCENE_LOD_FACTOR), 1.0);
-        assert_eq!(snapshot.get(RENDER_TEXTURE_SOFT_CAP_MIB), 1024);
+        assert_eq!(snapshot.get(RENDER_TEXTURE_SOFT_CAP_MIB), 0);
         assert_eq!(
             snapshot.provenance(RENDER_DRAW_DISTANCE.id()),
             CvarProvenance { value: CvarValue::F32(512.0), source: Layer::Default, pending_restart_value: None }
@@ -686,6 +694,16 @@ mod tests {
             registry.set(RENDER_DRAW_DISTANCE, Layer::Default, 512.0),
             Err(CvarError::LayerNotAllowed { name: "render.draw_distance", layer: Layer::Default })
         );
+        assert_matches!(
+            registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, 64),
+            Err(CvarError::OutOfBounds { name: "render.texture_soft_cap_mib" })
+        );
+        assert_matches!(
+            registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, -1),
+            Err(CvarError::OutOfBounds { name: "render.texture_soft_cap_mib" })
+        );
+        registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, 0).expect("auto zero is valid");
+        registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, 128).expect("range min is valid");
         assert_eq!(registry.get(RENDER_DRAW_DISTANCE), 512.0);
     }
 

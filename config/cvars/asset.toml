@@ -9,18 +9,20 @@ help = "Maximum on-disk asset cache size in MiB."
 
 [asset.work_budget_mib]
 type = "i64"
-default = 512
+default = 0
 range = [64, 4096]
+auto = true
 unit = "MiB"
 persistent = true
 apply = "restart_required"
-help = "CPU memory budget in MiB for in-flight asset decoding and staging."
+help = "CPU memory budget in MiB for in-flight asset decoding and staging (0 = auto)."
 
 [asset.texture_work_budget_mib]
 type = "i64"
-default = 192
+default = 0
 range = [32, 2048]
+auto = true
 unit = "MiB"
 persistent = true
 apply = "restart_required"
-help = "CPU memory budget in MiB for in-flight texture decoding."
+help = "CPU memory budget in MiB for in-flight texture decoding (0 = auto)."

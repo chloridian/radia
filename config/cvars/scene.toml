@@ -9,9 +9,10 @@ help = "Distance multiplier for mesh and prim level-of-detail switching."
 
 [scene.memory_budget_mib]
 type = "i64"
-default = 256
+default = 0
 range = [64, 4096]
+auto = true
 unit = "MiB"
 persistent = true
 apply = "restart_required"
-help = "CPU memory budget in MiB for derived scene geometry."
+help = "CPU memory budget in MiB for derived scene geometry (0 = auto)."

@@ -22,6 +22,7 @@ struct Declaration {
     value_type: ValueType,
     default_raw: String,
     range_raw: Option<(String, String)>,
+    auto: bool,
     step_raw: Option<String>,
     max_len_raw: Option<String>,
     variants: Vec<String>,
@@ -153,6 +154,7 @@ fn build_declaration(path: &Path, name: String, fields: Vec<(String, String)>) -
     let mut value_type = None;
     let mut default_raw = None;
     let mut range_raw = None;
+    let mut auto = false;
     let mut step_raw = None;
     let mut max_len_raw = None;
     let mut variants = Vec::new();
@@ -178,6 +180,7 @@ fn build_declaration(path: &Path, name: String, fields: Vec<(String, String)>) -
             }
             "default" => default_raw = Some(raw),
             "range" => range_raw = Some(parse_range(path, &name, &raw)),
+            "auto" => auto = parse_bool(path, &name, &key, &raw),
             "step" => step_raw = Some(raw),
             "max_len" => max_len_raw = Some(raw),
             "values" => variants = parse_string_array(path, &key, &raw),
@@ -198,6 +201,7 @@ fn build_declaration(path: &Path, name: String, fields: Vec<(String, String)>) -
         value_type: value_type.unwrap_or_else(|| panic!("{}: missing `type` on `{name}`", path.display())),
         default_raw: default_raw.unwrap_or_else(|| panic!("{}: missing `default` on `{name}`", path.display())),
         range_raw,
+        auto,
         step_raw,
         max_len_raw,
         variants,
@@ -268,6 +272,8 @@ fn validate_declarations(declarations: &[Declaration]) {
         assert!(matches!(decl.visibility.as_str(), "visible" | "hidden"), "invalid visibility `{}`", decl.visibility);
         assert!(!decl.help.trim().is_empty(), "empty help on `{}`", decl.name);
 
+        assert!(!decl.auto || decl.value_type == ValueType::I64, "`auto` is only supported on i64 cvars (`{}`)", decl.name);
+
         match decl.value_type {
             ValueType::Bool => {
                 assert!(matches!(decl.default_raw.as_str(), "true" | "false"), "invalid bool default on `{}`", decl.name);
@@ -278,7 +284,12 @@ fn validate_declarations(declarations: &[Declaration]) {
                 let (min_raw, max_raw) = decl.range_raw.as_ref().unwrap_or_else(|| panic!("missing range on `{}`", decl.name));
                 let min: i64 = min_raw.parse().unwrap_or_else(|_| panic!("invalid i64 min on `{}`", decl.name));
                 let max: i64 = max_raw.parse().unwrap_or_else(|_| panic!("invalid i64 max on `{}`", decl.name));
-                assert!(min <= max && (min..=max).contains(&default), "i64 bounds violated on `{}`", decl.name);
+                assert!(
+                    min <= max && ((min..=max).contains(&default) || (decl.auto && default == 0)),
+                    "i64 bounds violated on `{}`",
+                    decl.name
+                );
+                assert!(!decl.auto || min > 0, "auto i64 cvar `{}` must have min > 0", decl.name);
                 assert!(decl.step_raw.is_none(), "unexpected step on i64 cvar `{}`", decl.name);
             }
             ValueType::F32 => {
@@ -401,7 +412,7 @@ fn validate_preset_value(path: &Path, line_no: usize, decl: &Declaration, raw: &
             let min: i64 = min_raw.parse().expect("validated i64 min");
             let max: i64 = max_raw.parse().expect("validated i64 max");
             assert!(
-                (min..=max).contains(&value),
+                (min..=max).contains(&value) || (decl.auto && value == 0),
                 "{}:{line_no}: `{}` value {value} out of bounds [{min}, {max}]",
                 path.display(),
                 decl.name
@@ -473,7 +484,7 @@ fn render_generated(declarations: &[Declaration], presets: &[Preset]) -> String 
                 let (min_raw, max_raw) = decl.range_raw.as_ref().unwrap();
                 (
                     format!("CvarValue::I64({}_i64)", decl.default_raw),
-                    format!("ValueDomain::I64 {{ min: {min_raw}_i64, max: {max_raw}_i64 }}"),
+                    format!("ValueDomain::I64 {{ min: {min_raw}_i64, max: {max_raw}_i64, auto: {} }}", decl.auto),
                 )
             }
             ValueType::F32 => {
