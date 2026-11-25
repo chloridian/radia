@@ -2,7 +2,10 @@ use std::{
     assert_matches,
     collections::{HashMap, HashSet},
     fmt::Write as _,
-    sync::{Arc, atomic::AtomicUsize},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -27,8 +30,8 @@ use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
 use super::{
-    BACKGROUND_CONCURRENCY, ForegroundRequest, InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequests, InventoryLoadingStatus,
-    MAX_AIS_DEPTH, MAX_RETRY_AFTER, REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, retry_delay, run_scheduler,
+    BACKGROUND_CONCURRENCY, BackgroundQueueGauge, ForegroundRequest, InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequests,
+    InventoryLoadingStatus, MAX_AIS_DEPTH, MAX_RETRY_AFTER, REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, retry_delay, run_scheduler,
 };
 use crate::{
     inventory::{
@@ -339,6 +342,8 @@ fn scheduler(client: Client, snapshot: inventory::InventorySnapshot) -> Schedule
         requests_rx,
         events_tx,
         Arc::new(AtomicUsize::new(0)),
+        Arc::clone(&requests.background_queue_depth),
+        Arc::clone(&requests.background_queue_peak),
         refresh_receiver,
         cancellation,
         stop_rx,
@@ -1899,4 +1904,18 @@ async fn logout_cancellation_emits_zero_failures() {
     while let Ok(event) = events2.try_recv() {
         assert!(!matches!(event, InventoryFetchEvent::Failed { .. }), "unexpected failure event during backoff cancel: {event:?}");
     }
+}
+
+#[test]
+fn background_queue_gauge_tracks_peak() {
+    let depth = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    {
+        let gauge = BackgroundQueueGauge { depth: Arc::clone(&depth), peak: Arc::clone(&peak) };
+        gauge.set(5);
+        assert_eq!((depth.load(Ordering::Relaxed), peak.load(Ordering::Relaxed)), (5, 5));
+        gauge.set(2);
+        assert_eq!((depth.load(Ordering::Relaxed), peak.load(Ordering::Relaxed)), (2, 5));
+    }
+    assert_eq!((depth.load(Ordering::Relaxed), peak.load(Ordering::Relaxed)), (0, 5));
 }

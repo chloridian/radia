@@ -96,11 +96,19 @@ pub(crate) struct InventoryFetchRequests {
     sender: mpsc::Sender<ForegroundRequest>,
     full_rejections: Arc<AtomicU64>,
     refresh_incomplete: watch::Sender<u64>,
+    background_queue_depth: Arc<AtomicUsize>,
+    background_queue_peak: Arc<AtomicUsize>,
 }
 
 impl InventoryFetchRequests {
     fn new(sender: mpsc::Sender<ForegroundRequest>, refresh_incomplete: watch::Sender<u64>) -> Self {
-        Self { sender, full_rejections: Arc::new(AtomicU64::new(0)), refresh_incomplete }
+        Self {
+            sender,
+            full_rejections: Arc::new(AtomicU64::new(0)),
+            refresh_incomplete,
+            background_queue_depth: Arc::new(AtomicUsize::new(0)),
+            background_queue_peak: Arc::new(AtomicUsize::new(0)),
+        }
     }
 }
 
@@ -112,6 +120,10 @@ impl InventoryFetchHandle {
             capacity,
             full_count: self.requests.full_rejections.load(Ordering::Relaxed),
         }
+    }
+
+    pub fn background_queue_depth(&self) -> (usize, usize) {
+        (self.requests.background_queue_depth.load(Ordering::Relaxed), self.requests.background_queue_peak.load(Ordering::Relaxed))
     }
 
     pub fn request_folder(&self, folder: CategoryKey) -> Result<oneshot::Receiver<InventoryFetchOutcome>, InventoryFetchRequestError> {
@@ -217,6 +229,8 @@ impl InventoryFetchController {
             requests,
             self.events_tx.clone(),
             Arc::clone(&self.in_flight_count),
+            Arc::clone(&self.handle.requests.background_queue_depth),
+            Arc::clone(&self.handle.requests.background_queue_peak),
             refresh_receiver,
             cancellation,
             stop_rx,
@@ -289,6 +303,24 @@ impl Drop for InFlightGauge {
     }
 }
 
+struct BackgroundQueueGauge {
+    depth: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+}
+
+impl BackgroundQueueGauge {
+    fn set(&self, len: usize) {
+        self.depth.store(len, Ordering::Relaxed);
+        self.peak.fetch_max(len, Ordering::Relaxed);
+    }
+}
+
+impl Drop for BackgroundQueueGauge {
+    fn drop(&mut self) {
+        self.depth.store(0, Ordering::Relaxed);
+    }
+}
+
 async fn run_scheduler(
     client: Client,
     snapshot: InventorySnapshot,
@@ -296,11 +328,14 @@ async fn run_scheduler(
     mut requests: mpsc::Receiver<ForegroundRequest>,
     events: mpsc::Sender<InventoryFetchEvent>,
     in_flight_count: Arc<AtomicUsize>,
+    background_queue_depth: Arc<AtomicUsize>,
+    background_queue_peak: Arc<AtomicUsize>,
     mut refresh_incomplete: watch::Receiver<u64>,
     cancellation: Cancellation,
     mut stop: oneshot::Receiver<()>,
 ) {
     let in_flight_gauge = InFlightGauge(in_flight_count);
+    let background_gauge = BackgroundQueueGauge { depth: background_queue_depth, peak: background_queue_peak };
     let discovered = match discover(&client, cancellation.clone(), &mut stop).await {
         Ok(discovered) => discovered,
         Err(InventoryFetchError::Cancelled) => return,
@@ -343,6 +378,7 @@ async fn run_scheduler(
 
     loop {
         in_flight_gauge.set(in_flight.len());
+        background_gauge.set(background.len());
         while let Ok(request) = requests.try_recv() {
             queue_foreground_request(request, &mut foreground, &mut foreground_queued, &mut foreground_completions);
         }
@@ -516,6 +552,7 @@ async fn run_scheduler(
             );
             active.insert(job.id, job);
         }
+        background_gauge.set(background.len());
 
         if active.is_empty() && background.is_empty() && !background_done {
             background_done = true;

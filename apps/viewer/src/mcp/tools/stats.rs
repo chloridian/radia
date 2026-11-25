@@ -93,6 +93,18 @@ pub struct AssetsStatsOutput {
 }
 
 #[derive(Serialize, JsonSchema)]
+pub struct WorldReadsStatsOutput {
+    pub detail_batch_waits: u64,
+    pub outstanding_reads_full: u64,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct InventoryQueueStatsOutput {
+    pub background_depth: usize,
+    pub background_peak_depth: usize,
+}
+
+#[derive(Serialize, JsonSchema)]
 pub struct StatsOutput {
     pub active_session: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,6 +115,10 @@ pub struct StatsOutput {
     pub render: Option<RenderStatsOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assets: Option<AssetsStatsOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub world_reads: Option<WorldReadsStatsOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<InventoryQueueStatsOutput>,
 }
 
 #[tool_router(router = stats_router, vis = "pub(super)")]
@@ -120,13 +136,22 @@ impl Handler {
 
 pub(in crate::mcp) fn stats_data(handle: &ViewerInspectionHandle, limit: Option<usize>) -> StatsOutput {
     let Some(session) = handle.session() else {
-        return StatsOutput { active_session: false, viewport_size: None, frame: None, render: None, assets: None };
+        return StatsOutput {
+            active_session: false,
+            viewport_size: None,
+            frame: None,
+            render: None,
+            assets: None,
+            world_reads: None,
+            inventory: None,
+        };
     };
     let limit = limit.unwrap_or(FRAME_SPIKE_CAPACITY).clamp(1, FRAME_SPIKE_CAPACITY);
     let render_snapshot = *session.render_stats.borrow();
     let rs = render_snapshot.render_stats;
     let queue = session.assets.queue_stats();
     let memory = session.assets.memory_stats();
+    let (background_depth, background_peak_depth) = session.diagnostics.inventory_fetch.background_queue_depth();
     let total_spikes = render_snapshot.frame_spikes.len();
     let spikes = render_snapshot
         .frame_spikes
@@ -192,5 +217,10 @@ pub(in crate::mcp) fn stats_data(handle: &ViewerInspectionHandle, limit: Option<
                 high_water_bytes: memory.high_water_bytes,
             },
         }),
+        world_reads: Some(WorldReadsStatsOutput {
+            detail_batch_waits: render_snapshot.detail_batch_waits,
+            outstanding_reads_full: session.world.outstanding_reads_full(),
+        }),
+        inventory: Some(InventoryQueueStatsOutput { background_depth, background_peak_depth }),
     }
 }

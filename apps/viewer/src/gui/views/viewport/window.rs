@@ -639,6 +639,7 @@ impl SceneView {
             frame_spikes: self.frame_times.spikes(),
             texture_completions_capacity: self.texture_jobs,
             texture_completions_dropped: self.texture_completions_dropped_total,
+            detail_batch_waits: self.feed.as_ref().map_or(0, |feed| feed.view.detail_batch_waits()),
         };
         self.render_stats.send_replace(snapshot);
     }

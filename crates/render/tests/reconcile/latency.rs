@@ -272,3 +272,33 @@ fn mixed_work_progresses_fairly() {
         with_prims.first_high_frame,
     );
 }
+
+#[test]
+fn detail_batch_waits_counts_overflow() {
+    let mut world = world_with_capacity(16);
+    for id in 1..=10_u32 {
+        add_shaped(&mut world, u128::from(id), id, ParentUpdate::Root, f32::from(id as u16) * 2.0, u64::from(id) * 4, PrimShape::default());
+    }
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(camera(0.0));
+    for _ in 0..MAX_POLLS {
+        match scene.poll(now) {
+            ReconcileStep::Read(job) => {
+                let answer = reply(&world, &job);
+                scene.complete_read(job, answer, now);
+            }
+            ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
+            ReconcileStep::Publish(batch) => {
+                view.apply(batch).expect("publish applies");
+                now += FRAME;
+            }
+            ReconcileStep::Wait(until) => now = (now + FRAME).max(until),
+            ReconcileStep::Continue | ReconcileStep::Asset(_) => {}
+            ReconcileStep::Idle => break,
+            ReconcileStep::Closed => panic!("scene closed"),
+        }
+    }
+    assert!(scene.detail_batch_waits() >= 1, "expected detail batch wait when 10 objects exceed batch size 8");
+    assert_eq!(view.detail_batch_waits(), scene.detail_batch_waits());
+}

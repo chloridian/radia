@@ -99,6 +99,7 @@ pub struct RenderStatsSnapshot {
     pub frame_spikes: FrameSpikeRing,
     pub texture_completions_capacity: usize,
     pub texture_completions_dropped: u64,
+    pub detail_batch_waits: u64,
 }
 
 #[derive(Clone, Debug, Default)]
