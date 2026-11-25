@@ -30,6 +30,12 @@ impl Hardware {
         let ram_bytes = total_ram_bytes().unwrap_or(0);
         Self { cores, ram_bytes, vram: None }
     }
+
+    pub fn usable_ram_bytes(&self) -> u64 {
+        const MIN_OS_RESERVE: u64 = 2 * 1024 * 1024 * 1024;
+        let reserve = MIN_OS_RESERVE.max(self.ram_bytes / 4);
+        self.ram_bytes.saturating_sub(reserve)
+    }
 }
 
 pub fn available_ram_bytes() -> Option<u64> {

@@ -7,7 +7,7 @@ use std::{
 use assets::mesh::MeshLod;
 use render::{
     material::AlphaBehavior,
-    scene::{AssetRequest, DrawnMeshKey, Geometry, MEMORY_BYTES, Object, SceneView},
+    scene::{AssetRequest, DrawnMeshKey, Geometry, Object, SceneView},
 };
 use test_support::{mesh, texture::GRAY_4096_J2C};
 use world::{FaceAppearance, SculptFlags, SurfaceAppearance};
@@ -1089,7 +1089,7 @@ fn many_meshes_share_bounded_state() {
     let mesh_ids: HashSet<_> = view.objects().filter_map(|object| object.mesh().map(|(_, mesh)| mesh.id())).collect();
     assert_eq!(mesh_ids.len(), 1, "thousands of objects reuse one decoded LOD");
     assert!(view.objects().all(|object| asset_lod(object) == Some((asset, MeshLod::Lowest))));
-    assert!(budget.charged_bytes() <= MEMORY_BYTES);
+    assert!(budget.charged_bytes() <= budget.memory_bytes());
 
     scene.set_camera(Camera::new(DVec3::new(0.01, 0.0, 0.0), Vec3::X, FRAC_PI_3, [1000, 1000]).unwrap());
     assert!(settle_materials(&mut scene, &mut view, &world, &mut now).requested.is_empty());

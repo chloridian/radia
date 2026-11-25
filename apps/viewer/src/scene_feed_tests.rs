@@ -580,6 +580,7 @@ async fn pending_asset_preserves_scene() {
         watch::channel(None).0,
         watch::channel(None).0,
         agent_motion,
+        Budget::default(),
         Handle::current(),
         || {},
     );
@@ -644,6 +645,7 @@ async fn stalled_publication_preserves_intake() {
         watch::channel(None).0,
         watch::channel(None).0,
         agent_motion,
+        Budget::default(),
         Handle::current(),
         || {},
     );
@@ -776,6 +778,7 @@ async fn cached_burst_reaches_scene() {
         watch::channel(None).0,
         watch::channel(None).0,
         agent_motion,
+        Budget::default(),
         Handle::current(),
         || {},
     );

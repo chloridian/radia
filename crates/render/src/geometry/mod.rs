@@ -14,7 +14,7 @@ use std::{
     collections::{HashMap, HashSet},
     mem,
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -43,14 +43,16 @@ pub use self::{
     pick::{PickDetail, PickError},
 };
 use crate::{
+    Limits,
     pipeline::{FACE_INDEX_BYTES, Pipeline, Sky, SurfacePipelines, VoidWater},
     scene::{AgentPose, Camera, MAX_REGIONS, MeshId, ViewVersion},
     texture::{GeometryTextureState, TextureCompletion, TextureJob, TextureState, Textures},
 };
 
+#[cfg(test)]
 const MESH_BYTES: usize = 64 * 1024 * 1024;
-const DEPTH_BYTES: usize = 128 * 1024 * 1024;
-const INSTANCE_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const DEPTH_BYTES: usize = 128 * 1024 * 1024;
+pub(crate) const INSTANCE_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MESH_UPLOADS: usize = 16;
 const TRANSFORM_BYTES: usize = 112;
@@ -147,7 +149,6 @@ pub enum OmissionReason {
     CombinedBudgets,
 }
 
-#[derive(Default)]
 struct Accounting {
     bytes: AtomicUsize,
     instances: AtomicUsize,
@@ -156,16 +157,36 @@ struct Accounting {
     depth: AtomicUsize,
     peak: AtomicUsize,
     frames: AtomicUsize,
+    mesh_bytes: usize,
+}
+
+impl Default for Accounting {
+    fn default() -> Self {
+        Self::new(Limits::default().mesh_bytes)
+    }
 }
 
 impl Accounting {
+    fn new(mesh_bytes: usize) -> Self {
+        Self {
+            bytes: AtomicUsize::new(0),
+            instances: AtomicUsize::new(0),
+            instance_peak: AtomicUsize::new(0),
+            mesh_revision: AtomicU64::new(0),
+            depth: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            frames: AtomicUsize::new(0),
+            mesh_bytes,
+        }
+    }
+
     fn mesh_state(&self) -> MeshState {
         MeshState { bytes: self.bytes.load(Ordering::Acquire), revision: self.mesh_revision.load(Ordering::Acquire) }
     }
 
     fn reserve(self: &Arc<Self>, bytes: usize, resource: Resource) -> Option<Lease> {
         let limit = match resource {
-            Resource::Mesh => MESH_BYTES,
+            Resource::Mesh => self.mesh_bytes,
             Resource::Instances => return Some(self.charge(bytes)),
             Resource::Depth => DEPTH_BYTES,
         };
@@ -361,10 +382,9 @@ impl GeometryRenderer {
     pub(crate) fn texture_revision(&self) -> u64 {
         self.textures.state().revision
     }
-    pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
-        static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
-        let memory = MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone();
-        let textures = Textures::new(device, queue);
+    pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat, limits: Limits) -> Self {
+        let memory = Arc::new(Accounting::new(limits.mesh_bytes));
+        let textures = Textures::new(device, queue, limits);
         let instances = InstanceBuffers::new(device, &memory, INITIAL_FACE_INSTANCES);
         let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout, &textures, &instances.instances);
         let void_water = VoidWater::new(device, format, &textures);
@@ -423,7 +443,8 @@ impl GeometryRenderer {
     }
 
     pub(crate) fn vram_budget_bytes(&self) -> usize {
-        MESH_BYTES
+        self.memory
+            .mesh_bytes
             .saturating_add(DEPTH_BYTES)
             .saturating_add(INSTANCE_BUFFER_BYTES)
             .saturating_add((self.texture_soft_cap_mib() as usize).saturating_mul(1024 * 1024))

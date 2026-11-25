@@ -12,7 +12,10 @@ use wgpu::{
     TextureViewDimension,
 };
 
-use crate::texture::{CompressionQuality, TextureKey, Textures};
+use crate::{
+    Limits,
+    texture::{CompressionQuality, TextureKey, Textures},
+};
 
 #[test]
 #[ignore = "requires Vulkan; run with cargo test -p render --lib waves_sample_interpolated_field -- --ignored"]
@@ -26,7 +29,7 @@ fn waves_sample_interpolated_field() {
     let texture = loaded_fixture(0x4f6d_7192_3a4c_5e6f_8091_a2b3_c4d5_e6f7, RGBA_J2C);
     let image = texture.image().expect("fixture image pixels remain available");
     let key = TextureKey { id: texture.id(), sampler: assets::Sampler::default() };
-    let mut textures = Textures::new(&device, &queue);
+    let mut textures = Textures::new(&device, &queue, Limits::default());
     textures.request_environment(&texture, 1);
     let job = textures.next_conversion_job().expect("fixture texture upload is admitted");
     textures.complete(job.run(CompressionQuality::Fast));

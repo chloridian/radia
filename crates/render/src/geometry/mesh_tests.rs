@@ -27,6 +27,7 @@ use world::{
 
 use super::*;
 use crate::{
+    Limits,
     geometry::{
         Accounting, INSTANCE_BUFFER_BYTES, MESH_BYTES, OmissionReason, Resource, cache, fixtures,
         fixtures::{scene, scene_with_agent, scene_with_world, vulkan_device},
@@ -50,7 +51,7 @@ fn fixture_region(world: &world::World) -> Region {
 fn check_pages(device: &Device, queue: &wgpu::Queue, alpha: u8, separate_pages: bool) {
     let scope = device.push_error_scope(ErrorFilter::Validation);
     let (_scene, view, camera) = scene(alpha);
-    let mut geometry = GeometryRenderer::new(device, queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(device, queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     let filler = separate_pages.then(|| {
         let (_, shared) = view.objects().next().unwrap().mesh().unwrap();
         assert_matches!(geometry.upload_mesh(device, shared, None, &mut 0, None), MeshUpload::Ready);
@@ -663,7 +664,7 @@ fn gpu_removed_pending_reconciles_snapshot() {
     let (mut world, mut scene, mut view, camera) = scene_with_world(255, [Vec3::splat(2.0); 2], Default::default());
     let entity =
         view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("replacement target").detail().summary.entity;
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     geometry.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     let original_mesh = geometry.cache.items.get(geometry.cache.objects[&entity]).expect("original item").mesh.id();
@@ -748,7 +749,7 @@ fn gpu_repeated_overflow_matches_clean() {
     let objects = (1..=object_count).map(|id| (id, asset, Vec3::new(10.0, 0.0, 0.0))).collect::<Vec<_>>();
     let (mut world, mut scene, mut view, camera) = ready_mesh_scene(&objects, bytes);
     let (device, queue) = vulkan_device();
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     geometry.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     let old_entity = view
@@ -881,7 +882,7 @@ fn gpu_repeated_overflow_matches_clean() {
     assert!(!geometry.cache.objects.contains_key(&removed_entity));
     assert_eq!(geometry.cache.objects.len(), object_count_usize);
 
-    let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     clean.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut clean, &view, camera);
     assert!(clean.cache.rebuild.is_none(), "clean derived-cache build completes");
@@ -1032,7 +1033,7 @@ fn gpu_origin_crossings_keep_positions() {
     settle_with_meshes(&world, &mut scene, &mut view, &mesh_bytes);
 
     let (device, queue) = vulkan_device();
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     geometry.memory = Arc::new(Accounting::default());
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     let mut random = move || {
@@ -1124,7 +1125,7 @@ fn gpu_late_recovery_applies_changes() {
         .summary
         .entity;
     let (device, queue) = vulkan_device();
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     geometry.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     assert_eq!(geometry.cache.objects.len(), view.object_count(), "the recovery fixture starts with every object cacheable");
@@ -1265,7 +1266,7 @@ fn gpu_late_recovery_applies_changes() {
         assert_eq!(item.faces[0].params.color, expected_color, "accepted materials reach the renderer for {entity:?}");
     }
 
-    let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     clean.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut clean, &view, camera);
     let size = [128, 128];
@@ -1312,7 +1313,7 @@ fn gpu_agent_pose_override_patches() {
     let entity = agent.detail().summary.entity;
     let Placement::Ready(simulator_transform) = agent.placement() else { panic!("fixture avatar must have a pose") };
     let camera = Camera::new(DVec3::new(0.0, -2.0, 0.0), Vec3::X, 1.0, size).unwrap();
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     geometry.memory = Arc::new(Accounting::default());
     let mut encoder = device.create_command_encoder(&Default::default());
     geometry.prepare(&device, &mut encoder, &view, None, camera, size, None);
@@ -1369,7 +1370,7 @@ fn gpu_large_upload_exceeds_target() {
     let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
 
     let (device, queue) = vulkan_device();
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     let mut largest_upload = 0;
     for _ in 0..64 {
         prepare_frame(&device, &queue, &mut geometry, &view, camera);
@@ -1441,7 +1442,7 @@ fn gpu_lod_keeps_fallback() {
     );
 
     let (device, queue) = vulkan_device();
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     geometry.memory = Arc::new(Accounting::default());
     for _ in 0..512 {
         prepare_frame(&device, &queue, &mut geometry, &view, camera);
@@ -1646,7 +1647,7 @@ fn gpu_invisible_face_allows_mesh() {
     assert_eq!(shared.mesh().faces().len(), 2, "both authored face slots remain in the selected LOD");
 
     let (device, queue) = vulkan_device();
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     let depth = geometry.depth(&device, [128, 128]).expect("depth target");
     let started = Instant::now();
     for _ in 0..3 {
@@ -1710,11 +1711,11 @@ fn instance_buffer_grows_on_commit() {
         let x = if id <= 12 { 8.0 + id as f32 } else { -38.0 - id as f32 };
         (Vec3::new(x, 0.0, 0.0), world::PrimShape::default())
     });
-    let mut reference = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut reference = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     reference.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut reference, &view, near);
     let near_slots = reference.draw_list.slot_count();
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     geometry.memory = Arc::new(Accounting::default());
     geometry.instances = InstanceBuffers::new(&device, &geometry.memory, near_slots);
     geometry.pipelines.set_faces(&device, &geometry.textures, &geometry.instances.instances);
@@ -1752,7 +1753,7 @@ fn instance_buffer_grows_on_commit() {
 fn gpu_blended_rotation_uploads_instances() {
     let (device, queue) = vulkan_device();
     let (_scene, view, _) = scene(128);
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     geometry.instances.instances = device.create_buffer(&BufferDescriptor {
         label: None,
         size: geometry.instances.bytes() as u64,
@@ -1818,7 +1819,7 @@ fn gpu_admission_work_bounded_ordered() {
     const EXTRA_DEMANDS: usize = 160;
     let (_scene, view, camera) = scene(255);
     let (device, queue) = vulkan_device();
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     geometry.memory = Arc::new(Accounting::default());
     for _ in 0..8 {
         prepare_frame(&device, &queue, &mut geometry, &view, camera);
@@ -1937,7 +1938,7 @@ fn gpu_eviction_spares_shown_meshes() {
     let [near, shown, far] = [mesh(-3.0), mesh(4.0), mesh(6.0)];
 
     let (device, queue) = vulkan_device();
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     geometry.memory = Arc::new(Accounting::default());
     let settle = |geometry: &mut GeometryRenderer, camera: Camera, keep: Option<MeshId>| {
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -1996,7 +1997,7 @@ fn gpu_overbudget_visible_subset() {
     assert!(production_mesh_bytes.iter().sum::<usize>() > MESH_BYTES);
 
     let (device, queue) = vulkan_device();
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     geometry.memory = Arc::new(Accounting::default());
     let settle_deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -2111,7 +2112,7 @@ fn gpu_overbudget_visible_subset() {
     assert_eq!(geometry.stats.mesh_budget_blocked, 0);
     assert!(geometry.meshes.contains_key(&ordered[2]), "the previously omitted mesh is admitted after demand changes");
 
-    let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     clean.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut clean, &view, camera);
     let size = [128, 128];
@@ -2150,7 +2151,7 @@ fn draws_during_scene_churn(overflow: bool, membership: bool) {
     assert!(view.objects().all(|object| object.mesh().is_some()), "every fixture object has valid geometry before churn");
 
     let (device, queue) = vulkan_device();
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     geometry.memory = Arc::new(Accounting::default());
     let depth = geometry.depth(&device, [128, 128]).expect("fixture depth target");
     let assets = HashMap::from([(first_asset, bytes.clone()), (second_asset, bytes)]);
@@ -2228,7 +2229,7 @@ fn draws_during_scene_churn(overflow: bool, membership: bool) {
         prepare_frame(&device, &queue, &mut geometry, &view, camera);
         continuation_turns += 1;
     }
-    let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut clean = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     clean.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut clean, &view, camera);
     let signature = |renderer: &GeometryRenderer| {
@@ -2280,7 +2281,7 @@ fn pressure_streaming_no_flicker() {
     complete_mesh_requests(&world, &mut scene, &mut view, &asset_bytes, requests);
 
     let (device, queue) = vulkan_device();
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     geometry.memory = Arc::new(Accounting::default());
     prepare_until_current(&device, &queue, &mut geometry, &view, camera);
     let initial_meshes: Vec<MeshId> = view

@@ -8,36 +8,81 @@ use std::{
 };
 
 use tokio::sync::watch;
+use utils::hardware::Hardware;
 
-pub const ASSET_WORK_BYTES: usize = 512 * 1024 * 1024;
-pub(crate) const WORK_BYTES: usize = 32 * 1024 * 1024;
-pub(crate) const TEXTURE_WORK_BYTES: usize = 192 * 1024 * 1024;
+const MIB: usize = 1024 * 1024;
+const DEFAULT_WORK_BYTES: usize = 512 * MIB;
+const DEFAULT_TEXTURE_WORK_BYTES: usize = 192 * MIB;
+const MAX_WORK_BYTES: usize = 4096 * MIB;
+const MAX_TEXTURE_WORK_BYTES: usize = 2048 * MIB;
+pub(crate) const WORK_BYTES: usize = 32 * MIB;
+#[cfg(test)]
+pub(crate) const ASSET_WORK_BYTES: usize = DEFAULT_WORK_BYTES;
+#[cfg(test)]
+pub(crate) const TEXTURE_WORK_BYTES: usize = DEFAULT_TEXTURE_WORK_BYTES;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Limits {
+    pub work_bytes: usize,
+    pub texture_work_bytes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self { work_bytes: DEFAULT_WORK_BYTES, texture_work_bytes: DEFAULT_TEXTURE_WORK_BYTES }
+    }
+}
+
+impl Limits {
+    pub fn derive(hardware: &Hardware) -> Self {
+        let usable = hardware.usable_ram_bytes();
+        let work_bytes = usize::try_from(usable / 12).unwrap_or(usize::MAX).clamp(DEFAULT_WORK_BYTES, MAX_WORK_BYTES) / MIB * MIB;
+        let texture_work_bytes = (work_bytes * 3 / 8).clamp(DEFAULT_TEXTURE_WORK_BYTES, MAX_TEXTURE_WORK_BYTES).min(work_bytes) / MIB * MIB;
+        Self { work_bytes, texture_work_bytes }
+    }
+}
 
 struct Accounting {
     charged: AtomicUsize,
     working: AtomicUsize,
     resident: AtomicUsize,
     high_water: AtomicUsize,
+    work_bytes: usize,
+    texture_work_bytes: usize,
     wake: watch::Sender<()>,
 }
 
-impl Default for Accounting {
+#[derive(Clone)]
+pub struct Budget(Arc<Accounting>);
+
+impl Default for Budget {
     fn default() -> Self {
+        Self::new(Limits::default())
+    }
+}
+
+impl Budget {
+    pub fn new(limits: Limits) -> Self {
         let (wake, _) = watch::channel(());
-        Self {
+        Self(Arc::new(Accounting {
             charged: AtomicUsize::new(0),
             working: AtomicUsize::new(0),
             resident: AtomicUsize::new(0),
             high_water: AtomicUsize::new(0),
+            work_bytes: limits.work_bytes,
+            texture_work_bytes: limits.texture_work_bytes.min(limits.work_bytes),
             wake,
-        }
+        }))
     }
-}
 
-#[derive(Clone, Default)]
-pub struct Budget(Arc<Accounting>);
+    pub fn limits(&self) -> Limits {
+        Limits { work_bytes: self.0.work_bytes, texture_work_bytes: self.0.texture_work_bytes }
+    }
 
-impl Budget {
+    pub(crate) fn texture_work_bytes(&self) -> usize {
+        self.0.texture_work_bytes
+    }
+
     pub fn stats(&self) -> MemoryStats {
         MemoryStats {
             charged_bytes: self.0.charged.load(Ordering::Acquire),
@@ -55,10 +100,11 @@ impl Budget {
     }
 
     pub(crate) fn reserve_with_headroom(&self, bytes: usize, headroom: usize) -> Option<Reservation> {
+        let limit = self.0.work_bytes;
         self.0
             .working
             .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_add(bytes).filter(|next| next.checked_add(headroom).is_some_and(|total| total <= ASSET_WORK_BYTES))
+                used.checked_add(bytes).filter(|next| next.checked_add(headroom).is_some_and(|total| total <= limit))
             })
             .ok()?;
         let used = self.0.charged.fetch_add(bytes, Ordering::AcqRel);

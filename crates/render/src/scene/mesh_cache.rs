@@ -12,14 +12,8 @@ use assets::mesh::Mesh;
 use utils::{AssetId, FastHashMap};
 use world::{PrimShape, SculptFlags, SculptType};
 
-use crate::scene::{
-    Budget, Detail, MeshBuildError, SharedMesh,
-    budget::{MEMORY_BYTES, MeshWork},
-    mesh::retained_bytes,
-    prim::tessellate,
-};
+use crate::scene::{Budget, Detail, MeshBuildError, SharedMesh, budget::MeshWork, mesh::retained_bytes, prim::tessellate};
 
-const CACHE_BYTES: usize = MEMORY_BYTES;
 const HASH_ENTRY_OVERHEAD_BYTES: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -107,6 +101,7 @@ pub(in crate::scene) struct MeshCache {
 
 impl MeshCache {
     pub(in crate::scene) fn new(budget: Budget) -> Self {
+        let cache_bytes = budget.memory_bytes();
         Self {
             budget,
             entries: FastHashMap::default(),
@@ -118,7 +113,7 @@ impl MeshCache {
             evicted: Vec::new(),
             updated: Vec::new(),
             bytes: 0,
-            cache_bytes: CACHE_BYTES,
+            cache_bytes,
             capacity_revision: 0,
             priority_generation: 0,
             clock: 0,
@@ -486,7 +481,6 @@ mod tests {
     use std::assert_matches;
 
     use super::*;
-    use crate::scene::budget;
 
     fn key(detail: Detail) -> MeshKey {
         MeshKey { shape: PrimShape::default(), detail }
@@ -538,7 +532,7 @@ mod tests {
     #[test]
     fn shared_admission_releases_for_retry() {
         let budget = Budget::default();
-        let limit = budget::max_mesh_jobs();
+        let limit = budget.mesh_jobs();
         let extra = (2..limit).map(|_| budget.mesh_work().expect("reserve extra mesh slot")).collect::<Vec<_>>();
         let mut a = MeshCache::new(budget.clone());
         let mut b = MeshCache::new(budget.clone());
@@ -712,11 +706,11 @@ mod tests {
         }
         assert!(keys.iter().all(|key| matches!(meshes.get(*key), PreparedMesh::Ready(_))));
         assert!(meshes.start().is_none(), "resident meshes do not repeatedly decode");
-        assert!(meshes.bytes <= CACHE_BYTES);
+        assert!(meshes.bytes <= meshes.cache_bytes);
         let key = *keys.iter().find(|key| matches!(meshes.get(**key), PreparedMesh::Ready(_))).unwrap();
         meshes.release(key);
         assert!(meshes.start().is_none(), "releasing a resident mesh within budget does not evict it");
-        assert!(meshes.bytes <= CACHE_BYTES);
+        assert!(meshes.bytes <= meshes.cache_bytes);
         drop(meshes);
         assert_eq!(budget.charged_bytes(), 0);
     }

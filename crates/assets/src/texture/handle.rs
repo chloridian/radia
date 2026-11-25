@@ -9,11 +9,7 @@ use std::{
 use tokio::sync::watch;
 use utils::AssetId;
 
-use crate::{
-    Blob, Budget, Failure, Image, PixelFormat, TextureSize,
-    budget::{Reservation, TEXTURE_WORK_BYTES},
-    texture,
-};
+use crate::{Blob, Budget, Failure, Image, PixelFormat, TextureSize, budget::Reservation, texture};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TextureId(u64);
@@ -178,7 +174,7 @@ impl TextureHandle {
         let data = self.0.data.lock().unwrap_or_else(PoisonError::into_inner);
         let source = data.source.clone()?;
         let info = data.info?;
-        let reservation = self.0.budget.reserve(TEXTURE_WORK_BYTES)?;
+        let reservation = self.0.budget.reserve(self.0.budget.texture_work_bytes())?;
         Some(TextureDecodeJob { texture: self.downgrade(), source, info, reservation })
     }
 }

@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fmt,
     future::Future,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -155,13 +155,12 @@ impl SceneFeed {
         camera: watch::Sender<Option<Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
         mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
+        budget: Budget,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
         let assets = sources.assets.clone();
         let motion_circuits = sources.motion_circuits.clone();
-        static MEMORY: OnceLock<Budget> = OnceLock::new();
-        let budget = MEMORY.get_or_init(Budget::default).clone();
         let (scene, view) = Reconciler::new(budget.clone());
         let (sender, incoming) = mpsc::channel(1);
         let (environment_selection, selected_environment) = watch::channel(EnvironmentSelection {

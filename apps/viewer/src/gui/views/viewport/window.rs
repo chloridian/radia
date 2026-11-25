@@ -40,7 +40,7 @@ use tokio::{
     sync::{mpsc as tokio_mpsc, watch},
 };
 use tracing::Instrument;
-use utils::Summary;
+use utils::{Summary, hardware::Vram};
 use uuid::Uuid;
 use wgpu::{Device, Queue};
 
@@ -60,6 +60,7 @@ use crate::{
         SetCameraRequest, ViewportQuery,
     },
     inventory::environments::EnvironmentMenu,
+    limits::StartupLimits,
     logging::{LogControl, LogLevel},
     scene_feed::{SceneFeed, SceneSources},
     session::AgentMotionSample,
@@ -83,6 +84,8 @@ pub(crate) struct SceneViewConfig {
     pub(crate) runtime: Handle,
     pub(crate) log_control: LogControl,
     pub(crate) settings: Arc<SettingsStore>,
+    pub(crate) startup_limits: StartupLimits,
+    pub(crate) scene_budget: scene::Budget,
     pub(crate) render_stats: watch::Sender<RenderStatsSnapshot>,
     pub(crate) viewport_queries: tokio_mpsc::Receiver<ViewportQuery>,
 }
@@ -132,6 +135,9 @@ pub(crate) struct SceneView {
     ready: bool,
     failed: bool,
     settings: Arc<SettingsStore>,
+    startup_limits: StartupLimits,
+    texture_jobs: usize,
+    vram: Option<Vram>,
     lod_factor: f32,
     draw_distance: f32,
     camera: Option<OrbitCamera>,
@@ -167,6 +173,7 @@ impl SceneView {
             config.camera,
             config.movement,
             config.agent_motion,
+            config.scene_budget,
             config.runtime,
             move || {
                 let mut wake = feed_wake.clone();
@@ -174,7 +181,8 @@ impl SceneView {
             },
         );
 
-        let (texture_sender, texture_receiver) = mpsc::sync_channel(render::max_texture_jobs());
+        let texture_jobs = config.startup_limits.texture_jobs;
+        let (texture_sender, texture_receiver) = mpsc::sync_channel(texture_jobs);
         let settings = config.settings;
         let snapshot = settings.snapshot();
         let lod_factor = snapshot.get(SCENE_LOD_FACTOR);
@@ -324,6 +332,9 @@ impl SceneView {
             ready: false,
             failed: false,
             settings,
+            startup_limits: config.startup_limits,
+            texture_jobs,
+            vram: None,
             lod_factor,
             draw_distance,
             camera: None,
@@ -381,9 +392,12 @@ impl SceneView {
         };
         let format = handle.texture_format();
         let info = handle.adapter_info().clone();
+        let vram = handle.adapter_memory().map(|memory| Vram { local_bytes: memory.local_bytes, budget_bytes: memory.budget_bytes });
+        self.vram = vram;
+        let render_limits = self.startup_limits.resolve_render(vram, &self.settings.snapshot());
         let limits = device.limits();
         let [width, height] = self.viewport_size;
-        match Renderer::new(device, queue, info, format, width, height) {
+        match Renderer::new(device, queue, info, format, width, height, render_limits) {
             Ok(renderer) => {
                 let info = renderer.adapter_info();
                 if let Some(publisher) = inspection(cx) {
@@ -394,6 +408,12 @@ impl SceneView {
                     gpu = %info.name,
                     driver = %info.driver,
                     driver_info = %info.driver_info,
+                    vram_local_mib = vram.map(|v| v.local_bytes / (1024 * 1024)),
+                    vram_budget_mib = vram.and_then(|v| v.budget_bytes).map(|b| b / (1024 * 1024)),
+                    texture_soft_cap_mib = render_limits.texture_soft_cap_bytes / (1024 * 1024),
+                    mesh_memory_mib = render_limits.mesh_bytes / (1024 * 1024),
+                    texture_staging_mib = render_limits.texture_staging_bytes / (1024 * 1024),
+                    texture_jobs = render_limits.texture_jobs,
                     "scene GPU initialized"
                 );
                 self.renderer = Some(renderer);
@@ -615,7 +635,7 @@ impl SceneView {
             gpu_timings: renderer.gpu_timings(),
             viewport_size: self.viewport_size,
             frame_spikes: self.frame_times.spikes(),
-            texture_completions_capacity: render::max_texture_jobs(),
+            texture_completions_capacity: self.texture_jobs,
             texture_completions_dropped: self.texture_completions_dropped_total,
         };
         self.render_stats.send_replace(snapshot);
@@ -929,6 +949,12 @@ impl SceneView {
         }
         let turn_rate = snapshot.get(CAMERA_TURN_RATE_DEG_PER_SEC).to_radians();
         let frame_interval = frame_interval_for_fps(snapshot.get(RENDER_MAX_FPS));
+        let texture_soft_cap_mib = self.startup_limits.resolve_texture_soft_cap_mib(self.vram, &snapshot);
+        if let Some(renderer) = &mut self.renderer
+            && renderer.texture_soft_cap_mib() != texture_soft_cap_mib
+        {
+            renderer.set_texture_soft_cap(texture_soft_cap_mib);
+        }
         let (pose, seed) = self.agent_pose_and_seed_at(now);
         self.ensure_camera(pose);
         let rotation = self.body_rotation.update_with_turn_rate(seed, self.controls.yaw(self.modifiers.shift), turn_rate, now);

@@ -4,6 +4,7 @@ pub(crate) mod camera;
 pub mod gui;
 pub mod inspection;
 pub mod inventory;
+pub mod limits;
 pub mod logging;
 pub mod mcp;
 mod remembered_login;

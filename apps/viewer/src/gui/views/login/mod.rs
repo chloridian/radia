@@ -546,6 +546,7 @@ impl LoginScreen {
 
         let background = Tokio::handle(cx);
         let asset_cache = gui::asset_cache(cx);
+        let asset_budget = gui::asset_budget(cx);
         let grid = self.credential_load.grid();
 
         cx.spawn(async move |this, cx| {
@@ -568,6 +569,7 @@ impl LoginScreen {
             cancel_receiver,
             CredentialPersistence { grid, username: remembered_username, password: remembered_password, remember_login },
             asset_cache,
+            asset_budget,
         )));
 
         cx.notify();

@@ -14,6 +14,7 @@ use wgpu::{
 use world::Entity;
 
 use crate::{
+    Limits,
     environment::Evaluated,
     geometry::{GeometryRenderer, ObjectExplanation, PickDetail, PickError, Stats},
     gpu_timing::GpuTimings,
@@ -84,6 +85,7 @@ impl Renderer {
         format: TextureFormat,
         width: u32,
         height: u32,
+        limits: Limits,
     ) -> Result<Self, Error> {
         let srgb_format = format.add_srgb_suffix();
         if !srgb_format.is_srgb() {
@@ -97,7 +99,7 @@ impl Renderer {
             timestamp_queries,
             "scene renderer configured"
         );
-        let geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float);
+        let geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float, limits);
         let gpu_timings = if timestamp_queries { GpuTimings::new(&device, queue.get_timestamp_period()) } else { None };
         let postprocess = PostProcess::new(&device, &queue, srgb_format);
         let mut renderer = Self {

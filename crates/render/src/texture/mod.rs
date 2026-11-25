@@ -7,10 +7,9 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     mem::{replace, take},
     sync::{
-        Arc, OnceLock, Weak,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    thread,
     time::{Duration, Instant},
 };
 
@@ -30,12 +29,9 @@ use wgpu::{
 use world::Region;
 
 pub use self::compression::CompressionQuality;
+use crate::Limits;
 
-const DEFAULT_SOFT_CAP: usize = 1024 * 1024 * 1024;
-const STAGING_BYTES: usize = 48 * 1024 * 1024;
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
-const MIN_JOBS: usize = 2;
-const MAX_JOBS_CAP: usize = 6;
 const FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const TERRAIN_ALPHA_RAMP_WIDTH: u32 = 256;
 pub(crate) const TERRAIN_ALPHA_RAMP: &[u8; 256] = include_bytes!("../terrain_alpha_ramp.r8");
@@ -64,29 +60,44 @@ fn raw_channel_view_formats(format: TextureFormat) -> &'static [TextureFormat] {
     }
 }
 
-pub(crate) fn max_jobs() -> usize {
-    static MAX: OnceLock<usize> = OnceLock::new();
-    *MAX.get_or_init(|| thread::available_parallelism().map(usize::from).unwrap_or(4).clamp(MIN_JOBS, MAX_JOBS_CAP))
-}
-
-#[derive(Default)]
 struct Accounting {
     gpu: AtomicUsize,
     textures: AtomicUsize,
     staging: AtomicUsize,
     jobs: AtomicUsize,
+    staging_bytes: usize,
+    max_jobs: usize,
+}
+
+impl Default for Accounting {
+    fn default() -> Self {
+        let limits = Limits::default();
+        Self::new(limits.texture_staging_bytes, limits.texture_jobs)
+    }
 }
 
 impl Accounting {
+    fn new(staging_bytes: usize, max_jobs: usize) -> Self {
+        Self {
+            gpu: AtomicUsize::new(0),
+            textures: AtomicUsize::new(0),
+            staging: AtomicUsize::new(0),
+            jobs: AtomicUsize::new(0),
+            staging_bytes,
+            max_jobs: max_jobs.max(1),
+        }
+    }
+
     fn reserve(self: &Arc<Self>, bytes: usize) -> Option<Lease> {
+        let limit = self.staging_bytes;
         self.staging
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| used.checked_add(bytes).filter(|total| *total <= STAGING_BYTES))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| used.checked_add(bytes).filter(|total| *total <= limit))
             .ok()?;
         Some(Lease { memory: self.clone(), bytes })
     }
 
     fn work(self: &Arc<Self>) -> Option<Work> {
-        let limit = max_jobs();
+        let limit = self.max_jobs;
         self.jobs.try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < limit).then_some(n + 1)).ok()?;
         Some(Work(self.clone()))
     }
@@ -397,8 +408,7 @@ impl Textures {
     pub(crate) fn uploading(&self) -> bool {
         self.entries.values().any(|entry| matches!(entry.state, TextureUploadState::Uploading { .. }))
     }
-    pub(crate) fn new(device: &Device, queue: &Queue) -> Self {
-        static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
+    pub(crate) fn new(device: &Device, queue: &Queue, limits: Limits) -> Self {
         let material_entries: Vec<_> = (0..2)
             .flat_map(|image| {
                 [
@@ -602,11 +612,11 @@ impl Textures {
             revision: 0,
             geometry_revision: 0,
             queue: queue.clone(),
-            memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
+            memory: Arc::new(Accounting::new(limits.texture_staging_bytes, limits.texture_jobs)),
             conversion_failures: Summary::new(FAILURE_LOG_INTERVAL),
             entries: HashMap::new(),
             cap_bytes: Arc::new(AtomicUsize::new(0)),
-            soft_cap: DEFAULT_SOFT_CAP,
+            soft_cap: limits.texture_soft_cap_bytes,
             bcn: device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
             events: Vec::new(),
             lifecycle: 0,
@@ -1221,18 +1231,17 @@ mod tests {
     #[test]
     fn staging_release_restores_admission() {
         let memory = Arc::new(Accounting::default());
-        let held = memory.reserve(STAGING_BYTES).unwrap();
+        let held = memory.reserve(memory.staging_bytes).unwrap();
         assert!(memory.reserve(1).is_none());
         assert!(memory.reserve(usize::MAX).is_none());
         drop(held);
-        assert!(memory.reserve(STAGING_BYTES).is_some());
+        assert!(memory.reserve(memory.staging_bytes).is_some());
     }
 
     #[test]
     fn work_lease_bounded() {
         let memory = Arc::new(Accounting::default());
-        let limit = max_jobs();
-        assert!((MIN_JOBS..=MAX_JOBS_CAP).contains(&limit));
+        let limit = memory.max_jobs;
         let mut held: Vec<_> = (0..limit).map(|_| memory.work().expect("work slot within limit")).collect();
         assert!(memory.work().is_none());
         held.pop();

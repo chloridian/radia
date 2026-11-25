@@ -10,6 +10,7 @@ use world::FaceAppearance;
 
 use super::{GeometryRenderer, fixtures};
 use crate::{
+    Limits,
     pipeline::SCENE_CLEAR,
     scene::{Camera, SceneView},
 };
@@ -78,7 +79,7 @@ fn center_alpha(
 }
 
 fn render_center(device: &wgpu::Device, queue: &wgpu::Queue, view: &SceneView, camera: Camera, water_height: Option<f64>) -> [u8; 4] {
-    let mut geometry = GeometryRenderer::new(device, queue, TextureFormat::Rgba8Unorm);
+    let mut geometry = GeometryRenderer::new(device, queue, TextureFormat::Rgba8Unorm, Limits::default());
     let depth = geometry.depth(device, SIZE).expect("depth target is admitted");
     let frame = geometry.admit().expect("frame is admitted");
     let mut encoder = device.create_command_encoder(&Default::default());

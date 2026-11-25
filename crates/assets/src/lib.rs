@@ -12,7 +12,7 @@ mod texture;
 
 pub(crate) use self::budget::Blob;
 pub use self::{
-    budget::{ASSET_WORK_BYTES, Budget, MemoryStats},
+    budget::{Budget, Limits, MemoryStats},
     content::{Content, Environment, Material, MeshAsset, MeshHeaderAsset},
     envelope::{legacy_request, split_legacy_response},
     environment::{

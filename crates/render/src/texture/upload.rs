@@ -202,10 +202,12 @@ mod tests {
     use wgpu::{Queue, TextureFormat};
 
     use super::*;
-    use crate::texture::{
-        CompressionQuality, Conversion, PixelSource, allocation_bytes,
-        fixtures::{descriptor, loaded, loaded_fixture},
-        max_jobs,
+    use crate::{
+        Limits,
+        texture::{
+            CompressionQuality, Conversion, PixelSource, Textures, allocation_bytes,
+            fixtures::{descriptor, loaded, loaded_fixture},
+        },
     };
 
     fn vulkan_device() -> (Device, Queue) {
@@ -250,7 +252,7 @@ mod tests {
     #[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only gpu_texture_lifetimes"]
     fn gpu_texture_lifetimes() {
         let (device, queue) = vulkan_device();
-        let mut textures = Textures::new(&device, &queue);
+        let mut textures = Textures::new(&device, &queue, Limits::default());
         let handles: Vec<_> = (1..=8).map(|id| loaded(id, true)).collect();
         for texture in &handles {
             upload(&mut textures, &device, &queue, texture, 1);
@@ -341,7 +343,7 @@ mod tests {
         assert_eq!(stats.textures.load(Ordering::Acquire), 0, "shutdown releases GPU resources while live asset handles remain valid");
         assert!(live.info().is_some());
         assert!(live.image().is_none());
-        let mut recreated = Textures::new(&device, &queue);
+        let mut recreated = Textures::new(&device, &queue, Limits::default());
         upload(&mut recreated, &device, &queue, &live, 11);
         assert_eq!(recreated.count(), 1, "device recreation can rebuild render-only data from source");
         drop(live);
@@ -385,7 +387,7 @@ mod tests {
     #[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(upload_prioritizes_visible)'"]
     fn upload_prioritizes_visible() {
         let (device, queue) = vulkan_device();
-        let mut textures = Textures::new(&device, &queue);
+        let mut textures = Textures::new(&device, &queue, Limits::default());
         textures.bcn = false;
         let handles = [loaded_fixture(115, GRAY_4096_J2C), loaded_fixture(116, GRAY_4096_J2C)];
         assert!(handles.iter().all(|texture| texture.info().unwrap().size == [2048; 2]));
@@ -434,8 +436,8 @@ mod tests {
     #[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(work_released_on_complete)'"]
     fn work_released_on_complete() {
         let (device, queue) = vulkan_device();
-        let mut textures = Textures::new(&device, &queue);
-        let limit = max_jobs();
+        let mut textures = Textures::new(&device, &queue, Limits::default());
+        let limit = textures.memory.max_jobs;
         let handles: Vec<_> = (200..200 + limit as u128 + 1).map(|id| loaded(id, true)).collect();
         for texture in &handles[..limit] {
             textures.request(texture, 1, Priority::Visible);
@@ -470,7 +472,7 @@ mod tests {
     #[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(visible_jobs_dispatch_first)'"]
     fn visible_jobs_dispatch_first() {
         let (device, queue) = vulkan_device();
-        let mut textures = Textures::new(&device, &queue);
+        let mut textures = Textures::new(&device, &queue, Limits::default());
         let background = loaded(300, true);
         let visible = loaded(301, true);
         textures.request(&background, 1, Priority::Background);

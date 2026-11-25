@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-use assets::cache::AssetCache;
+use assets::{Budget as AssetBudget, cache::AssetCache};
 use futures::FutureExt;
 use prism::{
     AnyWindowHandle, App, AppContext, ColorExt, Entity, Global, QuitMode, Subscription, TitlebarOptions, Window, WindowBounds,
@@ -16,12 +16,14 @@ use prism::{
     px, rgb, rgb_to_hsla, size,
 };
 use prism_wgpu::WgpuContextHandle;
+use render::scene::Budget as SceneBudget;
 use tokio::{runtime::Handle, task::JoinHandle};
 use wgpu::{Device, Queue};
 
 use crate::{
     gui::{views::login::LoginScreen, window_geometry::restore_bounds},
     inspection::{GpuInfo, ViewerInspectionPublisher},
+    limits::StartupLimits,
     logging::LogControl,
     settings::SettingsStore,
 };
@@ -37,6 +39,9 @@ struct AppLifecycle {
     log_control: LogControl,
     settings: Arc<SettingsStore>,
     inspection: Option<ViewerInspectionPublisher>,
+    startup_limits: StartupLimits,
+    asset_budget: AssetBudget,
+    scene_budget: SceneBudget,
 }
 
 impl Global for AppLifecycle {}
@@ -108,6 +113,18 @@ pub(crate) fn inspection(cx: &App) -> Option<ViewerInspectionPublisher> {
     cx.try_global::<AppLifecycle>().and_then(|lifecycle| lifecycle.inspection.clone())
 }
 
+pub(crate) fn startup_limits(cx: &App) -> StartupLimits {
+    cx.try_global::<AppLifecycle>().map_or_else(StartupLimits::default, |lifecycle| lifecycle.startup_limits)
+}
+
+pub(crate) fn asset_budget(cx: &App) -> AssetBudget {
+    cx.try_global::<AppLifecycle>().map_or_else(AssetBudget::default, |lifecycle| lifecycle.asset_budget.clone())
+}
+
+pub(crate) fn scene_budget(cx: &App) -> SceneBudget {
+    cx.try_global::<AppLifecycle>().map_or_else(SceneBudget::default, |lifecycle| lifecycle.scene_budget.clone())
+}
+
 pub(crate) fn publish_window_gpu_info(window: &Window, cx: &App) {
     let Some(publisher) = inspection(cx) else { return };
     let Some(handle) = WgpuContextHandle::from_window(window) else { return };
@@ -124,6 +141,7 @@ pub fn init(
     log_control: LogControl,
     settings: Arc<SettingsStore>,
     inspection: Option<ViewerInspectionPublisher>,
+    startup_limits: StartupLimits,
 ) {
     let session_lifecycle = Arc::new(SessionLifecycle::default());
     cx.set_app_identity("org.radia.viewer", "Radia");
@@ -141,6 +159,9 @@ pub fn init(
         lifecycle.log_control = log_control;
         lifecycle.settings = settings;
         lifecycle.inspection = inspection;
+        lifecycle.startup_limits = startup_limits;
+        lifecycle.asset_budget = AssetBudget::new(startup_limits.assets);
+        lifecycle.scene_budget = SceneBudget::new(startup_limits.scene);
     }
 
     let (main_window, login) = prism::open_window(login_options(cx), cx, move |window, cx| {
@@ -179,6 +200,9 @@ fn install_lifecycle(session_lifecycle: Arc<SessionLifecycle>, cx: &mut App) {
         log_control: LogControl::noop(),
         settings: Arc::new(SettingsStore::in_memory()),
         inspection: None,
+        startup_limits: StartupLimits::default(),
+        asset_budget: AssetBudget::default(),
+        scene_budget: SceneBudget::default(),
     });
 }
 

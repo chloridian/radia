@@ -2,10 +2,7 @@ use std::{array, assert_matches, cmp::Ordering, f64::consts::FRAC_PI_2};
 
 use assets::{TextureHandle, TextureSize};
 use math::UvTransform;
-use render::{
-    material::{AlphaBehavior, AssetState, FaceMaterial, Resolution},
-    scene::MEMORY_BYTES,
-};
+use render::material::{AlphaBehavior, AssetState, FaceMaterial, Resolution};
 use test_support::texture::{GRAY_4096_J2C, RGBA_J2C};
 use world::{
     FaceAppearance, PbrAlphaMode, PbrMaterialAssignments, PbrMaterialOverride, PbrMaterialOverrides, SurfaceAppearance, TerrainSettings,
@@ -687,7 +684,7 @@ fn regional_demands_skip_cache_cap() {
             .resolution
             == Resolution::Pending)
     );
-    assert!(budget.charged_bytes() <= MEMORY_BYTES);
+    assert!(budget.charged_bytes() <= budget.memory_bytes());
     let removed = *active[0];
     let local = ((removed.request.resource().id.uuid().as_u128() - 10_000) / 6) as u32;
     let _ = world.remove_object(source(&world, 0, 10_000), NonZeroU32::new(local).unwrap()).unwrap();
