@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    panic::{self, AssertUnwindSafe},
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
 };
@@ -34,7 +35,9 @@ impl Drop for PoolInner {
         self.shared.ready.notify_all();
         if let Ok(mut threads) = self.threads.lock() {
             for handle in threads.drain(..) {
-                let _ = handle.join();
+                if handle.join().is_err() {
+                    tracing::error!("render worker thread panicked on shutdown");
+                }
             }
         }
     }
@@ -63,7 +66,7 @@ impl WorkerPool {
     pub(crate) fn spawn<T: Send + 'static>(&self, visible: bool, work: impl FnOnce() -> T + Send + 'static) -> oneshot::Receiver<T> {
         let (tx, rx) = oneshot::channel();
         let task: Task = Box::new(move || {
-            let _ = tx.send(work());
+            drop(tx.send(work()));
         });
         if let Ok(mut queue) = self.0.shared.queue.lock()
             && !queue.closed
@@ -95,7 +98,9 @@ fn worker_loop(shared: Arc<Shared>) {
                 queue = guard;
             }
         };
-        task();
+        if panic::catch_unwind(AssertUnwindSafe(task)).is_err() {
+            tracing::error!("render worker task panicked");
+        }
     }
 }
 
@@ -129,5 +134,17 @@ mod tests {
         vis.await.expect("visible finishes");
         bg.await.expect("background finishes");
         assert_eq!(*order.lock().expect("order lock"), vec!["visible", "background"]);
+    }
+
+    #[tokio::test]
+    async fn panicking_task_keeps_worker() {
+        let pool = WorkerPool::new(1);
+        let panicked = pool.spawn(true, || -> u32 {
+            panic!("intentional test panic");
+        });
+        assert!(panicked.await.is_err(), "panicking task should drop its sender");
+
+        let recovered = pool.spawn(true, || 42_u32);
+        assert_eq!(recovered.await.expect("worker should stay alive after panic"), 42);
     }
 }
