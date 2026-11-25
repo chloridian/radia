@@ -22,6 +22,7 @@ pub(super) const MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES: usize = MAX_EVENT_QU
 pub(super) const MAX_LLSD_NESTING_DEPTH: usize = 64;
 pub(crate) const MAX_LLSD_XML_ELEMENTS: usize = 262_144;
 pub(crate) const MAX_CONCURRENT_CAPABILITY_REQUESTS: usize = 4;
+pub(crate) const MAX_CONCURRENT_INVENTORY_REQUESTS: usize = 20;
 pub(crate) const MAX_CONCURRENT_ASSET_REQUESTS: usize = 40;
 pub(crate) const MAX_CONCURRENT_EVENT_QUEUES: usize = 9;
 pub(super) const MAX_CONCURRENT_PRIMARY_EVENT_QUEUES: usize = 1;
@@ -36,6 +37,7 @@ pub(super) const MAX_CAPABILITY_NAMES_BYTES: usize = 16 * 1024;
 #[derive(Clone)]
 pub(crate) struct CapabilityBudget {
     pub(super) ordinary_requests: Arc<Semaphore>,
+    pub(super) inventory_requests: Arc<Semaphore>,
     pub(super) asset_requests: Arc<Semaphore>,
     pub(super) primary_event_queues: Arc<Semaphore>,
     pub(super) neighbor_event_queues: Arc<Semaphore>,
@@ -49,6 +51,7 @@ impl CapabilityBudget {
     pub(crate) fn new() -> Self {
         Self {
             ordinary_requests: Arc::new(Semaphore::new(MAX_CONCURRENT_CAPABILITY_REQUESTS)),
+            inventory_requests: Arc::new(Semaphore::new(MAX_CONCURRENT_INVENTORY_REQUESTS)),
             asset_requests: Arc::new(Semaphore::new(MAX_CONCURRENT_ASSET_REQUESTS)),
             primary_event_queues: Arc::new(Semaphore::new(MAX_CONCURRENT_PRIMARY_EVENT_QUEUES)),
             neighbor_event_queues: Arc::new(Semaphore::new(MAX_CONCURRENT_NEIGHBOR_EVENT_QUEUES)),

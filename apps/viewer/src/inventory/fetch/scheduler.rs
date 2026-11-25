@@ -26,15 +26,18 @@ use tokio::{
 };
 
 use super::{
-    FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent, MAX_AIS_DEPTH, MAX_FETCH_RETRIES, RequestFailure, ais,
-    classify_request_error, legacy,
+    FetchFailureCause, FolderFetch, FolderFetchProvenance, InventoryFetchError, InventoryFetchEvent, MAX_AIS_DEPTH, MAX_FETCH_RETRIES,
+    RequestFailure, ais, classify_request_error, legacy,
     state::{BackgroundRequest, SourceKind, enqueue_background, next_background_job},
 };
 use crate::{inspection::BoundedQueueStats, inventory::InventoryEditHandle};
 
 const REQUEST_CAPACITY: usize = 1024;
 const RESULT_CAPACITY: usize = 2;
-const BACKGROUND_CONCURRENCY: usize = 2;
+const MAX_TOTAL_CONCURRENCY: usize = 20;
+const MAX_BACKGROUND_CONCURRENCY: usize = MAX_TOTAL_CONCURRENCY - 1;
+const MIN_BACKGROUND_CONCURRENCY: usize = 1;
+const RECOVERY_SUCCESS_THRESHOLD: usize = 2;
 const OWNER_REFRESH_SCAN_CHUNK: usize = 512;
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
@@ -278,15 +281,64 @@ impl Capabilities {
 }
 
 #[derive(Clone, Debug)]
-struct BackgroundJob {
+struct FetchJob {
     id: u64,
+    parent: Option<CategoryKey>,
     folders: Vec<CategoryKey>,
     depth: u8,
+    foreground: bool,
+}
+
+enum JobOutcome {
+    Ready(Vec<FolderFetch>),
+    Transient { cause: FetchFailureCause, retry_after: Option<Duration> },
+    SplitBatch,
+    Failed(InventoryFetchError),
 }
 
 struct JobCompletion {
-    job: BackgroundJob,
-    result: Result<Vec<FolderFetch>, InventoryFetchError>,
+    job: FetchJob,
+    outcome: JobOutcome,
+}
+
+struct AdaptiveConcurrency {
+    limit: usize,
+    backoff_until: Option<time::Instant>,
+    consecutive_successes: usize,
+}
+
+impl AdaptiveConcurrency {
+    fn new() -> Self {
+        Self { limit: MAX_BACKGROUND_CONCURRENCY, backoff_until: None, consecutive_successes: 0 }
+    }
+
+    fn can_launch_background(&self, active_background: usize, active_total: usize, now: time::Instant) -> bool {
+        active_background < self.limit && active_total < MAX_TOTAL_CONCURRENCY && self.backoff_until.is_none_or(|until| now >= until)
+    }
+
+    fn backoff_deadline(&self, now: time::Instant) -> Option<time::Instant> {
+        self.backoff_until.filter(|&until| until > now)
+    }
+
+    fn on_backoff(&mut self, now: time::Instant, retry: u32, retry_after: Option<Duration>) {
+        self.limit = (self.limit / 2).max(MIN_BACKGROUND_CONCURRENCY);
+        self.consecutive_successes = 0;
+        let until = now + retry_delay(retry, retry_after);
+        self.backoff_until = Some(self.backoff_until.map_or(until, |existing| existing.max(until)));
+    }
+
+    fn on_success(&mut self, now: time::Instant) {
+        if self.backoff_until.is_some_and(|until| now < until) {
+            return;
+        }
+        if self.limit < MAX_BACKGROUND_CONCURRENCY {
+            self.consecutive_successes += 1;
+            if self.consecutive_successes >= RECOVERY_SUCCESS_THRESHOLD {
+                self.consecutive_successes = 0;
+                self.limit += 1;
+            }
+        }
+    }
 }
 
 struct InFlightGauge(Arc<AtomicUsize>);
@@ -368,10 +420,13 @@ async fn run_scheduler(
     let mut initial_folders = snapshot.categories().map(|category| category.key).collect::<Vec<_>>();
     initial_folders.sort_unstable();
     for folder in initial_folders {
-        enqueue_background(BackgroundRequest { folder, depth: 0 }, &current, &failed, &mut background, &mut queued);
+        enqueue_background(BackgroundRequest { folder, depth: MAX_AIS_DEPTH }, &current, &failed, &mut background, &mut queued);
     }
     let mut jobs = FuturesUnordered::<BoxFuture<'static, JobCompletion>>::new();
-    let mut active = HashMap::<u64, BackgroundJob>::new();
+    let mut active = HashMap::<u64, FetchJob>::new();
+    let mut active_background = 0usize;
+    let mut retries = HashMap::<CategoryKey, u32>::new();
+    let mut concurrency = AdaptiveConcurrency::new();
     let mut next_job_id = 0u64;
     let mut requests_open = true;
     let mut background_done = false;
@@ -403,28 +458,21 @@ async fn run_scheduler(
             requests_open = false;
         }
 
-        if let Some(folder) = foreground.pop_front() {
+        while active.len() < MAX_TOTAL_CONCURRENCY {
+            let Some(folder) = foreground.pop_front() else { break };
             foreground_queued.remove(&folder);
-            let completions = foreground_completions.remove(&folder).unwrap_or_default();
-            if !active.is_empty() {
-                let current = latest_snapshot(&model, &snapshot);
-                for job in active.values() {
-                    for key in &job.folders {
-                        in_flight.remove(key);
-                        enqueue_background(
-                            BackgroundRequest { folder: *key, depth: job.depth },
-                            &current,
-                            &failed,
-                            &mut background,
-                            &mut queued,
-                        );
-                    }
-                }
-                active.clear();
-                jobs = FuturesUnordered::new();
-            }
             failed.remove(&folder);
-            let Some(source) = capabilities.source(folder.owner()) else {
+            retries.remove(&folder);
+            if latest_snapshot(&model, &snapshot).is_complete(folder) {
+                if let Some(completions) = foreground_completions.remove(&folder) {
+                    finish_foreground_request(completions, InventoryFetchOutcome::Succeeded);
+                }
+                continue;
+            }
+            if in_flight.contains(&folder) {
+                continue;
+            }
+            let Some(source) = capabilities.source(folder.owner()).cloned() else {
                 failed.insert(folder);
                 if !emit(
                     &events,
@@ -436,77 +484,31 @@ async fn run_scheduler(
                 {
                     return;
                 }
-                finish_foreground_request(completions, InventoryFetchOutcome::Failed);
-                continue;
-            };
-            if latest_snapshot(&model, &snapshot).is_complete(folder) {
-                finish_foreground_request(completions, InventoryFetchOutcome::Succeeded);
-                continue;
-            }
-            in_flight.insert(folder);
-            let job = BackgroundJob { id: next_job_id, folders: vec![folder], depth: 0 };
-            next_job_id = next_job_id.wrapping_add(1);
-            let fetch = execute_job(&client, source.clone(), job.clone(), &model, &snapshot, &cancellation);
-            futures::pin_mut!(fetch);
-            let result = loop {
-                tokio::select! {
-                    biased;
-                    _ = cancellation.clone() => return,
-                    _ = &mut stop => return,
-                    request = requests.recv(), if requests_open => {
-                        match request {
-                        Some(request) => queue_foreground_request(
-                            request,
-                            &mut foreground,
-                            &mut foreground_queued,
-                            &mut foreground_completions,
-                        ),
-                            None => requests_open = false,
-                        }
-                    }
-                    _ = refresh_incomplete.changed() => {
-                        refresh_incomplete.borrow_and_update();
-                        let current = latest_snapshot(&model, &snapshot);
-                        if !enqueue_incomplete_folders(
-                            &current,
-                            &mut background,
-                            &mut queued,
-                            &mut failed,
-                            &mut background_done,
-                            &cancellation,
-                            &mut stop,
-                        )
-                        .await
-                        {
-                            return;
-                        }
-                    }
-                    result = &mut fetch => break result,
+                if let Some(completions) = foreground_completions.remove(&folder) {
+                    finish_foreground_request(completions, InventoryFetchOutcome::Failed);
                 }
+                continue;
             };
-            in_flight.remove(&folder);
-            let completion = JobCompletion { job, result };
-            if !process_completion(
-                completion,
-                &model,
-                &snapshot,
-                &mut background,
-                &mut queued,
-                &mut failed,
-                &events,
-                &cancellation,
-                &mut stop,
-                &mut background_done,
-                Some((folder, completions)),
-            )
-            .await
-            {
-                return;
-            }
-            continue;
+            in_flight.insert(folder);
+            let job = FetchJob { id: next_job_id, parent: None, folders: vec![folder], depth: 0, foreground: true };
+            next_job_id = next_job_id.wrapping_add(1);
+            let client = client.clone();
+            let model = model.clone();
+            let initial = snapshot.clone();
+            let active_job = job.clone();
+            let job_cancellation = cancellation.clone();
+            jobs.push(
+                async move {
+                    let outcome = execute_job(&client, source, active_job.clone(), &model, &initial, &job_cancellation).await;
+                    JobCompletion { job: active_job, outcome }
+                }
+                .boxed(),
+            );
+            active.insert(job.id, job);
         }
 
-        while active.len() < BACKGROUND_CONCURRENCY {
+        let now = time::Instant::now();
+        while concurrency.can_launch_background(active_background, active.len(), now) {
             let current = latest_snapshot(&model, &snapshot);
             let Some(plan) = next_background_job(&mut background, &mut queued, &current, &in_flight, &failed, |owner| {
                 match capabilities.source(owner) {
@@ -517,7 +519,7 @@ async fn run_scheduler(
             }) else {
                 break;
             };
-            let job = BackgroundJob { id: next_job_id, folders: plan.folders, depth: plan.depth };
+            let job = FetchJob { id: next_job_id, parent: plan.parent, folders: plan.folders, depth: plan.depth, foreground: false };
             next_job_id = next_job_id.wrapping_add(1);
             let Some(source) = job.folders.first().and_then(|folder| capabilities.source(folder.owner())).cloned() else {
                 for folder in job.folders {
@@ -532,6 +534,9 @@ async fn run_scheduler(
                     {
                         return;
                     }
+                    if let Some(completions) = foreground_completions.remove(&folder) {
+                        finish_foreground_request(completions, InventoryFetchOutcome::Failed);
+                    }
                 }
                 continue;
             };
@@ -545,22 +550,31 @@ async fn run_scheduler(
             let job_cancellation = cancellation.clone();
             jobs.push(
                 async move {
-                    let result = execute_job(&client, source, active_job.clone(), &model, &initial, &job_cancellation).await;
-                    JobCompletion { job: active_job, result }
+                    let outcome = execute_job(&client, source, active_job.clone(), &model, &initial, &job_cancellation).await;
+                    JobCompletion { job: active_job, outcome }
                 }
                 .boxed(),
             );
             active.insert(job.id, job);
+            active_background += 1;
         }
+        in_flight_gauge.set(in_flight.len());
         background_gauge.set(background.len());
 
-        if active.is_empty() && background.is_empty() && !background_done {
+        if active_background == 0 && background.is_empty() && !background_done {
             background_done = true;
             if !emit(&events, InventoryFetchEvent::BackgroundDone, &cancellation, &mut stop).await {
                 return;
             }
             continue;
         }
+
+        let backoff_deadline = if !background.is_empty() { concurrency.backoff_deadline(time::Instant::now()) } else { None };
+        let backoff_sleep = async {
+            if let Some(deadline) = backoff_deadline {
+                time::sleep_until(deadline).await;
+            }
+        };
 
         tokio::select! {
             biased;
@@ -596,25 +610,108 @@ async fn run_scheduler(
             }
             Some(completion) = jobs.next(), if !active.is_empty() => {
                 active.remove(&completion.job.id);
+                if !completion.job.foreground {
+                    active_background = active_background.saturating_sub(1);
+                }
                 for folder in &completion.job.folders {
                     in_flight.remove(folder);
                 }
-                if !process_completion(
-                    completion,
-                    &model,
-                    &snapshot,
-                    &mut background,
-                    &mut queued,
-                    &mut failed,
-                    &events,
-                    &cancellation,
-                    &mut stop,
-                &mut background_done,
-                    None,
-                ).await {
-                    return;
+                match completion.outcome {
+                    JobOutcome::Ready(folders) => {
+                        if !completion.job.foreground {
+                            concurrency.on_success(time::Instant::now());
+                        }
+                        for folder in &completion.job.folders {
+                            retries.remove(folder);
+                        }
+                        if !process_completion(
+                            completion.job,
+                            folders,
+                            &model,
+                            &snapshot,
+                            &mut background,
+                            &mut queued,
+                            &mut failed,
+                            &mut foreground_completions,
+                            &events,
+                            &cancellation,
+                            &mut stop,
+                            &mut background_done,
+                        )
+                        .await
+                        {
+                            return;
+                        }
+                    }
+                    JobOutcome::SplitBatch => {
+                        let current = latest_snapshot(&model, &snapshot);
+                        for folder in completion.job.folders {
+                            enqueue_background(BackgroundRequest { folder, depth: 0 }, &current, &failed, &mut background, &mut queued);
+                        }
+                    }
+                    JobOutcome::Transient { cause, retry_after } => {
+                        let max_retry = completion
+                            .job
+                            .folders
+                            .iter()
+                            .map(|folder| retries.get(folder).copied().unwrap_or(0))
+                            .max()
+                            .unwrap_or(0);
+                        concurrency.on_backoff(time::Instant::now(), max_retry, retry_after);
+                        let current = latest_snapshot(&model, &snapshot);
+                        for folder in completion.job.folders {
+                            let attempt = retries.entry(folder).or_insert(0);
+                            if *attempt < MAX_FETCH_RETRIES {
+                                *attempt += 1;
+                                enqueue_background(
+                                    BackgroundRequest { folder, depth: completion.job.depth },
+                                    &current,
+                                    &failed,
+                                    &mut background,
+                                    &mut queued,
+                                );
+                            } else {
+                                retries.remove(&folder);
+                                failed.insert(folder);
+                                if !emit(
+                                    &events,
+                                    InventoryFetchEvent::Failed { folder, error: InventoryFetchError::RetryExhausted(cause) },
+                                    &cancellation,
+                                    &mut stop,
+                                )
+                                .await
+                                {
+                                    return;
+                                }
+                                if let Some(completions) = foreground_completions.remove(&folder) {
+                                    finish_foreground_request(completions, InventoryFetchOutcome::Failed);
+                                }
+                            }
+                        }
+                    }
+                    JobOutcome::Failed(InventoryFetchError::Cancelled) => return,
+                    JobOutcome::Failed(error) => {
+                        for folder in completion.job.folders {
+                            retries.remove(&folder);
+                            failed.insert(folder);
+                            if !emit(
+                                &events,
+                                InventoryFetchEvent::Failed { folder, error: error.clone() },
+                                &cancellation,
+                                &mut stop,
+                            )
+                            .await
+                            {
+                                return;
+                            }
+                            if let Some(completions) = foreground_completions.remove(&folder) {
+                                finish_foreground_request(completions, InventoryFetchOutcome::Failed);
+                            }
+                        }
+                    }
                 }
             }
+            _ = backoff_sleep, if backoff_deadline.is_some() => {}
         }
     }
 }
@@ -731,26 +828,96 @@ async fn discover(
 async fn execute_job(
     client: &Client,
     source: SourceCapabilities,
-    job: BackgroundJob,
+    job: FetchJob,
     model: &watch::Receiver<Option<InventorySnapshot>>,
     initial: &InventorySnapshot,
     cancellation: &Cancellation,
-) -> Result<Vec<FolderFetch>, InventoryFetchError> {
+) -> JobOutcome {
     let Some(folder) = job.folders.first().copied() else {
-        return Err(InventoryFetchError::InvalidResponse(DecodeError::UnexpectedStructure("empty fetch job")));
+        return JobOutcome::Failed(InventoryFetchError::InvalidResponse(DecodeError::UnexpectedStructure("empty fetch job")));
     };
+    if job.foreground {
+        let result = if let Some(capability) = source.ais {
+            fetch_ais_with_provenance(client, &capability, folder, job.depth, source.is_library, Some(cancellation), || {
+                Some(latest_snapshot(model, initial))
+            })
+            .await
+        } else if let Some(capability) = source.legacy {
+            fetch_legacy_with_provenance(client, &capability, &job.folders, source.is_library, Some(cancellation), || {
+                Some(latest_snapshot(model, initial))
+            })
+            .await
+        } else {
+            Err(InventoryFetchError::CapabilityUnavailable)
+        };
+        return match result {
+            Ok(folders) => JobOutcome::Ready(folders),
+            Err(error) => JobOutcome::Failed(error),
+        };
+    }
     if let Some(capability) = source.ais {
-        fetch_ais_with_provenance(client, &capability, folder, job.depth, source.is_library, Some(cancellation), || {
-            Some(latest_snapshot(model, initial))
-        })
-        .await
+        execute_background_ais(client, &capability, &job, source.is_library, model, initial).await
     } else if let Some(capability) = source.legacy {
-        fetch_legacy_with_provenance(client, &capability, &job.folders, source.is_library, Some(cancellation), || {
-            Some(latest_snapshot(model, initial))
-        })
-        .await
+        let request_snapshot = latest_snapshot(model, initial);
+        match legacy::fetch_batch(client, &capability, &job.folders, source.is_library).await {
+            Ok(mut folders) => {
+                stamp_request_provenance(&mut folders, Some(&request_snapshot));
+                JobOutcome::Ready(folders)
+            }
+            Err(RequestFailure::Cancelled) => JobOutcome::Failed(InventoryFetchError::Cancelled),
+            Err(RequestFailure::Transient { cause, retry_after }) => JobOutcome::Transient { cause, retry_after },
+            Err(RequestFailure::FolderTooLarge) => JobOutcome::Failed(InventoryFetchError::FolderTooLarge),
+            Err(RequestFailure::InvalidResponse(decode)) => JobOutcome::Failed(InventoryFetchError::InvalidResponse(decode)),
+            Err(RequestFailure::Forbidden) => JobOutcome::Failed(InventoryFetchError::HttpStatus(403)),
+            Err(RequestFailure::Missing(status) | RequestFailure::HttpStatus(status)) => {
+                JobOutcome::Failed(InventoryFetchError::HttpStatus(status))
+            }
+            Err(RequestFailure::Failed) => JobOutcome::Failed(InventoryFetchError::RequestFailed),
+        }
     } else {
-        Err(InventoryFetchError::CapabilityUnavailable)
+        JobOutcome::Failed(InventoryFetchError::CapabilityUnavailable)
+    }
+}
+
+async fn execute_background_ais(
+    client: &Client,
+    capability: &CapabilityUrl,
+    job: &FetchJob,
+    is_library: bool,
+    model: &watch::Receiver<Option<InventorySnapshot>>,
+    initial: &InventorySnapshot,
+) -> JobOutcome {
+    let mut depth = job.depth.min(MAX_AIS_DEPTH);
+    loop {
+        let request_snapshot = latest_snapshot(model, initial);
+        let result = match job.parent {
+            Some(parent) if job.folders.len() > 1 => {
+                ais::fetch_batch_once(client, capability, parent, &job.folders, depth, is_library).await
+            }
+            _ => ais::fetch_once(client, capability, job.folders[0], depth, is_library).await,
+        };
+        match result {
+            Ok(mut folders) => {
+                stamp_request_provenance(&mut folders, Some(&request_snapshot));
+                return JobOutcome::Ready(folders);
+            }
+            Err(RequestFailure::Cancelled) => return JobOutcome::Failed(InventoryFetchError::Cancelled),
+            Err(RequestFailure::Forbidden | RequestFailure::FolderTooLarge) if depth > 0 => {
+                depth /= 2;
+            }
+            Err(RequestFailure::Forbidden | RequestFailure::FolderTooLarge | RequestFailure::Missing(_)) if job.folders.len() > 1 => {
+                return JobOutcome::SplitBatch;
+            }
+            Err(RequestFailure::Forbidden | RequestFailure::FolderTooLarge) => {
+                return JobOutcome::Failed(InventoryFetchError::FolderTooLarge);
+            }
+            Err(RequestFailure::Transient { cause, retry_after }) => return JobOutcome::Transient { cause, retry_after },
+            Err(RequestFailure::InvalidResponse(decode)) => return JobOutcome::Failed(InventoryFetchError::InvalidResponse(decode)),
+            Err(RequestFailure::Missing(status) | RequestFailure::HttpStatus(status)) => {
+                return JobOutcome::Failed(InventoryFetchError::HttpStatus(status));
+            }
+            Err(RequestFailure::Failed) => return JobOutcome::Failed(InventoryFetchError::RequestFailed),
+        }
     }
 }
 
@@ -953,36 +1120,19 @@ fn retry_delay(retries: u32, retry_after: Option<Duration>) -> Duration {
 }
 
 async fn process_completion(
-    completion: JobCompletion,
+    job: FetchJob,
+    folders: Vec<FolderFetch>,
     model: &watch::Receiver<Option<InventorySnapshot>>,
     initial: &InventorySnapshot,
     background: &mut VecDeque<BackgroundRequest>,
     queued: &mut HashSet<CategoryKey>,
     failed: &mut HashSet<CategoryKey>,
+    foreground_completions: &mut HashMap<CategoryKey, Vec<oneshot::Sender<InventoryFetchOutcome>>>,
     events: &mpsc::Sender<InventoryFetchEvent>,
     cancellation: &Cancellation,
     stop: &mut oneshot::Receiver<()>,
     background_done: &mut bool,
-    foreground_request: Option<(CategoryKey, Vec<oneshot::Sender<InventoryFetchOutcome>>)>,
 ) -> bool {
-    let foreground_folder = foreground_request.as_ref().map(|(folder, _)| *folder);
-    let folders = match completion.result {
-        Ok(folders) => folders,
-        Err(InventoryFetchError::Cancelled) => return false,
-        Err(error) => {
-            for folder in completion.job.folders {
-                failed.insert(folder);
-                if !emit(events, InventoryFetchEvent::Failed { folder, error: error.clone() }, cancellation, stop).await {
-                    return false;
-                }
-            }
-            if let Some((_, completions)) = foreground_request {
-                finish_foreground_request(completions, InventoryFetchOutcome::Failed);
-            }
-            return true;
-        }
-    };
-    let mut foreground_outcome = None;
     for folder in folders {
         let folder_key = folder.folder;
         let (applied, outcome) = oneshot::channel();
@@ -1001,8 +1151,8 @@ async fn process_completion(
         match outcome {
             super::FolderApplyOutcome::Rejected => {
                 failed.insert(folder_key);
-                if foreground_folder == Some(folder_key) {
-                    foreground_outcome = Some(InventoryFetchOutcome::Failed);
+                if let Some(completions) = foreground_completions.remove(&folder_key) {
+                    finish_foreground_request(completions, InventoryFetchOutcome::Failed);
                 }
                 continue;
             }
@@ -1010,8 +1160,11 @@ async fn process_completion(
                 failed.remove(&folder_key);
                 let current = latest_snapshot(model, initial);
                 let complete = current.is_complete(folder_key);
-                if foreground_folder == Some(folder_key) {
-                    foreground_outcome = Some(if complete { InventoryFetchOutcome::Succeeded } else { InventoryFetchOutcome::Failed });
+                if let Some(completions) = foreground_completions.remove(&folder_key) {
+                    finish_foreground_request(
+                        completions,
+                        if complete { InventoryFetchOutcome::Succeeded } else { InventoryFetchOutcome::Failed },
+                    );
                 }
                 if current.category(folder_key).is_some() && !complete {
                     let was_queued = queued.contains(&folder_key);
@@ -1027,21 +1180,24 @@ async fn process_completion(
             }
         }
         let current = latest_snapshot(model, initial);
-        if foreground_folder == Some(folder_key) {
-            foreground_outcome =
-                Some(if current.is_complete(folder_key) { InventoryFetchOutcome::Succeeded } else { InventoryFetchOutcome::Failed });
+        if let Some(completions) = foreground_completions.remove(&folder_key) {
+            finish_foreground_request(
+                completions,
+                if current.is_complete(folder_key) { InventoryFetchOutcome::Succeeded } else { InventoryFetchOutcome::Failed },
+            );
         }
+        let child_depth = if job.depth > 0 { MAX_AIS_DEPTH } else { 0 };
         for category in current.children(folder_key).filter_map(|node| match node.id() {
             inventory::InventoryNodeId::Category(id) => Some(CategoryKey::new(folder_key.owner(), id)),
             inventory::InventoryNodeId::Item(_) => None,
         }) {
             let was_queued = queued.contains(&category);
-            enqueue_background(BackgroundRequest { folder: category, depth: 0 }, &current, failed, background, queued);
+            enqueue_background(BackgroundRequest { folder: category, depth: child_depth }, &current, failed, background, queued);
             if !was_queued && queued.contains(&category) {
                 *background_done = false;
             }
         }
-        if !current.is_complete(folder_key) && completion.job.depth > 0 {
+        if !current.is_complete(folder_key) && job.depth > 0 {
             let was_queued = queued.contains(&folder_key);
             enqueue_background(BackgroundRequest { folder: folder_key, depth: 0 }, &current, failed, background, queued);
             if !was_queued && queued.contains(&folder_key) {
@@ -1049,8 +1205,11 @@ async fn process_completion(
             }
         }
     }
-    if let Some((_, completions)) = foreground_request {
-        finish_foreground_request(completions, foreground_outcome.unwrap_or(InventoryFetchOutcome::Failed));
+    for folder in job.folders {
+        if let Some(completions) = foreground_completions.remove(&folder) {
+            let complete = latest_snapshot(model, initial).is_complete(folder);
+            finish_foreground_request(completions, if complete { InventoryFetchOutcome::Succeeded } else { InventoryFetchOutcome::Failed });
+        }
     }
     true
 }

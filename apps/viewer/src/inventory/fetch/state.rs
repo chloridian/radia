@@ -2,7 +2,7 @@ use std::collections::{HashSet, VecDeque};
 
 use inventory::{CategoryKey, InventorySnapshot};
 
-use super::MAX_LEGACY_BATCH;
+use super::{MAX_AIS_BATCH, MAX_LEGACY_BATCH};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct BackgroundRequest {
@@ -18,6 +18,7 @@ pub(super) enum SourceKind {
 }
 
 pub(super) struct BackgroundPlan {
+    pub(super) parent: Option<CategoryKey>,
     pub(super) folders: Vec<CategoryKey>,
     pub(super) depth: u8,
 }
@@ -45,7 +46,34 @@ pub(super) fn next_background_job(
         let request = background.remove(index)?;
         queued.remove(&request.folder);
         match source_kind(request.folder.owner()) {
-            SourceKind::Ais => return Some(BackgroundPlan { folders: vec![request.folder], depth: request.depth }),
+            SourceKind::Ais => {
+                let parent = if request.depth > 0 { snapshot.category(request.folder).and_then(|category| category.parent) } else { None };
+                let mut folders = vec![request.folder];
+                if let Some(parent_key) = parent {
+                    let mut next_index = index;
+                    while folders.len() < MAX_AIS_BATCH && next_index < background.len() {
+                        let next = background[next_index];
+                        if snapshot.is_complete(next.folder) || failed.contains(&next.folder) {
+                            background.remove(next_index);
+                            queued.remove(&next.folder);
+                            continue;
+                        }
+                        if in_flight.contains(&next.folder)
+                            || next.depth != request.depth
+                            || next.folder.owner() != request.folder.owner()
+                            || snapshot.category(next.folder).and_then(|category| category.parent) != Some(parent_key)
+                        {
+                            next_index += 1;
+                            continue;
+                        }
+                        background.remove(next_index);
+                        queued.remove(&next.folder);
+                        folders.push(next.folder);
+                    }
+                }
+                let batch_parent = (folders.len() > 1).then_some(parent).flatten();
+                return Some(BackgroundPlan { parent: batch_parent, folders, depth: request.depth });
+            }
             SourceKind::Legacy => {
                 let mut folders = vec![request.folder];
                 let mut next_index = index;
@@ -67,9 +95,9 @@ pub(super) fn next_background_job(
                     queued.remove(&next.folder);
                     folders.push(next.folder);
                 }
-                return Some(BackgroundPlan { folders, depth: 0 });
+                return Some(BackgroundPlan { parent: None, folders, depth: 0 });
             }
-            SourceKind::Unavailable => return Some(BackgroundPlan { folders: vec![request.folder], depth: 0 }),
+            SourceKind::Unavailable => return Some(BackgroundPlan { parent: None, folders: vec![request.folder], depth: 0 }),
         }
     }
     None
