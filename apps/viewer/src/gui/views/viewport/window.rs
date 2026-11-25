@@ -179,7 +179,7 @@ impl SceneView {
         let worker_threads = config.startup_limits.worker_threads;
         let workers = config.scene_budget.workers();
         let worker_pool = WorkerPool::new(worker_threads);
-        let feed = SceneFeed::start_with_workers(
+        let feed = SceneFeed::start(
             config.sources,
             config.agent_id,
             config.camera,
@@ -414,7 +414,7 @@ impl SceneView {
         let render_limits = self.startup_limits.resolve_render(vram, &self.settings.snapshot());
         let limits = device.limits();
         let [width, height] = self.viewport_size;
-        match Renderer::new_with_workers(device, queue, info, format, width, height, render_limits, self.workers.clone()) {
+        match Renderer::new(device, queue, info, format, width, height, render_limits, self.workers.clone()) {
             Ok(mut renderer) => {
                 renderer.set_pressure(*self.pressure.borrow_and_update());
                 let info = renderer.adapter_info();

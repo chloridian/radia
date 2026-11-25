@@ -151,22 +151,7 @@ pub(crate) struct SceneFeed {
 }
 
 impl SceneFeed {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn start(
-        sources: SceneSources,
-        agent_id: Uuid,
-        camera: watch::Sender<Option<Camera>>,
-        movement: watch::Sender<Option<MovementObservation>>,
-        agent_motion: watch::Receiver<Option<AgentMotionSample>>,
-        budget: Budget,
-        runtime: Handle,
-        wake: impl Fn() + Send + Sync + 'static,
-    ) -> Self {
-        let worker_pool = WorkerPool::new(budget.worker_threads());
-        Self::start_with_workers(sources, agent_id, camera, movement, agent_motion, budget, worker_pool, runtime, wake)
-    }
-
-    pub(crate) fn start_with_workers(
         sources: SceneSources,
         agent_id: Uuid,
         camera: watch::Sender<Option<Camera>>,

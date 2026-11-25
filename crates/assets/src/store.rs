@@ -1084,10 +1084,6 @@ impl Store {
         self.budget.wake().subscribe()
     }
 
-    pub fn set_pressure(&mut self, level: Pressure) {
-        self.budget.set_pressure(level);
-    }
-
     pub fn priority(&self, input: &DecodeInput) -> Priority {
         self.entries.get(&input.job.key).map_or(Priority::Background, AssetEntry::effective_priority)
     }

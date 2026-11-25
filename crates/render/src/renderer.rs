@@ -87,19 +87,6 @@ impl Renderer {
         width: u32,
         height: u32,
         limits: Limits,
-    ) -> Result<Self, Error> {
-        let workers = WorkerBudget::new(limits.worker_threads);
-        Self::new_with_workers(device, queue, info, format, width, height, limits, workers)
-    }
-
-    pub fn new_with_workers(
-        device: Arc<Device>,
-        queue: Arc<Queue>,
-        info: AdapterInfo,
-        format: TextureFormat,
-        width: u32,
-        height: u32,
-        limits: Limits,
         workers: WorkerBudget,
     ) -> Result<Self, Error> {
         let srgb_format = format.add_srgb_suffix();

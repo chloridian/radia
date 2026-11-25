@@ -145,10 +145,6 @@ impl MeshCache {
         cache
     }
 
-    pub(in crate::scene) fn set_pressure(&mut self, level: Pressure) {
-        self.budget.set_pressure(level);
-    }
-
     pub(in crate::scene) fn evict_pressure_turn(&mut self) -> usize {
         let bound = match self.budget.pressure() {
             Pressure::Normal => return 0,
@@ -753,7 +749,7 @@ mod tests {
     #[test]
     fn pressure_shrinks_and_recovers() {
         let budget = Budget::default();
-        let mut meshes = MeshCache::new(budget);
+        let mut meshes = MeshCache::new(budget.clone());
         let in_view: Vec<MeshKey> =
             (0..3).map(|i| MeshKey { shape: PrimShape { profile_begin: i * 10, ..PrimShape::default() }, detail: Detail::High }).collect();
         let off_screen: Vec<MeshKey> =
@@ -774,7 +770,7 @@ mod tests {
             meshes.release(*key);
         }
 
-        meshes.set_pressure(Pressure::Low);
+        budget.set_pressure(Pressure::Low);
         let extra_offscreen = MeshKey { shape: PrimShape { profile_begin: 200, ..PrimShape::default() }, detail: Detail::High };
         assert!(!meshes.request(extra_offscreen, 0), "off-screen admissions are refused under Low pressure");
 
@@ -792,7 +788,7 @@ mod tests {
             assert!(matches!(meshes.get(*key), PreparedMesh::Ready(_)), "in-view meshes must be kept under pressure");
         }
 
-        meshes.set_pressure(Pressure::Normal);
+        budget.set_pressure(Pressure::Normal);
         assert!(meshes.request(extra_offscreen, 0), "off-screen admissions recover under Normal pressure");
         let job = meshes.start().expect("recovered off-screen mesh starts");
         meshes.complete(job.run());
