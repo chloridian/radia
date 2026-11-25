@@ -140,6 +140,7 @@ pub(crate) fn start_session(
         settings,
         startup_limits,
         scene_budget,
+        pressure: super::pressure(cx),
         render_stats: render_stats_tx,
         viewport_queries: viewport_queries_rx,
     };

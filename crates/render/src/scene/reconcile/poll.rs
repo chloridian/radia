@@ -1,5 +1,7 @@
 use std::{mem, sync::atomic::Ordering};
 
+use utils::hardware::Pressure;
+
 use super::{
     Change, DeliveryState, Duration, Instant, MAX_OBJECT_DETAIL_BATCH_ITEMS, MeshChange, MeshJob, POLL_DELAY, PageState, READ_QUANTUM,
     ReadQuery, ReconcileStep, Reconciler, RecoveryReason, Status, SurfaceStep, WORK, Work,
@@ -7,7 +9,12 @@ use super::{
 use crate::scene::region_environment::EnvironmentStart;
 
 impl Reconciler {
+    pub fn set_pressure(&mut self, level: Pressure) {
+        self.preparation.meshes.set_pressure(level);
+    }
+
     pub fn poll(&mut self, now: Instant) -> ReconcileStep {
+        let _ = self.preparation.meshes.evict_pressure_turn();
         if let Some(event) = self.preparation.environments.event() {
             return ReconcileStep::Asset(event);
         }

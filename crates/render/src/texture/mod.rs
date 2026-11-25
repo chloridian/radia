@@ -16,7 +16,7 @@ use std::{
 use assets::{
     Failure, Filter, Image, MinFilter, Priority, Sampler, TextureDecodeJob, TextureEvents, TextureHandle, TextureId, WeakTexture, Wrap,
 };
-use utils::Summary;
+use utils::{Summary, hardware::Pressure};
 use wgpu::{
     AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingResource, BindingType, Buffer, BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, Color, ColorTargetState,
@@ -35,6 +35,8 @@ use crate::{
 };
 
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
+const PRESSURE_EVICT_LOW_PER_TURN: usize = 4;
+const PRESSURE_EVICT_CRITICAL_PER_TURN: usize = 16;
 const FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const TERRAIN_ALPHA_RAMP_WIDTH: u32 = 256;
 pub(crate) const TERRAIN_ALPHA_RAMP: &[u8; 256] = include_bytes!("../terrain_alpha_ramp.r8");
@@ -363,6 +365,7 @@ pub(crate) struct Textures {
     entries: HashMap<TextureId, TextureEntry>,
     cap_bytes: Arc<AtomicUsize>,
     soft_cap: usize,
+    pressure: Pressure,
     bcn: bool,
     events: Vec<TextureEvents>,
     lifecycle: u64,
@@ -614,6 +617,7 @@ impl Textures {
             entries: HashMap::new(),
             cap_bytes: Arc::new(AtomicUsize::new(0)),
             soft_cap: limits.texture_soft_cap_bytes,
+            pressure: Pressure::Normal,
             bcn: device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
             events: Vec::new(),
             lifecycle: 0,
@@ -690,7 +694,7 @@ impl Textures {
             }
             return;
         }
-        if entry.evicted && priority == Priority::Background {
+        if (entry.evicted || self.pressure != Pressure::Normal) && priority == Priority::Background {
             return;
         }
         let Some(work) = self.memory.work() else { return };
@@ -808,27 +812,21 @@ impl Textures {
 
     fn trim(&mut self, epoch: u64) {
         let retiring = self.retired.iter().map(|gpu| gpu.charge.bytes).sum::<usize>() + self.retiring.load(Ordering::Acquire);
-        let mut projected = self.cap_bytes.load(Ordering::Acquire).saturating_sub(retiring);
-        if projected <= self.soft_cap {
-            return;
-        }
-        let mut unused: Vec<_> =
-            self.entries.iter().filter(|(_, entry)| entry.used != epoch).map(|(id, entry)| (*id, entry.used)).collect();
-        unused.sort_unstable_by_key(|(id, used)| (*used, *id));
-        for (id, _) in unused {
-            if projected <= self.soft_cap {
-                break;
-            }
-            let entry = &self.entries[&id];
-            let bytes = entry.fallback.as_ref().map_or(0, |gpu| gpu.charge.bytes)
-                + match &entry.state {
-                    TextureUploadState::Ready(gpu) | TextureUploadState::Uploading { gpu, .. } => gpu.charge.bytes,
-                    _ => 0,
-                };
-            if bytes > 0 {
-                self.retire_entry(id, true);
-                projected = projected.saturating_sub(bytes);
-            }
+        let projected = self.cap_bytes.load(Ordering::Acquire).saturating_sub(retiring);
+        let candidates = self
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| {
+                let bytes = entry.fallback.as_ref().map_or(0, |gpu| gpu.charge.bytes)
+                    + match &entry.state {
+                        TextureUploadState::Ready(gpu) | TextureUploadState::Uploading { gpu, .. } => gpu.charge.bytes,
+                        _ => 0,
+                    };
+                (bytes > 0).then_some(TrimCandidate { id: *id, used: entry.used, bytes })
+            })
+            .collect::<Vec<_>>();
+        for id in select_evictions(&candidates, epoch, projected, self.soft_cap, self.pressure) {
+            self.retire_entry(id, true);
         }
     }
 
@@ -1018,6 +1016,10 @@ impl Textures {
     pub(crate) fn set_soft_cap(&mut self, mib: u32) {
         self.soft_cap = (mib as usize).saturating_mul(1024 * 1024);
     }
+
+    pub(crate) fn set_pressure(&mut self, level: Pressure) {
+        self.pressure = level;
+    }
     pub(crate) fn staging_bytes(&self) -> usize {
         self.memory.staging.load(Ordering::Acquire)
     }
@@ -1088,6 +1090,37 @@ impl Drop for Textures {
             drop(pixels);
         });
     }
+}
+
+#[derive(Clone, Copy)]
+struct TrimCandidate {
+    id: TextureId,
+    used: u64,
+    bytes: usize,
+}
+
+fn select_evictions(candidates: &[TrimCandidate], epoch: u64, mut projected: usize, soft_cap: usize, pressure: Pressure) -> Vec<TextureId> {
+    let pressure_bound = match pressure {
+        Pressure::Normal => 0,
+        Pressure::Low => PRESSURE_EVICT_LOW_PER_TURN,
+        Pressure::Critical => PRESSURE_EVICT_CRITICAL_PER_TURN,
+    };
+    if projected <= soft_cap && pressure_bound == 0 {
+        return Vec::new();
+    }
+    let mut unused: Vec<_> = candidates.iter().copied().filter(|candidate| candidate.used != epoch).collect();
+    unused.sort_unstable_by_key(|candidate| (candidate.used, candidate.id));
+    let mut evicted = Vec::new();
+    for candidate in unused {
+        let over_cap = projected > soft_cap;
+        let under_pressure_turn = evicted.len() < pressure_bound;
+        if !over_cap && !under_pressure_turn {
+            break;
+        }
+        evicted.push(candidate.id);
+        projected = projected.saturating_sub(candidate.bytes);
+    }
+    evicted
 }
 
 fn mip_count(size: [u32; 2]) -> u32 {
@@ -1259,5 +1292,40 @@ mod tests {
         assert!(memory.work().is_none());
         held.pop();
         assert!(memory.work().is_some());
+    }
+
+    #[test]
+    fn pressure_shrinks_and_recovers() {
+        let epoch = 100u64;
+        let tex_bytes = 4 * 1024 * 1024;
+        let soft_cap = 64 * 1024 * 1024;
+        let handles: Vec<TextureHandle> = (1..=13).map(|i| fixtures::loaded(i, true)).collect();
+        let mut resident: Vec<TrimCandidate> = handles
+            .iter()
+            .enumerate()
+            .map(|(idx, handle)| TrimCandidate { id: handle.id(), used: if idx < 3 { epoch } else { (idx + 1) as u64 }, bytes: tex_bytes })
+            .collect();
+        let mut pressure = Pressure::Low;
+        let admits_background = |p: Pressure, used: usize, cap: usize| p == Pressure::Normal && used + tex_bytes <= cap;
+        assert!(!admits_background(pressure, resident.len() * tex_bytes, soft_cap));
+
+        let mut total_evicted = 0;
+        let mut previous_bytes = resident.len() * tex_bytes;
+        while resident.iter().any(|c| c.used != epoch) {
+            let evicted = select_evictions(&resident, epoch, previous_bytes, soft_cap, pressure);
+            assert!(!evicted.is_empty() && evicted.len() <= PRESSURE_EVICT_LOW_PER_TURN);
+            resident.retain(|c| !evicted.contains(&c.id));
+            let current_bytes = resident.len() * tex_bytes;
+            assert!(current_bytes < previous_bytes);
+            previous_bytes = current_bytes;
+            total_evicted += evicted.len();
+        }
+        assert_eq!(total_evicted, 10);
+        assert_eq!(resident.len(), 3, "in-view textures must survive pressure eviction");
+        assert!(resident.iter().all(|c| c.used == epoch));
+        assert!(select_evictions(&resident, epoch, previous_bytes, soft_cap, Pressure::Critical).is_empty());
+
+        pressure = Pressure::Normal;
+        assert!(admits_background(pressure, previous_bytes, soft_cap));
     }
 }

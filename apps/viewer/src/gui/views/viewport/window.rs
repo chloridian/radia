@@ -40,7 +40,10 @@ use tokio::{
     sync::{mpsc as tokio_mpsc, watch},
 };
 use tracing::Instrument;
-use utils::{Summary, hardware::Vram};
+use utils::{
+    Summary,
+    hardware::{Pressure, Vram},
+};
 use uuid::Uuid;
 use wgpu::{Device, Queue};
 
@@ -87,6 +90,7 @@ pub(crate) struct SceneViewConfig {
     pub(crate) settings: Arc<SettingsStore>,
     pub(crate) startup_limits: StartupLimits,
     pub(crate) scene_budget: scene::Budget,
+    pub(crate) pressure: watch::Receiver<Pressure>,
     pub(crate) render_stats: watch::Sender<RenderStatsSnapshot>,
     pub(crate) viewport_queries: tokio_mpsc::Receiver<ViewportQuery>,
 }
@@ -140,6 +144,7 @@ pub(crate) struct SceneView {
     worker_threads: usize,
     workers: WorkerBudget,
     worker_pool: WorkerPool,
+    pressure: watch::Receiver<Pressure>,
     vram: Option<Vram>,
     lod_factor: f32,
     draw_distance: f32,
@@ -344,6 +349,7 @@ impl SceneView {
             worker_threads,
             workers,
             worker_pool,
+            pressure: config.pressure,
             vram: None,
             lod_factor,
             draw_distance,
@@ -409,7 +415,8 @@ impl SceneView {
         let limits = device.limits();
         let [width, height] = self.viewport_size;
         match Renderer::new_with_workers(device, queue, info, format, width, height, render_limits, self.workers.clone()) {
-            Ok(renderer) => {
+            Ok(mut renderer) => {
+                renderer.set_pressure(*self.pressure.borrow_and_update());
                 let info = renderer.adapter_info();
                 if let Some(publisher) = inspection(cx) {
                     publisher.set_gpu_info(GpuInfo::from_wgpu(info, &limits));
@@ -965,6 +972,12 @@ impl SceneView {
             self.dirty |= before != feed.view.version();
         }
         self.complete_texture_jobs();
+        if self.pressure.has_changed().unwrap_or(false) {
+            let level = *self.pressure.borrow_and_update();
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_pressure(level);
+            }
+        }
 
         let now = Instant::now();
         let snapshot = self.settings.snapshot();

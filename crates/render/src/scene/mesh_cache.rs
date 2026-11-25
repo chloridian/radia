@@ -9,7 +9,7 @@ use std::{
 };
 
 use assets::mesh::Mesh;
-use utils::{AssetId, FastHashMap};
+use utils::{AssetId, FastHashMap, hardware::Pressure};
 use world::{PrimShape, SculptFlags, SculptType};
 
 use crate::{
@@ -18,6 +18,8 @@ use crate::{
 };
 
 const HASH_ENTRY_OVERHEAD_BYTES: usize = 64;
+const PRESSURE_EVICT_LOW_PER_TURN: usize = 4;
+const PRESSURE_EVICT_CRITICAL_PER_TURN: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MeshKey {
@@ -143,6 +145,23 @@ impl MeshCache {
         cache
     }
 
+    pub(in crate::scene) fn set_pressure(&mut self, level: Pressure) {
+        self.budget.set_pressure(level);
+    }
+
+    pub(in crate::scene) fn evict_pressure_turn(&mut self) -> usize {
+        let bound = match self.budget.pressure() {
+            Pressure::Normal => return 0,
+            Pressure::Low => PRESSURE_EVICT_LOW_PER_TURN,
+            Pressure::Critical => PRESSURE_EVICT_CRITICAL_PER_TURN,
+        };
+        let mut evicted = 0;
+        while evicted < bound && self.evict(1) {
+            evicted += 1;
+        }
+        evicted
+    }
+
     pub(in crate::scene) fn request(&mut self, key: MeshKey, priority: u32) -> bool {
         self.clock = self.clock.checked_add(1).expect("mesh cache clock exhausted");
         if let Some(entry) = self.entries.get_mut(&key) {
@@ -156,6 +175,9 @@ impl MeshCache {
             }
             self.reindex(key);
             return true;
+        }
+        if self.budget.pressure() != Pressure::Normal && priority == 0 {
+            return false;
         }
         while !self.has_room(ENTRY_BYTES) && self.evict(priority) {}
         if !self.has_room(ENTRY_BYTES) {
@@ -726,5 +748,54 @@ mod tests {
         assert!(meshes.bytes <= meshes.cache_bytes);
         drop(meshes);
         assert_eq!(budget.charged_bytes(), 0);
+    }
+
+    #[test]
+    fn pressure_shrinks_and_recovers() {
+        let budget = Budget::default();
+        let mut meshes = MeshCache::new(budget);
+        let in_view: Vec<MeshKey> =
+            (0..3).map(|i| MeshKey { shape: PrimShape { profile_begin: i * 10, ..PrimShape::default() }, detail: Detail::High }).collect();
+        let off_screen: Vec<MeshKey> =
+            (3..13).map(|i| MeshKey { shape: PrimShape { profile_begin: i * 10, ..PrimShape::default() }, detail: Detail::High }).collect();
+        for key in &in_view {
+            assert!(meshes.request(*key, 100));
+        }
+        for key in &off_screen {
+            assert!(meshes.request(*key, 0));
+        }
+        while let Some(job) = meshes.start() {
+            meshes.complete(job.run());
+        }
+        for key in in_view.iter().chain(&off_screen) {
+            assert!(matches!(meshes.get(*key), PreparedMesh::Ready(_)));
+        }
+        for key in &off_screen {
+            meshes.release(*key);
+        }
+
+        meshes.set_pressure(Pressure::Low);
+        let extra_offscreen = MeshKey { shape: PrimShape { profile_begin: 200, ..PrimShape::default() }, detail: Detail::High };
+        assert!(!meshes.request(extra_offscreen, 0), "off-screen admissions are refused under Low pressure");
+
+        let mut total_evicted = 0;
+        let mut previous_bytes = meshes.bytes;
+        while total_evicted < off_screen.len() {
+            let evicted = meshes.evict_pressure_turn();
+            assert!(evicted > 0 && evicted <= PRESSURE_EVICT_LOW_PER_TURN, "eviction turn must stay within bound");
+            assert!(meshes.bytes < previous_bytes, "usage must fall every eviction turn while Low");
+            previous_bytes = meshes.bytes;
+            total_evicted += evicted;
+        }
+        assert_eq!(meshes.evict_pressure_turn(), 0, "no further evictions once only in-view meshes remain");
+        for key in &in_view {
+            assert!(matches!(meshes.get(*key), PreparedMesh::Ready(_)), "in-view meshes must be kept under pressure");
+        }
+
+        meshes.set_pressure(Pressure::Normal);
+        assert!(meshes.request(extra_offscreen, 0), "off-screen admissions recover under Normal pressure");
+        let job = meshes.start().expect("recovered off-screen mesh starts");
+        meshes.complete(job.run());
+        assert!(matches!(meshes.get(extra_offscreen), PreparedMesh::Ready(_)));
     }
 }

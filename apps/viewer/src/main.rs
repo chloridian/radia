@@ -111,7 +111,7 @@ fn main() -> io::Result<()> {
     }
 
     let hardware = Hardware::detect_cpu_and_ram();
-    let _pressure = pressure::spawn_monitor(&services, hardware.ram_bytes);
+    let pressure = pressure::spawn_monitor(&services, hardware.ram_bytes);
     let startup_limits = StartupLimits::resolve(hardware, &settings.snapshot());
     tracing::info!(
         cores = hardware.cores,
@@ -146,7 +146,7 @@ fn main() -> io::Result<()> {
             limits: Some(render::required_limits()),
             backends: None,
         }));
-        gui::init(cx, services, gui_cache, log_control, gui_settings, inspection_publisher, startup_limits);
+        gui::init(cx, services, gui_cache, log_control, gui_settings, inspection_publisher, startup_limits, pressure);
     });
     if let Some(server) = mcp_server {
         server.shutdown();

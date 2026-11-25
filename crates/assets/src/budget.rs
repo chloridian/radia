@@ -3,11 +3,12 @@ use std::{
     ops::Deref,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
     },
 };
 
 use tokio::sync::watch;
+use utils::hardware::Pressure;
 
 const MIB: usize = 1024 * 1024;
 const DEFAULT_WORK_BYTES: usize = 512 * MIB;
@@ -51,7 +52,24 @@ struct Accounting {
     high_water: AtomicUsize,
     work_bytes: usize,
     texture_work_bytes: usize,
+    pressure: AtomicU8,
     wake: watch::Sender<()>,
+}
+
+fn encode_pressure(level: Pressure) -> u8 {
+    match level {
+        Pressure::Normal => 0,
+        Pressure::Low => 1,
+        Pressure::Critical => 2,
+    }
+}
+
+fn decode_pressure(raw: u8) -> Pressure {
+    match raw {
+        1 => Pressure::Low,
+        2 => Pressure::Critical,
+        _ => Pressure::Normal,
+    }
 }
 
 #[derive(Clone)]
@@ -73,8 +91,20 @@ impl Budget {
             high_water: AtomicUsize::new(0),
             work_bytes: limits.work_bytes,
             texture_work_bytes: limits.texture_work_bytes.min(limits.work_bytes),
+            pressure: AtomicU8::new(encode_pressure(Pressure::Normal)),
             wake,
         }))
+    }
+
+    pub fn set_pressure(&self, level: Pressure) {
+        let prev = self.0.pressure.swap(encode_pressure(level), Ordering::AcqRel);
+        if prev != encode_pressure(level) {
+            self.0.wake.send_replace(());
+        }
+    }
+
+    pub fn pressure(&self) -> Pressure {
+        decode_pressure(self.0.pressure.load(Ordering::Acquire))
     }
 
     pub fn limits(&self) -> Limits {

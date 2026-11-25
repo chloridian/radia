@@ -5,6 +5,7 @@ use std::{
 };
 
 use math::DVec3;
+use utils::hardware::Pressure;
 use wgpu::{
     AdapterInfo, Buffer, BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, CommandEncoderDescriptor, Device, Extent3d, LoadOp,
     Operations, Origin3d, PollError, PollType, Queue, RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor,
@@ -234,6 +235,10 @@ impl Renderer {
 
     pub fn set_texture_soft_cap(&mut self, mib: u32) {
         self.geometry.set_texture_soft_cap(mib);
+    }
+
+    pub fn set_pressure(&mut self, level: Pressure) {
+        self.geometry.set_pressure(level);
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {

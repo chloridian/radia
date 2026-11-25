@@ -2581,3 +2581,27 @@ fn reused_key_ignores_stale_lease() {
     assert_eq!(fetch.request(), request);
     assert_matches!(replacement.status(), Status::Fetching);
 }
+
+#[test]
+fn pressure_blocks_background_jobs() {
+    let now = Instant::now();
+    let mut store = Store::new(Budget::default());
+    let route = store.register_route().expect("register route");
+    let bg_req = Request::PbrMaterial(AssetId::new(Uuid::from_u128(5_001)));
+    let vis_req = Request::PbrMaterial(AssetId::new(Uuid::from_u128(5_002)));
+    let _bg = store.request(route, bg_req, Priority::Background, now).expect("queue background");
+    let _vis = store.request(route, vis_req, Priority::Visible, now).expect("queue visible");
+
+    store.set_pressure(Pressure::Low);
+    let LoadJob::Fetch(vis_job) = store.next_job(now).expect("visible job admitted under pressure") else {
+        panic!("expected fetch job for visible request");
+    };
+    assert_eq!(vis_job.request(), vis_req);
+    assert!(store.next_job(now).is_none(), "background job must be refused under Low pressure");
+
+    store.set_pressure(Pressure::Normal);
+    let LoadJob::Fetch(bg_job) = store.next_job(now).expect("background job resumes under Normal pressure") else {
+        panic!("expected fetch job for background request");
+    };
+    assert_eq!(bg_job.request(), bg_req);
+}

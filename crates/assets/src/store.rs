@@ -12,7 +12,7 @@ use std::{
 };
 
 use tokio::sync::watch;
-use utils::{AssetId, Summary};
+use utils::{AssetId, Summary, hardware::Pressure};
 
 use crate::{
     Blob, Budget, Content, TextureEvents, TextureHandle, TextureSize, WeakTexture,
@@ -1084,6 +1084,10 @@ impl Store {
         self.budget.wake().subscribe()
     }
 
+    pub fn set_pressure(&mut self, level: Pressure) {
+        self.budget.set_pressure(level);
+    }
+
     pub fn priority(&self, input: &DecodeInput) -> Priority {
         self.entries.get(&input.job.key).map_or(Priority::Background, AssetEntry::effective_priority)
     }
@@ -1551,6 +1555,9 @@ impl Store {
             };
             if entry.dirty.is_dirty() || entry.candidate != Some(candidate) {
                 self.quarantine_candidate(candidate);
+                continue;
+            }
+            if self.budget.pressure() != Pressure::Normal && entry.priority == Priority::Background {
                 continue;
             }
             let request = entry.request;

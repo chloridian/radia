@@ -22,7 +22,7 @@ use std::{
 
 use assets::{TextureHandle, TextureId};
 use math::{DVec3, Vec4, motion::RegionBounds};
-use utils::Summary;
+use utils::{Summary, hardware::Pressure};
 use uuid::Uuid;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
@@ -552,6 +552,10 @@ impl GeometryRenderer {
     }
     pub(crate) fn set_texture_soft_cap(&mut self, mib: u32) {
         self.textures.set_soft_cap(mib);
+    }
+
+    pub(crate) fn set_pressure(&mut self, level: Pressure) {
+        self.textures.set_pressure(level);
     }
     pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
         self.sky.draw(pass);

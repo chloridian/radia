@@ -4,7 +4,7 @@ use std::{
     ops::Bound::{Excluded, Unbounded},
 };
 
-use utils::{FastHashMap, FastHashSet};
+use utils::{FastHashMap, FastHashSet, hardware::Pressure};
 use uuid::Uuid;
 use world::{Entity, Region};
 
@@ -150,6 +150,14 @@ impl MeshPlanner {
 
     pub(in crate::scene) fn start(&mut self) -> Option<MeshJob> {
         self.meshes.start().map(|job| MeshJob(Work::Prim(job)))
+    }
+
+    pub(in crate::scene) fn set_pressure(&mut self, level: Pressure) {
+        self.meshes.set_pressure(level);
+    }
+
+    pub(in crate::scene) fn evict_pressure_turn(&mut self) -> usize {
+        self.meshes.evict_pressure_turn()
     }
 
     pub(in crate::scene) fn has_work(&self) -> bool {

@@ -17,7 +17,8 @@ use prism::{
 };
 use prism_wgpu::WgpuContextHandle;
 use render::scene::Budget as SceneBudget;
-use tokio::{runtime::Handle, task::JoinHandle};
+use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
+use utils::hardware::Pressure;
 use wgpu::{Device, Queue};
 
 use crate::{
@@ -42,6 +43,7 @@ struct AppLifecycle {
     startup_limits: StartupLimits,
     asset_budget: AssetBudget,
     scene_budget: SceneBudget,
+    pressure: watch::Receiver<Pressure>,
 }
 
 impl Global for AppLifecycle {}
@@ -125,6 +127,10 @@ pub(crate) fn scene_budget(cx: &App) -> SceneBudget {
     cx.try_global::<AppLifecycle>().map_or_else(SceneBudget::default, |lifecycle| lifecycle.scene_budget.clone())
 }
 
+pub(crate) fn pressure(cx: &App) -> watch::Receiver<Pressure> {
+    cx.try_global::<AppLifecycle>().map(|lifecycle| lifecycle.pressure.clone()).unwrap_or_else(|| watch::channel(Pressure::Normal).1)
+}
+
 pub(crate) fn publish_window_gpu_info(window: &Window, cx: &App) {
     let Some(publisher) = inspection(cx) else { return };
     let Some(handle) = WgpuContextHandle::from_window(window) else { return };
@@ -142,17 +148,35 @@ pub fn init(
     settings: Arc<SettingsStore>,
     inspection: Option<ViewerInspectionPublisher>,
     startup_limits: StartupLimits,
+    pressure: watch::Receiver<Pressure>,
 ) {
     let session_lifecycle = Arc::new(SessionLifecycle::default());
     cx.set_app_identity("org.radia.viewer", "Radia");
     cx.set_keyring_label("Radia");
-    prism_tokio::init_from_handle(cx, services);
+    prism_tokio::init_from_handle(cx, services.clone());
     cx.set_quit_mode(QuitMode::Explicit);
 
     prism::init(cx);
     set_dark_theme(cx);
 
     install_lifecycle(Arc::clone(&session_lifecycle), cx);
+    let asset_budget = AssetBudget::new(startup_limits.assets);
+    let scene_budget = SceneBudget::new(startup_limits.scene);
+    {
+        let mut rx = pressure.clone();
+        let asset_budget = asset_budget.clone();
+        let scene_budget = scene_budget.clone();
+        drop(services.spawn(async move {
+            let initial = *rx.borrow_and_update();
+            asset_budget.set_pressure(initial);
+            scene_budget.set_pressure(initial);
+            while rx.changed().await.is_ok() {
+                let level = *rx.borrow_and_update();
+                asset_budget.set_pressure(level);
+                scene_budget.set_pressure(level);
+            }
+        }));
+    }
     {
         let lifecycle = cx.global_mut::<AppLifecycle>();
         lifecycle.asset_cache = asset_cache;
@@ -160,8 +184,9 @@ pub fn init(
         lifecycle.settings = settings;
         lifecycle.inspection = inspection;
         lifecycle.startup_limits = startup_limits;
-        lifecycle.asset_budget = AssetBudget::new(startup_limits.assets);
-        lifecycle.scene_budget = SceneBudget::new(startup_limits.scene);
+        lifecycle.asset_budget = asset_budget;
+        lifecycle.scene_budget = scene_budget;
+        lifecycle.pressure = pressure;
     }
 
     let (main_window, login) = prism::open_window(login_options(cx), cx, move |window, cx| {
@@ -203,6 +228,7 @@ fn install_lifecycle(session_lifecycle: Arc<SessionLifecycle>, cx: &mut App) {
         startup_limits: StartupLimits::default(),
         asset_budget: AssetBudget::default(),
         scene_budget: SceneBudget::default(),
+        pressure: watch::channel(Pressure::Normal).1,
     });
 }
 
