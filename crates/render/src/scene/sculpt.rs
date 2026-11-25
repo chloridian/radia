@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     f32::consts::PI,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -80,16 +79,16 @@ pub(in crate::scene) fn sculpt_placeholder_mesh() -> Result<Mesh, MeshBuildError
     build_grid(&positions, rows, columns, false, true, SculptType::Sphere, rows * columns, &AtomicBool::new(false))
 }
 
-pub(in crate::scene) fn image_to_rgba<'a>(image: &'a Image, cancelled: &AtomicBool) -> Result<Cow<'a, [u8]>, MeshBuildError> {
+pub(in crate::scene) fn image_to_rgba(image: &Image, cancelled: &AtomicBool) -> Result<Vec<u8>, MeshBuildError> {
     pixels_to_rgba(image.size(), image.format(), image.pixels(), cancelled)
 }
 
-pub(in crate::scene) fn pixels_to_rgba<'a>(
+pub(in crate::scene) fn pixels_to_rgba(
     size: [u32; 2],
     format: PixelFormat,
-    pixels: &'a [u8],
+    pixels: &[u8],
     cancelled: &AtomicBool,
-) -> Result<Cow<'a, [u8]>, MeshBuildError> {
+) -> Result<Vec<u8>, MeshBuildError> {
     if cancelled.load(Ordering::Acquire) {
         return Err(MeshBuildError::Cancelled);
     }
@@ -106,15 +105,16 @@ pub(in crate::scene) fn pixels_to_rgba<'a>(
     if pixels.len() != expected_bytes {
         return Err(MeshBuildError::InvalidParameters);
     }
-    if format == PixelFormat::Rgba8 {
-        return Ok(Cow::Borrowed(pixels));
-    }
     let required_bytes = pixel_count.checked_mul(4).ok_or(MeshBuildError::TooComplex)?;
     let mut rgba = vec![0; required_bytes];
     let row_width = width as usize;
-    for (dest, src) in rgba.chunks_exact_mut(row_width * 4).zip(pixels.chunks_exact(row_width * channels)) {
+    for (dest, src) in rgba.chunks_exact_mut(row_width * 4).zip(pixels.chunks_exact(row_width * channels).rev()) {
         if cancelled.load(Ordering::Acquire) {
             return Err(MeshBuildError::Cancelled);
+        }
+        if format == PixelFormat::Rgba8 {
+            dest.copy_from_slice(src);
+            continue;
         }
         for (src, dest) in src.chunks_exact(channels).zip(dest.as_chunks_mut::<4>().0) {
             *dest = match format {
@@ -125,7 +125,7 @@ pub(in crate::scene) fn pixels_to_rgba<'a>(
             };
         }
     }
-    Ok(Cow::Owned(rgba))
+    Ok(rgba)
 }
 
 #[allow(clippy::too_many_arguments)]

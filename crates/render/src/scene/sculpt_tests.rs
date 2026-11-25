@@ -1,4 +1,4 @@
-use std::{assert_matches, sync::atomic::AtomicBool};
+use std::{assert_matches, f32::consts::PI, sync::atomic::AtomicBool};
 
 use assets::{
     PixelFormat,
@@ -346,17 +346,43 @@ fn placeholder_is_pickable() {
 #[test]
 fn rgba_expands_pixel_formats() {
     let cancelled = AtomicBool::new(false);
+    assert_eq!(pixels_to_rgba([1, 2], PixelFormat::Gray8, &[10, 200], &cancelled).unwrap(), vec![200, 200, 200, 255, 10, 10, 10, 255]);
     assert_eq!(
-        pixels_to_rgba([2, 1], PixelFormat::Gray8, &[10, 200], &cancelled).unwrap().as_ref(),
-        &[10, 10, 10, 255, 200, 200, 200, 255]
+        pixels_to_rgba([1, 2], PixelFormat::GrayAlpha8, &[10, 50, 200, 128], &cancelled).unwrap(),
+        vec![200, 200, 200, 128, 10, 10, 10, 50]
     );
-    assert_eq!(
-        pixels_to_rgba([2, 1], PixelFormat::GrayAlpha8, &[10, 50, 200, 128], &cancelled).unwrap().as_ref(),
-        &[10, 10, 10, 50, 200, 200, 200, 128]
-    );
-    assert_eq!(pixels_to_rgba([2, 1], PixelFormat::Rgb8, &[1, 2, 3, 4, 5, 6], &cancelled).unwrap().as_ref(), &[1, 2, 3, 255, 4, 5, 6, 255]);
-    assert_eq!(pixels_to_rgba([1, 1], PixelFormat::Rgba8, &[7, 8, 9, 10], &cancelled).unwrap().as_ref(), &[7, 8, 9, 10]);
+    assert_eq!(pixels_to_rgba([1, 2], PixelFormat::Rgb8, &[1, 2, 3, 4, 5, 6], &cancelled).unwrap(), vec![4, 5, 6, 255, 1, 2, 3, 255]);
+    assert_eq!(pixels_to_rgba([1, 2], PixelFormat::Rgba8, &[1, 2, 3, 4, 7, 8, 9, 10], &cancelled).unwrap(), vec![7, 8, 9, 10, 1, 2, 3, 4]);
 
     let cancelled = AtomicBool::new(true);
     assert_matches!(pixels_to_rgba([2, 1], PixelFormat::Rgb8, &[1, 2, 3, 4, 5, 6], &cancelled).err(), Some(MeshBuildError::Cancelled));
+}
+
+#[test]
+fn image_sphere_faces_outward() {
+    let size = [64, 64];
+    let raw = map(size, |x, y| {
+        let latitude = PI * (y as f32 / (size[1] - 1) as f32);
+        let longitude = -2.0 * PI * (x as f32 / size[0] as f32);
+        let point = Vec3::new(latitude.sin() * longitude.cos(), latitude.sin() * longitude.sin(), latitude.cos());
+        let encode = |v: f32| ((v * 0.5 + 0.5) * 255.0).round() as u8;
+        [encode(point.x), encode(point.y), encode(point.z), 255]
+    });
+
+    let assert_outward = |mesh: &Mesh, label: &str| {
+        for vertex in mesh.vertices() {
+            if vertex.position.z.abs() < 0.45 {
+                assert!(vertex.normal.dot(vertex.position) > 0.0, "{label}: inward normal {:?} at {:?}", vertex.normal, vertex.position);
+            }
+        }
+    };
+
+    let raw_mesh = tessellate_sculpt(size, &raw, SculptType::Sphere, SculptFlags::default(), Detail::High).unwrap();
+    assert_outward(&raw_mesh, "raw");
+
+    let row_bytes = size[0] as usize * 4;
+    let decoder_order: Vec<u8> = raw.chunks_exact(row_bytes).rev().flatten().copied().collect();
+    let rgba = pixels_to_rgba(size, PixelFormat::Rgba8, &decoder_order, &AtomicBool::new(false)).unwrap();
+    let decoded_mesh = tessellate_sculpt(size, &rgba, SculptType::Sphere, SculptFlags::default(), Detail::High).unwrap();
+    assert_outward(&decoded_mesh, "decoded");
 }
