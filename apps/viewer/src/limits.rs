@@ -137,6 +137,6 @@ mod tests {
         assert_eq!(render.texture_jobs, 7);
 
         assert_eq!(clamp_i64_to_domain(RENDER_TEXTURE_SOFT_CAP_MIB, 50), 128);
-        assert_eq!(clamp_i64_to_domain(RENDER_TEXTURE_SOFT_CAP_MIB, 999_999), 4096);
+        assert_eq!(clamp_i64_to_domain(RENDER_TEXTURE_SOFT_CAP_MIB, 999_999), 65536);
     }
 }

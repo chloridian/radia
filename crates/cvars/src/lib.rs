@@ -708,7 +708,7 @@ mod tests {
         assert_matches!(registry.set(RENDER_MAX_FPS, Layer::Session, 0), Err(CvarError::OutOfBounds { name: "render.max_fps" }));
         registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, 0).expect("auto zero is valid");
         registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, 128).expect("range min is valid");
-        registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, 4096).expect("range max is valid");
+        registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Session, 65536).expect("range max is valid");
         assert_eq!(registry.get(RENDER_DRAW_DISTANCE), 512.0);
     }
 

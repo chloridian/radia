@@ -30,7 +30,7 @@ help = "Maximum viewport frame rate in frames per second."
 [render.texture_soft_cap_mib]
 type = "i64"
 default = 0
-range = [128, 4096]
+range = [128, 65536]
 unit = "MiB"
 persistent = true
 apply = "live"
