@@ -60,7 +60,7 @@ pub(super) struct InventoryCacheSession {
 enum CacheLifecycle {
     Dormant,
     Opening { pending_writes: Vec<PendingWrite>, overflow: Option<HashSet<CategoryKey>> },
-    Active { writer: CacheWriter, resync: bool },
+    Active { writer: CacheWriter, resync: Option<HashSet<CategoryKey>> },
     Disabled { writer: Option<CacheWriter> },
 }
 
@@ -86,6 +86,7 @@ enum CacheWriterCommand {
     },
     Bootstrap {
         snapshot: InventorySnapshot,
+        stale: Vec<CategoryKey>,
         disposal: InventoryDisposalPermit,
     },
     Discard,
@@ -282,53 +283,49 @@ impl InventoryCacheSession {
             return;
         }
         match &mut self.lifecycle {
-            CacheLifecycle::Opening { overflow: Some(overflow), .. } => {
-                overflow.extend(InventoryCache::affected_categories(&changes, &before, &after));
+            CacheLifecycle::Opening { overflow: Some(stale), .. } | CacheLifecycle::Active { resync: Some(stale), .. } => {
+                let affected = InventoryCache::affected_categories(&changes, &before, &after);
+                exclude_from_restore(&mut self.restore, &affected);
+                stale.extend(affected);
                 disposal.reclaim((changes, before, after));
                 return;
             }
-            CacheLifecycle::Active { resync: true, .. } => {
-                exclude_from_restore(&mut self.restore, &changes, &before, &after);
-                disposal.reclaim((changes, before, after));
-                return;
-            }
-            CacheLifecycle::Opening { overflow: None, .. } | CacheLifecycle::Active { resync: false, .. } => {}
+            CacheLifecycle::Opening { overflow: None, .. } | CacheLifecycle::Active { resync: None, .. } => {}
             CacheLifecycle::Dormant | CacheLifecycle::Disabled { .. } => unreachable!(),
         }
         let (rows, bytes) = estimate_write(&changes);
         let next_rows = self.pending_rows.saturating_add(rows);
         let next_bytes = self.pending_bytes.saturating_add(bytes);
         if self.pending_write_count >= MAX_PENDING_WRITES || next_rows > MAX_PENDING_ROWS || next_bytes > MAX_PENDING_BYTES {
-            let mut immediate_bootstrap = None;
+            let affected = InventoryCache::affected_categories(&changes, &before, &after);
+            exclude_from_restore(&mut self.restore, &affected);
+            let mut stale = affected.into_iter().collect::<HashSet<_>>();
+            let mut immediate_resync = None;
             match &mut self.lifecycle {
                 CacheLifecycle::Opening { pending_writes, overflow } => {
-                    let mut categories = HashSet::new();
                     for pending in mem::take(pending_writes) {
-                        categories.extend(InventoryCache::affected_categories(&pending.changes, &pending.before, &pending.after));
+                        stale.extend(InventoryCache::affected_categories(&pending.changes, &pending.before, &pending.after));
                         pending.disposal.reclaim((pending.changes, pending.before, pending.after));
                     }
-                    categories.extend(InventoryCache::affected_categories(&changes, &before, &after));
-                    *overflow = Some(categories);
+                    *overflow = Some(stale);
                     self.pending_write_count = 0;
                     self.pending_rows = 0;
                     self.pending_bytes = 0;
                     self.pending_exclusions = 0;
-                    disposal.reclaim((changes, before, after));
                 }
                 CacheLifecycle::Active { resync, .. } => {
-                    exclude_from_restore(&mut self.restore, &changes, &before, &after);
                     if self.pending_write_count == 0 {
-                        immediate_bootstrap = Some(after.clone());
+                        immediate_resync = Some(stale);
                     } else {
-                        *resync = true;
+                        *resync = Some(stale);
                     }
-                    disposal.reclaim((changes, before, after));
                 }
                 CacheLifecycle::Dormant | CacheLifecycle::Disabled { .. } => unreachable!(),
             }
-            if let Some(snapshot) = immediate_bootstrap {
-                self.send_bootstrap(snapshot, true);
+            if let Some(stale) = immediate_resync {
+                self.send_bootstrap(after.clone(), stale);
             }
+            disposal.reclaim((changes, before, after));
             return;
         }
         self.pending_write_count += 1;
@@ -447,14 +444,12 @@ impl InventoryCacheSession {
                     }
                     return InventoryCacheEventOutcome::Stale;
                 }
-                let trigger_resync = !bootstrap
+                if !bootstrap
                     && self.pending_write_count == 0
-                    && match &mut self.lifecycle {
-                        CacheLifecycle::Active { resync, .. } => mem::take(resync),
-                        CacheLifecycle::Dormant | CacheLifecycle::Opening { .. } | CacheLifecycle::Disabled { .. } => false,
-                    };
-                if trigger_resync {
-                    self.send_bootstrap(inventory.snapshot(), true);
+                    && let CacheLifecycle::Active { resync, .. } = &mut self.lifecycle
+                    && let Some(stale) = resync.take()
+                {
+                    self.send_bootstrap(inventory.snapshot(), stale);
                 }
                 if active { InventoryCacheEventOutcome::Unchanged } else { InventoryCacheEventOutcome::Stale }
             }
@@ -536,32 +531,30 @@ impl InventoryCacheSession {
         tracing::info!(?status, "inventory cache opened");
         let writer = start_cache_writer(runtime, cache, self.event_sender.clone());
         let sender = writer.sender.clone();
-        self.lifecycle = CacheLifecycle::Active { writer, resync: false };
+        self.lifecycle = CacheLifecycle::Active { writer, resync: None };
         let mut accepting = true;
-        if overflow.is_none() {
-            for pending in pending_writes {
-                if accepting {
-                    let command = CacheWriterCommand::Changeset {
-                        changes: pending.changes,
-                        before: pending.before,
-                        after: pending.after,
-                        rows: pending.rows,
-                        bytes: pending.bytes,
-                        disposal: pending.disposal,
-                    };
-                    match sender.try_send(command) {
-                        Ok(()) => {}
-                        Err(error) => {
-                            let CacheWriterCommand::Changeset { changes, before, after, disposal, .. } = error.into_inner() else {
-                                unreachable!()
-                            };
-                            disposal.reclaim((changes, before, after));
-                            accepting = false;
-                        }
+        for pending in pending_writes {
+            if accepting {
+                let command = CacheWriterCommand::Changeset {
+                    changes: pending.changes,
+                    before: pending.before,
+                    after: pending.after,
+                    rows: pending.rows,
+                    bytes: pending.bytes,
+                    disposal: pending.disposal,
+                };
+                match sender.try_send(command) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        let CacheWriterCommand::Changeset { changes, before, after, disposal, .. } = error.into_inner() else {
+                            unreachable!()
+                        };
+                        disposal.reclaim((changes, before, after));
+                        accepting = false;
                     }
-                } else {
-                    pending.disposal.reclaim((pending.changes, pending.before, pending.after));
                 }
+            } else {
+                pending.disposal.reclaim((pending.changes, pending.before, pending.after));
             }
         }
         if !accepting {
@@ -571,18 +564,19 @@ impl InventoryCacheSession {
             self.pending_exclusions = 0;
             self.disable_and_discard("inventory cache writer stopped during startup");
         }
+        let stale = overflow.unwrap_or_default();
         if accepting && matches!(&self.lifecycle, CacheLifecycle::Active { .. }) {
-            self.send_bootstrap(inventory.snapshot(), overflow.is_some());
+            self.send_bootstrap(inventory.snapshot(), stale.clone());
         }
         if matches!(&self.lifecycle, CacheLifecycle::Active { .. }) && matches!(&self.restore, RestoreLifecycle::Available) {
-            self.restore = RestoreLifecycle::Applying(PendingRestore { restore, excluded: overflow.unwrap_or_default(), disposal });
+            self.restore = RestoreLifecycle::Applying(PendingRestore { restore, excluded: stale, disposal });
         } else {
-            disposal.reclaim((restore, overflow));
+            disposal.reclaim((restore, stale));
         }
         InventoryCacheEventOutcome::Unchanged
     }
 
-    fn send_bootstrap(&mut self, snapshot: InventorySnapshot, resync: bool) {
+    fn send_bootstrap(&mut self, snapshot: InventorySnapshot, stale: HashSet<CategoryKey>) {
         let sender = match &self.lifecycle {
             CacheLifecycle::Active { writer, .. } => writer.sender.clone(),
             CacheLifecycle::Dormant | CacheLifecycle::Opening { .. } | CacheLifecycle::Disabled { .. } => return,
@@ -593,13 +587,15 @@ impl InventoryCacheSession {
         };
         let bootstrap_bytes = snapshot.category_count().saturating_mul(CATEGORY_BATCH_MEMORY);
         if bootstrap_bytes > MAX_BOOTSTRAP_BYTES {
-            disposal.reclaim(snapshot);
+            disposal.reclaim((snapshot, stale));
             self.disable_and_discard("inventory cache bootstrap exceeded its admission budget");
             return;
         }
-        if let Err(error) = sender.try_send(CacheWriterCommand::Bootstrap { snapshot, disposal }) {
-            let CacheWriterCommand::Bootstrap { snapshot, disposal } = error.into_inner() else { unreachable!() };
-            disposal.reclaim(snapshot);
+        let resync = !stale.is_empty();
+        let stale = stale.into_iter().collect();
+        if let Err(error) = sender.try_send(CacheWriterCommand::Bootstrap { snapshot, stale, disposal }) {
+            let CacheWriterCommand::Bootstrap { snapshot, stale, disposal } = error.into_inner() else { unreachable!() };
+            disposal.reclaim((snapshot, stale));
             self.disable_and_discard("inventory cache writer stopped during bootstrap");
             return;
         }
@@ -694,9 +690,9 @@ impl InventoryCacheSession {
     }
 }
 
-fn exclude_from_restore(restore: &mut RestoreLifecycle, changes: &ChangeSet, before: &InventorySnapshot, after: &InventorySnapshot) {
+fn exclude_from_restore(restore: &mut RestoreLifecycle, categories: &[CategoryKey]) {
     if let RestoreLifecycle::Applying(restore) = restore {
-        restore.excluded.extend(InventoryCache::affected_categories(changes, before, after));
+        restore.excluded.extend(categories.iter().copied());
     }
 }
 
@@ -785,13 +781,13 @@ fn start_cache_writer(runtime: &Handle, cache: InventoryCache, sender: mpsc::Unb
                         InventoryCacheEvent::WriteCompleted { rows, bytes, affected, bootstrap: false, result, disposal },
                     );
                 }
-                CacheWriterCommand::Bootstrap { snapshot, disposal } => {
+                CacheWriterCommand::Bootstrap { snapshot, stale, disposal } => {
                     let Some(current) = cache.take() else {
-                        disposal.reclaim(snapshot);
+                        disposal.reclaim((snapshot, stale));
                         break;
                     };
                     let encoded = task::spawn_blocking(move || {
-                        let result = current.submit_bootstrap(&snapshot);
+                        let result = current.submit_resync(&snapshot, &stale);
                         (current, result)
                     })
                     .await;
@@ -898,7 +894,9 @@ mod tests {
                     .field("pending_writes", &pending_writes.len())
                     .field("overflow", &overflow.as_ref().map(HashSet::len))
                     .finish(),
-                Self::Active { resync, .. } => formatter.debug_struct("Active").field("resync", resync).finish(),
+                Self::Active { resync, .. } => {
+                    formatter.debug_struct("Active").field("resync", &resync.as_ref().map(HashSet::len)).finish()
+                }
                 Self::Disabled { writer } => formatter.debug_struct("Disabled").field("has_writer", &writer.is_some()).finish(),
             }
         }
@@ -1280,7 +1278,7 @@ mod tests {
         assert_matches!(&event, InventoryCacheEvent::Ready { .. });
         let outcome = session.handle_event(&runtime, event, &mut inventory);
         assert_matches!(outcome, InventoryCacheEventOutcome::Unchanged);
-        assert_matches!(&session.lifecycle, CacheLifecycle::Active { resync: false, .. });
+        assert_matches!(&session.lifecycle, CacheLifecycle::Active { resync: None, .. });
 
         let completion = session.next_event(false).await.expect("bootstrap completion arrives");
         assert_matches!(&completion, InventoryCacheEvent::WriteCompleted { bootstrap: true, result: Ok(()), .. });
@@ -1456,7 +1454,7 @@ mod tests {
         let mut session = InventoryCacheSession::new(&Handle::current());
         let (sender, receiver) = mpsc::channel(CACHE_WRITER_QUEUE_CAPACITY);
         drop(receiver);
-        session.lifecycle = CacheLifecycle::Active { writer: CacheWriter { sender, task: tokio::spawn(async {}) }, resync: false };
+        session.lifecycle = CacheLifecycle::Active { writer: CacheWriter { sender, task: tokio::spawn(async {}) }, resync: None };
         let before = inventory.snapshot();
         let changes =
             inventory.upsert_category(category(owner, 301, Some(root.id().uuid().as_u128()), 1)).expect("category update applies");
@@ -1513,7 +1511,7 @@ mod tests {
         let mut session = InventoryCacheSession::new(&Handle::current());
         let (sender, receiver) = mpsc::channel(CACHE_WRITER_QUEUE_CAPACITY);
         drop(receiver);
-        session.lifecycle = CacheLifecycle::Active { writer: CacheWriter { sender, task: tokio::spawn(async {}) }, resync: false };
+        session.lifecycle = CacheLifecycle::Active { writer: CacheWriter { sender, task: tokio::spawn(async {}) }, resync: None };
         session.pending_write_count = 1;
         session.pending_rows = 3;
         session.pending_bytes = 192;
@@ -1566,19 +1564,18 @@ mod tests {
         let completion = session.next_event(false).await.expect("bootstrap completion arrives");
         assert_matches!(&completion, InventoryCacheEvent::WriteCompleted { bootstrap: true, result: Ok(()), .. });
         session.handle_event(&runtime, completion, &mut inventory);
-        assert_matches!(&session.lifecycle, CacheLifecycle::Active { resync: false, .. });
+        assert_matches!(&session.lifecycle, CacheLifecycle::Active { resync: None, .. });
         session.close().await;
     }
 
     fn spawn_held_writer(
         runtime: &Handle,
         event_sender: mpsc::UnboundedSender<InventoryCacheEvent>,
-    ) -> (CacheWriter, oneshot::Sender<()>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    ) -> (CacheWriter, oneshot::Sender<()>, std_mpsc::Receiver<Vec<CategoryKey>>, Arc<AtomicUsize>) {
         let (sender, mut receiver) = mpsc::channel(CACHE_WRITER_QUEUE_CAPACITY);
         let (release_tx, release_rx) = oneshot::channel();
-        let bootstraps = Arc::new(AtomicUsize::new(0));
+        let (bootstrap_tx, bootstraps) = std_mpsc::channel();
         let discards = Arc::new(AtomicUsize::new(0));
-        let writer_bootstraps = Arc::clone(&bootstraps);
         let writer_discards = Arc::clone(&discards);
         let task = runtime.spawn(async move {
             if release_rx.await.is_err() {
@@ -1594,8 +1591,8 @@ mod tests {
                             InventoryCacheEvent::WriteCompleted { rows, bytes, affected, bootstrap: false, result: Ok(()), disposal },
                         );
                     }
-                    CacheWriterCommand::Bootstrap { snapshot, disposal } => {
-                        writer_bootstraps.fetch_add(1, Ordering::Relaxed);
+                    CacheWriterCommand::Bootstrap { snapshot, stale, disposal } => {
+                        bootstrap_tx.send(stale).expect("test keeps the bootstrap receiver");
                         drop(snapshot);
                         send_cache_event(
                             &event_sender,
@@ -1629,7 +1626,7 @@ mod tests {
         let runtime = Handle::current();
         let mut session = InventoryCacheSession::new(&runtime);
         let (writer, release_tx, bootstraps, discards) = spawn_held_writer(&runtime, session.event_sender.clone());
-        session.lifecycle = CacheLifecycle::Active { writer, resync: false };
+        session.lifecycle = CacheLifecycle::Active { writer, resync: None };
 
         for index in 0..(MAX_PENDING_WRITES + 4) {
             let before = inventory.snapshot();
@@ -1641,7 +1638,7 @@ mod tests {
             session.record_change(changes, before, after, disposal);
         }
 
-        assert_matches!(&session.lifecycle, CacheLifecycle::Active { resync: true, .. });
+        assert_matches!(&session.lifecycle, CacheLifecycle::Active { resync: Some(_), .. });
         assert_eq!(session.pending_write_count, MAX_PENDING_WRITES);
 
         release_tx.send(()).expect("release held cache writer");
@@ -1651,16 +1648,19 @@ mod tests {
             session.handle_event(&runtime, event, &mut inventory);
         }
 
-        assert_matches!(&session.lifecycle, CacheLifecycle::Active { resync: false, .. });
+        assert_matches!(&session.lifecycle, CacheLifecycle::Active { resync: None, .. });
         assert_eq!(session.pending_write_count, 0);
 
         let resync = session.next_event(false).await.expect("resync bootstrap completion arrives");
         assert_matches!(&resync, InventoryCacheEvent::WriteCompleted { bootstrap: true, result: Ok(()), .. });
         session.handle_event(&runtime, resync, &mut inventory);
-        assert_matches!(&session.lifecycle, CacheLifecycle::Active { resync: false, .. });
+        assert_matches!(&session.lifecycle, CacheLifecycle::Active { resync: None, .. });
 
         session.close().await;
-        assert_eq!(bootstraps.load(Ordering::Relaxed), 1);
+        let overflowed = CategoryKey::new(owner, FolderId::new(uuid(2_000 + MAX_PENDING_WRITES as u128)));
+        let resyncs = bootstraps.try_iter().collect::<Vec<_>>();
+        assert_eq!(resyncs.len(), 1);
+        assert!(resyncs[0].contains(&overflowed), "resync forgets completeness of every dropped folder");
         assert_eq!(discards.load(Ordering::Relaxed), 0);
     }
 
@@ -1739,7 +1739,7 @@ mod tests {
         assert_matches!(&session.restore, RestoreLifecycle::Applying(_));
 
         let (writer, release_tx, bootstraps, discards) = spawn_held_writer(&runtime, session.event_sender.clone());
-        let old_writer = match mem::replace(&mut session.lifecycle, CacheLifecycle::Active { writer, resync: false }) {
+        let old_writer = match mem::replace(&mut session.lifecycle, CacheLifecycle::Active { writer, resync: None }) {
             CacheLifecycle::Active { writer, .. } => writer,
             other => panic!("expected active lifecycle, got {other:?}"),
         };
@@ -1788,7 +1788,9 @@ mod tests {
         assert_eq!(snapshot.item(server_item_key).map(|item| item.parent), Some(child));
         assert!(snapshot.item(cached_item_key).is_none());
         session.close().await;
-        assert_eq!(bootstraps.load(Ordering::Relaxed), 1);
+        let resyncs = bootstraps.try_iter().collect::<Vec<_>>();
+        assert_eq!(resyncs.len(), 1);
+        assert!(resyncs[0].contains(&child), "resync forgets completeness of the dropped item's folder");
         assert_eq!(discards.load(Ordering::Relaxed), 0);
     }
 }

@@ -354,6 +354,12 @@ impl InventoryCache {
         Ok(self.submit(batches, owners, Vec::new()))
     }
 
+    pub fn submit_resync(&self, snapshot: &InventorySnapshot, stale: &[CategoryKey]) -> Result<InventoryCacheWrite, InventoryCacheError> {
+        let batches = write::resync(snapshot, stale, &self.identity)?;
+        let owners = self.identity.owners().collect();
+        Ok(self.submit(batches, owners, Vec::new()))
+    }
+
     pub fn submit_changeset(
         &self,
         changes: &ChangeSet,

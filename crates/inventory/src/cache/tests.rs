@@ -622,6 +622,40 @@ fn bootstrap_keeps_completeness_across_logins() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn resync_forgets_stale_completeness() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    seed_cache(directory.path(), 7)?;
+    let mut current = fixture(7)?;
+    apply_fetch(
+        &mut current.inventory,
+        current.folder,
+        ServerVersion::from_raw(7),
+        Some(1),
+        vec![InventoryChild::Item(current.item.clone())],
+    )?;
+    let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", current.agent, None)?;
+    block_on(cache.submit_resync(&current.inventory.snapshot(), &[current.folder])?.wait())?;
+
+    let before = current.inventory.snapshot();
+    let mut renamed = current.item.clone();
+    renamed.name = Arc::from("Renamed");
+    let changes = current.inventory.upsert_item(renamed)?;
+    let after = current.inventory.snapshot();
+    assert!(after.is_complete(current.folder));
+    block_on(cache.submit_changeset(&changes, &before, &after)?.wait())?;
+    block_on(cache.close())?;
+
+    let mut next = fixture(7)?;
+    let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", next.agent, None)?;
+    let load = block_on(cache.load(&next.inventory))?;
+    let skeleton = next.inventory.snapshot();
+    load.apply_to(&mut next.inventory, &skeleton, &HashSet::new())?;
+    assert!(!next.inventory.snapshot().is_complete(next.folder), "a resynced folder stays incomplete until a full fetch rewrites it");
+    block_on(cache.close())?;
+    Ok(())
+}
+
+#[test]
 fn incomplete_partial_write_stays_incomplete() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     seed_cache(directory.path(), 7)?;

@@ -14,6 +14,19 @@ pub(super) fn bootstrap(snapshot: &InventorySnapshot, identity: &CacheIdentity) 
     category_batches(categories, identity)
 }
 
+pub(super) fn resync(
+    snapshot: &InventorySnapshot,
+    stale: &[CategoryKey],
+    identity: &CacheIdentity,
+) -> Result<Vec<SqliteBatch>, InventoryCacheError> {
+    for key in stale {
+        validate_owner(identity, key.owner().id())?;
+    }
+    let mut batches = bootstrap(snapshot, identity)?;
+    batches.extend(forget_completion(stale.to_vec(), identity)?);
+    Ok(batches)
+}
+
 pub(super) fn changeset(
     changes: &ChangeSet,
     after: &InventorySnapshot,
@@ -302,6 +315,22 @@ fn delete_categories(keys: Vec<CategoryKey>, identity: &CacheIdentity) -> Result
         SqliteBatch::new(chunk.len(), bytes, move |transaction| {
             let mut statement = transaction.prepare(
                 "DELETE FROM categories WHERE scope_id=(SELECT scope_id FROM scopes WHERE grid_id=?1 AND owner_id=?2) AND id=?3",
+            )?;
+            for key in chunk {
+                statement.execute(params![grid_id, key.owner().id().as_bytes().as_slice(), key.id().uuid().as_bytes().as_slice()])?;
+            }
+            Ok(())
+        })
+    })
+}
+
+fn forget_completion(keys: Vec<CategoryKey>, identity: &CacheIdentity) -> Result<Vec<SqliteBatch>, InventoryCacheError> {
+    chunks(keys, |chunk, bytes| {
+        let grid_id = identity.grid_id.clone();
+        SqliteBatch::new(chunk.len(), bytes, move |transaction| {
+            let mut statement = transaction.prepare(
+                "UPDATE categories SET complete=0, complete_generation=0
+                 WHERE scope_id=(SELECT scope_id FROM scopes WHERE grid_id=?1 AND owner_id=?2) AND id=?3",
             )?;
             for key in chunk {
                 statement.execute(params![grid_id, key.owner().id().as_bytes().as_slice(), key.id().uuid().as_bytes().as_slice()])?;
