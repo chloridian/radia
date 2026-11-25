@@ -10,8 +10,8 @@ use std::{
 };
 
 use cvars::{
-    CAMERA_TURN_RATE_DEG_PER_SEC, LOG_LEVEL, LOG_NOISY_NETWORK, RENDER_DRAW_DISTANCE, RENDER_MAX_FPS, RENDER_SHOW_STATS, SCENE_LOD_FACTOR,
-    ValueDomain,
+    CAMERA_TURN_RATE_DEG_PER_SEC, LOG_LEVEL, LOG_NOISY_NETWORK, RENDER_DRAW_DISTANCE, RENDER_MAX_FPS, RENDER_MAX_TEXTURE_RESOLUTION,
+    RENDER_SHOW_STATS, SCENE_LOD_FACTOR, ValueDomain,
 };
 use futures::{StreamExt, channel::mpsc as async_mpsc};
 use prism::{
@@ -60,7 +60,7 @@ use crate::{
         SetCameraRequest, ViewportQuery,
     },
     inventory::environments::EnvironmentMenu,
-    limits::StartupLimits,
+    limits::{StartupLimits, parse_max_texture_resolution},
     logging::{LogControl, LogLevel},
     scene_feed::{SceneFeed, SceneSources},
     session::AgentMotionSample,
@@ -140,6 +140,7 @@ pub(crate) struct SceneView {
     vram: Option<Vram>,
     lod_factor: f32,
     draw_distance: f32,
+    max_texture_resolution: u32,
     camera: Option<OrbitCamera>,
     follow_camera: FollowCamera,
     camera_mode: CameraMode,
@@ -187,6 +188,7 @@ impl SceneView {
         let snapshot = settings.snapshot();
         let lod_factor = snapshot.get(SCENE_LOD_FACTOR);
         let draw_distance = snapshot.get(RENDER_DRAW_DISTANCE);
+        let max_texture_resolution = parse_max_texture_resolution(snapshot.get(RENDER_MAX_TEXTURE_RESOLUTION));
         let show_stats = snapshot.get(RENDER_SHOW_STATS);
         let camera_config = CameraConfig::from_snapshot(&snapshot);
         let (lod_min, lod_max, lod_step) = f32_slider_bounds(SCENE_LOD_FACTOR.descriptor().domain);
@@ -337,6 +339,7 @@ impl SceneView {
             vram: None,
             lod_factor,
             draw_distance,
+            max_texture_resolution,
             camera: None,
             follow_camera,
             camera_mode: CameraMode::Follow,
@@ -791,7 +794,10 @@ impl SceneView {
         let mut orbit = OrbitCamera::from_follow_view(position, focus, self.draw_distance, self.lod_factor);
         orbit.config = self.follow_camera.config;
         let viewport = [self.viewport_size[0].max(1), self.viewport_size[1].max(1)];
-        let scene_camera = orbit.scene_camera(viewport, now).ok_or_else(|| "invalid camera pose".to_owned())?;
+        let scene_camera = orbit
+            .scene_camera(viewport, now)
+            .ok_or_else(|| "invalid camera pose".to_owned())?
+            .with_max_texture_resolution(self.max_texture_resolution);
 
         self.camera = Some(orbit);
         self.camera_mode.detach_for_focus();
@@ -814,13 +820,14 @@ impl SceneView {
 
     fn camera_observation(&mut self, pose: Option<world::WorldPose>, rotation: math::Quat, now: Instant) -> Option<scene::Camera> {
         let viewport = self.viewport_size;
-        match self.camera_mode {
+        let camera = match self.camera_mode {
             CameraMode::Follow => pose.and_then(|mut pose| {
                 pose.rotation = rotation;
                 self.follow_camera.follow(pose, viewport, self.draw_distance, self.lod_factor, now)
             }),
             CameraMode::Free => self.camera.as_ref().and_then(|camera| camera.scene_camera(viewport, now)),
-        }
+        };
+        camera.map(|camera| camera.with_max_texture_resolution(self.max_texture_resolution))
     }
 
     fn sync_environment_selects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -952,6 +959,11 @@ impl SceneView {
         }
         let turn_rate = snapshot.get(CAMERA_TURN_RATE_DEG_PER_SEC).to_radians();
         let frame_interval = frame_interval_for_fps(snapshot.get(RENDER_MAX_FPS));
+        let max_texture_resolution = parse_max_texture_resolution(snapshot.get(RENDER_MAX_TEXTURE_RESOLUTION));
+        if self.max_texture_resolution != max_texture_resolution {
+            self.max_texture_resolution = max_texture_resolution;
+            self.dirty = true;
+        }
         let texture_soft_cap_mib = self.startup_limits.resolve_texture_soft_cap_mib(self.vram, &snapshot);
         if let Some(renderer) = &mut self.renderer
             && renderer.texture_soft_cap_mib() != texture_soft_cap_mib

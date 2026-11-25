@@ -27,48 +27,38 @@ persistent = true
 apply = "live"
 help = "Maximum viewport frame rate in frames per second."
 
-[render.texture_soft_cap_mib]
+[render.max_vram_budget_mib]
 type = "i64"
 default = 0
-range = [128, 65536]
+range = [1024, 65536]
 unit = "MiB"
 persistent = true
 apply = "live"
-help = "Target memory cap in MiB for decoded textures before background eviction (0 = auto)."
+help = "Maximum GPU VRAM budget in MiB before texture eviction (0 = auto)."
 
-[render.mesh_memory_mib]
+[render.texture_vram_divisor]
+type = "i64"
+default = 1
+range = [1, 8]
+persistent = true
+apply = "live"
+help = "Divisor applied to detected VRAM when computing the automatic GPU VRAM budget."
+
+[render.max_texture_resolution]
+type = "enum"
+default = "2048"
+values = ["512", "1024", "2048"]
+persistent = true
+apply = "live"
+help = "Maximum texture edge resolution requested for scene textures."
+
+[render.worker_threads]
 type = "i64"
 default = 0
-range = [16, 1024]
-unit = "MiB"
+range = [2, 64]
 persistent = true
 apply = "restart_required"
-help = "GPU memory budget in MiB for resident scene meshes (0 = auto)."
-
-[render.texture_staging_mib]
-type = "i64"
-default = 0
-range = [16, 1024]
-unit = "MiB"
-persistent = true
-apply = "restart_required"
-help = "CPU staging memory budget in MiB for texture uploads (0 = auto)."
-
-[render.texture_jobs]
-type = "i64"
-default = 0
-range = [1, 64]
-persistent = true
-apply = "restart_required"
-help = "Maximum background texture decode jobs (0 = auto)."
-
-[render.mesh_jobs]
-type = "i64"
-default = 0
-range = [1, 64]
-persistent = true
-apply = "restart_required"
-help = "Maximum background mesh preparation jobs (0 = auto)."
+help = "Total background CPU worker threads shared by texture and mesh jobs (0 = auto)."
 
 [render.show_stats]
 type = "bool"

@@ -1,8 +1,8 @@
 use cvars::{
-    ASSET_TEXTURE_WORK_BUDGET_MIB, ASSET_WORK_BUDGET_MIB, CvarKey, CvarSnapshot, RENDER_MESH_JOBS, RENDER_MESH_MEMORY_MIB,
-    RENDER_TEXTURE_JOBS, RENDER_TEXTURE_SOFT_CAP_MIB, RENDER_TEXTURE_STAGING_MIB, SCENE_MEMORY_BUDGET_MIB, ValueDomain,
+    ASSET_TEXTURE_WORK_BUDGET_MIB, ASSET_WORK_BUDGET_MIB, CvarKey, CvarSnapshot, RENDER_MAX_VRAM_BUDGET_MIB, RENDER_TEXTURE_VRAM_DIVISOR,
+    RENDER_WORKER_THREADS, SCENE_MEMORY_BUDGET_MIB, ValueDomain,
 };
-use render::scene;
+use render::{RESERVED_THREADS, scene, split_worker_threads};
 use utils::hardware::{Hardware, Vram};
 
 const MIB: usize = 1024 * 1024;
@@ -38,9 +38,10 @@ impl StartupLimits {
         let work_bytes = resolve_mib(snapshot, ASSET_WORK_BUDGET_MIB, derived_assets.work_bytes);
         let texture_work_bytes = resolve_mib(snapshot, ASSET_TEXTURE_WORK_BUDGET_MIB, derived_assets.texture_work_bytes).min(work_bytes);
         let memory_bytes = resolve_mib(snapshot, SCENE_MEMORY_BUDGET_MIB, derived_scene.memory_bytes);
-        let mesh_jobs = resolve_count(snapshot, RENDER_MESH_JOBS, derived_scene.mesh_jobs);
-        let texture_jobs = resolve_count(snapshot, RENDER_TEXTURE_JOBS, derived_render.texture_jobs);
-        let texture_staging_bytes = resolve_mib(snapshot, RENDER_TEXTURE_STAGING_MIB, derived_render.texture_staging_bytes);
+        let auto_workers = hardware.cores.saturating_sub(RESERVED_THREADS).max(2);
+        let total_workers = resolve_count(snapshot, RENDER_WORKER_THREADS, auto_workers);
+        let (texture_jobs, mesh_jobs) = split_worker_threads(total_workers);
+        let texture_staging_bytes = derived_render.texture_staging_bytes;
 
         Self {
             hardware,
@@ -53,12 +54,15 @@ impl StartupLimits {
 
     pub fn resolve_render(&self, vram: Option<Vram>, snapshot: &CvarSnapshot) -> render::Limits {
         let hardware = Hardware { vram, ..self.hardware };
-        let derived = render::Limits::derive(&hardware);
-        let texture_soft_cap_bytes = resolve_mib(snapshot, RENDER_TEXTURE_SOFT_CAP_MIB, derived.texture_soft_cap_bytes);
-        let mesh_bytes = resolve_mib(snapshot, RENDER_MESH_MEMORY_MIB, derived.mesh_bytes);
+        let raw_budget = snapshot.get(RENDER_MAX_VRAM_BUDGET_MIB);
+        let max_vram_budget_bytes =
+            (raw_budget != 0).then(|| (clamp_i64_to_domain(RENDER_MAX_VRAM_BUDGET_MIB, raw_budget) as u64).saturating_mul(MIB as u64));
+        let vram_divisor =
+            u32::try_from(clamp_i64_to_domain(RENDER_TEXTURE_VRAM_DIVISOR, snapshot.get(RENDER_TEXTURE_VRAM_DIVISOR))).unwrap_or(1);
+        let derived = render::Limits::derive_with_vram_policy(&hardware, max_vram_budget_bytes, vram_divisor);
         render::Limits {
-            texture_soft_cap_bytes,
-            mesh_bytes,
+            texture_soft_cap_bytes: derived.texture_soft_cap_bytes,
+            mesh_bytes: derived.mesh_bytes,
             texture_staging_bytes: self.texture_staging_bytes,
             texture_jobs: self.texture_jobs,
         }
@@ -67,6 +71,14 @@ impl StartupLimits {
     pub fn resolve_texture_soft_cap_mib(&self, vram: Option<Vram>, snapshot: &CvarSnapshot) -> u32 {
         let bytes = self.resolve_render(vram, snapshot).texture_soft_cap_bytes;
         u32::try_from(bytes / MIB).unwrap_or(u32::MAX)
+    }
+}
+
+pub fn parse_max_texture_resolution(value: &str) -> u32 {
+    match value {
+        "512" => 512,
+        "1024" => 1024,
+        _ => 2048,
     }
 }
 
@@ -96,8 +108,8 @@ fn clamp_i64_to_domain(key: CvarKey<i64>, value: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use cvars::{
-        ASSET_TEXTURE_WORK_BUDGET_MIB, ASSET_WORK_BUDGET_MIB, CvarRegistry, Layer, RENDER_MESH_JOBS, RENDER_MESH_MEMORY_MIB,
-        RENDER_TEXTURE_JOBS, RENDER_TEXTURE_SOFT_CAP_MIB, RENDER_TEXTURE_STAGING_MIB, SCENE_MEMORY_BUDGET_MIB,
+        ASSET_TEXTURE_WORK_BUDGET_MIB, ASSET_WORK_BUDGET_MIB, CvarRegistry, Layer, RENDER_MAX_VRAM_BUDGET_MIB, RENDER_TEXTURE_VRAM_DIVISOR,
+        RENDER_WORKER_THREADS, SCENE_MEMORY_BUDGET_MIB,
     };
     use utils::hardware::{Hardware, Vram};
 
@@ -114,11 +126,9 @@ mod tests {
         registry.set(ASSET_WORK_BUDGET_MIB, Layer::Global, 768).unwrap();
         registry.set(ASSET_TEXTURE_WORK_BUDGET_MIB, Layer::Global, 256).unwrap();
         registry.set(SCENE_MEMORY_BUDGET_MIB, Layer::Global, 512).unwrap();
-        registry.set(RENDER_MESH_JOBS, Layer::Global, 5).unwrap();
-        registry.set(RENDER_TEXTURE_JOBS, Layer::Global, 7).unwrap();
-        registry.set(RENDER_TEXTURE_STAGING_MIB, Layer::Global, 96).unwrap();
-        registry.set(RENDER_MESH_MEMORY_MIB, Layer::Global, 128).unwrap();
-        registry.set(RENDER_TEXTURE_SOFT_CAP_MIB, Layer::Global, 2048).unwrap();
+        registry.set(RENDER_WORKER_THREADS, Layer::Global, 12).unwrap();
+        registry.set(RENDER_MAX_VRAM_BUDGET_MIB, Layer::Global, 1792).unwrap();
+        registry.set(RENDER_TEXTURE_VRAM_DIVISOR, Layer::Global, 4).unwrap();
         registry.lock_startup_values();
         let snapshot = registry.snapshot();
 
@@ -126,17 +136,20 @@ mod tests {
         assert_eq!(startup.assets.work_bytes, 768 * MIB);
         assert_eq!(startup.assets.texture_work_bytes, 256 * MIB);
         assert_eq!(startup.scene.memory_bytes, 512 * MIB);
-        assert_eq!(startup.scene.mesh_jobs, 5);
-        assert_eq!(startup.texture_jobs, 7);
-        assert_eq!(startup.texture_staging_bytes, 96 * MIB);
+        assert_eq!(startup.texture_jobs, 6);
+        assert_eq!(startup.scene.mesh_jobs, 6);
+        assert_eq!(startup.texture_staging_bytes, render::Limits::derive(&hardware).texture_staging_bytes);
 
         let render = startup.resolve_render(hardware.vram, &snapshot);
-        assert_eq!(render.mesh_bytes, 128 * MIB);
-        assert_eq!(render.texture_soft_cap_bytes, 2048 * MIB);
-        assert_eq!(render.texture_staging_bytes, 96 * MIB);
-        assert_eq!(render.texture_jobs, 7);
+        assert_eq!(render.mesh_bytes, 64 * MIB);
+        assert_eq!(render.texture_soft_cap_bytes, 1024 * MIB);
+        assert_eq!(render.texture_staging_bytes, startup.texture_staging_bytes);
+        assert_eq!(render.texture_jobs, 6);
 
-        assert_eq!(clamp_i64_to_domain(RENDER_TEXTURE_SOFT_CAP_MIB, 50), 128);
-        assert_eq!(clamp_i64_to_domain(RENDER_TEXTURE_SOFT_CAP_MIB, 999_999), 65536);
+        assert_eq!(clamp_i64_to_domain(RENDER_MAX_VRAM_BUDGET_MIB, 50), 1024);
+        assert_eq!(clamp_i64_to_domain(RENDER_MAX_VRAM_BUDGET_MIB, 999_999), 65536);
+        assert_eq!(parse_max_texture_resolution("512"), 512);
+        assert_eq!(parse_max_texture_resolution("1024"), 1024);
+        assert_eq!(parse_max_texture_resolution("2048"), 2048);
     }
 }
