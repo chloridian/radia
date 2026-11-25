@@ -259,13 +259,16 @@ pub(super) fn draw_priority(item: &CachedItem, camera: Camera) -> (f64, f64) {
 
 pub(super) fn surface_pipeline(params: &FaceParams, scale: Vec3, invert_normals: bool) -> Pipeline {
     match (params.blend, params.fullbright, params.double_sided, math::flips_winding(scale) ^ invert_normals) {
-        (true, _, true, _) => Pipeline::BlendDoubleSided,
+        (true, _, true, true) => Pipeline::BlendDoubleSidedFlipped,
+        (true, _, true, false) => Pipeline::BlendDoubleSided,
         (true, _, false, true) => Pipeline::BlendFlipped,
         (true, _, false, false) => Pipeline::Blend,
-        (false, true, true, _) => Pipeline::FullbrightDoubleSided,
+        (false, true, true, true) => Pipeline::FullbrightDoubleSidedFlipped,
+        (false, true, true, false) => Pipeline::FullbrightDoubleSided,
         (false, true, false, true) => Pipeline::FullbrightFlipped,
         (false, true, false, false) => Pipeline::Fullbright,
-        (false, false, true, _) => Pipeline::DoubleSided,
+        (false, false, true, true) => Pipeline::DoubleSidedFlipped,
+        (false, false, true, false) => Pipeline::DoubleSided,
         (false, false, false, true) => Pipeline::FlippedWinding,
         (false, false, false, false) => Pipeline::Surface,
     }
@@ -334,19 +337,19 @@ mod tests {
             (false, false, false, Vec3::ONE, Pipeline::Surface),
             (false, false, false, mirrored, Pipeline::FlippedWinding),
             (false, false, true, Vec3::ONE, Pipeline::DoubleSided),
-            (false, false, true, mirrored, Pipeline::DoubleSided),
+            (false, false, true, mirrored, Pipeline::DoubleSidedFlipped),
             (false, true, false, Vec3::ONE, Pipeline::Fullbright),
             (false, true, false, mirrored, Pipeline::FullbrightFlipped),
             (false, true, true, Vec3::ONE, Pipeline::FullbrightDoubleSided),
-            (false, true, true, mirrored, Pipeline::FullbrightDoubleSided),
+            (false, true, true, mirrored, Pipeline::FullbrightDoubleSidedFlipped),
             (true, false, false, Vec3::ONE, Pipeline::Blend),
             (true, false, false, mirrored, Pipeline::BlendFlipped),
             (true, false, true, Vec3::ONE, Pipeline::BlendDoubleSided),
-            (true, false, true, mirrored, Pipeline::BlendDoubleSided),
+            (true, false, true, mirrored, Pipeline::BlendDoubleSidedFlipped),
             (true, true, false, Vec3::ONE, Pipeline::Blend),
             (true, true, false, mirrored, Pipeline::BlendFlipped),
             (true, true, true, Vec3::ONE, Pipeline::BlendDoubleSided),
-            (true, true, true, mirrored, Pipeline::BlendDoubleSided),
+            (true, true, true, mirrored, Pipeline::BlendDoubleSidedFlipped),
         ] {
             let params = FaceParams { blend, fullbright, double_sided, ..FaceParams::new(None) };
             assert_eq!(

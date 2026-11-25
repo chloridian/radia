@@ -33,12 +33,15 @@ pub(crate) enum Pipeline {
     Surface,
     FlippedWinding,
     DoubleSided,
+    DoubleSidedFlipped,
     Fullbright,
     FullbrightFlipped,
     FullbrightDoubleSided,
+    FullbrightDoubleSidedFlipped,
     Blend,
     BlendFlipped,
     BlendDoubleSided,
+    BlendDoubleSidedFlipped,
     RegionWater,
 }
 
@@ -47,12 +50,15 @@ pub(crate) struct SurfacePipelines {
     pipeline: RenderPipeline,
     flipped_winding: RenderPipeline,
     double_sided: RenderPipeline,
+    double_sided_flipped: RenderPipeline,
     fullbright: RenderPipeline,
     fullbright_flipped: RenderPipeline,
     fullbright_double_sided: RenderPipeline,
+    fullbright_double_sided_flipped: RenderPipeline,
     blend: RenderPipeline,
     blend_flipped: RenderPipeline,
     blend_double_sided: RenderPipeline,
+    blend_double_sided_flipped: RenderPipeline,
     region_water: RenderPipeline,
     frame_environment_layout: BindGroupLayout,
     camera: Buffer,
@@ -217,6 +223,10 @@ impl SurfacePipelines {
             primitive: PrimitiveState { cull_mode: None, ..descriptor.primitive },
             ..descriptor.clone()
         });
+        let double_sided_flipped = device.create_render_pipeline(&RenderPipelineDescriptor {
+            primitive: PrimitiveState { cull_mode: None, front_face: FrontFace::Cw, ..descriptor.primitive },
+            ..descriptor.clone()
+        });
         let fullbright_targets = [Some(ColorTargetState {
             format,
             blend: Some(BlendState {
@@ -241,6 +251,10 @@ impl SurfacePipelines {
         });
         let fullbright_double_sided = device.create_render_pipeline(&RenderPipelineDescriptor {
             primitive: PrimitiveState { cull_mode: None, ..fullbright_descriptor.primitive },
+            ..fullbright_descriptor.clone()
+        });
+        let fullbright_double_sided_flipped = device.create_render_pipeline(&RenderPipelineDescriptor {
+            primitive: PrimitiveState { cull_mode: None, front_face: FrontFace::Cw, ..fullbright_descriptor.primitive },
             ..fullbright_descriptor
         });
         let blended_targets = [Some(ColorTargetState { format, blend: Some(BlendState::ALPHA_BLENDING), write_mask: ColorWrites::COLOR })];
@@ -260,6 +274,10 @@ impl SurfacePipelines {
         });
         let blend_double_sided = device.create_render_pipeline(&RenderPipelineDescriptor {
             primitive: PrimitiveState { cull_mode: None, ..blended.primitive },
+            ..blended.clone()
+        });
+        let blend_double_sided_flipped = device.create_render_pipeline(&RenderPipelineDescriptor {
+            primitive: PrimitiveState { cull_mode: None, front_face: FrontFace::Cw, ..blended.primitive },
             ..blended
         });
         let region_water = device.create_render_pipeline(&RenderPipelineDescriptor {
@@ -298,12 +316,15 @@ impl SurfacePipelines {
             pipeline,
             flipped_winding,
             double_sided,
+            double_sided_flipped,
             fullbright,
             fullbright_flipped,
             fullbright_double_sided,
+            fullbright_double_sided_flipped,
             blend,
             blend_flipped,
             blend_double_sided,
+            blend_double_sided_flipped,
             region_water,
             frame_environment_layout,
             camera,
@@ -333,12 +354,15 @@ impl SurfacePipelines {
             Pipeline::Surface => &self.pipeline,
             Pipeline::FlippedWinding => &self.flipped_winding,
             Pipeline::DoubleSided => &self.double_sided,
+            Pipeline::DoubleSidedFlipped => &self.double_sided_flipped,
             Pipeline::Fullbright => &self.fullbright,
             Pipeline::FullbrightFlipped => &self.fullbright_flipped,
             Pipeline::FullbrightDoubleSided => &self.fullbright_double_sided,
+            Pipeline::FullbrightDoubleSidedFlipped => &self.fullbright_double_sided_flipped,
             Pipeline::Blend => &self.blend,
             Pipeline::BlendFlipped => &self.blend_flipped,
             Pipeline::BlendDoubleSided => &self.blend_double_sided,
+            Pipeline::BlendDoubleSidedFlipped => &self.blend_double_sided_flipped,
             Pipeline::RegionWater => &self.region_water,
         });
         pass.set_bind_group(0, &self.binding, &[]);
