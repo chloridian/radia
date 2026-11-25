@@ -924,7 +924,7 @@ fn two_processes_share_library_scope() -> Result<(), Box<dyn Error>> {
     child.wait_for_stdout("write-lock-held")?;
 
     let write = cache.submit_changeset(&changes, &before, &after)?;
-    let InventoryCacheWrite { result, control, identity, owners, affected_categories } = write;
+    let InventoryCacheWrite { result, control, identity, owners } = write;
     let busy = match result {
         Ok(receipt) => block_on(receipt.wait()),
         Err(error) => Err(error),
@@ -933,7 +933,7 @@ fn two_processes_share_library_scope() -> Result<(), Box<dyn Error>> {
     child.write_stdin(b"go\n")?;
     assert!(child.wait()?.success(), "child process failed; stdout: {}", child.stdout());
 
-    let failed_write = InventoryCacheWrite { result: Err(SqliteError::Busy), control, identity, owners, affected_categories };
+    let failed_write = InventoryCacheWrite { result: Err(SqliteError::Busy), control, identity, owners };
     assert_matches!(block_on(failed_write.wait()), Err(InventoryCacheError::Sqlite(SqliteError::Busy)));
     block_on(cache.close())?;
 

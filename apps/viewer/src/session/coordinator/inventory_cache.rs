@@ -8,14 +8,17 @@ use std::{
     },
 };
 
-use inventory::{Category, CategoryKey, ChangeSet, Inventory, InventoryCache, InventoryCacheRestore, InventorySnapshot};
+use inventory::{
+    Category, CategoryKey, ChangeSet, Inventory, InventoryCache, InventoryCacheError, InventoryCacheRestore, InventoryCacheWrite,
+    InventorySnapshot,
+};
 use network::Grid;
 use storage::sqlite::OpenStatus;
 use tokio::{
     runtime::Handle,
     sync::{mpsc, oneshot},
     task,
-    task::JoinHandle,
+    task::{JoinError, JoinHandle},
 };
 use uuid::Uuid;
 
@@ -54,7 +57,6 @@ pub(super) struct InventoryCacheSession {
     pending_write_count: usize,
     pending_rows: usize,
     pending_bytes: usize,
-    pending_exclusions: usize,
 }
 
 enum CacheLifecycle {
@@ -109,27 +111,14 @@ struct PendingWrite {
 }
 
 pub(super) enum InventoryCacheEvent {
-    Ready {
-        cache: InventoryCache,
-        restore: InventoryCacheRestore,
-        status: OpenStatus,
-        disposal: InventoryDisposalPermit,
-    },
+    Ready { cache: InventoryCache, restore: InventoryCacheRestore, status: OpenStatus, disposal: InventoryDisposalPermit },
     OpenFailed(String),
     RestoreBatch(InventoryDisposalPermit),
-    WriteCompleted {
-        rows: usize,
-        bytes: usize,
-        affected: Vec<CategoryKey>,
-        bootstrap: bool,
-        result: Result<(), String>,
-        disposal: InventoryDisposalPermit,
-    },
+    WriteCompleted { rows: usize, bytes: usize, bootstrap: bool, result: Result<(), String> },
 }
 
 pub(super) enum InventoryCacheEventOutcome {
     Unchanged,
-    Deferred,
     Stale,
     Changed { before: InventorySnapshot, after: InventorySnapshot, disposal: InventoryDisposalPermit },
 }
@@ -158,7 +147,6 @@ impl InventoryCacheSession {
             pending_write_count: 0,
             pending_rows: 0,
             pending_bytes: 0,
-            pending_exclusions: 0,
         }
     }
 
@@ -179,7 +167,7 @@ impl InventoryCacheSession {
         &mut self,
         runtime: &Handle,
         inventory: &Inventory,
-        open: impl FnOnce() -> Result<(InventoryCache, OpenStatus), inventory::InventoryCacheError> + Send + 'static,
+        open: impl FnOnce() -> Result<(InventoryCache, OpenStatus), InventoryCacheError> + Send + 'static,
     ) {
         if !matches!(&self.lifecycle, CacheLifecycle::Dormant) {
             return;
@@ -230,7 +218,7 @@ impl InventoryCacheSession {
     }
 
     pub(super) async fn next_event(&mut self, allow_restore_batch: bool) -> Option<InventoryCacheEvent> {
-        if allow_restore_batch && matches!(&self.restore, RestoreLifecycle::Applying(_)) && self.pending_exclusions == 0 {
+        if allow_restore_batch && matches!(&self.restore, RestoreLifecycle::Applying(_)) {
             if let Some(disposal) = self.try_reserve_disposal() {
                 return Some(InventoryCacheEvent::RestoreBatch(disposal));
             }
@@ -282,11 +270,12 @@ impl InventoryCacheSession {
             disposal.reclaim((changes, before, after));
             return;
         }
+        if let RestoreLifecycle::Applying(restore) = &mut self.restore {
+            restore.excluded.extend(InventoryCache::affected_categories(&changes, &before, &after));
+        }
         match &mut self.lifecycle {
             CacheLifecycle::Opening { overflow: Some(stale), .. } | CacheLifecycle::Active { resync: Some(stale), .. } => {
-                let affected = InventoryCache::affected_categories(&changes, &before, &after);
-                exclude_from_restore(&mut self.restore, &affected);
-                stale.extend(affected);
+                stale.extend(InventoryCache::affected_categories(&changes, &before, &after));
                 disposal.reclaim((changes, before, after));
                 return;
             }
@@ -297,9 +286,7 @@ impl InventoryCacheSession {
         let next_rows = self.pending_rows.saturating_add(rows);
         let next_bytes = self.pending_bytes.saturating_add(bytes);
         if self.pending_write_count >= MAX_PENDING_WRITES || next_rows > MAX_PENDING_ROWS || next_bytes > MAX_PENDING_BYTES {
-            let affected = InventoryCache::affected_categories(&changes, &before, &after);
-            exclude_from_restore(&mut self.restore, &affected);
-            let mut stale = affected.into_iter().collect::<HashSet<_>>();
+            let mut stale = InventoryCache::affected_categories(&changes, &before, &after).into_iter().collect::<HashSet<_>>();
             let mut immediate_resync = None;
             match &mut self.lifecycle {
                 CacheLifecycle::Opening { pending_writes, overflow } => {
@@ -311,7 +298,6 @@ impl InventoryCacheSession {
                     self.pending_write_count = 0;
                     self.pending_rows = 0;
                     self.pending_bytes = 0;
-                    self.pending_exclusions = 0;
                 }
                 CacheLifecycle::Active { resync, .. } => {
                     if self.pending_write_count == 0 {
@@ -331,7 +317,6 @@ impl InventoryCacheSession {
         self.pending_write_count += 1;
         self.pending_rows = next_rows;
         self.pending_bytes = next_bytes;
-        self.pending_exclusions += 1;
         match &mut self.lifecycle {
             CacheLifecycle::Opening { pending_writes, .. } => {
                 pending_writes.push(PendingWrite { changes, before, after, rows, bytes, disposal })
@@ -344,7 +329,6 @@ impl InventoryCacheSession {
                     self.pending_write_count = self.pending_write_count.saturating_sub(1);
                     self.pending_rows = self.pending_rows.saturating_sub(rows);
                     self.pending_bytes = self.pending_bytes.saturating_sub(bytes);
-                    self.pending_exclusions = self.pending_exclusions.saturating_sub(1);
                     self.disable_and_discard("inventory cache writer stopped accepting changes");
                 }
             }
@@ -358,12 +342,6 @@ impl InventoryCacheSession {
         event: InventoryCacheEvent,
         inventory: &mut Inventory,
     ) -> InventoryCacheEventOutcome {
-        if matches!(&event, InventoryCacheEvent::RestoreBatch(_))
-            && matches!(&self.lifecycle, CacheLifecycle::Active { .. })
-            && self.pending_exclusions > 0
-        {
-            return InventoryCacheEventOutcome::Deferred;
-        }
         match event {
             InventoryCacheEvent::OpenFailed(error) => {
                 if matches!(&self.lifecycle, CacheLifecycle::Opening { .. }) {
@@ -424,18 +402,13 @@ impl InventoryCacheSession {
                     }
                 }
             }
-            InventoryCacheEvent::WriteCompleted { rows, bytes, affected, bootstrap, result, disposal } => {
+            InventoryCacheEvent::WriteCompleted { rows, bytes, bootstrap, result } => {
                 let active = matches!(&self.lifecycle, CacheLifecycle::Active { .. });
                 if !bootstrap {
                     self.pending_write_count = self.pending_write_count.saturating_sub(1);
                     self.pending_rows = self.pending_rows.saturating_sub(rows);
                     self.pending_bytes = self.pending_bytes.saturating_sub(bytes);
-                    self.pending_exclusions = self.pending_exclusions.saturating_sub(1);
                 }
-                if active && let RestoreLifecycle::Applying(restore) = &mut self.restore {
-                    restore.excluded.extend(affected.iter().copied());
-                }
-                disposal.reclaim(affected);
                 if let Err(error) = result {
                     if active {
                         self.warn_once(&error);
@@ -532,6 +505,11 @@ impl InventoryCacheSession {
         let writer = start_cache_writer(runtime, cache, self.event_sender.clone());
         let sender = writer.sender.clone();
         self.lifecycle = CacheLifecycle::Active { writer, resync: None };
+        let stale = overflow.unwrap_or_default();
+        let mut excluded = stale.clone();
+        for pending in &pending_writes {
+            excluded.extend(InventoryCache::affected_categories(&pending.changes, &pending.before, &pending.after));
+        }
         let mut accepting = true;
         for pending in pending_writes {
             if accepting {
@@ -561,17 +539,15 @@ impl InventoryCacheSession {
             self.pending_write_count = 0;
             self.pending_rows = 0;
             self.pending_bytes = 0;
-            self.pending_exclusions = 0;
             self.disable_and_discard("inventory cache writer stopped during startup");
         }
-        let stale = overflow.unwrap_or_default();
         if accepting && matches!(&self.lifecycle, CacheLifecycle::Active { .. }) {
-            self.send_bootstrap(inventory.snapshot(), stale.clone());
+            self.send_bootstrap(inventory.snapshot(), stale);
         }
         if matches!(&self.lifecycle, CacheLifecycle::Active { .. }) && matches!(&self.restore, RestoreLifecycle::Available) {
-            self.restore = RestoreLifecycle::Applying(PendingRestore { restore, excluded: stale, disposal });
+            self.restore = RestoreLifecycle::Applying(PendingRestore { restore, excluded, disposal });
         } else {
-            disposal.reclaim((restore, stale));
+            disposal.reclaim((restore, excluded));
         }
         InventoryCacheEventOutcome::Unchanged
     }
@@ -619,7 +595,6 @@ impl InventoryCacheSession {
         self.pending_write_count = 0;
         self.pending_rows = 0;
         self.pending_bytes = 0;
-        self.pending_exclusions = 0;
     }
 
     fn disable_and_discard(&mut self, reason: &str) {
@@ -690,12 +665,6 @@ impl InventoryCacheSession {
     }
 }
 
-fn exclude_from_restore(restore: &mut RestoreLifecycle, categories: &[CategoryKey]) {
-    if let RestoreLifecycle::Applying(restore) = restore {
-        restore.excluded.extend(categories.iter().copied());
-    }
-}
-
 fn estimate_write(changes: &ChangeSet) -> (usize, usize) {
     let estimate = changes.cache_write_estimate();
     (estimate.rows(), estimate.bytes())
@@ -713,18 +682,7 @@ async fn discard_cache_event(event: InventoryCacheEvent, discard_cache: bool) {
             }
         }
         InventoryCacheEvent::RestoreBatch(disposal) => drop(disposal),
-        InventoryCacheEvent::WriteCompleted { affected, disposal, .. } => {
-            disposal.reclaim(affected);
-        }
-        InventoryCacheEvent::OpenFailed(_) => {}
-    }
-}
-
-fn send_cache_event(sender: &mpsc::UnboundedSender<InventoryCacheEvent>, event: InventoryCacheEvent) {
-    if let Err(error) = sender.send(event)
-        && let InventoryCacheEvent::WriteCompleted { affected, disposal, .. } = error.0
-    {
-        disposal.reclaim(affected);
+        InventoryCacheEvent::WriteCompleted { .. } | InventoryCacheEvent::OpenFailed(_) => {}
     }
 }
 
@@ -744,42 +702,13 @@ fn start_cache_writer(runtime: &Handle, cache: InventoryCache, sender: mpsc::Unb
                         (current, result)
                     })
                     .await;
-                    let (next_cache, affected, result, disposal) = match encoded {
-                        Ok((current, Ok(mut write))) => {
-                            let affected = write.take_affected_categories();
-                            let result = write.wait().await.map_err(|error| error.to_string());
-                            (Some(current), affected, result, disposal)
-                        }
-                        Ok((current, Err(error))) => {
-                            let message = error.to_string();
-                            let invalidation = current.discard().await;
-                            let result = match invalidation {
-                                Ok(()) => Err(message),
-                                Err(error) => Err(format!("{message}; cache invalidation failed: {error}")),
-                            };
-                            (Some(current), Vec::new(), result, disposal)
-                        }
-                        Err(error) => {
-                            let result = Err(error.to_string());
-                            send_cache_event(
-                                &sender,
-                                InventoryCacheEvent::WriteCompleted {
-                                    rows,
-                                    bytes,
-                                    affected: Vec::new(),
-                                    bootstrap: false,
-                                    result,
-                                    disposal,
-                                },
-                            );
-                            break;
-                        }
-                    };
+                    drop(disposal);
+                    let (next_cache, result) = finish_write(encoded).await;
                     cache = next_cache;
-                    send_cache_event(
-                        &sender,
-                        InventoryCacheEvent::WriteCompleted { rows, bytes, affected, bootstrap: false, result, disposal },
-                    );
+                    sender.send(InventoryCacheEvent::WriteCompleted { rows, bytes, bootstrap: false, result }).ok();
+                    if cache.is_none() {
+                        break;
+                    }
                 }
                 CacheWriterCommand::Bootstrap { snapshot, stale, disposal } => {
                     let Some(current) = cache.take() else {
@@ -791,38 +720,13 @@ fn start_cache_writer(runtime: &Handle, cache: InventoryCache, sender: mpsc::Unb
                         (current, result)
                     })
                     .await;
-                    let (next_cache, result, disposal) = match encoded {
-                        Ok((current, Ok(write))) => (Some(current), write.wait().await.map_err(|error| error.to_string()), disposal),
-                        Ok((current, Err(error))) => {
-                            let message = error.to_string();
-                            let invalidation = current.discard().await;
-                            let result = match invalidation {
-                                Ok(()) => Err(message),
-                                Err(error) => Err(format!("{message}; cache invalidation failed: {error}")),
-                            };
-                            (Some(current), result, disposal)
-                        }
-                        Err(error) => {
-                            let result = Err(error.to_string());
-                            send_cache_event(
-                                &sender,
-                                InventoryCacheEvent::WriteCompleted {
-                                    rows: 0,
-                                    bytes: 0,
-                                    affected: Vec::new(),
-                                    bootstrap: true,
-                                    result,
-                                    disposal,
-                                },
-                            );
-                            break;
-                        }
-                    };
+                    drop(disposal);
+                    let (next_cache, result) = finish_write(encoded).await;
                     cache = next_cache;
-                    send_cache_event(
-                        &sender,
-                        InventoryCacheEvent::WriteCompleted { rows: 0, bytes: 0, affected: Vec::new(), bootstrap: true, result, disposal },
-                    );
+                    sender.send(InventoryCacheEvent::WriteCompleted { rows: 0, bytes: 0, bootstrap: true, result }).ok();
+                    if cache.is_none() {
+                        break;
+                    }
                 }
                 CacheWriterCommand::Discard => {
                     if let Some(cache) = &cache
@@ -851,6 +755,26 @@ fn start_cache_writer(runtime: &Handle, cache: InventoryCache, sender: mpsc::Unb
     CacheWriter { sender: command_sender, task }
 }
 
+async fn finish_write(
+    encoded: Result<(InventoryCache, Result<InventoryCacheWrite, InventoryCacheError>), JoinError>,
+) -> (Option<InventoryCache>, Result<(), String>) {
+    match encoded {
+        Ok((current, Ok(write))) => {
+            let result = write.wait().await.map_err(|error| error.to_string());
+            (Some(current), result)
+        }
+        Ok((current, Err(error))) => {
+            let message = error.to_string();
+            let result = match current.discard().await {
+                Ok(()) => Err(message),
+                Err(error) => Err(format!("{message}; cache invalidation failed: {error}")),
+            };
+            (Some(current), result)
+        }
+        Err(error) => (None, Err(error.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -865,6 +789,7 @@ mod tests {
         },
         thread,
         thread::ThreadId,
+        time::Duration,
     };
 
     use inventory::{
@@ -875,6 +800,7 @@ mod tests {
     use tokio::{
         runtime::Handle,
         sync::{mpsc, oneshot},
+        time::timeout,
     };
     use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
     use uuid::Uuid;
@@ -882,7 +808,6 @@ mod tests {
     use super::{
         CACHE_WRITER_QUEUE_CAPACITY, CacheLifecycle, CacheWriter, CacheWriterCommand, InventoryCache, InventoryCacheEvent,
         InventoryCacheEventOutcome, InventoryCacheSession, MAX_PENDING_WRITES, RECLAIMER_QUEUE_CAPACITY, RestoreLifecycle,
-        send_cache_event,
     };
 
     impl fmt::Debug for CacheLifecycle {
@@ -908,11 +833,10 @@ mod tests {
                 Self::Ready { status, .. } => formatter.debug_struct("Ready").field("status", status).finish(),
                 Self::OpenFailed(error) => formatter.debug_tuple("OpenFailed").field(error).finish(),
                 Self::RestoreBatch(_) => formatter.write_str("RestoreBatch"),
-                Self::WriteCompleted { rows, bytes, affected, bootstrap, result, .. } => formatter
+                Self::WriteCompleted { rows, bytes, bootstrap, result } => formatter
                     .debug_struct("WriteCompleted")
                     .field("rows", rows)
                     .field("bytes", bytes)
-                    .field("affected", &affected.len())
                     .field("bootstrap", bootstrap)
                     .field("result", result)
                     .finish(),
@@ -924,7 +848,6 @@ mod tests {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
                 Self::Unchanged => formatter.write_str("Unchanged"),
-                Self::Deferred => formatter.write_str("Deferred"),
                 Self::Stale => formatter.write_str("Stale"),
                 Self::Changed { .. } => formatter.write_str("Changed"),
             }
@@ -1050,6 +973,36 @@ mod tests {
             session.record_change(changes, before, after, disposal);
         }
         (session, continue_tx)
+    }
+
+    async fn start_held_session(
+        cache_root: &Path,
+        owner: InventoryOwner,
+        inventory: &mut Inventory,
+    ) -> (InventoryCacheSession, oneshot::Sender<()>, std_mpsc::Receiver<Vec<CategoryKey>>, Arc<AtomicUsize>) {
+        let runtime = Handle::current();
+        let mut session = InventoryCacheSession::new(&runtime);
+        let cache_root = cache_root.to_path_buf();
+        session.start_with_open(&runtime, inventory, move || InventoryCache::open_at_root(cache_root, "agni", owner.id(), None));
+
+        let ready = session.next_event(false).await.expect("cache open completes");
+        assert_matches!(&ready, InventoryCacheEvent::Ready { .. });
+        session.handle_event(&runtime, ready, inventory);
+        let initial_bootstrap = session.next_event(false).await.expect("initial bootstrap completes");
+        assert_matches!(&initial_bootstrap, InventoryCacheEvent::WriteCompleted { bootstrap: true, result: Ok(()), .. });
+        session.handle_event(&runtime, initial_bootstrap, inventory);
+        assert_matches!(&session.restore, RestoreLifecycle::Applying(_));
+
+        let (writer, release_tx, bootstraps, discards) = spawn_held_writer(&runtime, session.event_sender.clone());
+        let old_writer = match mem::replace(&mut session.lifecycle, CacheLifecycle::Active { writer, resync: None }) {
+            CacheLifecycle::Active { writer, .. } => writer,
+            other => panic!("expected active lifecycle, got {other:?}"),
+        };
+        let (closed_tx, closed_rx) = oneshot::channel();
+        old_writer.sender.send(CacheWriterCommand::Close(closed_tx)).await.expect("close real writer");
+        closed_rx.await.expect("real writer closes");
+        old_writer.task.await.expect("real writer task joins");
+        (session, release_tx, bootstraps, discards)
     }
 
     #[tokio::test]
@@ -1188,79 +1141,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_waits_for_writer_completions() {
+    async fn restore_skips_inflight_changes() {
         let directory = tempdir().expect("create inventory cache directory");
-        let agent = uuid(112);
-        let owner = InventoryOwner::new(agent);
-        let (mut seeded, root, _) = cache_skeleton(owner);
-        let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", agent, None).expect("open inventory cache");
-        let before = seeded.snapshot();
-        cache.submit_bootstrap(&before).expect("write login skeleton").wait().await.expect("skeleton write completes");
-        let changes = apply_fetch(
-            &mut seeded,
-            root,
-            ServerVersion::from_raw(7),
-            Some(1),
-            vec![InventoryChild::Category(category(owner, 2, Some(1), 0))],
-        )
-        .expect("complete root folder");
-        let after = seeded.snapshot();
-        cache.submit_changeset(&changes, &before, &after).expect("write root folder").wait().await.expect("root write completes");
-        cache.close().await.expect("close seeded cache");
+        let owner = InventoryOwner::new(uuid(112));
+        let cached_item_key = seed_cache_with_item(directory.path(), owner, 113).await;
+        let (mut inventory, _, child) = cache_skeleton(owner);
+        let runtime = Handle::current();
+        let (mut session, release_tx, _, _) = start_held_session(directory.path(), owner, &mut inventory).await;
 
-        let (mut inventory, _, _) = cache_skeleton(owner);
-        let mut session = InventoryCacheSession::new(&Handle::current());
-        let cache_root = directory.path().to_path_buf();
-        session.start_with_open(&Handle::current(), &inventory, move || InventoryCache::open_at_root(cache_root, "agni", agent, None));
-        let ready = session.next_event(true).await.expect("cache open completes");
-        let InventoryCacheEvent::Ready { .. } = &ready else { panic!("cache open returns ready") };
-        session.handle_event(&Handle::current(), ready, &mut inventory);
-        let restore = session.next_event(true).await.expect("restore batch becomes available");
-        match &restore {
-            InventoryCacheEvent::RestoreBatch(_) => {}
-            _ => panic!("restore batch becomes available"),
-        }
-        let preparation = session.try_reserve_disposal().expect("active preparation reserves bounded cleanup");
+        let server_item = item(owner, 114, child);
+        let server_item_key = server_item.key;
+        let before = inventory.snapshot();
+        let changes = inventory.upsert_item(server_item).expect("server item applies");
+        let after = inventory.snapshot();
+        let disposal = session.try_reserve_disposal().expect("write reserves bounded cleanup");
+        session.record_change(changes, before, after, disposal);
 
-        for index in 0..MAX_PENDING_WRITES {
-            let before = inventory.snapshot();
-            let changes = inventory
-                .upsert_category(category(owner, 1_000 + index as u128, Some(root.id().uuid().as_u128()), 1))
-                .expect("inventory update applies");
-            let after = inventory.snapshot();
-            let disposal = session.try_reserve_disposal().expect("write reserves bounded cleanup");
-            session.record_change(changes, before, after, disposal);
-        }
-
-        let InventoryCacheEventOutcome::Deferred = session.handle_event(&Handle::current(), restore, &mut inventory) else {
-            panic!("restore waits while cache writes are in flight");
-        };
-        let mut bootstrap_completions = 0;
-        let mut write_completions = 0;
-        for _ in 0..=MAX_PENDING_WRITES {
-            let event = session.next_event(false).await.expect("cache worker completion remains serviceable");
-            let InventoryCacheEvent::WriteCompleted { bootstrap, .. } = &event else {
-                panic!("deferred restore must leave writer completions available");
-            };
-            if *bootstrap {
-                bootstrap_completions += 1;
-            } else {
-                write_completions += 1;
+        while matches!(&session.restore, RestoreLifecycle::Applying(_)) {
+            let event = timeout(Duration::from_secs(30), session.next_event(true))
+                .await
+                .expect("restore proceeds while a write is in flight")
+                .expect("restore batch arrives");
+            assert_matches!(&event, InventoryCacheEvent::RestoreBatch(_));
+            let outcome = session.handle_event(&runtime, event, &mut inventory);
+            if let InventoryCacheEventOutcome::Changed { before, disposal, .. } = outcome {
+                disposal.reclaim(before);
             }
-            session.handle_event(&Handle::current(), event, &mut inventory);
         }
-        assert_eq!(bootstrap_completions, 1);
-        assert_eq!(write_completions, MAX_PENDING_WRITES);
-        let restore = session.next_event(true).await.expect("restore resumes after writes finish");
-        match &restore {
-            InventoryCacheEvent::RestoreBatch(_) => {}
-            _ => panic!("restore resumes after writes finish"),
-        }
-        let InventoryCacheEventOutcome::Unchanged = session.handle_event(&Handle::current(), restore, &mut inventory) else {
-            panic!("cached version mismatch keeps the live folder unchanged");
-        };
-        assert!(!inventory.snapshot().is_complete(root));
-        drop(preparation);
+
+        assert_eq!(session.pending_write_count, 1, "the write stays in flight for the whole restore");
+        let snapshot = inventory.snapshot();
+        assert_eq!(snapshot.item(server_item_key).map(|item| item.parent), Some(child));
+        assert!(snapshot.item(cached_item_key).is_none(), "the restore skips a folder changed this session");
+        release_tx.send(()).expect("release held writer");
         session.close().await;
     }
 
@@ -1469,7 +1382,6 @@ mod tests {
         assert_eq!(session.pending_write_count, 0);
         assert_eq!(session.pending_rows, 0);
         assert_eq!(session.pending_bytes, 0);
-        assert_eq!(session.pending_exclusions, 0);
         session.close().await;
     }
 
@@ -1515,20 +1427,11 @@ mod tests {
         session.pending_write_count = 1;
         session.pending_rows = 3;
         session.pending_bytes = 192;
-        session.pending_exclusions = 1;
 
         for _ in 0..2 {
-            let disposal = session.try_reserve_disposal().expect("cache failure completion reserves bounded cleanup");
             session.handle_event(
                 &Handle::current(),
-                InventoryCacheEvent::WriteCompleted {
-                    rows: 3,
-                    bytes: 192,
-                    affected: Vec::new(),
-                    bootstrap: false,
-                    result: Err("worker failed".into()),
-                    disposal,
-                },
+                InventoryCacheEvent::WriteCompleted { rows: 3, bytes: 192, bootstrap: false, result: Err("worker failed".into()) },
                 &mut inventory,
             );
         }
@@ -1539,7 +1442,6 @@ mod tests {
         assert_eq!(session.pending_write_count, 0);
         assert_eq!(session.pending_rows, 0);
         assert_eq!(session.pending_bytes, 0);
-        assert_eq!(session.pending_exclusions, 0);
         let RestoreLifecycle::Invalidated = &session.restore else {
             panic!("disabled cache invalidates pending restore");
         };
@@ -1584,27 +1486,21 @@ mod tests {
             while let Some(command) = receiver.recv().await {
                 match command {
                     CacheWriterCommand::Changeset { changes, before, after, rows, bytes, disposal } => {
-                        let affected = InventoryCache::affected_categories(&changes, &before, &after);
-                        drop((changes, before, after));
-                        send_cache_event(
-                            &event_sender,
-                            InventoryCacheEvent::WriteCompleted { rows, bytes, affected, bootstrap: false, result: Ok(()), disposal },
-                        );
+                        disposal.reclaim((changes, before, after));
+                        if event_sender.send(InventoryCacheEvent::WriteCompleted { rows, bytes, bootstrap: false, result: Ok(()) }).is_err()
+                        {
+                            return;
+                        }
                     }
                     CacheWriterCommand::Bootstrap { snapshot, stale, disposal } => {
                         bootstrap_tx.send(stale).expect("test keeps the bootstrap receiver");
-                        drop(snapshot);
-                        send_cache_event(
-                            &event_sender,
-                            InventoryCacheEvent::WriteCompleted {
-                                rows: 0,
-                                bytes: 0,
-                                affected: Vec::new(),
-                                bootstrap: true,
-                                result: Ok(()),
-                                disposal,
-                            },
-                        );
+                        disposal.reclaim(snapshot);
+                        if event_sender
+                            .send(InventoryCacheEvent::WriteCompleted { rows: 0, bytes: 0, bootstrap: true, result: Ok(()) })
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                     CacheWriterCommand::Discard => {
                         writer_discards.fetch_add(1, Ordering::Relaxed);
@@ -1726,27 +1622,7 @@ mod tests {
         let cached_item_key = seed_cache_with_item(directory.path(), owner, 57).await;
         let (mut inventory, root, child) = cache_skeleton(owner);
         let runtime = Handle::current();
-        let mut session = InventoryCacheSession::new(&runtime);
-        let cache_root = directory.path().to_path_buf();
-        session.start_with_open(&runtime, &inventory, move || InventoryCache::open_at_root(cache_root, "agni", owner.id(), None));
-
-        let ready = session.next_event(false).await.expect("cache open completes");
-        assert_matches!(&ready, InventoryCacheEvent::Ready { .. });
-        session.handle_event(&runtime, ready, &mut inventory);
-        let initial_bootstrap = session.next_event(false).await.expect("initial bootstrap completes");
-        assert_matches!(&initial_bootstrap, InventoryCacheEvent::WriteCompleted { bootstrap: true, result: Ok(()), .. });
-        session.handle_event(&runtime, initial_bootstrap, &mut inventory);
-        assert_matches!(&session.restore, RestoreLifecycle::Applying(_));
-
-        let (writer, release_tx, bootstraps, discards) = spawn_held_writer(&runtime, session.event_sender.clone());
-        let old_writer = match mem::replace(&mut session.lifecycle, CacheLifecycle::Active { writer, resync: None }) {
-            CacheLifecycle::Active { writer, .. } => writer,
-            other => panic!("expected active lifecycle, got {other:?}"),
-        };
-        let (closed_tx, closed_rx) = oneshot::channel();
-        old_writer.sender.send(CacheWriterCommand::Close(closed_tx)).await.expect("close real writer");
-        closed_rx.await.expect("real writer closes");
-        old_writer.task.await.expect("real writer task joins");
+        let (mut session, release_tx, bootstraps, discards) = start_held_session(directory.path(), owner, &mut inventory).await;
 
         for index in 0..MAX_PENDING_WRITES {
             let before = inventory.snapshot();
