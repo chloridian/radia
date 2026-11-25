@@ -126,7 +126,7 @@ fn main() -> io::Result<()> {
         "hardware limits resolved"
     );
 
-    let cache_limit_bytes = u64::try_from(settings.get(ASSET_DISK_CACHE_CAPACITY_MIB)).unwrap_or(1024).saturating_mul(1024 * 1024);
+    let cache_limit_bytes = u64::try_from(settings.get(ASSET_DISK_CACHE_CAPACITY_MIB)).unwrap_or(6144).saturating_mul(1024 * 1024);
     let asset_cache = match AssetCache::open_default_with_limit(cache_limit_bytes) {
         Ok(cache) => {
             let stats = cache.stats();

@@ -1,6 +1,6 @@
 [asset.disk_cache_capacity_mib]
 type = "i64"
-default = 1024
+default = 6144
 range = [64, 16384]
 unit = "MiB"
 persistent = true
