@@ -235,8 +235,9 @@ fn map_positions(
     let mut positions = Vec::with_capacity(rows * columns);
     for row in 0..rows {
         for column in 0..columns {
+            let sample_column = if reverse_horizontal { columns - 1 - column } else { column };
             let mut y = ((row as f32 / (rows - 1) as f32) * height as f32) as u32;
-            let mut x = ((column as f32 / (columns - 1) as f32) * width as f32) as u32;
+            let mut x = ((sample_column as f32 / (columns - 1) as f32) * width as f32) as u32;
             if y == 0 && sculpt_type == SculptType::Sphere {
                 x = width / 2;
             }
@@ -248,9 +249,6 @@ fn map_positions(
             }
             if x == width {
                 x = if sculpt_type == SculptType::Plane { width - 1 } else { 0 };
-            }
-            if reverse_horizontal {
-                x = width - x - 1;
             }
             let pixel_index = usize::try_from(y)
                 .ok()
