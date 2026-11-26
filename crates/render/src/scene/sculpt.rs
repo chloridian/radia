@@ -128,7 +128,6 @@ pub(in crate::scene) fn pixels_to_rgba(
     Ok(rgba)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_grid(
     positions: &[Vec3],
     rows: usize,

@@ -203,7 +203,7 @@ pub(super) fn decode_simulator_world_update(
             )
             .is_err()
         {
-            record_parcel_rejection(world, simulator_id, region);
+            world.record_parcel_rejection(simulator_id, region);
         }
         if let Err(error) = world
             .update_water_height(UpdateSource::new(region, sequence, order_evidence(packet_order), 0), handshake.region_info1.water_height)
@@ -245,7 +245,7 @@ pub(super) fn decode_simulator_world_update(
             )
             .is_err()
         {
-            record_parcel_rejection(world, simulator_id, region);
+            world.record_parcel_rejection(simulator_id, region);
         }
     }
 
@@ -281,12 +281,6 @@ pub(super) fn decode_simulator_world_update(
         batch.stamp_motion(received_at, ping_delay);
         DecodedWorldUpdate::Object(batch)
     })
-}
-
-fn record_parcel_rejection(world: &mut SessionWorld, simulator_id: SimulatorId, region: world::Region) {
-    if let Some(rejected) = world.record_parcel_rejection() {
-        tracing::debug!(simulator = simulator_id.get(), region = region.get(), rejected, "parcel updates were repeatedly rejected");
-    }
 }
 
 #[cfg(test)]
@@ -856,7 +850,7 @@ impl WorldHandoff {
             }
             DecodedWorldUpdate::ParcelOverlay { source, observation } => {
                 if world.observe_parcel_overlay(source, observation).is_err() {
-                    record_parcel_rejection(world, simulator_id, source.region());
+                    world.record_parcel_rejection(simulator_id, source.region());
                 }
                 None
             }
@@ -865,7 +859,7 @@ impl WorldHandoff {
                     return None;
                 }
                 if world.observe_parcel_properties(source, observation).is_err() {
-                    record_parcel_rejection(world, simulator_id, source.region());
+                    world.record_parcel_rejection(simulator_id, source.region());
                 }
                 None
             }
@@ -873,7 +867,7 @@ impl WorldHandoff {
                 if self.world_primary == Some(simulator_id)
                     && let Some(region) = world.region_for(simulator_id)
                 {
-                    record_parcel_rejection(world, simulator_id, region);
+                    world.record_parcel_rejection(simulator_id, region);
                 }
                 None
             }

@@ -349,25 +349,21 @@ impl EnvironmentIntake {
                         if let Some(source) = self.source(region).map(|source| source.with_authority(UpdateAuthority::Untracked))
                             && world.observe_parcel_properties(source, observation).is_err()
                         {
-                            self.record_parcel_rejection(world, simulator, region);
+                            world.record_parcel_rejection(simulator, region);
                             return;
                         }
                     }
                     Err(()) => {
-                        self.record_parcel_rejection(world, simulator, region);
+                        world.record_parcel_rejection(simulator, region);
                         return;
                     }
                 }
                 self.parcel(world, region, notice, true);
             }
             Ok(None) => {}
-            Err(_) => self.record_parcel_rejection(world, simulator, region),
-        }
-    }
-
-    fn record_parcel_rejection(&self, world: &mut SessionWorld, simulator: SimulatorId, region: Region) {
-        if let Some(rejected) = world.record_parcel_rejection() {
-            tracing::debug!(simulator = simulator.get(), region = region.get(), rejected, "parcel updates were repeatedly rejected");
+            Err(_) => {
+                world.record_parcel_rejection(simulator, region);
+            }
         }
     }
 

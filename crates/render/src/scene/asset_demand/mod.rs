@@ -940,7 +940,6 @@ impl AssetDemand {
         resolution
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn resolve_sculpt(
         &mut self,
         camera: Camera,

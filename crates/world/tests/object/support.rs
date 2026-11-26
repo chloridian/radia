@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_imports)]
-
 pub(super) use std::{collections::HashSet, num::NonZeroU32};
 
 pub(super) use math::{Quat, Vec3};

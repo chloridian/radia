@@ -955,13 +955,15 @@ fn parent_reintroduction_cancels_child_retry() {
 #[test]
 fn parcel_rejections_report_in_batches() {
     let mut world = SessionWorld::new(viewer_world_limits());
+    let simulator = simulator_id();
+    let region = world.register_simulator(simulator, None).unwrap();
 
     for _ in 0..63 {
-        assert_eq!(world.record_parcel_rejection(), None);
+        assert_eq!(world.record_parcel_rejection(simulator, region), None);
     }
-    assert_eq!(world.record_parcel_rejection(), Some(64));
+    assert_eq!(world.record_parcel_rejection(simulator, region), Some(64));
     for _ in 0..63 {
-        assert_eq!(world.record_parcel_rejection(), None);
+        assert_eq!(world.record_parcel_rejection(simulator, region), None);
     }
-    assert_eq!(world.record_parcel_rejection(), Some(128));
+    assert_eq!(world.record_parcel_rejection(simulator, region), Some(128));
 }

@@ -7,7 +7,7 @@ use utils::AssetId;
 use uuid::Uuid;
 
 #[path = "../src/texture/compression.rs"]
-#[allow(unused_imports)]
+#[expect(unused_imports)]
 mod texture_compression;
 
 use self::texture_compression::CompressionQuality;

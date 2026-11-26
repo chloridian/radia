@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     env,
-    fmt::Write as _,
+    fmt::{self, Write as _},
     fs,
     path::{Path, PathBuf},
 };
@@ -83,7 +83,7 @@ fn main() {
         presets.push(preset);
     }
 
-    let generated = render_generated(&declarations, &presets);
+    let generated = render_generated(&declarations, &presets).expect("render generated cvars");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set"));
     fs::write(out_dir.join("generated_cvars.rs"), generated).expect("write generated_cvars.rs");
 }
@@ -453,9 +453,9 @@ fn validate_preset_value(path: &Path, line_no: usize, decl: &Declaration, raw: &
     }
 }
 
-fn render_generated(declarations: &[Declaration], presets: &[Preset]) -> String {
+fn render_generated(declarations: &[Declaration], presets: &[Preset]) -> Result<String, fmt::Error> {
     let mut output = String::new();
-    let _ = writeln!(output, "pub const CVAR_COUNT: usize = {};", declarations.len());
+    writeln!(output, "pub const CVAR_COUNT: usize = {};", declarations.len())?;
     for (index, decl) in declarations.iter().enumerate() {
         let key_type = match decl.value_type {
             ValueType::Bool => "bool",
@@ -465,10 +465,10 @@ fn render_generated(declarations: &[Declaration], presets: &[Preset]) -> String 
             ValueType::String => "String",
             ValueType::Enum => "&'static str",
         };
-        let _ = writeln!(output, "pub const {}: CvarKey<{key_type}> = CvarKey::new(CvarId({index}));", decl.const_name);
+        writeln!(output, "pub const {}: CvarKey<{key_type}> = CvarKey::new(CvarId({index}));", decl.const_name)?;
     }
 
-    let _ = writeln!(output, "pub static DESCRIPTORS: [CvarDescriptor; CVAR_COUNT] = [");
+    writeln!(output, "pub static DESCRIPTORS: [CvarDescriptor; CVAR_COUNT] = [")?;
     for (index, decl) in declarations.iter().enumerate() {
         let (default_expr, domain_expr) = match decl.value_type {
             ValueType::Bool => (format!("CvarValue::Bool({})", decl.default_raw), "ValueDomain::Bool".to_owned()),
@@ -537,24 +537,24 @@ fn render_generated(declarations: &[Declaration], presets: &[Preset]) -> String 
             "hidden" => "Visibility::Hidden",
             _ => unreachable!(),
         };
-        let _ = writeln!(
+        writeln!(
             output,
             "    CvarDescriptor {{ id: CvarId({index}), name: {:?}, default: {default_expr}, domain: {domain_expr}, unit: {unit_expr}, persistence: {persistence_expr}, apply: {apply_expr}, visibility: {visibility_expr}, help: {:?} }},",
             decl.name, decl.help
-        );
+        )?;
     }
-    writeln!(output, "];").expect("write descriptors end");
-    writeln!(output, "pub const GRAPHICS_PRESET_COUNT: usize = {};", presets.len()).expect("write preset count");
-    writeln!(output, "pub static GRAPHICS_PRESETS: [GraphicsPreset; GRAPHICS_PRESET_COUNT] = [").expect("write presets start");
+    writeln!(output, "];")?;
+    writeln!(output, "pub const GRAPHICS_PRESET_COUNT: usize = {};", presets.len())?;
+    writeln!(output, "pub static GRAPHICS_PRESETS: [GraphicsPreset; GRAPHICS_PRESET_COUNT] = [")?;
     for preset in presets {
-        writeln!(output, "    GraphicsPreset {{ name: {:?}, entries: &[", preset.name).expect("write preset header");
+        writeln!(output, "    GraphicsPreset {{ name: {:?}, entries: &[", preset.name)?;
         for (key, value_expr) in &preset.entries {
-            writeln!(output, "        ({key:?}, {value_expr}),").expect("write preset entry");
+            writeln!(output, "        ({key:?}, {value_expr}),")?;
         }
-        writeln!(output, "    ] }},").expect("write preset footer");
+        writeln!(output, "    ] }},")?;
     }
-    writeln!(output, "];").expect("write presets end");
-    output
+    writeln!(output, "];")?;
+    Ok(output)
 }
 
 fn is_auto_i64(default: i64, min: i64, max: i64) -> bool {

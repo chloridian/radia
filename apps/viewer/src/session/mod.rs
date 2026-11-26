@@ -3,7 +3,7 @@ mod coordinator;
 mod environment;
 mod experience_environment;
 mod inbound;
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub(crate) mod name_cache;
 mod object_cache;
 mod object_media;

@@ -246,7 +246,6 @@ impl NameCache {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn record_verified_login_fields(
         &self,
         grid: Grid,
@@ -593,7 +592,6 @@ fn prune_verified_logins_for_grid(transaction: &Transaction<'_>, grid_id: &str, 
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn decode_avatar_row(
     agent_bytes: &[u8],
     username: String,
