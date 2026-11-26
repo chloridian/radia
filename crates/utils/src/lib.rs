@@ -1,4 +1,5 @@
 mod fast_hash;
+pub mod hardware;
 mod summary;
 
 use std::{

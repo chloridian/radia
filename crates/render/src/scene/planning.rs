@@ -20,6 +20,13 @@ use crate::scene::{
 pub struct MeshJob(pub(in crate::scene) Work);
 
 impl MeshJob {
+    pub fn is_visible(&self) -> bool {
+        match &self.0 {
+            Work::Prim(job) => job.is_visible(),
+            Work::Sculpt(_) | Work::Surface(_) | Work::Environment(_) => true,
+        }
+    }
+
     pub fn run(self) -> MeshCompletion {
         MeshCompletion(match self.0 {
             Work::Prim(job) => Completion::Prim(job.run()),
@@ -143,6 +150,10 @@ impl MeshPlanner {
 
     pub(in crate::scene) fn start(&mut self) -> Option<MeshJob> {
         self.meshes.start().map(|job| MeshJob(Work::Prim(job)))
+    }
+
+    pub(in crate::scene) fn evict_pressure_turn(&mut self) -> usize {
+        self.meshes.evict_pressure_turn()
     }
 
     pub(in crate::scene) fn has_work(&self) -> bool {

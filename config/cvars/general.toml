@@ -20,3 +20,38 @@ range = [50, 5000]
 persistent = true
 apply = "live"
 help = "Maximum number of nearby chat messages retained in history."
+
+[memory.max_ram_mib]
+type = "i64"
+default = 0
+range = [256, 65536]
+unit = "MiB"
+persistent = true
+apply = "restart_required"
+help = "Optional cap in MiB on CPU memory for asset decoding and the scene geometry cache (0 = no cap; the viewer backs off when the system runs low on memory)."
+
+[memory.max_vram_mib]
+type = "i64"
+default = 0
+range = [1024, 65536]
+unit = "MiB"
+persistent = true
+apply = "live"
+help = "Maximum GPU VRAM budget in MiB before texture eviction (0 = auto)."
+
+[memory.vram_divisor]
+type = "i64"
+default = 1
+range = [1, 8]
+persistent = true
+apply = "live"
+help = "Divisor applied to detected VRAM when computing the automatic GPU VRAM budget."
+
+[network.max_bandwidth_kbps]
+type = "i64"
+default = 0
+range = [500, 50000]
+unit = "kbps"
+persistent = true
+apply = "restart_required"
+help = "Maximum simulator bandwidth in kbps requested from each region (0 = auto)."

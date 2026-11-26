@@ -186,6 +186,7 @@ async fn connect_test_primary_with_coverage(
             budget: budget.handle(),
             owned_budget: Some(budget),
             transport: None,
+            throttle_rates: default_throttle_rates(),
         },
     )
     .await
@@ -208,6 +209,7 @@ pub(in crate::circuit) async fn connect_test_neighbor_with_coverage(
             budget: budget.handle(),
             owned_budget: Some(budget),
             transport: None,
+            throttle_rates: default_throttle_rates(),
         },
     )
     .await

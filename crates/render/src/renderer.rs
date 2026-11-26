@@ -5,6 +5,7 @@ use std::{
 };
 
 use math::DVec3;
+use utils::hardware::Pressure;
 use wgpu::{
     AdapterInfo, Buffer, BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, CommandEncoderDescriptor, Device, Extent3d, LoadOp,
     Operations, Origin3d, PollError, PollType, Queue, RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor,
@@ -14,6 +15,7 @@ use wgpu::{
 use world::Entity;
 
 use crate::{
+    Limits, WorkerBudget,
     environment::Evaluated,
     geometry::{GeometryRenderer, ObjectExplanation, PickDetail, PickError, Stats},
     gpu_timing::GpuTimings,
@@ -84,6 +86,8 @@ impl Renderer {
         format: TextureFormat,
         width: u32,
         height: u32,
+        limits: Limits,
+        workers: WorkerBudget,
     ) -> Result<Self, Error> {
         let srgb_format = format.add_srgb_suffix();
         if !srgb_format.is_srgb() {
@@ -97,7 +101,7 @@ impl Renderer {
             timestamp_queries,
             "scene renderer configured"
         );
-        let geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float);
+        let geometry = GeometryRenderer::new_with_workers(&device, &queue, TextureFormat::Rgba16Float, limits, workers);
         let gpu_timings = if timestamp_queries { GpuTimings::new(&device, queue.get_timestamp_period()) } else { None };
         let postprocess = PostProcess::new(&device, &queue, srgb_format);
         let mut renderer = Self {
@@ -218,6 +222,10 @@ impl Renderer {
 
     pub fn set_texture_soft_cap(&mut self, mib: u32) {
         self.geometry.set_texture_soft_cap(mib);
+    }
+
+    pub fn set_pressure(&mut self, level: Pressure) {
+        self.geometry.set_pressure(level);
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {

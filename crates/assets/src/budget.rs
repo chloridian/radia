@@ -8,36 +8,96 @@ use std::{
 };
 
 use tokio::sync::watch;
+use utils::hardware::{AtomicPressure, Pressure};
 
-pub const ASSET_WORK_BYTES: usize = 512 * 1024 * 1024;
-pub(crate) const WORK_BYTES: usize = 32 * 1024 * 1024;
-pub(crate) const TEXTURE_WORK_BYTES: usize = 192 * 1024 * 1024;
+const MIB: usize = 1024 * 1024;
+const DEFAULT_WORK_BYTES: usize = 512 * MIB;
+const DEFAULT_TEXTURE_WORK_BYTES: usize = 192 * MIB;
+const WORK_BYTES_PER_WORKER: usize = 128 * MIB;
+pub(crate) const WORK_BYTES: usize = 32 * MIB;
+#[cfg(test)]
+pub(crate) const ASSET_WORK_BYTES: usize = DEFAULT_WORK_BYTES;
+#[cfg(test)]
+pub(crate) const TEXTURE_WORK_BYTES: usize = DEFAULT_TEXTURE_WORK_BYTES;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Limits {
+    pub work_bytes: usize,
+    pub texture_work_bytes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self { work_bytes: DEFAULT_WORK_BYTES, texture_work_bytes: DEFAULT_TEXTURE_WORK_BYTES }
+    }
+}
+
+impl Limits {
+    pub fn derive(workers: usize) -> Self {
+        let work_bytes = workers.saturating_mul(WORK_BYTES_PER_WORKER).max(DEFAULT_WORK_BYTES);
+        Self::from_work_bytes(work_bytes)
+    }
+
+    pub fn from_work_bytes(work_bytes: usize) -> Self {
+        let work_bytes = work_bytes / MIB * MIB;
+        let texture_work_bytes = (work_bytes * 3 / 8) / MIB * MIB;
+        Self { work_bytes, texture_work_bytes }
+    }
+}
 
 struct Accounting {
     charged: AtomicUsize,
     working: AtomicUsize,
     resident: AtomicUsize,
     high_water: AtomicUsize,
+    work_bytes: usize,
+    texture_work_bytes: usize,
+    pressure: AtomicPressure,
     wake: watch::Sender<()>,
 }
 
-impl Default for Accounting {
+#[derive(Clone)]
+pub struct Budget(Arc<Accounting>);
+
+impl Default for Budget {
     fn default() -> Self {
+        Self::new(Limits::default())
+    }
+}
+
+impl Budget {
+    pub fn new(limits: Limits) -> Self {
         let (wake, _) = watch::channel(());
-        Self {
+        Self(Arc::new(Accounting {
             charged: AtomicUsize::new(0),
             working: AtomicUsize::new(0),
             resident: AtomicUsize::new(0),
             high_water: AtomicUsize::new(0),
+            work_bytes: limits.work_bytes,
+            texture_work_bytes: limits.texture_work_bytes.min(limits.work_bytes),
+            pressure: AtomicPressure::new(Pressure::Normal),
             wake,
+        }))
+    }
+
+    pub fn set_pressure(&self, level: Pressure) {
+        if self.0.pressure.swap(level) != level {
+            self.0.wake.send_replace(());
         }
     }
-}
 
-#[derive(Clone, Default)]
-pub struct Budget(Arc<Accounting>);
+    pub fn pressure(&self) -> Pressure {
+        self.0.pressure.load()
+    }
 
-impl Budget {
+    pub fn limits(&self) -> Limits {
+        Limits { work_bytes: self.0.work_bytes, texture_work_bytes: self.0.texture_work_bytes }
+    }
+
+    pub(crate) fn texture_work_bytes(&self) -> usize {
+        self.0.texture_work_bytes
+    }
+
     pub fn stats(&self) -> MemoryStats {
         MemoryStats {
             charged_bytes: self.0.charged.load(Ordering::Acquire),
@@ -55,10 +115,11 @@ impl Budget {
     }
 
     pub(crate) fn reserve_with_headroom(&self, bytes: usize, headroom: usize) -> Option<Reservation> {
+        let limit = self.0.work_bytes;
         self.0
             .working
             .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_add(bytes).filter(|next| next.checked_add(headroom).is_some_and(|total| total <= ASSET_WORK_BYTES))
+                used.checked_add(bytes).filter(|next| next.checked_add(headroom).is_some_and(|total| total <= limit))
             })
             .ok()?;
         let used = self.0.charged.fetch_add(bytes, Ordering::AcqRel);

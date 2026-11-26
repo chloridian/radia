@@ -28,7 +28,7 @@ use protocol::{
     lludp::Message,
     messages::{
         AgentUpdate, ChatFromViewer, MapBlockRequest, MoveInventoryFolder, MoveInventoryItem, RegionHandleRequest, RequestMultipleObjects,
-        SetAlwaysRun, TeleportCancel,
+        SetAlwaysRun, TeleportCancel, ThrottleRates,
     },
 };
 use tokio::sync::{
@@ -68,7 +68,7 @@ use crate::{
     LoginCredentials,
     circuit::{
         ConnectionError, HandoffTarget, PrimaryState, SimulatorCommand, SimulatorConnection, SimulatorConnectionOptions, SimulatorEvent,
-        SimulatorRequest, SimulatorTaskOutcome, admission::SimulatorMemoryBudget, lludp::Delivery,
+        SimulatorRequest, SimulatorTaskOutcome, admission::SimulatorMemoryBudget, default_throttle_rates, lludp::Delivery,
     },
     coverage,
     coverage::{
@@ -92,18 +92,28 @@ pub struct QueueStats {
     pub full_count: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SessionOptions {
     upstream_bytes_per_second: NonZeroU64,
+    throttle_rates: ThrottleRates,
 }
 
 impl SessionOptions {
-    pub const fn new(upstream_bytes_per_second: NonZeroU64) -> Self {
-        Self { upstream_bytes_per_second }
+    pub fn new(upstream_bytes_per_second: NonZeroU64) -> Self {
+        Self { upstream_bytes_per_second, throttle_rates: default_throttle_rates() }
+    }
+
+    pub const fn with_throttle_rates(mut self, throttle_rates: ThrottleRates) -> Self {
+        self.throttle_rates = throttle_rates;
+        self
     }
 
     pub const fn upstream_bytes_per_second(self) -> NonZeroU64 {
         self.upstream_bytes_per_second
+    }
+
+    pub const fn throttle_rates(self) -> ThrottleRates {
+        self.throttle_rates
     }
 }
 

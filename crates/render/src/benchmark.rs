@@ -3,7 +3,7 @@ use std::time::Instant;
 use wgpu::{CommandEncoder, Device, Queue, TextureFormat};
 
 use crate::{
-    Stats, TextureCompletion, TextureJob,
+    Limits, Stats, TextureCompletion, TextureJob,
     geometry::GeometryRenderer,
     scene::{Camera, SceneView},
 };
@@ -12,7 +12,7 @@ pub struct GeometryPrepare(GeometryRenderer);
 
 impl GeometryPrepare {
     pub fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
-        Self(GeometryRenderer::new(device, queue, format))
+        Self(GeometryRenderer::new(device, queue, format, Limits::default()))
     }
 
     pub fn prepare(

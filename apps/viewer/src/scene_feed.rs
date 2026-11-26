@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fmt,
     future::Future,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -17,6 +17,7 @@ use inventory::InventorySnapshot;
 use math::motion;
 use network::CircuitMotionStatus;
 use render::{
+    WorkerBudget, WorkerKind,
     environment::{ActiveEnvironment, Evaluated},
     scene::{
         ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, EnvironmentChoice, LocalChoice, MotionCircuit, Object,
@@ -41,6 +42,7 @@ use crate::{
     asset_coordinator::{AssetHandle, RequestError},
     inventory::environments::{self, EnvironmentItems},
     session::{AgentMotionSample, EnvironmentInbox},
+    worker_pool::WorkerPool,
     world_reader::{ReadError, WorldReader},
 };
 
@@ -155,13 +157,14 @@ impl SceneFeed {
         camera: watch::Sender<Option<Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
         mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
+        budget: Budget,
+        worker_pool: WorkerPool,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
         let assets = sources.assets.clone();
         let motion_circuits = sources.motion_circuits.clone();
-        static MEMORY: OnceLock<Budget> = OnceLock::new();
-        let budget = MEMORY.get_or_init(Budget::default).clone();
+        let workers = budget.workers();
         let (scene, view) = Reconciler::new(budget.clone());
         let (sender, incoming) = mpsc::channel(1);
         let (environment_selection, selected_environment) = watch::channel(EnvironmentSelection {
@@ -184,10 +187,19 @@ impl SceneFeed {
         dead_reckoning.replace(*agent_motion.borrow_and_update());
         let run_wake = Arc::clone(&wake);
         drop(
-            runtime.clone().spawn(
-                run(scene, sources, sender, selected_environment, runtime.clone(), cancelled, observations, agent_motions, move || {
-                    run_wake()
-                })
+            runtime.spawn(
+                run(
+                    scene,
+                    sources,
+                    sender,
+                    selected_environment,
+                    workers,
+                    worker_pool,
+                    cancelled,
+                    observations,
+                    agent_motions,
+                    move || run_wake(),
+                )
                 .in_current_span(),
             ),
         );
@@ -724,7 +736,8 @@ async fn run(
     sources: SceneSources,
     sender: mpsc::Sender<Batch>,
     mut environment: watch::Receiver<EnvironmentSelection>,
-    runtime: Handle,
+    workers: WorkerBudget,
+    worker_pool: WorkerPool,
     cancelled: oneshot::Receiver<()>,
     mut camera: watch::Receiver<Option<Camera>>,
     mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
@@ -764,7 +777,14 @@ async fn run(
             }
             ReconcileStep::Build(job) => {
                 let span = tracing::Span::current();
-                meshes.push(runtime.spawn_blocking(move || span.in_scope(|| job.run())));
+                let visible = job.is_visible();
+                let workers = workers.clone();
+                meshes.push(worker_pool.spawn(visible, move || {
+                    let started = Instant::now();
+                    let completion = span.in_scope(|| job.run());
+                    workers.record_busy(WorkerKind::Mesh, started.elapsed());
+                    completion
+                }));
                 Some(Instant::now())
             }
             ReconcileStep::Publish(batch) => {

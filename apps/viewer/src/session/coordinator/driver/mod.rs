@@ -615,6 +615,7 @@ impl SessionDriver {
         cancellation: oneshot::Receiver<()>,
         credentials: CredentialPersistence,
         cache: Option<Arc<AssetCache>>,
+        asset_budget: assets::Budget,
     ) -> Self {
         let cancellation = async move {
             match cancellation.await {
@@ -628,7 +629,7 @@ impl SessionDriver {
         let terrain = TerrainDecodeQueue::default();
         let environments = EnvironmentIntake::new(runtime.clone());
         let (environment_pushes, environment_inbox) = EnvironmentInbox::channel();
-        let assets = AssetCoordinator::new(runtime.clone(), cancellation.clone(), cache);
+        let assets = AssetCoordinator::with_budget(runtime.clone(), cancellation.clone(), asset_budget, cache);
         let camera = CameraUplink::new();
         let (region_motion_sender, _) = watch::channel(Vec::new());
         let (network_diagnostics, _) = watch::channel(Vec::new());
@@ -2357,8 +2358,9 @@ pub(crate) async fn drain_session(
     cancellation: oneshot::Receiver<()>,
     credentials: CredentialPersistence,
     cache: Option<Arc<AssetCache>>,
+    asset_budget: assets::Budget,
 ) {
-    SessionDriver::new(session, session_handle, runtime, mailbox, cancellation, credentials, cache).run().await;
+    SessionDriver::new(session, session_handle, runtime, mailbox, cancellation, credentials, cache, asset_budget).run().await;
 }
 
 #[cfg(test)]

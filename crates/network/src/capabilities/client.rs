@@ -19,6 +19,7 @@ use tokio::{
     time,
 };
 use tracing::Instrument;
+use uuid::Uuid;
 
 use super::{
     SetupError,
@@ -86,6 +87,17 @@ impl CapabilityUrl {
     pub fn with_query_pair(&self, name: &str, value: &str) -> Self {
         let mut url = self.url.clone();
         url.query_pairs_mut().append_pair(name, value);
+        Self { url, name: self.name.clone() }
+    }
+
+    pub fn with_uuid_list_query_pair(&self, name: &str, values: &[Uuid]) -> Self {
+        let mut url = self.url.clone();
+        let joined = values.iter().map(Uuid::to_string).collect::<Vec<_>>().join(",");
+        let updated = match url.query() {
+            Some(existing) if !existing.is_empty() => format!("{existing}&{name}={joined}"),
+            _ => format!("{name}={joined}"),
+        };
+        url.set_query(Some(&updated));
         Self { url, name: self.name.clone() }
     }
 
@@ -429,6 +441,39 @@ impl Client {
 
     pub async fn get_bytes_with_accept(&self, url: &CapabilityUrl, accept: &str, max_response_bytes: usize) -> Result<Vec<u8>, Error> {
         self.get_bytes_inner(url, Some(accept.to_owned()), max_response_bytes, RedirectPolicy::None).await
+    }
+
+    pub async fn get_inventory_bytes_with_accept(
+        &self,
+        url: &CapabilityUrl,
+        accept: &str,
+        max_response_bytes: usize,
+    ) -> Result<Vec<u8>, Error> {
+        validate_response_limit(max_response_bytes)?;
+        let deadline = RequestDeadline::new(self.request_timeout);
+        let client = self.clone();
+        let url = url.clone();
+        let accept = accept.to_owned();
+        self.on_runtime(async move {
+            let budget = Arc::clone(&client.budget.inventory_requests);
+            let result = client
+                .run_with_budget_permit(deadline, budget, |http, permit| {
+                    let url = url.clone();
+                    async move {
+                        let response =
+                            get_capability_bytes(&http, &url.url, Some(accept.as_str()), max_response_bytes, RedirectPolicy::None)
+                                .await
+                                .map_err(Error::CapabilityHttp)?;
+                        Ok((response, permit))
+                    }
+                })
+                .await;
+            client.record_response_status(&url, result.as_ref().map(|(response, _)| response.status));
+            let (response, permit) = result?;
+            drop(permit);
+            Ok(response.body)
+        })
+        .await
     }
 
     async fn get_bytes_inner(

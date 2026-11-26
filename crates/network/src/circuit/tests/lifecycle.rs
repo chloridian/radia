@@ -243,6 +243,39 @@ async fn primary_throttle_follows_movement_complete() {
     budget.shutdown().await;
 }
 
+#[test]
+fn throttle_rates_scale_proportionally_with_override() {
+    let auto = DEFAULT_AGENT_THROTTLE_RATES;
+    let scaled = throttle_rates_for_bandwidth_kbps(16_000);
+    let auto_fields = [
+        auto.resend_bits_per_second,
+        auto.land_bits_per_second,
+        auto.wind_bits_per_second,
+        auto.cloud_bits_per_second,
+        auto.task_bits_per_second,
+        auto.texture_bits_per_second,
+        auto.asset_bits_per_second,
+    ];
+    let scaled_fields = [
+        scaled.resend_bits_per_second,
+        scaled.land_bits_per_second,
+        scaled.wind_bits_per_second,
+        scaled.cloud_bits_per_second,
+        scaled.task_bits_per_second,
+        scaled.texture_bits_per_second,
+        scaled.asset_bits_per_second,
+    ];
+    let auto_sum: f64 = auto_fields.into_iter().map(f64::from).sum();
+    let scaled_sum: f64 = scaled_fields.into_iter().map(f64::from).sum();
+    let expected_scale = 16_000_000.0 / auto_sum;
+
+    assert!((scaled_sum - 16_000_000.0).abs() < 16.0, "sum {scaled_sum} should equal 16_000_000 bps");
+    for (base, actual) in auto_fields.into_iter().zip(scaled_fields) {
+        let ratio = f64::from(actual) / f64::from(base);
+        assert!((ratio - expected_scale).abs() < 1e-5, "ratio {ratio} != {expected_scale}");
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn demoted_primary_times_out() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");

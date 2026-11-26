@@ -669,7 +669,8 @@ pub(super) async fn run(
         measured_ping_delay: connection.circuit.measured_ping_delay_average(),
         connected: false,
     });
-    let (circuit_stats_sender, circuit_stats_receiver) = watch::channel(super::CircuitStats::default());
+    let (circuit_stats_sender, circuit_stats_receiver) =
+        watch::channel(super::CircuitStats { throttle_rates: connection.throttle_rates, ..super::CircuitStats::default() });
     ConnectionTask {
         connection,
         events,
@@ -701,8 +702,11 @@ pub(super) async fn run(
         stats_sample_at: now,
         stats_sample_in: 0,
         stats_sample_out: 0,
+        stats_sample_bytes_in: 0,
+        bytes_in: 0,
         packets_in_per_sec: 0,
         packets_out_per_sec: 0,
+        bytes_in_per_sec: 0,
     }
     .run()
     .await

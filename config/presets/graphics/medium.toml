@@ -1,6 +1,6 @@
 [render]
 draw_distance = 256.0
-texture_soft_cap_mib = 1024
+max_texture_resolution = "1024"
 
 [scene]
 lod_factor = 1.0

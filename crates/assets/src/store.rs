@@ -12,11 +12,11 @@ use std::{
 };
 
 use tokio::sync::watch;
-use utils::{AssetId, Summary};
+use utils::{AssetId, Summary, hardware::Pressure};
 
 use crate::{
     Blob, Budget, Content, TextureEvents, TextureHandle, TextureSize, WeakTexture,
-    budget::{Reservation, TEXTURE_WORK_BYTES, WORK_BYTES},
+    budget::{Reservation, WORK_BYTES},
     cache::{AssetCache, AssetCacheError, AssetLookup, CacheWrite, read_work_bytes_for_request},
     content,
     content::{Finished, Prepared, StoredContent},
@@ -100,9 +100,9 @@ pub enum Kind {
 }
 
 impl Kind {
-    const fn work_bytes(self) -> Option<usize> {
+    const fn work_bytes(self, texture_work_bytes: usize) -> Option<usize> {
         match self {
-            Self::Texture => Some(TEXTURE_WORK_BYTES),
+            Self::Texture => Some(texture_work_bytes),
             Self::Mesh => None,
             _ => Some(WORK_BYTES),
         }
@@ -1553,6 +1553,9 @@ impl Store {
                 self.quarantine_candidate(candidate);
                 continue;
             }
+            if self.budget.pressure() != Pressure::Normal && entry.priority == Priority::Background {
+                continue;
+            }
             let request = entry.request;
             let mesh_fetch_mode = entry.mesh_fetch_mode;
             let mut cache_lookup_unchecked =
@@ -1584,8 +1587,11 @@ impl Store {
             else {
                 continue;
             };
-            let headroom =
-                if self.running_texture_decodes + self.running_other_decodes > 0 { 0 } else { TEXTURE_WORK_BYTES.saturating_sub(bytes) };
+            let headroom = if self.running_texture_decodes + self.running_other_decodes > 0 {
+                0
+            } else {
+                self.budget.texture_work_bytes().saturating_sub(bytes)
+            };
             let Some(reservation) = self.budget.reserve_with_headroom(bytes, headroom) else { continue };
             let generation = self.sequence.checked_add(1)?;
             self.sequence = generation;
@@ -1725,7 +1731,7 @@ impl Store {
         ) {
             return Err(input);
         }
-        if let Some(bytes) = input.job.resource.kind.work_bytes()
+        if let Some(bytes) = input.job.resource.kind.work_bytes(self.budget.texture_work_bytes())
             && !input.job.reservation.resize(bytes)
         {
             return Err(input);
@@ -1771,7 +1777,7 @@ impl Store {
         }
         match result {
             Ok(AssetLookup::Hit(asset)) => {
-                let decode_bytes = job.resource.kind.work_bytes().unwrap_or(asset.bytes.capacity());
+                let decode_bytes = job.resource.kind.work_bytes(self.budget.texture_work_bytes()).unwrap_or(asset.bytes.capacity());
                 job.reservation.shrink_to_at_most(decode_bytes.max(asset.bytes.capacity()));
                 if job.resource.kind != Kind::Mesh {
                     self.pending_non_mesh_cache_decodes += 1;

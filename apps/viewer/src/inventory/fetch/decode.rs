@@ -22,6 +22,30 @@ pub(super) fn ais_folders(root: &Category, requested: CategoryKey, is_library: b
     Ok(folders)
 }
 
+pub(super) fn ais_batch_folders(
+    parent_wire: &Category,
+    parent: CategoryKey,
+    requested: &[CategoryKey],
+    is_library: bool,
+) -> Result<Vec<FolderFetch>, InventoryFetchError> {
+    if parent_wire.id != parent.id().uuid() {
+        return Err(InventoryFetchError::InvalidResponse(DecodeError::UnexpectedStructure("parent category_id mismatch")));
+    }
+    let Some(wire_children) = &parent_wire.children else {
+        return Err(InventoryFetchError::InvalidResponse(DecodeError::UnexpectedStructure("missing batch children")));
+    };
+    let mut folders = Vec::new();
+    for child in wire_children {
+        if let Child::Category(category) = child {
+            append_ais_folder(category, parent.owner(), is_library, &mut folders)?;
+        }
+    }
+    if requested.iter().any(|folder| !folders.iter().any(|fetched| fetched.folder == *folder)) {
+        return Err(InventoryFetchError::InvalidResponse(DecodeError::UnexpectedStructure("missing requested batch folder")));
+    }
+    Ok(folders)
+}
+
 pub(super) fn append_ais_folder(
     wire: &Category,
     owner: InventoryOwner,

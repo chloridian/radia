@@ -45,7 +45,7 @@ fn water_color_ignores_far_plane() {
         )
     });
     let (_scene, view, _) = fixtures::water_scene(0);
-    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float, Limits::default());
 
     let camera = Camera::new(DVec3::new(128.0, 128.0, WATER_HEIGHT + 2.0), Vec3::new(1.0, 0.0, -0.01), 1.0, SIZE).expect("camera is valid");
     let distance = (WATER_HEIGHT - camera.position().z).abs() / f64::from(camera.direction().z.abs());

@@ -7,12 +7,15 @@ use prism::{
     assets::{Assets, icon_assets},
 };
 use prism_wgpu::WgpuDeviceRequirements;
+use render::scene;
 use tokio::runtime::Builder;
+use utils::hardware::Hardware;
 use viewer::{
     gui,
     inspection::inspection_channel,
+    limits::StartupLimits,
     logging::{self, LogLevel},
-    mcp,
+    mcp, pressure,
     settings::{SettingsStore, default_settings_path},
 };
 
@@ -107,7 +110,23 @@ fn main() -> io::Result<()> {
         publisher.set_log_control(log_control.clone());
     }
 
-    let cache_limit_bytes = u64::try_from(settings.get(ASSET_DISK_CACHE_CAPACITY_MIB)).unwrap_or(1024).saturating_mul(1024 * 1024);
+    let hardware = Hardware::detect_cpu_and_ram();
+    let pressure = pressure::spawn_monitor(&services);
+    let startup_limits = StartupLimits::resolve(hardware, &settings.snapshot());
+    tracing::info!(
+        cores = hardware.cores,
+        ram_mib = hardware.ram_bytes / (1024 * 1024),
+        reserved_threads = render::RESERVED_THREADS,
+        asset_work_mib = startup_limits.assets.work_bytes / (1024 * 1024),
+        asset_texture_work_mib = startup_limits.assets.texture_work_bytes / (1024 * 1024),
+        scene_memory_mib = (startup_limits.scene.memory_bytes != scene::UNBOUNDED_MEMORY_BYTES)
+            .then_some(startup_limits.scene.memory_bytes / (1024 * 1024)),
+        worker_threads = startup_limits.worker_threads,
+        texture_staging_mib = startup_limits.texture_staging_bytes / (1024 * 1024),
+        "hardware limits resolved"
+    );
+
+    let cache_limit_bytes = u64::try_from(settings.get(ASSET_DISK_CACHE_CAPACITY_MIB)).unwrap_or(6144).saturating_mul(1024 * 1024);
     let asset_cache = match AssetCache::open_default_with_limit(cache_limit_bytes) {
         Ok(cache) => {
             let stats = cache.stats();
@@ -127,7 +146,7 @@ fn main() -> io::Result<()> {
             limits: Some(render::required_limits()),
             backends: None,
         }));
-        gui::init(cx, services, gui_cache, log_control, gui_settings, inspection_publisher);
+        gui::init(cx, services, gui_cache, log_control, gui_settings, inspection_publisher, startup_limits, pressure);
     });
     if let Some(server) = mcp_server {
         server.shutdown();

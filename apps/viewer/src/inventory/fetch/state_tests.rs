@@ -137,3 +137,20 @@ fn in_flight_stays_queued() {
     assert_eq!(job.folders, [child]);
     assert!(background.is_empty());
 }
+
+#[test]
+fn ais_batches_twenty_siblings() {
+    let (inventory, root, children) = inventory_with_children(21);
+    let snapshot = inventory.snapshot();
+    let mut background = children.iter().map(|folder| BackgroundRequest { folder: *folder, depth: 16 }).collect::<VecDeque<_>>();
+    let mut queued = children.iter().copied().collect::<HashSet<_>>();
+
+    let job = next_background_job(&mut background, &mut queued, &snapshot, &HashSet::new(), &HashSet::new(), |_| SourceKind::Ais)
+        .expect("AIS sibling batch is available");
+
+    assert_eq!(job.parent, Some(root));
+    assert_eq!(job.depth, 16);
+    assert_eq!(job.folders, children[..20]);
+    assert_eq!(background.len(), 1);
+    assert_eq!(queued, HashSet::from([children[20]]));
+}

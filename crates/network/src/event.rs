@@ -6,13 +6,13 @@ use std::{
 };
 
 use llsd::Value;
-use protocol::{lludp::Message, login::ResponseData};
+use protocol::{lludp::Message, login::ResponseData, messages::ThrottleRates};
 use tokio::sync::{OwnedSemaphorePermit, mpsc, watch};
 
 use crate::{
     AgentSession,
     capabilities::Client,
-    circuit::admission::PacketMemoryReservation,
+    circuit::{admission::PacketMemoryReservation, default_throttle_rates},
     coverage::{CoverageLoss, CoverageWatermark},
     session::MfaChallenge,
 };
@@ -39,15 +39,35 @@ impl SimulatorId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CircuitStats {
     pub packets_in: u64,
     pub packets_out: u64,
     pub packets_in_per_sec: u32,
     pub packets_out_per_sec: u32,
+    pub bytes_in: u64,
+    pub bytes_in_per_sec: u64,
     pub unacked: usize,
     pub resent: u64,
     pub throttle_sent: bool,
+    pub throttle_rates: ThrottleRates,
+}
+
+impl Default for CircuitStats {
+    fn default() -> Self {
+        Self {
+            packets_in: 0,
+            packets_out: 0,
+            packets_in_per_sec: 0,
+            packets_out_per_sec: 0,
+            bytes_in: 0,
+            bytes_in_per_sec: 0,
+            unacked: 0,
+            resent: 0,
+            throttle_sent: false,
+            throttle_rates: default_throttle_rates(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

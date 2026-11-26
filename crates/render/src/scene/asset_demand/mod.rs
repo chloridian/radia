@@ -13,7 +13,8 @@ use std::{
 };
 
 use assets::{
-    Content, Failure, Kind, MaterialDescription, Priority, Request, Resource, Status, TextureHandle, TextureRef, TextureSize,
+    Content, Failure, Kind, MAX_TEXTURE_EDGE, MaterialDescription, Priority, Request, Resource, Status, TextureHandle, TextureRef,
+    TextureSize,
     mesh::{LodGeometry, MeshLod},
 };
 use math::DVec3;
@@ -1133,13 +1134,15 @@ impl AssetDemand {
         keys: &mut HashSet<AssetKey>,
     ) -> (AssetState, Option<TextureHandle>) {
         let repeats = repeats.max(1.0 / 64.0);
+        let max_edge = self.camera.map_or(MAX_TEXTURE_EDGE, Camera::max_texture_resolution);
         let size = if priority == Priority::Background {
             previous_texture_sizes
                 .get(&id)
                 .copied()
-                .unwrap_or_else(|| TextureSize::new((f64::from(TextureSize::new(32).edge()) / repeats).ceil() as u32))
+                .map(|previous| TextureSize::new(previous.edge().min(max_edge)))
+                .unwrap_or_else(|| TextureSize::new(((f64::from(TextureSize::new(32).edge()) / repeats).ceil() as u32).min(max_edge)))
         } else {
-            TextureSize::new((f64::from(size.edge()) / repeats).ceil() as u32)
+            TextureSize::new(((f64::from(size.edge()) / repeats).ceil() as u32).min(max_edge))
         };
         let (resolution, content) = self.observe(entity, region, Request::Texture { id, size }, size, priority, 0, keys);
         let image = match content {

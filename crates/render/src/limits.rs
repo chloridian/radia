@@ -1,0 +1,163 @@
+use utils::hardware::Hardware;
+
+use crate::geometry::{DEPTH_BYTES, INSTANCE_BUFFER_BYTES};
+
+pub const RESERVED_THREADS: usize = 2;
+const MIB: usize = 1024 * 1024;
+const GIB: usize = 1024 * MIB;
+const MIN_VRAM_BUDGET_BYTES: u64 = GIB as u64;
+const MIN_TEXTURE_SOFT_CAP_BYTES: usize = 768 * MIB;
+const DEFAULT_TEXTURE_SOFT_CAP_BYTES: usize = GIB;
+const DEFAULT_MESH_BYTES: usize = 64 * MIB;
+const MAX_MESH_BYTES: usize = 1024 * MIB;
+const DEFAULT_TEXTURE_STAGING_BYTES: usize = 48 * MIB;
+const MAX_TEXTURE_STAGING_BYTES: usize = 512 * MIB;
+const DEFAULT_WORKER_THREADS: usize = 4;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Limits {
+    pub texture_soft_cap_bytes: usize,
+    pub mesh_bytes: usize,
+    pub texture_staging_bytes: usize,
+    pub worker_threads: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            texture_soft_cap_bytes: DEFAULT_TEXTURE_SOFT_CAP_BYTES,
+            mesh_bytes: DEFAULT_MESH_BYTES,
+            texture_staging_bytes: DEFAULT_TEXTURE_STAGING_BYTES,
+            worker_threads: DEFAULT_WORKER_THREADS,
+        }
+    }
+}
+
+impl Limits {
+    pub fn derive(hardware: &Hardware) -> Self {
+        Self::derive_with_vram_policy(hardware, None, 1)
+    }
+
+    pub fn derive_with_vram_policy(hardware: &Hardware, max_vram_budget_bytes: Option<u64>, vram_divisor: u32) -> Self {
+        let worker_threads = auto_worker_threads(hardware.cores);
+        let usable_ram = hardware.usable_ram_bytes();
+        let texture_staging_bytes =
+            usize::try_from(usable_ram / 128).unwrap_or(usize::MAX).clamp(DEFAULT_TEXTURE_STAGING_BYTES, MAX_TEXTURE_STAGING_BYTES) / MIB
+                * MIB;
+        let divisor = u64::from(vram_divisor.clamp(1, 8));
+        let budget = match max_vram_budget_bytes {
+            Some(override_bytes) => override_bytes.max(MIN_VRAM_BUDGET_BYTES),
+            None => match hardware.vram.map(|vram| vram.budget_bytes.unwrap_or(vram.local_bytes)) {
+                Some(vram) => (vram / divisor).max(MIN_VRAM_BUDGET_BYTES),
+                None => MIN_VRAM_BUDGET_BYTES,
+            },
+        };
+        let mesh_bytes = usize::try_from(budget / 32).unwrap_or(usize::MAX).clamp(DEFAULT_MESH_BYTES, MAX_MESH_BYTES) / MIB * MIB;
+        let target = budget.saturating_sub(512 * MIB as u64).min(budget * 4 / 5).max(MIN_TEXTURE_SOFT_CAP_BYTES as u64);
+        let other_gpu = (mesh_bytes + DEPTH_BYTES + INSTANCE_BUFFER_BYTES) as u64;
+        let texture_soft_cap_bytes =
+            usize::try_from(target.saturating_sub(other_gpu)).unwrap_or(usize::MAX).max(MIN_TEXTURE_SOFT_CAP_BYTES) / MIB * MIB;
+        Self { texture_soft_cap_bytes, mesh_bytes, texture_staging_bytes, worker_threads }
+    }
+}
+
+pub fn auto_worker_threads(cores: usize) -> usize {
+    cores.saturating_sub(RESERVED_THREADS).max(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use utils::hardware::{Hardware, Vram};
+
+    use super::*;
+    use crate::scene;
+
+    #[test]
+    fn derive_low_end() {
+        let hardware = Hardware { cores: 4, ram_bytes: 8 * 1024 * 1024 * 1024, vram: None };
+        let render = Limits::derive(&hardware);
+        let scene_limits = scene::Limits::derive(&hardware);
+        let workers = render.worker_threads;
+        let asset_limits = assets::Limits::derive(workers);
+
+        assert_eq!(scene_limits.worker_threads, workers);
+        assert_eq!(render.texture_soft_cap_bytes, MIN_TEXTURE_SOFT_CAP_BYTES);
+        assert!(render.mesh_bytes >= DEFAULT_MESH_BYTES);
+        assert!(render.texture_staging_bytes >= DEFAULT_TEXTURE_STAGING_BYTES);
+        assert_eq!(scene_limits.memory_bytes, scene::UNBOUNDED_MEMORY_BYTES);
+        assert_eq!(asset_limits.work_bytes, 512 * MIB);
+        assert_eq!(asset_limits.texture_work_bytes, 192 * MIB);
+        assert!(workers <= hardware.cores - RESERVED_THREADS);
+        assert!(workers >= 2);
+    }
+
+    #[test]
+    fn derive_high_core() {
+        let hardware = Hardware {
+            cores: 32,
+            ram_bytes: 64 * 1024 * 1024 * 1024,
+            vram: Some(Vram { local_bytes: 24 * 1024 * 1024 * 1024, budget_bytes: None }),
+        };
+        let render = Limits::derive(&hardware);
+        let scene_limits = scene::Limits::derive(&hardware);
+        let workers = render.worker_threads;
+        let asset_limits = assets::Limits::derive(workers);
+
+        assert_eq!(scene_limits.worker_threads, workers);
+        assert!(workers <= hardware.cores - RESERVED_THREADS);
+        assert!(workers >= 2);
+        assert_eq!(scene_limits.memory_bytes, scene::UNBOUNDED_MEMORY_BYTES);
+        assert_eq!(asset_limits.work_bytes, workers * 128 * MIB);
+        assert_eq!(asset_limits.texture_work_bytes, asset_limits.work_bytes * 3 / 8);
+
+        let vram = 24 * 1024 * 1024 * 1024_u64;
+        let expected_target = vram.saturating_sub(512 * MIB as u64).min(vram * 4 / 5);
+        let other_gpu = (render.mesh_bytes + DEPTH_BYTES + INSTANCE_BUFFER_BYTES) as u64;
+        let expected_texture_cap = ((expected_target - other_gpu) as usize) / MIB * MIB;
+        assert_eq!(render.texture_soft_cap_bytes, expected_texture_cap);
+    }
+
+    #[test]
+    fn decode_budgets_scale_with_workers() {
+        assert_eq!(assets::Limits::derive(2), assets::Limits { work_bytes: 512 * MIB, texture_work_bytes: 192 * MIB });
+        assert_eq!(assets::Limits::derive(4), assets::Limits { work_bytes: 512 * MIB, texture_work_bytes: 192 * MIB });
+        assert_eq!(assets::Limits::derive(12), assets::Limits { work_bytes: 1536 * MIB, texture_work_bytes: 576 * MIB });
+        assert_eq!(assets::Limits::derive(30), assets::Limits { work_bytes: 3840 * MIB, texture_work_bytes: 1440 * MIB });
+    }
+
+    #[test]
+    fn derive_vram_and_divisor() {
+        let hardware = Hardware {
+            cores: 6,
+            ram_bytes: 32 * 1024 * 1024 * 1024,
+            vram: Some(Vram { local_bytes: 6 * 1024 * 1024 * 1024, budget_bytes: None }),
+        };
+        let div1 = Limits::derive_with_vram_policy(&hardware, None, 1);
+        assert_eq!(div1.mesh_bytes, 192 * MIB);
+        assert_eq!(div1.texture_soft_cap_bytes, (4915 - 192 - 128 - 64) * MIB);
+
+        let div2 = Limits::derive_with_vram_policy(&hardware, None, 2);
+        assert_eq!(div2.mesh_bytes, 96 * MIB);
+        assert_eq!(div2.texture_soft_cap_bytes, (2457 - 96 - 128 - 64) * MIB);
+    }
+
+    #[test]
+    fn derive_vram_override_wins_over_divisor() {
+        let hardware = Hardware {
+            cores: 6,
+            ram_bytes: 32 * 1024 * 1024 * 1024,
+            vram: Some(Vram { local_bytes: 6 * 1024 * 1024 * 1024, budget_bytes: None }),
+        };
+        let limits = Limits::derive_with_vram_policy(&hardware, Some(1792 * MIB as u64), 4);
+        assert_eq!(limits.mesh_bytes, 64 * MIB);
+        assert_eq!(limits.texture_soft_cap_bytes, 1024 * MIB);
+    }
+
+    #[test]
+    fn derive_vram_unknown() {
+        let hardware = Hardware { cores: 16, ram_bytes: 32 * 1024 * 1024 * 1024, vram: None };
+        let render = Limits::derive(&hardware);
+        assert_eq!(render.mesh_bytes, 64 * MIB);
+        assert_eq!(render.texture_soft_cap_bytes, MIN_TEXTURE_SOFT_CAP_BYTES);
+    }
+}

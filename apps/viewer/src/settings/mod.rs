@@ -577,7 +577,7 @@ lod_factor = 999.0
 
         let outcome = store.set_global_and_save(ASSET_DISK_CACHE_CAPACITY_MIB, 2048).expect("stage restart-required override");
         assert!(outcome.pending_restart);
-        assert_eq!(store.get(ASSET_DISK_CACHE_CAPACITY_MIB), 1024);
+        assert_eq!(store.get(ASSET_DISK_CACHE_CAPACITY_MIB), 6144);
         assert_eq!(store.pending_restarts().len(), 1);
         assert_eq!(store.pending_restarts()[0].0.name, "asset.disk_cache_capacity_mib");
 

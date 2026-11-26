@@ -268,6 +268,17 @@ pub struct CvarDescriptor {
     pub help: &'static str,
 }
 
+impl CvarDescriptor {
+    fn validate(&self, value: &CvarValue) -> Result<CvarValue, CvarError> {
+        if let (CvarValue::I64(0), ValueDomain::I64 { min, max }, CvarValue::I64(0)) = (&self.default, self.domain, value)
+            && !(min..=max).contains(&0)
+        {
+            return Ok(CvarValue::I64(0));
+        }
+        self.domain.validate(self.name, value)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct CvarRevision(u64);
 
@@ -402,7 +413,7 @@ impl CvarRegistry {
     pub fn set_value(&mut self, id: CvarId, layer: Layer, value: &CvarValue) -> Result<CvarRevision, CvarError> {
         let descriptor = id.descriptor();
         let slot = Self::validate_layer(descriptor, layer)?;
-        let validated = descriptor.domain.validate(descriptor.name, value)?;
+        let validated = descriptor.validate(value)?;
         let normalized = if layer == Layer::Global && validated == descriptor.default { None } else { Some(validated) };
         if self.layers[slot][id.0] != normalized {
             self.layers[slot][id.0] = normalized;
@@ -425,7 +436,7 @@ impl CvarRegistry {
         for (name, value) in entries {
             let descriptor = lookup_by_name(name).ok_or_else(|| CvarError::UnknownName((*name).to_owned()))?;
             let slot = Self::validate_layer(descriptor, layer)?;
-            let validated = descriptor.domain.validate(descriptor.name, value)?;
+            let validated = descriptor.validate(value)?;
             let normalized = if layer == Layer::Global && validated == descriptor.default { None } else { Some(validated) };
             staged.push((slot, descriptor.id.0, normalized));
         }
@@ -450,7 +461,7 @@ impl CvarRegistry {
         for (name, value) in entries {
             let descriptor = lookup_by_name(name).ok_or_else(|| CvarError::UnknownName((*name).to_owned()))?;
             Self::validate_layer(descriptor, layer)?;
-            let validated = descriptor.domain.validate(descriptor.name, value)?;
+            let validated = descriptor.validate(value)?;
             let normalized = if layer == Layer::Global && validated == descriptor.default { None } else { Some(validated) };
             next[descriptor.id.0] = normalized;
         }
@@ -607,10 +618,12 @@ mod tests {
 
         assert_eq!(RENDER_DRAW_DISTANCE.default_value(), 512.0);
         assert_eq!(SCENE_LOD_FACTOR.default_value(), 1.0);
-        assert_eq!(RENDER_TEXTURE_SOFT_CAP_MIB.default_value(), 1024);
+        assert_eq!(MEMORY_MAX_VRAM_MIB.default_value(), 0);
+        assert_eq!(MEMORY_VRAM_DIVISOR.default_value(), 1);
+        assert_eq!(RENDER_MAX_TEXTURE_RESOLUTION.default_value(), "2048");
         assert_eq!(snapshot.get(RENDER_DRAW_DISTANCE), 512.0);
         assert_eq!(snapshot.get(SCENE_LOD_FACTOR), 1.0);
-        assert_eq!(snapshot.get(RENDER_TEXTURE_SOFT_CAP_MIB), 1024);
+        assert_eq!(snapshot.get(MEMORY_MAX_VRAM_MIB), 0);
         assert_eq!(
             snapshot.provenance(RENDER_DRAW_DISTANCE.id()),
             CvarProvenance { value: CvarValue::F32(512.0), source: Layer::Default, pending_restart_value: None }
@@ -686,6 +699,38 @@ mod tests {
             registry.set(RENDER_DRAW_DISTANCE, Layer::Default, 512.0),
             Err(CvarError::LayerNotAllowed { name: "render.draw_distance", layer: Layer::Default })
         );
+        assert_matches!(
+            registry.set(MEMORY_MAX_VRAM_MIB, Layer::Session, 1023),
+            Err(CvarError::OutOfBounds { name: "memory.max_vram_mib" })
+        );
+        assert_matches!(registry.set(MEMORY_MAX_VRAM_MIB, Layer::Session, -1), Err(CvarError::OutOfBounds { name: "memory.max_vram_mib" }));
+        assert_matches!(registry.set(RENDER_MAX_FPS, Layer::Session, 0), Err(CvarError::OutOfBounds { name: "render.max_fps" }));
+        registry.set(MEMORY_MAX_VRAM_MIB, Layer::Session, 0).expect("auto zero is valid");
+        registry.set(MEMORY_MAX_VRAM_MIB, Layer::Session, 1024).expect("range min is valid");
+        registry.set(MEMORY_MAX_VRAM_MIB, Layer::Session, 65536).expect("range max is valid");
+        assert_matches!(
+            registry.set(RENDER_WORKER_THREADS, Layer::Session, 1),
+            Err(CvarError::OutOfBounds { name: "render.worker_threads" })
+        );
+        registry.set(RENDER_WORKER_THREADS, Layer::Session, 0).expect("auto zero is valid");
+        registry.set(RENDER_WORKER_THREADS, Layer::Session, 2).expect("range min is valid");
+        registry.set(RENDER_WORKER_THREADS, Layer::Session, 64).expect("range max is valid");
+        assert_matches!(
+            registry.set(RENDER_MAX_TEXTURE_RESOLUTION, Layer::Session, "256"),
+            Err(CvarError::InvalidEnumVariant { name: "render.max_texture_resolution", .. })
+        );
+        registry.set(RENDER_MAX_TEXTURE_RESOLUTION, Layer::Session, "512").expect("enum value is valid");
+        assert_matches!(registry.set(MEMORY_MAX_RAM_MIB, Layer::Session, 255), Err(CvarError::OutOfBounds { name: "memory.max_ram_mib" }));
+        registry.set(MEMORY_MAX_RAM_MIB, Layer::Session, 0).expect("auto zero is valid");
+        registry.set(MEMORY_MAX_RAM_MIB, Layer::Session, 256).expect("range min is valid");
+        registry.set(MEMORY_MAX_RAM_MIB, Layer::Session, 65536).expect("range max is valid");
+        assert_matches!(
+            registry.set(NETWORK_MAX_BANDWIDTH_KBPS, Layer::Session, 499),
+            Err(CvarError::OutOfBounds { name: "network.max_bandwidth_kbps" })
+        );
+        registry.set(NETWORK_MAX_BANDWIDTH_KBPS, Layer::Session, 0).expect("auto zero is valid");
+        registry.set(NETWORK_MAX_BANDWIDTH_KBPS, Layer::Session, 500).expect("range min is valid");
+        registry.set(NETWORK_MAX_BANDWIDTH_KBPS, Layer::Session, 50000).expect("range max is valid");
         assert_eq!(registry.get(RENDER_DRAW_DISTANCE), 512.0);
     }
 
@@ -707,14 +752,14 @@ mod tests {
                 &[
                     ("render.draw_distance", CvarValue::F32(256.0)),
                     ("scene.lod_factor", CvarValue::F32(2.0)),
-                    ("render.texture_soft_cap_mib", CvarValue::I64(2048)),
+                    ("memory.max_vram_mib", CvarValue::I64(2048)),
                 ],
             )
             .expect("valid batch applies");
         assert!(after > before);
         assert_eq!(registry.get(RENDER_DRAW_DISTANCE), 256.0);
         assert_eq!(registry.get(SCENE_LOD_FACTOR), 2.0);
-        assert_eq!(registry.get(RENDER_TEXTURE_SOFT_CAP_MIB), 2048);
+        assert_eq!(registry.get(MEMORY_MAX_VRAM_MIB), 2048);
     }
 
     #[test]
@@ -815,7 +860,7 @@ mod tests {
         assert_eq!(by_name_match, vec!["render.draw_distance"]);
 
         let by_help_match = search("EVICTION", false).map(|descriptor| descriptor.name).collect::<Vec<_>>();
-        assert_eq!(by_help_match, vec!["render.texture_soft_cap_mib"]);
+        assert_eq!(by_help_match, vec!["memory.max_vram_mib"]);
 
         let synthetic = [
             CvarDescriptor {
@@ -858,20 +903,21 @@ mod tests {
     #[test]
     fn graphics_presets_apply() {
         let cases = [
-            ("low", 128.0_f32, 512_i64, 0.75_f32),
-            ("medium", 256.0_f32, 1024_i64, 1.0_f32),
-            ("high", 384.0_f32, 1536_i64, 1.5_f32),
-            ("ultra", 512.0_f32, 2048_i64, 2.0_f32),
+            ("low", 128.0_f32, "512", 0.75_f32),
+            ("medium", 256.0_f32, "1024", 1.0_f32),
+            ("high", 384.0_f32, "2048", 1.5_f32),
+            ("ultra", 512.0_f32, "2048", 2.0_f32),
         ];
 
         assert_eq!(GRAPHICS_PRESETS.len(), cases.len());
         let mut registry = CvarRegistry::new();
 
-        for (name, draw_distance, texture_cap, lod_factor) in cases {
+        for (name, draw_distance, max_texture_res, lod_factor) in cases {
             assert!(graphics_preset(name).is_some(), "missing preset `{name}`");
             registry.apply_graphics_preset(Some(name)).expect("apply bundled preset");
             assert_eq!(registry.get(RENDER_DRAW_DISTANCE), draw_distance);
-            assert_eq!(registry.get(RENDER_TEXTURE_SOFT_CAP_MIB), texture_cap);
+            assert_eq!(registry.get(RENDER_MAX_TEXTURE_RESOLUTION), max_texture_res);
+            assert_eq!(registry.get(MEMORY_MAX_VRAM_MIB), 0);
             assert_eq!(registry.get(SCENE_LOD_FACTOR), lod_factor);
             assert_eq!(registry.snapshot().provenance(RENDER_DRAW_DISTANCE.id()).source, Layer::Preset);
         }

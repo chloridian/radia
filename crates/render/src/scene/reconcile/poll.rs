@@ -1,4 +1,4 @@
-use std::mem;
+use std::{mem, sync::atomic::Ordering};
 
 use super::{
     Change, DeliveryState, Duration, Instant, MAX_OBJECT_DETAIL_BATCH_ITEMS, MeshChange, MeshJob, POLL_DELAY, PageState, READ_QUANTUM,
@@ -8,6 +8,7 @@ use crate::scene::region_environment::EnvironmentStart;
 
 impl Reconciler {
     pub fn poll(&mut self, now: Instant) -> ReconcileStep {
+        let _ = self.preparation.meshes.evict_pressure_turn();
         if let Some(event) = self.preparation.environments.event() {
             return ReconcileStep::Asset(event);
         }
@@ -139,6 +140,9 @@ impl Reconciler {
                 }
             }
             if !self.world.pending.is_empty() {
+                if self.world.pending.len() > MAX_OBJECT_DETAIL_BATCH_ITEMS {
+                    self.detail_batch_waits.fetch_add(1, Ordering::Relaxed);
+                }
                 let entities = self.world.pending.iter().take(MAX_OBJECT_DETAIL_BATCH_ITEMS).copied().collect();
                 return self.read(ReadQuery::Details(entities), now);
             }

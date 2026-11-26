@@ -8,7 +8,7 @@ use std::{
 use protocol::{
     lludp::Message,
     messages::{
-        AgentThrottle, LogoutRequest,
+        AgentThrottle, LogoutRequest, ThrottleRates,
         agent::{
             agent_throttle::{AgentData, Throttle},
             logout_request,
@@ -21,8 +21,8 @@ use tokio::{
 };
 
 use super::{
-    ConnectionError, DEFAULT_AGENT_THROTTLE_RATES, LOGOUT_TIMEOUT, MAX_NONCONTROL_SENDS, MAX_PENDING_SEND_BYTES,
-    MAX_PENDING_SEND_NOTIFICATIONS, MAX_PENDING_SENDS, MAX_SEND_AGE, MAX_SEND_ERROR_BYTES, OUTBOUND_SEND_CHARGE_BYTES, SimulatorEvent,
+    ConnectionError, LOGOUT_TIMEOUT, MAX_NONCONTROL_SENDS, MAX_PENDING_SEND_BYTES, MAX_PENDING_SEND_NOTIFICATIONS, MAX_PENDING_SENDS,
+    MAX_SEND_AGE, MAX_SEND_ERROR_BYTES, OUTBOUND_SEND_CHARGE_BYTES, SimulatorEvent,
 };
 use crate::{
     AgentSession,
@@ -299,10 +299,10 @@ pub(super) fn logout_message(session: &AgentSession) -> Message {
     })
 }
 
-pub(super) fn agent_throttle_message(session: &AgentSession) -> Message {
+pub(super) fn agent_throttle_message(session: &AgentSession, throttles: ThrottleRates) -> Message {
     Message::AgentThrottle(AgentThrottle {
         agent_data: AgentData { agent_id: session.agent_id, session_id: session.session_id, circuit_code: session.circuit_code },
-        throttle: Throttle { gen_counter: 0, throttles: DEFAULT_AGENT_THROTTLE_RATES },
+        throttle: Throttle { gen_counter: 0, throttles },
     })
 }
 

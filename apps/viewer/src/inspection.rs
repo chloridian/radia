@@ -8,7 +8,7 @@ use std::{
 
 use network::{CircuitMotionStatus, CircuitStats, SessionHandle, SimulatorId, capabilities::Client as CapabilityClient};
 use protocol::messages::SimStats;
-use render::{CaptureReadback, ObjectExplanation, PickDetail, PickError, Stats};
+use render::{CaptureReadback, ObjectExplanation, PickDetail, PickError, Stats, WorkerStats};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{
@@ -88,6 +88,8 @@ pub struct SessionQueuesSnapshot {
 #[derive(Clone, Copy, Default)]
 pub struct RenderStatsSnapshot {
     pub frame_ms: f64,
+    pub frame_p50_ms: f64,
+    pub frame_p99_ms: f64,
     pub game_ms: f64,
     pub render_ms: f64,
     pub fps: f64,
@@ -97,6 +99,8 @@ pub struct RenderStatsSnapshot {
     pub frame_spikes: FrameSpikeRing,
     pub texture_completions_capacity: usize,
     pub texture_completions_dropped: u64,
+    pub detail_batch_waits: u64,
+    pub workers: WorkerStats,
 }
 
 #[derive(Clone, Debug, Default)]

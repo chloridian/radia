@@ -4,7 +4,10 @@ mod read;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-    sync::{Arc, Weak},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -222,12 +225,18 @@ pub struct Reconciler {
     viewer: ViewerEnvironments,
     active_environment_textures: BTreeMap<AssetId, Region>,
     environment_identity: u64,
+    detail_batch_waits: Arc<AtomicU64>,
 }
 
 impl Reconciler {
+    pub fn detail_batch_waits(&self) -> u64 {
+        self.detail_batch_waits.load(Ordering::Relaxed)
+    }
+
     pub fn new(budget: Budget) -> (Self, SceneView) {
         let session = SceneLifetime::new();
         let view = SceneView::new(session.clone());
+        let detail_batch_waits = view.detail_batch_waits_counter();
         let scene = Self {
             session,
             world: WorldSync::new(0, None),
@@ -256,6 +265,7 @@ impl Reconciler {
             },
             recovery: RecoveryState { startup: true, status: Status::Loading, status_pending: false, failures: 0, retry: None },
             environment_identity: 1,
+            detail_batch_waits,
             budget,
         };
         (scene, view)

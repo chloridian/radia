@@ -10,8 +10,8 @@ use std::{
 };
 
 use cvars::{
-    CAMERA_TURN_RATE_DEG_PER_SEC, LOG_LEVEL, LOG_NOISY_NETWORK, RENDER_DRAW_DISTANCE, RENDER_MAX_FPS, RENDER_SHOW_STATS, SCENE_LOD_FACTOR,
-    ValueDomain,
+    CAMERA_TURN_RATE_DEG_PER_SEC, LOG_LEVEL, LOG_NOISY_NETWORK, RENDER_DRAW_DISTANCE, RENDER_MAX_FPS, RENDER_MAX_TEXTURE_RESOLUTION,
+    RENDER_SHOW_STATS, SCENE_LOD_FACTOR, ValueDomain,
 };
 use futures::{StreamExt, channel::mpsc as async_mpsc};
 use prism::{
@@ -34,13 +34,16 @@ use prism::{
     px, rgb, rgb_to_hsla, size, surface, white,
 };
 use prism_wgpu::WgpuContextHandle;
-use render::{CompressionQuality, FrameInput, Renderer, TextureCompletion, scene, scene::EnvironmentChoice};
+use render::{CompressionQuality, FrameInput, Renderer, TextureCompletion, WorkerBudget, WorkerKind, scene, scene::EnvironmentChoice};
 use tokio::{
     runtime::Handle,
     sync::{mpsc as tokio_mpsc, watch},
 };
 use tracing::Instrument;
-use utils::Summary;
+use utils::{
+    Summary,
+    hardware::{Pressure, Vram},
+};
 use uuid::Uuid;
 use wgpu::{Device, Queue};
 
@@ -60,10 +63,12 @@ use crate::{
         SetCameraRequest, ViewportQuery,
     },
     inventory::environments::EnvironmentMenu,
+    limits::{StartupLimits, parse_max_texture_resolution},
     logging::{LogControl, LogLevel},
     scene_feed::{SceneFeed, SceneSources},
     session::AgentMotionSample,
     settings::SettingsStore,
+    worker_pool::WorkerPool,
 };
 
 const TEXTURE_DROP_REPORT_INTERVAL: Duration = Duration::from_secs(10);
@@ -83,6 +88,9 @@ pub(crate) struct SceneViewConfig {
     pub(crate) runtime: Handle,
     pub(crate) log_control: LogControl,
     pub(crate) settings: Arc<SettingsStore>,
+    pub(crate) startup_limits: StartupLimits,
+    pub(crate) scene_budget: scene::Budget,
+    pub(crate) pressure: watch::Receiver<Pressure>,
     pub(crate) render_stats: watch::Sender<RenderStatsSnapshot>,
     pub(crate) viewport_queries: tokio_mpsc::Receiver<ViewportQuery>,
 }
@@ -132,8 +140,15 @@ pub(crate) struct SceneView {
     ready: bool,
     failed: bool,
     settings: Arc<SettingsStore>,
+    startup_limits: StartupLimits,
+    worker_threads: usize,
+    workers: WorkerBudget,
+    worker_pool: WorkerPool,
+    pressure: watch::Receiver<Pressure>,
+    vram: Option<Vram>,
     lod_factor: f32,
     draw_distance: f32,
+    max_texture_resolution: u32,
     camera: Option<OrbitCamera>,
     follow_camera: FollowCamera,
     camera_mode: CameraMode,
@@ -161,12 +176,17 @@ impl SceneView {
         let focus_handle = cx.focus_handle();
         let (wake_tx, mut wake_rx) = async_mpsc::channel::<()>(1);
         let feed_wake = wake_tx.clone();
+        let worker_threads = config.startup_limits.worker_threads;
+        let workers = config.scene_budget.workers();
+        let worker_pool = WorkerPool::new(worker_threads);
         let feed = SceneFeed::start(
             config.sources,
             config.agent_id,
             config.camera,
             config.movement,
             config.agent_motion,
+            config.scene_budget,
+            worker_pool.clone(),
             config.runtime,
             move || {
                 let mut wake = feed_wake.clone();
@@ -174,11 +194,12 @@ impl SceneView {
             },
         );
 
-        let (texture_sender, texture_receiver) = mpsc::sync_channel(render::max_texture_jobs());
+        let (texture_sender, texture_receiver) = mpsc::sync_channel(worker_threads);
         let settings = config.settings;
         let snapshot = settings.snapshot();
         let lod_factor = snapshot.get(SCENE_LOD_FACTOR);
         let draw_distance = snapshot.get(RENDER_DRAW_DISTANCE);
+        let max_texture_resolution = parse_max_texture_resolution(snapshot.get(RENDER_MAX_TEXTURE_RESOLUTION));
         let show_stats = snapshot.get(RENDER_SHOW_STATS);
         let camera_config = CameraConfig::from_snapshot(&snapshot);
         let (lod_min, lod_max, lod_step) = f32_slider_bounds(SCENE_LOD_FACTOR.descriptor().domain);
@@ -324,8 +345,15 @@ impl SceneView {
             ready: false,
             failed: false,
             settings,
+            startup_limits: config.startup_limits,
+            worker_threads,
+            workers,
+            worker_pool,
+            pressure: config.pressure,
+            vram: None,
             lod_factor,
             draw_distance,
+            max_texture_resolution,
             camera: None,
             follow_camera,
             camera_mode: CameraMode::Follow,
@@ -381,10 +409,14 @@ impl SceneView {
         };
         let format = handle.texture_format();
         let info = handle.adapter_info().clone();
+        let vram = handle.adapter_memory().map(|memory| Vram { local_bytes: memory.local_bytes, budget_bytes: memory.budget_bytes });
+        self.vram = vram;
+        let render_limits = self.startup_limits.resolve_render(vram, &self.settings.snapshot());
         let limits = device.limits();
         let [width, height] = self.viewport_size;
-        match Renderer::new(device, queue, info, format, width, height) {
-            Ok(renderer) => {
+        match Renderer::new(device, queue, info, format, width, height, render_limits, self.workers.clone()) {
+            Ok(mut renderer) => {
+                renderer.set_pressure(*self.pressure.borrow_and_update());
                 let info = renderer.adapter_info();
                 if let Some(publisher) = inspection(cx) {
                     publisher.set_gpu_info(GpuInfo::from_wgpu(info, &limits));
@@ -394,6 +426,12 @@ impl SceneView {
                     gpu = %info.name,
                     driver = %info.driver,
                     driver_info = %info.driver_info,
+                    vram_local_mib = vram.map(|v| v.local_bytes / (1024 * 1024)),
+                    vram_budget_mib = vram.and_then(|v| v.budget_bytes).map(|b| b / (1024 * 1024)),
+                    texture_soft_cap_mib = render_limits.texture_soft_cap_bytes / (1024 * 1024),
+                    mesh_memory_mib = render_limits.mesh_bytes / (1024 * 1024),
+                    texture_staging_mib = render_limits.texture_staging_bytes / (1024 * 1024),
+                    worker_threads = render_limits.worker_threads,
                     "scene GPU initialized"
                 );
                 self.renderer = Some(renderer);
@@ -608,6 +646,8 @@ impl SceneView {
         let metrics = self.frame_times.metrics();
         let snapshot = RenderStatsSnapshot {
             frame_ms: metrics.map_or(0.0, |m| m.frametime_ms),
+            frame_p50_ms: metrics.map_or(0.0, |m| m.frame_p50_ms),
+            frame_p99_ms: metrics.map_or(0.0, |m| m.frame_p99_ms),
             game_ms: metrics.map_or(0.0, |m| m.game_ms),
             render_ms: metrics.map_or(0.0, |m| m.render_ms),
             fps: metrics.map_or(0.0, |m| m.fps),
@@ -615,8 +655,10 @@ impl SceneView {
             gpu_timings: renderer.gpu_timings(),
             viewport_size: self.viewport_size,
             frame_spikes: self.frame_times.spikes(),
-            texture_completions_capacity: render::max_texture_jobs(),
+            texture_completions_capacity: self.worker_threads,
             texture_completions_dropped: self.texture_completions_dropped_total,
+            detail_batch_waits: self.feed.as_ref().map_or(0, |feed| feed.view.detail_batch_waits()),
+            workers: self.workers.stats(),
         };
         self.render_stats.send_replace(snapshot);
     }
@@ -768,7 +810,10 @@ impl SceneView {
         let mut orbit = OrbitCamera::from_follow_view(position, focus, self.draw_distance, self.lod_factor);
         orbit.config = self.follow_camera.config;
         let viewport = [self.viewport_size[0].max(1), self.viewport_size[1].max(1)];
-        let scene_camera = orbit.scene_camera(viewport, now).ok_or_else(|| "invalid camera pose".to_owned())?;
+        let scene_camera = orbit
+            .scene_camera(viewport, now)
+            .ok_or_else(|| "invalid camera pose".to_owned())?
+            .with_max_texture_resolution(self.max_texture_resolution);
 
         self.camera = Some(orbit);
         self.camera_mode.detach_for_focus();
@@ -791,13 +836,14 @@ impl SceneView {
 
     fn camera_observation(&mut self, pose: Option<world::WorldPose>, rotation: math::Quat, now: Instant) -> Option<scene::Camera> {
         let viewport = self.viewport_size;
-        match self.camera_mode {
+        let camera = match self.camera_mode {
             CameraMode::Follow => pose.and_then(|mut pose| {
                 pose.rotation = rotation;
                 self.follow_camera.follow(pose, viewport, self.draw_distance, self.lod_factor, now)
             }),
             CameraMode::Free => self.camera.as_ref().and_then(|camera| camera.scene_camera(viewport, now)),
-        }
+        };
+        camera.map(|camera| camera.with_max_texture_resolution(self.max_texture_resolution))
     }
 
     fn sync_environment_selects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -880,7 +926,14 @@ impl SceneView {
             let dropped = Arc::clone(&self.dropped_textures);
             let mut wake = self.wake_tx.clone();
             let span = tracing::Span::current();
-            let work = feed.runtime.spawn_blocking(move || span.in_scope(|| job.run(CompressionQuality::Fast)));
+            let visible = job.is_visible();
+            let workers = self.workers.clone();
+            let work = self.worker_pool.spawn(visible, move || {
+                let started = Instant::now();
+                let completion = span.in_scope(|| job.run(CompressionQuality::Fast));
+                workers.record_busy(WorkerKind::Texture, started.elapsed());
+                completion
+            });
             drop(
                 feed.runtime.spawn(
                     async move {
@@ -919,6 +972,12 @@ impl SceneView {
             self.dirty |= before != feed.view.version();
         }
         self.complete_texture_jobs();
+        if self.pressure.has_changed().unwrap_or(false) {
+            let level = *self.pressure.borrow_and_update();
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_pressure(level);
+            }
+        }
 
         let now = Instant::now();
         let snapshot = self.settings.snapshot();
@@ -929,6 +988,17 @@ impl SceneView {
         }
         let turn_rate = snapshot.get(CAMERA_TURN_RATE_DEG_PER_SEC).to_radians();
         let frame_interval = frame_interval_for_fps(snapshot.get(RENDER_MAX_FPS));
+        let max_texture_resolution = parse_max_texture_resolution(snapshot.get(RENDER_MAX_TEXTURE_RESOLUTION));
+        if self.max_texture_resolution != max_texture_resolution {
+            self.max_texture_resolution = max_texture_resolution;
+            self.dirty = true;
+        }
+        let texture_soft_cap_mib = self.startup_limits.resolve_texture_soft_cap_mib(self.vram, &snapshot);
+        if let Some(renderer) = &mut self.renderer
+            && renderer.texture_soft_cap_mib() != texture_soft_cap_mib
+        {
+            renderer.set_texture_soft_cap(texture_soft_cap_mib);
+        }
         let (pose, seed) = self.agent_pose_and_seed_at(now);
         self.ensure_camera(pose);
         let rotation = self.body_rotation.update_with_turn_rate(seed, self.controls.yaw(self.modifiers.shift), turn_rate, now);

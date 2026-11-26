@@ -27,23 +27,21 @@ persistent = true
 apply = "live"
 help = "Maximum viewport frame rate in frames per second."
 
-[render.texture_soft_cap_mib]
-type = "i64"
-default = 1024
-range = [128, 4096]
-unit = "MiB"
+[render.max_texture_resolution]
+type = "enum"
+default = "2048"
+values = ["512", "1024", "2048"]
 persistent = true
 apply = "live"
-help = "Target memory cap in MiB for decoded textures before background eviction."
+help = "Maximum texture edge resolution requested for scene textures."
 
-[render.mesh_memory_mib]
+[render.worker_threads]
 type = "i64"
-default = 64
-range = [16, 1024]
-unit = "MiB"
+default = 0
+range = [2, 64]
 persistent = true
 apply = "restart_required"
-help = "GPU memory budget in MiB for resident scene meshes."
+help = "Total background CPU worker threads shared by texture and mesh jobs (0 = auto)."
 
 [render.show_stats]
 type = "bool"

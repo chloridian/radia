@@ -17,7 +17,7 @@ use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::AssetHandle,
     gui::{
-        AppLifecycle, inspection, log_control, login_options, settings,
+        AppLifecycle, inspection, log_control, login_options, scene_budget, settings, startup_limits,
         views::{
             chat::ChatScreen,
             viewport::{SceneView, SceneViewConfig, ViewportError},
@@ -113,6 +113,8 @@ pub(crate) fn start_session(
     let runtime = Tokio::handle(cx);
     let logs = log_control(cx);
     let settings = settings(cx);
+    let startup_limits = startup_limits(cx);
+    let scene_budget = scene_budget(cx);
     let (render_stats_tx, render_stats_rx) = watch::channel(RenderStatsSnapshot::default());
     let (viewport_queries_tx, viewport_queries_rx) = mpsc::channel(VIEWPORT_QUERY_CAPACITY);
     if let Some(publisher) = inspection(cx) {
@@ -136,6 +138,9 @@ pub(crate) fn start_session(
         runtime,
         log_control: logs,
         settings,
+        startup_limits,
+        scene_budget,
+        pressure: super::pressure(cx),
         render_stats: render_stats_tx,
         viewport_queries: viewport_queries_rx,
     };

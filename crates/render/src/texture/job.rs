@@ -69,7 +69,7 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
 
     use super::*;
-    use crate::texture::{Accounting, STAGING_BYTES, fixtures::loaded, max_jobs};
+    use crate::texture::{Accounting, fixtures::loaded};
 
     #[test]
     fn completion_retains_only_work() {
@@ -78,6 +78,7 @@ mod tests {
             let image = texture.image().unwrap();
             let original = image.pixels().as_ptr();
             let memory = Arc::new(Accounting::default());
+            let staging_bytes = memory.staging_bytes;
             let job = TextureJob {
                 id: texture.id(),
                 revision: texture.info().unwrap().revision,
@@ -88,8 +89,9 @@ mod tests {
                 staging: memory.reserve(8 * 8 * 4).unwrap(),
                 work: memory.work().unwrap(),
                 compress: false,
+                visible: true,
             };
-            let others: Vec<_> = (1..max_jobs()).map(|_| memory.work().unwrap()).collect();
+            let others: Vec<_> = (1..memory.workers.capacity()).map(|_| memory.work().unwrap()).collect();
             assert!(memory.work().is_none());
             let completion = job.run(CompressionQuality::Fast);
             match &completion.data {
@@ -100,19 +102,19 @@ mod tests {
                     if rgba {
                         assert_eq!(rgba_pixels.bytes().as_ptr(), original, "RGBA upload reuses the decoded allocation");
                     }
-                    assert!(memory.reserve(STAGING_BYTES).is_none());
+                    assert!(memory.reserve(staging_bytes).is_none());
                 }
                 Conversion::Failed(failure) => {
                     assert!(cancelled);
                     assert_eq!(*failure, Failure::Cancelled);
-                    assert!(memory.reserve(STAGING_BYTES).is_some());
+                    assert!(memory.reserve(staging_bytes).is_some());
                 }
             }
             assert!(memory.work().is_none(), "queued completions retain admission through delivery");
             drop(completion);
             drop(others);
             assert!(memory.work().is_some());
-            assert!(memory.reserve(STAGING_BYTES).is_some());
+            assert!(memory.reserve(staging_bytes).is_some());
         }
     }
 }

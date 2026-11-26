@@ -4,6 +4,7 @@ use world::FaceAppearance;
 
 use super::{GeometryRenderer, fixtures};
 use crate::{
+    Limits,
     environment::{Evaluated, Schedule, Sources, evaluate},
     scene::Camera,
 };
@@ -73,7 +74,7 @@ fn environment() -> Evaluated {
 
 fn center_rgb(device: &Device, queue: &Queue, objects: &[(Vec3, Vec3, FaceAppearance)]) -> [u8; 3] {
     let (_scene, view) = fixtures::surface_scene(objects, None);
-    let mut geometry = GeometryRenderer::new(device, queue, TextureFormat::Rgba16Float);
+    let mut geometry = GeometryRenderer::new(device, queue, TextureFormat::Rgba16Float, Limits::default());
     let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, SIZE).expect("camera is valid");
     let image = fixtures::render_frame(device, queue, &mut geometry, &view, camera, SIZE, &environment(), None);
     let center = ((SIZE[1] / 2 * SIZE[0] + SIZE[0] / 2) * 4) as usize;

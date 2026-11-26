@@ -5,7 +5,7 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
-use assets::{TextureSize, mesh::MeshLod};
+use assets::{MAX_TEXTURE_EDGE, TextureSize, mesh::MeshLod};
 use math::{DVec3, Vec3};
 
 use super::mesh::Detail;
@@ -42,13 +42,16 @@ pub struct Camera {
     view_planes: [DVec3; 4],
     draw_distance: f64,
     lod_factor: f64,
+    max_texture_resolution: u32,
 }
 
 impl Camera {
     pub(in crate::scene) fn texture_size(self, center: DVec3, diameter: f64, previous: Option<TextureSize>) -> TextureSize {
         let depth = (center - self.position).dot(self.direction).max(diameter * 0.5).max(0.01);
-        let pixels = (diameter * self.focal_pixels / depth).clamp(1.0, 2048.0);
-        if let Some(previous) = previous {
+        let pixels = (diameter * self.focal_pixels / depth).clamp(1.0, f64::from(self.max_texture_resolution));
+        if let Some(previous) = previous
+            && previous.edge() <= self.max_texture_resolution
+        {
             let edge = f64::from(previous.edge());
             if pixels <= edge * 1.2 && pixels >= edge * 0.4 {
                 return previous;
@@ -76,7 +79,25 @@ impl Camera {
         let view_planes =
             [direction * horizontal + right, direction * horizontal - right, direction * vertical + up, direction * vertical - up]
                 .map(DVec3::normalize);
-        Ok(Self { position, direction, focal_pixels, vertical_fov, view_planes, draw_distance: 512.0, lod_factor: 1.0 })
+        Ok(Self {
+            position,
+            direction,
+            focal_pixels,
+            vertical_fov,
+            view_planes,
+            draw_distance: 512.0,
+            lod_factor: 1.0,
+            max_texture_resolution: MAX_TEXTURE_EDGE,
+        })
+    }
+
+    pub fn with_max_texture_resolution(mut self, max_edge: u32) -> Self {
+        self.max_texture_resolution = max_edge.clamp(32, MAX_TEXTURE_EDGE);
+        self
+    }
+
+    pub fn max_texture_resolution(self) -> u32 {
+        self.max_texture_resolution
     }
 
     pub fn with_quality(mut self, draw_distance: f64, lod_factor: f64) -> Result<Self, CameraError> {
@@ -394,6 +415,9 @@ mod tests {
         assert_eq!(camera.texture_size(DVec3::X * 100.0, 2.0, Some(TextureSize::new(64))).edge(), 32);
         let tall = Camera::new(DVec3::ZERO, Vec3::X, PI / 2.0, [2000, 2000]).unwrap();
         assert_eq!(tall.texture_size(DVec3::X * 10.0, 2.0, None).edge(), 256);
+        let capped = camera.with_max_texture_resolution(512);
+        assert_eq!(capped.texture_size(DVec3::X, 2.0, None).edge(), 512);
+        assert_eq!(capped.texture_size(DVec3::X, 2.0, Some(TextureSize::new(1024))).edge(), 512);
     }
 
     #[test]

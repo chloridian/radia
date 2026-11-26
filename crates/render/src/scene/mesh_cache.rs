@@ -9,18 +9,17 @@ use std::{
 };
 
 use assets::mesh::Mesh;
-use utils::{AssetId, FastHashMap};
+use utils::{AssetId, FastHashMap, hardware::Pressure};
 use world::{PrimShape, SculptFlags, SculptType};
 
-use crate::scene::{
-    Budget, Detail, MeshBuildError, SharedMesh,
-    budget::{MEMORY_BYTES, MeshWork},
-    mesh::retained_bytes,
-    prim::tessellate,
+use crate::{
+    scene::{Budget, Detail, MeshBuildError, SharedMesh, budget::MeshWork, mesh::retained_bytes, prim::tessellate},
+    workers::WorkerKind,
 };
 
-const CACHE_BYTES: usize = MEMORY_BYTES;
 const HASH_ENTRY_OVERHEAD_BYTES: usize = 64;
+const PRESSURE_EVICT_LOW_PER_TURN: usize = 4;
+const PRESSURE_EVICT_CRITICAL_PER_TURN: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MeshKey {
@@ -48,11 +47,16 @@ pub enum PreparedMesh {
 
 pub(in crate::scene) struct PrimJob {
     key: MeshKey,
+    priority: u32,
     work: MeshWork,
     cancelled: Arc<AtomicBool>,
 }
 
 impl PrimJob {
+    pub(in crate::scene) fn is_visible(&self) -> bool {
+        self.priority > 0
+    }
+
     pub fn run(self) -> PrimCompletion {
         let result = tessellate(self.key.shape, self.key.detail, &self.cancelled);
         PrimCompletion { key: self.key, result, work: self.work, cancelled: self.cancelled }
@@ -107,6 +111,7 @@ pub(in crate::scene) struct MeshCache {
 
 impl MeshCache {
     pub(in crate::scene) fn new(budget: Budget) -> Self {
+        let cache_bytes = budget.memory_bytes();
         Self {
             budget,
             entries: FastHashMap::default(),
@@ -118,7 +123,7 @@ impl MeshCache {
             evicted: Vec::new(),
             updated: Vec::new(),
             bytes: 0,
-            cache_bytes: CACHE_BYTES,
+            cache_bytes,
             capacity_revision: 0,
             priority_generation: 0,
             clock: 0,
@@ -140,6 +145,19 @@ impl MeshCache {
         cache
     }
 
+    pub(in crate::scene) fn evict_pressure_turn(&mut self) -> usize {
+        let bound = match self.budget.pressure() {
+            Pressure::Normal => return 0,
+            Pressure::Low => PRESSURE_EVICT_LOW_PER_TURN,
+            Pressure::Critical => PRESSURE_EVICT_CRITICAL_PER_TURN,
+        };
+        let mut evicted = 0;
+        while evicted < bound && self.evict(1) {
+            evicted += 1;
+        }
+        evicted
+    }
+
     pub(in crate::scene) fn request(&mut self, key: MeshKey, priority: u32) -> bool {
         self.clock = self.clock.checked_add(1).expect("mesh cache clock exhausted");
         if let Some(entry) = self.entries.get_mut(&key) {
@@ -153,6 +171,9 @@ impl MeshCache {
             }
             self.reindex(key);
             return true;
+        }
+        if self.budget.pressure() != Pressure::Normal && priority == 0 {
+            return false;
         }
         while !self.has_room(ENTRY_BYTES) && self.evict(priority) {}
         if !self.has_room(ENTRY_BYTES) {
@@ -252,6 +273,7 @@ impl MeshCache {
             }
             State::Running(_) | State::Failed(_) => {}
         }
+        self.budget.workers().set_queued(WorkerKind::Mesh, self.queued.len());
     }
 
     fn remove_indexes(&mut self, key: MeshKey) {
@@ -280,6 +302,7 @@ impl MeshCache {
         if let Some(index) = entry.unused.take() {
             self.unused.remove(&index);
         }
+        self.budget.workers().set_queued(WorkerKind::Mesh, self.queued.len());
     }
 
     pub(in crate::scene) fn release(&mut self, key: MeshKey) {
@@ -360,10 +383,13 @@ impl MeshCache {
         }
         let work = self.budget.mesh_work()?;
         let (_, key) = self.queued.pop_first()?;
+        self.budget.workers().set_queued(WorkerKind::Mesh, self.queued.len());
         let cancelled = Arc::new(AtomicBool::new(false));
-        self.entries.get_mut(&key).expect("selected queue entry").state = State::Running(Arc::downgrade(&cancelled));
+        let entry = self.entries.get_mut(&key).expect("selected queue entry");
+        let priority = entry.priority;
+        entry.state = State::Running(Arc::downgrade(&cancelled));
         self.running.push(key);
-        Some(PrimJob { key, work, cancelled })
+        Some(PrimJob { key, priority, work, cancelled })
     }
 
     pub(in crate::scene) fn waiting(&self) -> bool {
@@ -486,7 +512,6 @@ mod tests {
     use std::assert_matches;
 
     use super::*;
-    use crate::scene::budget;
 
     fn key(detail: Detail) -> MeshKey {
         MeshKey { shape: PrimShape::default(), detail }
@@ -538,7 +563,7 @@ mod tests {
     #[test]
     fn shared_admission_releases_for_retry() {
         let budget = Budget::default();
-        let limit = budget::max_mesh_jobs();
+        let limit = budget.worker_threads();
         let extra = (2..limit).map(|_| budget.mesh_work().expect("reserve extra mesh slot")).collect::<Vec<_>>();
         let mut a = MeshCache::new(budget.clone());
         let mut b = MeshCache::new(budget.clone());
@@ -712,12 +737,61 @@ mod tests {
         }
         assert!(keys.iter().all(|key| matches!(meshes.get(*key), PreparedMesh::Ready(_))));
         assert!(meshes.start().is_none(), "resident meshes do not repeatedly decode");
-        assert!(meshes.bytes <= CACHE_BYTES);
+        assert!(meshes.bytes <= meshes.cache_bytes);
         let key = *keys.iter().find(|key| matches!(meshes.get(**key), PreparedMesh::Ready(_))).unwrap();
         meshes.release(key);
         assert!(meshes.start().is_none(), "releasing a resident mesh within budget does not evict it");
-        assert!(meshes.bytes <= CACHE_BYTES);
+        assert!(meshes.bytes <= meshes.cache_bytes);
         drop(meshes);
         assert_eq!(budget.charged_bytes(), 0);
+    }
+
+    #[test]
+    fn pressure_shrinks_and_recovers() {
+        let budget = Budget::default();
+        let mut meshes = MeshCache::new(budget.clone());
+        let in_view: Vec<MeshKey> =
+            (0..3).map(|i| MeshKey { shape: PrimShape { profile_begin: i * 10, ..PrimShape::default() }, detail: Detail::High }).collect();
+        let off_screen: Vec<MeshKey> =
+            (3..13).map(|i| MeshKey { shape: PrimShape { profile_begin: i * 10, ..PrimShape::default() }, detail: Detail::High }).collect();
+        for key in &in_view {
+            assert!(meshes.request(*key, 100));
+        }
+        for key in &off_screen {
+            assert!(meshes.request(*key, 0));
+        }
+        while let Some(job) = meshes.start() {
+            meshes.complete(job.run());
+        }
+        for key in in_view.iter().chain(&off_screen) {
+            assert_matches!(status(meshes.get(*key)), MeshStatus::Ready);
+        }
+        for key in &off_screen {
+            meshes.release(*key);
+        }
+
+        budget.set_pressure(Pressure::Low);
+        let extra_offscreen = MeshKey { shape: PrimShape { profile_begin: 200, ..PrimShape::default() }, detail: Detail::High };
+        assert!(!meshes.request(extra_offscreen, 0), "off-screen admissions are refused under Low pressure");
+
+        let mut total_evicted = 0;
+        let mut previous_bytes = meshes.bytes;
+        while total_evicted < off_screen.len() {
+            let evicted = meshes.evict_pressure_turn();
+            assert!(evicted > 0 && evicted <= PRESSURE_EVICT_LOW_PER_TURN, "eviction turn must stay within bound");
+            assert!(meshes.bytes < previous_bytes, "usage must fall every eviction turn while Low");
+            previous_bytes = meshes.bytes;
+            total_evicted += evicted;
+        }
+        assert_eq!(meshes.evict_pressure_turn(), 0, "no further evictions once only in-view meshes remain");
+        for key in &in_view {
+            assert_matches!(status(meshes.get(*key)), MeshStatus::Ready, "in-view meshes must be kept under pressure");
+        }
+
+        budget.set_pressure(Pressure::Normal);
+        assert!(meshes.request(extra_offscreen, 0), "off-screen admissions recover under Normal pressure");
+        let job = meshes.start().expect("recovered off-screen mesh starts");
+        meshes.complete(job.run());
+        assert_matches!(status(meshes.get(extra_offscreen)), MeshStatus::Ready);
     }
 }

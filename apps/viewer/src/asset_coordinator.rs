@@ -4,7 +4,7 @@ use std::{
     future::pending,
     ops::Range,
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -494,13 +494,10 @@ pub struct AssetCoordinator {
 
 impl AssetCoordinator {
     pub fn new(runtime: Handle, cancelled: impl Future<Output = ()> + Send + 'static, cache: Option<Arc<AssetCache>>) -> Self {
-        static MEMORY: OnceLock<Budget> = OnceLock::new();
-        let budget = MEMORY.get_or_init(Budget::default).clone();
-        Self::build(runtime, cancelled, budget, cache, Box::new(spawn_cache_writes), Box::new(|| {}))
+        Self::with_budget(runtime, cancelled, Budget::default(), cache)
     }
 
-    #[cfg(test)]
-    fn with_budget(
+    pub fn with_budget(
         runtime: Handle,
         cancelled: impl Future<Output = ()> + Send + 'static,
         budget: Budget,
@@ -1419,7 +1416,7 @@ mod tests {
         assert_eq!(jobs.len(), 32);
         let reserved_bytes = jobs.iter().map(FetchJob::response_limit).sum::<usize>();
         assert_eq!(budget.stats().charged_bytes, reserved_bytes);
-        assert!(reserved_bytes <= assets::ASSET_WORK_BYTES);
+        assert!(reserved_bytes <= assets::Limits::default().work_bytes);
         for response in join_all(jobs.iter().map(|job| transport.fetch(job))).await {
             assert_matches!(response, Err(Failure::FullAssetRequired));
         }

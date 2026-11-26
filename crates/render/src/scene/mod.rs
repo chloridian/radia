@@ -24,7 +24,7 @@ use world::WorldPose;
 
 pub use self::{
     asset_demand::{AssetChange, AssetRequest, AssetTicket},
-    budget::{Budget, MEMORY_BYTES},
+    budget::{Budget, Limits, MIN_CAPPED_MEMORY_BYTES, UNBOUNDED_MEMORY_BYTES},
     camera::{Camera, CameraError},
     environment::{
         EnvironmentChoice, EnvironmentPreset, EnvironmentProperty, EnvironmentPush, EnvironmentPushError, ExperienceProperty,

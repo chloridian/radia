@@ -68,6 +68,7 @@ struct ReadAdmission {
     bytes: Arc<Semaphore>,
     state: AtomicU8,
     busy_rejections: AtomicU64,
+    outstanding_full: AtomicU64,
 }
 
 impl ReadAdmission {
@@ -84,9 +85,14 @@ impl ReadAdmission {
         ReadError::Busy
     }
 
+    fn record_outstanding_full(&self) -> ReadError {
+        self.outstanding_full.fetch_add(1, Ordering::Relaxed);
+        self.record_busy()
+    }
+
     fn reserve(&self, bytes: usize) -> Result<ReadPermit, ReadError> {
         self.check()?;
-        let requests = Arc::clone(&self.requests).try_acquire_owned().map_err(|_| self.record_busy())?;
+        let requests = Arc::clone(&self.requests).try_acquire_owned().map_err(|_| self.record_outstanding_full())?;
         let bytes = u32::try_from(bytes).map_err(|_| self.record_busy())?;
         let bytes = Arc::clone(&self.bytes).try_acquire_many_owned(bytes).map_err(|_| self.record_busy())?;
         Ok(ReadPermit { _requests: requests, _bytes: bytes })
@@ -192,6 +198,10 @@ impl WorldReader {
         }
     }
 
+    pub fn outstanding_reads_full(&self) -> u64 {
+        self.budget.outstanding_full.load(Ordering::Relaxed)
+    }
+
     pub fn revision(&self) -> Result<WorldRevision, ReadError> {
         self.budget.check()?;
         *self.revisions.borrow()
@@ -282,7 +292,7 @@ impl WorldReader {
         let (sender, response) = oneshot::channel();
         self.sender.try_send(build(ReadResponder { sender, permit })).map_err(|error| {
             self.budget.check().err().unwrap_or_else(|| match error {
-                TrySendError::Full(_) => self.budget.record_busy(),
+                TrySendError::Full(_) => self.budget.record_outstanding_full(),
                 TrySendError::Closed(_) => ReadError::Shutdown,
             })
         })?;
@@ -318,6 +328,7 @@ impl WorldReadHost {
             bytes: Arc::new(Semaphore::new(MAX_RESERVED_REPLY_BYTES)),
             state: AtomicU8::new(ACTIVE),
             busy_rejections: AtomicU64::new(0),
+            outstanding_full: AtomicU64::new(0),
         });
         Self {
             receiver,
@@ -760,10 +771,13 @@ mod tests {
         for read in &mut pending {
             assert!(poll!(read.as_mut()).is_pending());
         }
+        assert_eq!(reader.outstanding_reads_full(), 0);
         assert_eq!(reader.barrier().await, Err(ReadError::Busy));
+        assert_eq!(reader.outstanding_reads_full(), 1);
         let request = service.next_request().await;
         request.serve(&world);
         assert_eq!(reader.barrier().await, Err(ReadError::Busy), "a queued reply still owns admission");
+        assert_eq!(reader.outstanding_reads_full(), 2);
         let delivered = pending.remove(0).await.unwrap();
         let mut admitted = Box::pin(reader.barrier());
         assert!(poll!(admitted.as_mut()).is_pending(), "delivery releases admission even while the value is retained");

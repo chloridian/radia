@@ -3,6 +3,10 @@ use std::{
     error::Error,
     fmt::{self, Display, Formatter},
     ops::Bound,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -142,9 +146,18 @@ pub struct SceneView {
     reconcile_marker: SceneChanges,
     replacement_marker: SceneChanges,
     replacement_sequence: Option<u64>,
+    detail_batch_waits: Arc<AtomicU64>,
 }
 
 impl SceneView {
+    pub fn detail_batch_waits(&self) -> u64 {
+        self.detail_batch_waits.load(Ordering::Relaxed)
+    }
+
+    pub(in crate::scene) fn detail_batch_waits_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.detail_batch_waits)
+    }
+
     pub fn viewer_environment(&self) -> Option<&ViewerEnvironment> {
         if self.session.is_active() { self.mirror.viewer_environment.as_ref() } else { None }
     }
@@ -178,6 +191,7 @@ impl SceneView {
             reconcile_marker: SceneChanges { reconcile_all: true, ..SceneChanges::default() },
             replacement_marker: SceneChanges { full: true, ..SceneChanges::default() },
             replacement_sequence: None,
+            detail_batch_waits: Arc::new(AtomicU64::new(0)),
         }
     }
 

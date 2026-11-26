@@ -1,7 +1,7 @@
 use std::{assert_matches, f64::consts::FRAC_PI_3};
 
 use assets::{Failure, Status, TextureUsage};
-use render::scene::{AssetRequest, DrawnMeshKey, Geometry, MEMORY_BYTES, ReconcileStep};
+use render::scene::{AssetRequest, DrawnMeshKey, Geometry, ReconcileStep};
 use test_support::{mesh, texture::RGBA_J2C};
 use world::{ObjectPatch, PrimShape, SculptFlags, SculptType};
 
@@ -246,7 +246,7 @@ fn mixed_stays_within_budget() {
         settle_materials(&mut scene, &mut view, &world, &mut now);
     }
 
-    assert!(budget.charged_bytes() <= MEMORY_BYTES);
+    assert!(budget.charged_bytes() <= budget.memory_bytes());
     let mut saw_mesh = false;
     let mut saw_sculpt = false;
     for object in view.objects() {

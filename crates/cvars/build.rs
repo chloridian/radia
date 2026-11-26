@@ -278,7 +278,8 @@ fn validate_declarations(declarations: &[Declaration]) {
                 let (min_raw, max_raw) = decl.range_raw.as_ref().unwrap_or_else(|| panic!("missing range on `{}`", decl.name));
                 let min: i64 = min_raw.parse().unwrap_or_else(|_| panic!("invalid i64 min on `{}`", decl.name));
                 let max: i64 = max_raw.parse().unwrap_or_else(|_| panic!("invalid i64 max on `{}`", decl.name));
-                assert!(min <= max && (min..=max).contains(&default), "i64 bounds violated on `{}`", decl.name);
+                let auto = is_auto_i64(default, min, max);
+                assert!(min <= max && ((min..=max).contains(&default) || auto), "i64 bounds violated on `{}`", decl.name);
                 assert!(decl.step_raw.is_none(), "unexpected step on i64 cvar `{}`", decl.name);
             }
             ValueType::F32 => {
@@ -400,8 +401,10 @@ fn validate_preset_value(path: &Path, line_no: usize, decl: &Declaration, raw: &
             let (min_raw, max_raw) = decl.range_raw.as_ref().expect("validated i64 range");
             let min: i64 = min_raw.parse().expect("validated i64 min");
             let max: i64 = max_raw.parse().expect("validated i64 max");
+            let default: i64 = decl.default_raw.parse().expect("validated i64 default");
+            let auto = is_auto_i64(default, min, max);
             assert!(
-                (min..=max).contains(&value),
+                (min..=max).contains(&value) || (auto && value == 0),
                 "{}:{line_no}: `{}` value {value} out of bounds [{min}, {max}]",
                 path.display(),
                 decl.name
@@ -552,6 +555,10 @@ fn render_generated(declarations: &[Declaration], presets: &[Preset]) -> String 
     }
     writeln!(output, "];").expect("write presets end");
     output
+}
+
+fn is_auto_i64(default: i64, min: i64, max: i64) -> bool {
+    default == 0 && !(min..=max).contains(&0)
 }
 
 fn format_f32_literal(raw: &str) -> String {

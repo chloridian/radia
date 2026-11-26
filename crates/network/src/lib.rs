@@ -10,7 +10,7 @@ mod login;
 mod session;
 
 pub use self::{
-    circuit::{default_throttle_rates, lludp::Delivery},
+    circuit::{default_throttle_rates, lludp::Delivery, throttle_rates_for_bandwidth_kbps},
     coverage::{
         CoverageLoss, CoverageLossLedger, CoverageLossReason, CoverageLossRecord, CoverageSnapshot, CoverageSource, CoverageWatermark,
     },
