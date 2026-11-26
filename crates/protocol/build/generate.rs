@@ -129,11 +129,11 @@ pub fn generate(template: &Template) -> String {
         "/// Find the schema for an exact message frequency and number.\n///\n/// Returns `None` when the template has no matching ID.\npub fn find_by_id(id: MessageId) -> Option<&'static MessageSchema> {\n",
     );
     output.push_str("    let key = (frequency_rank(id.frequency), id.number);\n");
-    output.push_str("    let index = MESSAGE_ID_INDEX.binary_search_by_key(&key, |index| {\n");
-    output.push_str("        let message = &MESSAGES[*index];\n");
+    output.push_str("    let index = MESSAGE_ID_INDEX.binary_search_by_key(&key, |&index| {\n");
+    output.push_str("        let message = MESSAGES.get(index).expect(\"generated message index is in bounds\");\n");
     output.push_str("        (frequency_rank(message.id.frequency), message.id.number)\n");
     output.push_str("    }).ok()?;\n");
-    output.push_str("    Some(&MESSAGES[MESSAGE_ID_INDEX[index]])\n}\n\n");
+    output.push_str("    MESSAGE_ID_INDEX.get(index).and_then(|&message_index| MESSAGES.get(message_index))\n}\n\n");
     output.push_str(
         "/// Find a schema by its exact, case-sensitive template message name.\n///\n/// Returns `None` when the template has no matching name.\npub fn find_by_name(name: &str) -> Option<&'static MessageSchema> {\n",
     );

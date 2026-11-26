@@ -57,7 +57,9 @@ impl TextureEntry {
         Some(
             self.overrides
                 .binary_search_by_key(&index, |(face_index, _)| *face_index)
-                .map_or(&self.default_face, |slot| &self.overrides[slot].1),
+                .ok()
+                .and_then(|slot| self.overrides.get(slot))
+                .map_or(&self.default_face, |(_, face)| face),
         )
     }
 

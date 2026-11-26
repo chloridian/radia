@@ -118,19 +118,18 @@ impl CoverageLossLedger {
     pub(crate) fn record(&self, simulator_id: SimulatorId, source: CoverageSource, reason: CoverageLossReason) -> CoverageRecord {
         let mut state = self.lock();
         let scope = Scope { simulator_id, source };
-        let outcome = if let Some(index) = state.scopes.iter().position(|entry| entry.scope == scope) {
-            let Some(generation) = state.scopes[index].latest_generation.checked_add(1) else {
+        let overflow_generation = state.overflow_generation;
+        let outcome = if let Some(entry) = state.scopes.iter_mut().find(|entry| entry.scope == scope) {
+            let Some(generation) = entry.latest_generation.checked_add(1) else {
                 let generation = advance_overflow(&mut state);
                 drop(state);
                 self.notify();
                 return CoverageRecord::Overflowed { generation };
             };
-            let overflow_generation = state.overflow_generation;
-            let entry = &mut state.scopes[index];
             entry.latest_generation = generation;
             entry.latest_reason = reason;
             entry.latest_overflow_generation = overflow_generation;
-            CoverageRecord::Recorded(CoverageWatermark { simulator_id, source, generation, overflow_generation: state.overflow_generation })
+            CoverageRecord::Recorded(CoverageWatermark { simulator_id, source, generation, overflow_generation })
         } else if state.scopes.len() < MAX_COVERAGE_SCOPES {
             let overflow_generation = state.overflow_generation;
             state.scopes.push(ScopeState {
@@ -188,8 +187,7 @@ impl CoverageLossLedger {
     pub fn acknowledge(&self, watermark: CoverageWatermark) {
         let mut state = self.lock();
         let scope = Scope { simulator_id: watermark.simulator_id, source: watermark.source };
-        if let Some(index) = state.scopes.iter().position(|entry| entry.scope == scope) {
-            let entry = &mut state.scopes[index];
+        if let Some((index, entry)) = state.scopes.iter_mut().enumerate().find(|(_, entry)| entry.scope == scope) {
             if watermark.generation <= entry.latest_generation {
                 entry.acknowledged_generation = entry.acknowledged_generation.max(watermark.generation);
             }
@@ -213,8 +211,7 @@ impl CoverageLossLedger {
     pub(crate) fn retire(&self, simulator_id: SimulatorId, source: CoverageSource) {
         let mut state = self.lock();
         let scope = Scope { simulator_id, source };
-        if let Some(index) = state.scopes.iter().position(|entry| entry.scope == scope) {
-            let entry = &mut state.scopes[index];
+        if let Some((index, entry)) = state.scopes.iter_mut().enumerate().find(|(_, entry)| entry.scope == scope) {
             entry.retired = true;
             if entry.latest_generation <= entry.acknowledged_generation {
                 state.scopes.swap_remove(index);

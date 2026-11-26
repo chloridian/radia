@@ -1,3 +1,5 @@
+#![expect(clippy::indexing_slicing)]
+
 use std::{array, borrow::Cow, error::Error, fmt, marker::PhantomData, sync::Arc};
 
 include!(concat!(env!("OUT_DIR"), "/generated_cvars.rs"));

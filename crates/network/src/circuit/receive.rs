@@ -78,9 +78,32 @@ struct PacketRejectionWindow {
 }
 
 impl PacketRejectionWindow {
+    fn count_mut(&mut self, kind: RejectionKind) -> &mut u64 {
+        let [
+            frame_inspection,
+            acknowledgement_admission,
+            decode_admission,
+            preflight,
+            retained_memory_admission,
+            decode,
+            allocation_estimate_mismatch,
+            event_admission,
+        ] = &mut self.counts;
+        match kind {
+            RejectionKind::FrameInspection => frame_inspection,
+            RejectionKind::AcknowledgementAdmission => acknowledgement_admission,
+            RejectionKind::DecodeAdmission => decode_admission,
+            RejectionKind::Preflight => preflight,
+            RejectionKind::RetainedMemoryAdmission => retained_memory_admission,
+            RejectionKind::Decode => decode,
+            RejectionKind::AllocationEstimateMismatch => allocation_estimate_mismatch,
+            RejectionKind::EventAdmission => event_admission,
+        }
+    }
+
     fn record(&mut self, kind: RejectionKind) {
-        let index = rejection_index(kind);
-        self.counts[index] = self.counts[index].saturating_add(1);
+        let count = self.count_mut(kind);
+        *count = count.saturating_add(1);
     }
 
     fn record_decode_failure(&mut self, message_id: MessageId, error: &LLUdpError) {
@@ -149,19 +172,6 @@ impl PacketRejections {
     }
 }
 
-fn rejection_index(kind: RejectionKind) -> usize {
-    match kind {
-        RejectionKind::FrameInspection => 0,
-        RejectionKind::AcknowledgementAdmission => 1,
-        RejectionKind::DecodeAdmission => 2,
-        RejectionKind::Preflight => 3,
-        RejectionKind::RetainedMemoryAdmission => 4,
-        RejectionKind::Decode => 5,
-        RejectionKind::AllocationEstimateMismatch => 6,
-        RejectionKind::EventAdmission => 7,
-    }
-}
-
 fn format_message_id(message_id: MessageId) -> String {
     if let Some(schema) = SchemaMessage::schema_by_id(message_id) {
         schema.name.to_owned()
@@ -223,7 +233,11 @@ impl ConnectionTask {
         if *self.shutdown.borrow() || self.events.is_closed() {
             return Ok(RunControl::Finish(None));
         }
-        self.receive_packet(&buffer[..size])
+        let Some(datagram) = buffer.get(..size) else {
+            self.reject(RejectionKind::FrameInspection, CoverageLossReason::PreflightRejected);
+            return Ok(RunControl::Continue);
+        };
+        self.receive_packet(datagram)
     }
 
     fn receive_packet(&mut self, bytes: &[u8]) -> Result<RunControl, ConnectionError> {
@@ -815,11 +829,11 @@ mod tests {
     fn known_schema_records_failure() {
         let mut rejections = PacketRejections::default();
         let now = time::Instant::now();
-        let window = rejections
+        let mut window = rejections
             .record_decode_failure_at(now, OBJECT_UPDATE, &LLUdpError::TruncatedPacket)
             .expect("first rejection reports immediately");
 
-        assert_eq!(window.counts[rejection_index(RejectionKind::Decode)], 1);
+        assert_eq!(*window.count_mut(RejectionKind::Decode), 1);
         assert_eq!(window.decode_failures.len(), 1);
         assert_eq!(window.decode_failures[0].message, "ObjectUpdate");
         assert_eq!(window.decode_failures[0].error, LLUdpError::TruncatedPacket.to_string());
@@ -862,11 +876,11 @@ mod tests {
         assert!(rejections.record_decode_failure_at(within_window, MessageId::low(0xfff1), &LLUdpError::InvalidMessageId).is_none());
         assert!(rejections.record_decode_failure_at(within_window, MessageId::low(0xfff2), &LLUdpError::InvalidMessageId).is_none());
 
-        let window = rejections
+        let mut window = rejections
             .record_decode_failure_at(start + PACKET_REJECTION_SUMMARY_INTERVAL, OBJECT_UPDATE, &LLUdpError::TruncatedPacket)
             .expect("summary reports when interval elapses");
 
-        assert_eq!(window.counts[rejection_index(RejectionKind::Decode)], 8);
+        assert_eq!(*window.count_mut(RejectionKind::Decode), 8);
         assert_eq!(window.decode_failures.len(), MAX_DECODE_FAILURE_SAMPLES);
         assert_eq!(window.decode_failures[0].message, "ObjectUpdate");
         assert_eq!(window.decode_failures[0].count, 3);

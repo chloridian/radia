@@ -27,10 +27,15 @@ impl<'a> Writer<'a> {
     }
 
     pub(crate) fn bytes(&mut self, bytes: &[u8]) {
-        let length = bytes.len().min(self.limit.saturating_sub(self.output.len()));
-        self.output.extend_from_slice(&bytes[..length]);
-        if length < bytes.len() {
-            self.overflow_at.get_or_insert(self.output.len());
+        let remaining = self.limit.saturating_sub(self.output.len());
+        match bytes.split_at_checked(remaining) {
+            Some((head, tail)) => {
+                self.output.extend_from_slice(head);
+                if !tail.is_empty() {
+                    self.overflow_at.get_or_insert(self.output.len());
+                }
+            }
+            None => self.output.extend_from_slice(bytes),
         }
     }
 
@@ -181,7 +186,7 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn remaining(&self) -> &'a [u8] {
-        &self.input[self.cursor..]
+        self.input.get(self.cursor..).unwrap_or_default()
     }
 
     pub(crate) fn position(&self) -> usize {
@@ -209,8 +214,13 @@ impl<'a> Reader<'a> {
         }
     }
 
+    fn take_array<const N: usize>(&mut self) -> Result<[u8; N], LLUdpError> {
+        self.take(N)?.try_into().map_err(|_| LLUdpError::TruncatedPacket)
+    }
+
     pub(crate) fn u8(&mut self) -> Result<u8, LLUdpError> {
-        Ok(self.take(1)?[0])
+        let [byte] = self.take_array()?;
+        Ok(byte)
     }
 
     pub(crate) fn i8(&mut self) -> Result<i8, LLUdpError> {
@@ -218,43 +228,35 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn u16(&mut self) -> Result<u16, LLUdpError> {
-        let bytes = self.take(2)?;
-        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+        Ok(u16::from_le_bytes(self.take_array()?))
     }
 
     pub(crate) fn i16(&mut self) -> Result<i16, LLUdpError> {
-        let bytes = self.take(2)?;
-        Ok(i16::from_le_bytes([bytes[0], bytes[1]]))
+        Ok(i16::from_le_bytes(self.take_array()?))
     }
 
     pub(crate) fn u32(&mut self) -> Result<u32, LLUdpError> {
-        let bytes = self.take(4)?;
-        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        Ok(u32::from_le_bytes(self.take_array()?))
     }
 
     pub(crate) fn i32(&mut self) -> Result<i32, LLUdpError> {
-        let bytes = self.take(4)?;
-        Ok(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        Ok(i32::from_le_bytes(self.take_array()?))
     }
 
     pub(crate) fn i64(&mut self) -> Result<i64, LLUdpError> {
-        let bytes = self.take(8)?;
-        Ok(i64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]))
+        Ok(i64::from_le_bytes(self.take_array()?))
     }
 
     pub(crate) fn u64(&mut self) -> Result<u64, LLUdpError> {
-        let bytes = self.take(8)?;
-        Ok(u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]))
+        Ok(u64::from_le_bytes(self.take_array()?))
     }
 
     pub(crate) fn f32(&mut self) -> Result<f32, LLUdpError> {
-        let bytes = self.take(4)?;
-        Ok(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        Ok(f32::from_le_bytes(self.take_array()?))
     }
 
     pub(crate) fn f64(&mut self) -> Result<f64, LLUdpError> {
-        let bytes = self.take(8)?;
-        Ok(f64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]))
+        Ok(f64::from_le_bytes(self.take_array()?))
     }
 
     pub(crate) fn uuid(&mut self) -> Result<Uuid, LLUdpError> {
@@ -343,8 +345,8 @@ fn validate_ll_string(value: &str) -> Result<(), LLUdpError> {
 }
 
 fn decode_string(bytes: &[u8]) -> Result<String, LLUdpError> {
-    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
-    str::from_utf8(&bytes[..end]).map(str::to_owned).map_err(|_| LLUdpError::InvalidUtf8)
+    let text = bytes.split(|byte| *byte == 0).next().unwrap_or(bytes);
+    str::from_utf8(text).map(str::to_owned).map_err(|_| LLUdpError::InvalidUtf8)
 }
 
 #[cfg(test)]

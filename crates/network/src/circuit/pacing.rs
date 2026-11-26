@@ -61,13 +61,25 @@ pub(crate) enum TrafficClass {
 }
 
 impl TrafficClass {
-    fn index(self) -> usize {
+    fn get<T>(self, [control, deadline, fair]: &[T; 3]) -> &T {
         match self {
-            Self::Control => 0,
-            Self::Deadline => 1,
-            Self::Fair => 2,
+            Self::Control => control,
+            Self::Deadline => deadline,
+            Self::Fair => fair,
         }
     }
+
+    fn get_mut<T>(self, [control, deadline, fair]: &mut [T; 3]) -> &mut T {
+        match self {
+            Self::Control => control,
+            Self::Deadline => deadline,
+            Self::Fair => fair,
+        }
+    }
+}
+
+fn service_class(slot: usize) -> TrafficClass {
+    *SERVICE_ORDER.get(slot % SERVICE_ORDER.len()).expect("modulo keeps slot within SERVICE_ORDER")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -458,8 +470,7 @@ fn handle_command(
                 connection.role = role;
                 connection.finish = *virtual_time;
                 if let Some(request) = pending.get_mut(&id) {
-                    let class_index = request.class.index();
-                    request.finish = virtual_time[class_index].saturating_add(role.virtual_cost(request.bytes));
+                    request.finish = request.class.get(virtual_time).saturating_add(role.virtual_cost(request.bytes));
                 }
             }
         }
@@ -488,17 +499,18 @@ fn queue_request(
     if pending.get(&id).is_some_and(|request| request.completed.is_closed()) {
         pending.remove(&id);
     }
+    let Some(connection) = connections.get(&id) else {
+        return;
+    };
     if completed.is_closed()
-        || !connections.get(&id).is_some_and(|connection| connection.active.load(Ordering::Acquire))
+        || !connection.active.load(Ordering::Acquire)
         || pending.contains_key(&id)
         || bytes == 0
         || bytes > MAX_BURST_BYTES as usize
     {
         return;
     }
-    let class_index = class.index();
-    let connection = &connections[&id];
-    let start = connection.finish[class_index].max(virtual_time[class_index]);
+    let start = (*class.get(&connection.finish)).max(*class.get(virtual_time));
     let finish = start.saturating_add(connection.role.virtual_cost(bytes));
     pending.insert(id, PendingRequest::new(bytes, class, finish, completed));
 }
@@ -522,10 +534,8 @@ fn dispatch_next(
     {
         let reserved_slot = *class_cursor;
         for offset in 1..SERVICE_ORDER.len() {
-            let slot = (reserved_slot + offset) % SERVICE_ORDER.len();
-            let class = SERVICE_ORDER[slot];
-            let class_index = class.index();
-            if class_index >= reserved_class.index() || bypass_slots[class_index] == 0 {
+            let class = service_class(reserved_slot + offset);
+            if class >= reserved_class || *class.get(&bypass_slots) == 0 {
                 continue;
             }
             let available = bucket.lock().map(|mut bucket| bucket.available_bytes(Instant::now())).unwrap_or(0);
@@ -549,14 +559,13 @@ fn dispatch_next(
                 false,
                 false,
             ) {
-                pending.get_mut(&reserved_id).expect("reserved request remains pending").bypass_slots[class_index] -= 1;
+                *class.get_mut(&mut pending.get_mut(&reserved_id).expect("reserved request remains pending").bypass_slots) -= 1;
                 return true;
             }
         }
 
-        let class_index = reserved_class.index();
         let index = order.iter().position(|candidate| *candidate == reserved_id).expect("reserved request has a registered connection");
-        let offset = (index + order.len() - connection_cursor[class_index]) % order.len();
+        let offset = (index + order.len() - *reserved_class.get(connection_cursor)) % order.len();
         return grant_request(
             bucket,
             connections,
@@ -577,7 +586,7 @@ fn dispatch_next(
     let start_cursor = *class_cursor;
     for offset in 0..SERVICE_ORDER.len() {
         let slot = (start_cursor + offset) % SERVICE_ORDER.len();
-        let class = SERVICE_ORDER[slot];
+        let class = service_class(slot);
         if let Some((finish, offset, id, bytes)) = next_request_for_class(class, order, pending, connection_cursor, None) {
             let available = bucket.lock().map(|mut bucket| bucket.available_bytes(Instant::now())).unwrap_or(0);
             if bytes as u64 > available {
@@ -637,10 +646,10 @@ fn next_request_for_class(
     connection_cursor: &[usize; 3],
     max_bytes: Option<usize>,
 ) -> Option<(u128, usize, u64, usize)> {
-    let class_index = class.index();
+    let cursor = *class.get(connection_cursor);
     let mut selected: Option<(u128, usize, u64, usize)> = None;
     for offset in 0..order.len() {
-        let id = order[(connection_cursor[class_index] + offset) % order.len()];
+        let id = *order.get((cursor + offset) % order.len()).expect("modulo keeps index within non-empty order");
         let Some(request) = pending.get(&id) else { continue };
         if request.class != class || max_bytes.is_some_and(|max_bytes| request.bytes > max_bytes) {
             continue;
@@ -656,9 +665,9 @@ fn next_request_for_class(
 fn higher_priority_slots(class: TrafficClass, slot: usize) -> [usize; 3] {
     let mut slots = [0; 3];
     for offset in 1..SERVICE_ORDER.len() {
-        let higher_priority = SERVICE_ORDER[(slot + offset) % SERVICE_ORDER.len()];
-        if higher_priority.index() < class.index() {
-            slots[higher_priority.index()] += 1;
+        let higher_priority = service_class(slot + offset);
+        if higher_priority < class {
+            *higher_priority.get_mut(&mut slots) += 1;
         }
     }
     slots
@@ -683,7 +692,6 @@ fn grant_request(
     advance_class_cursor: bool,
     reserve_on_failure: bool,
 ) -> bool {
-    let class_index = class.index();
     let Some(request) = pending.remove(&id) else { return false };
     if !bucket.lock().is_ok_and(|mut bucket| bucket.reserve(request.bytes, Instant::now())) {
         let mut request = request;
@@ -698,13 +706,15 @@ fn grant_request(
         return false;
     }
     let connection = connections.get_mut(&id).expect("pending request has a registered connection");
-    connection.finish[class_index] = request.finish;
+    *class.get_mut(&mut connection.finish) = request.finish;
     if advance_class_cursor {
         *class_cursor = (slot + 1) % SERVICE_ORDER.len();
     }
-    virtual_time[class_index] = virtual_time[class_index].max(request.finish);
-    let index = (connection_cursor[class_index] + offset) % order.len();
-    connection_cursor[class_index] = (index + 1) % order.len();
+    let class_virtual_time = class.get_mut(virtual_time);
+    *class_virtual_time = (*class_virtual_time).max(request.finish);
+    let class_connection_cursor = class.get_mut(connection_cursor);
+    let index = (*class_connection_cursor + offset) % order.len();
+    *class_connection_cursor = (index + 1) % order.len();
     match request.completed.send(BudgetLease::new(Arc::clone(bucket), request.bytes)) {
         Ok(()) => {}
         Err(error) => drop(error),
@@ -737,9 +747,7 @@ fn next_dispatch_delay(bucket: &Arc<Mutex<Bucket>>, pending: &HashMap<u64, Pendi
         |reserved| {
             pending
                 .values()
-                .filter(|request| {
-                    request.reserved || (request.class.index() < reserved.class.index() && reserved.bypass_slots[request.class.index()] > 0)
-                })
+                .filter(|request| request.reserved || (request.class < reserved.class && *request.class.get(&reserved.bypass_slots) > 0))
                 .map(|request| request.bytes)
                 .min()
         },

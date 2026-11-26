@@ -115,6 +115,7 @@ allow_attributes = "deny"
 complexity = { level = "deny", priority = -1 }
 correctness = { level = "deny", priority = -1 }
 dbg_macro = "deny"
+indexing_slicing = "deny"
 large_enum_variant = "allow"
 perf = { level = "deny", priority = -1 }
 redundant_clone = "deny"
@@ -122,6 +123,7 @@ suspicious = { level = "deny", priority = -1 }
 todo = "deny"
 too_many_arguments = "allow"
 unimplemented = "deny"
+unwrap_used = "deny"
 upper_case_acronyms = "allow"
 
 [profile.dev]

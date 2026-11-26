@@ -601,27 +601,11 @@ pub fn from_slice_with_limits<T: DeserializeOwned>(input: &[u8], limits: Limits)
     Ok(value)
 }
 
-fn append_normalized_xml_text(output: &mut String, text: &str) {
-    if !text.as_bytes().contains(&b'\r') {
-        output.push_str(text);
-        return;
+fn append_normalized_xml_text(output: &mut String, mut text: &str) {
+    while let Some((before, after)) = text.split_once('\r') {
+        output.push_str(before);
+        output.push('\n');
+        text = after.strip_prefix('\n').unwrap_or(after);
     }
-
-    let bytes = text.as_bytes();
-    let mut start = 0;
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'\r' {
-            output.push_str(&text[start..index]);
-            output.push('\n');
-            index += 1;
-            if bytes.get(index) == Some(&b'\n') {
-                index += 1;
-            }
-            start = index;
-        } else {
-            index += 1;
-        }
-    }
-    output.push_str(&text[start..]);
+    output.push_str(text);
 }

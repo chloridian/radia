@@ -83,7 +83,8 @@ impl<'a> Decoder<'a> {
             let magnitude = self.bits.read((quant & 15) as usize + 2)? as f32;
             let x = index % PATCH_SIZE;
             let y = index / PATCH_SIZE;
-            coefficients[*index] = if negative { -magnitude } else { magnitude } * (1 + 2 * (x + y)) as f32;
+            *coefficients.get_mut(*index).expect("zigzag index is within patch") =
+                if negative { -magnitude } else { magnitude } * (1 + 2 * (x + y)) as f32;
         }
         if !dc.is_finite() {
             return Err(Error::NonFinite);
@@ -91,27 +92,31 @@ impl<'a> Decoder<'a> {
         let scale = range / (1u32 << ((quant >> 4) + 2)) as f32;
         let offset = range * 0.5 + dc;
         let mut columns = [0.0; PATCH_SAMPLES];
-        for y in 0..PATCH_SIZE {
-            for x in 0..PATCH_SIZE {
-                let mut value = FRAC_1_SQRT_2 * coefficients[x];
-                for v in 1..PATCH_SIZE {
-                    value += coefficients[v * PATCH_SIZE + x] * tables.cosines[y][v];
+        let coeff_rows = coefficients.as_chunks::<PATCH_SIZE>().0;
+        let (first_coeff_row, rest_coeff_rows) = coeff_rows.split_first().expect("patch has coefficient rows");
+        for (col_row, cosine_row) in columns.as_chunks_mut::<PATCH_SIZE>().0.iter_mut().zip(&tables.cosines) {
+            for (x, (col_cell, &first_coeff)) in col_row.iter_mut().zip(first_coeff_row).enumerate() {
+                let mut value = FRAC_1_SQRT_2 * first_coeff;
+                for (row, &cos) in rest_coeff_rows.iter().zip(cosine_row.iter().skip(1)) {
+                    value += *row.get(x).expect("coefficient row covers x") * cos;
                 }
-                columns[y * PATCH_SIZE + x] = value;
+                *col_cell = value;
             }
         }
         let mut heights = Box::new([0.0; PATCH_SAMPLES]);
-        for y in 0..PATCH_SIZE {
-            for x in 0..PATCH_SIZE {
-                let mut value = FRAC_1_SQRT_2 * columns[y * PATCH_SIZE];
-                for u in 1..PATCH_SIZE {
-                    value += columns[y * PATCH_SIZE + u] * tables.cosines[x][u];
+        for (height_row, &[first_col, ref rest_cols @ ..]) in
+            heights.as_chunks_mut::<PATCH_SIZE>().0.iter_mut().zip(columns.as_chunks::<PATCH_SIZE>().0)
+        {
+            for (height_cell, cosine_row) in height_row.iter_mut().zip(&tables.cosines) {
+                let mut value = FRAC_1_SQRT_2 * first_col;
+                for (&col, &cos) in rest_cols.iter().zip(cosine_row.iter().skip(1)) {
+                    value += col * cos;
                 }
                 let height = value * (2.0 / PATCH_SIZE as f32) * scale + offset;
                 if !height.is_finite() {
                     return Err(Error::NonFinite);
                 }
-                heights[y * PATCH_SIZE + x] = height;
+                *height_cell = height;
             }
         }
         Ok(Some(Patch { x: (id >> 5) as u8, y: (id & 31) as u8, heights }))
@@ -148,13 +153,12 @@ fn tables() -> &'static Tables {
     TABLES.get_or_init(|| {
         let cosines = array::from_fn(|n| array::from_fn(|u| ((2 * n + 1) as f32 * u as f32 * PI / (2 * PATCH_SIZE) as f32).cos()));
         let mut zigzag = [0; PATCH_SAMPLES];
-        let mut index = 0;
+        let mut slots = zigzag.iter_mut();
         for diagonal in 0..(2 * PATCH_SIZE - 1) {
             for offset in 0..=diagonal {
                 let (x, y) = if diagonal % 2 == 0 { (offset, diagonal - offset) } else { (diagonal - offset, offset) };
                 if x < PATCH_SIZE && y < PATCH_SIZE {
-                    zigzag[index] = y * PATCH_SIZE + x;
-                    index += 1;
+                    *slots.next().expect("zigzag visits each patch sample once") = y * PATCH_SIZE + x;
                 }
             }
         }

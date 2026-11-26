@@ -1,3 +1,5 @@
+#![expect(clippy::unwrap_used)]
+
 mod environment;
 mod environment_textures;
 mod latency;

@@ -44,7 +44,7 @@ pub(crate) fn strip_header<'a>(input: &'a [u8], marker: &[u8]) -> Option<&'a [u8
     } else if input.get(offset).is_some_and(|byte| *byte == b'\n' || *byte == b'\r') {
         offset += 1;
     }
-    Some(&input[offset..])
+    input.get(offset..)
 }
 
 pub(crate) fn parse_real(value: &str) -> Result<f64> {

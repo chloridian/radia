@@ -125,7 +125,7 @@ impl OutboundQueue {
         const ORDER: [TrafficClass; 5] =
             [TrafficClass::Control, TrafficClass::Control, TrafficClass::Deadline, TrafficClass::Fair, TrafficClass::Fair];
         for _ in 0..ORDER.len() {
-            let class = ORDER[self.class_cursor];
+            let class = *ORDER.get(self.class_cursor).expect("class cursor stays within ORDER");
             self.class_cursor = (self.class_cursor + 1) % ORDER.len();
             if let Some(index) = self.messages.iter().position(|queued| queued.class == class && eligible(queued)) {
                 self.charged_bytes = self.charged_bytes.saturating_sub(OUTBOUND_SEND_CHARGE_BYTES);

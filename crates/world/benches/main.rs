@@ -1,3 +1,5 @@
+#![expect(clippy::unwrap_used, clippy::indexing_slicing)]
+
 mod lifecycle;
 mod load;
 mod pose;

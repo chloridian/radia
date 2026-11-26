@@ -1,3 +1,5 @@
+#![expect(clippy::unwrap_used)]
+
 mod support;
 
 mod appearance;

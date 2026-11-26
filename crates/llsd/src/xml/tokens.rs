@@ -61,8 +61,8 @@ impl<'input> Tokens<'input> {
             return Ok(());
         }
         let name = markup.strip_prefix(b"/").unwrap_or(markup);
-        let len = name.iter().position(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'/' | b'>')).unwrap_or(name.len());
-        tag_name(str::from_utf8(&name[..len]).map_err(|_| Error::InvalidUtf8)?)?;
+        let name = name.split(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'/' | b'>')).next().unwrap_or(name);
+        tag_name(str::from_utf8(name).map_err(|_| Error::InvalidUtf8)?)?;
         Ok(())
     }
 

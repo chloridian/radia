@@ -1,3 +1,5 @@
+#![expect(clippy::unwrap_used, clippy::indexing_slicing)]
+
 use std::{
     collections::BTreeSet,
     env,

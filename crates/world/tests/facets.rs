@@ -1,3 +1,5 @@
+#![expect(clippy::unwrap_used)]
+
 use std::num::NonZeroU32;
 
 use proptest::{collection, prelude::*, test_runner::Config};

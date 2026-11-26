@@ -56,7 +56,7 @@ impl Format for Encoder {
 
     fn close(out: &mut Output, kind: Container, offset: usize, count: usize) -> Result<()> {
         let length = binary_length(count)?;
-        out.bytes[offset + 1..offset + 5].copy_from_slice(&length);
+        out.bytes.get_mut(offset + 1..offset + 5).expect("container header reserved by open").copy_from_slice(&length);
         out.append(&[kind.end()])
     }
 

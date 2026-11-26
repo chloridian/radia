@@ -31,7 +31,9 @@ pub fn decode_render_material_bindings(bytes: &[u8]) -> Result<Vec<RenderMateria
         let face_index = reader.u8().map_err(|_| RenderMaterialError::Malformed)?;
         let index = usize::from(face_index);
         let material_id = reader.uuid().map_err(|_| RenderMaterialError::Malformed)?;
-        if index < MAX_TEXTURE_FACES && !mem::replace(&mut seen[index], true) {
+        if let Some(slot) = seen.get_mut(index)
+            && !mem::replace(slot, true)
+        {
             bindings.push(RenderMaterialBinding { face_index, material_id });
         }
     }

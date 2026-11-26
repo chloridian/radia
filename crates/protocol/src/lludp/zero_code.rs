@@ -1,20 +1,24 @@
 use super::error::LLUdpError;
 
-pub(crate) fn encode(input: &[u8]) -> Vec<u8> {
+pub(crate) fn encode(mut input: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(input.len());
-    let mut cursor = 0;
-    while cursor < input.len() {
-        if input[cursor] != 0 {
-            output.push(input[cursor]);
-            cursor += 1;
+    while let Some((&byte, rest)) = input.split_first() {
+        if byte != 0 {
+            output.push(byte);
+            input = rest;
             continue;
         }
 
-        let start = cursor;
-        while cursor < input.len() && input[cursor] == 0 && cursor - start < u8::MAX as usize {
-            cursor += 1;
+        let mut run = 1usize;
+        input = rest;
+        while run < usize::from(u8::MAX) {
+            let Some((&0, next)) = input.split_first() else {
+                break;
+            };
+            run += 1;
+            input = next;
         }
-        output.extend_from_slice(&[0, (cursor - start) as u8]);
+        output.extend_from_slice(&[0, run as u8]);
     }
     output
 }
@@ -31,22 +35,24 @@ fn read_zero_count(input: &[u8], cursor: &mut usize) -> Result<usize, LLUdpError
     Ok(usize::from(u8::MAX) + usize::from(extension))
 }
 
-pub(crate) fn decode_prefix(input: &[u8], output: &mut [u8]) -> Result<usize, LLUdpError> {
+pub(crate) fn decode_prefix(input: &[u8], mut output: &mut [u8]) -> Result<usize, LLUdpError> {
+    let total = output.len();
     let mut input_cursor = 0;
-    let mut output_cursor = 0usize;
-    while output_cursor < output.len() && input_cursor < input.len() {
-        let byte = input[input_cursor];
+    while !output.is_empty() {
+        let Some(&byte) = input.get(input_cursor) else {
+            break;
+        };
         input_cursor += 1;
         if byte == 0 {
-            let count = read_zero_count(input, &mut input_cursor)?.min(output.len() - output_cursor);
-            output[output_cursor..output_cursor + count].fill(0);
-            output_cursor += count;
-        } else {
-            output[output_cursor] = byte;
-            output_cursor += 1;
+            let count = read_zero_count(input, &mut input_cursor)?.min(output.len());
+            if let Some(zeros) = output.split_off_mut(..count) {
+                zeros.fill(0);
+            }
+        } else if let Some(slot) = output.split_off_first_mut() {
+            *slot = byte;
         }
     }
-    Ok(output_cursor)
+    Ok(total - output.len())
 }
 
 #[cfg(test)]
@@ -85,8 +91,7 @@ pub(crate) fn decode_into(input: &[u8], output: &mut Vec<u8>, expected_len: usiz
     output.clear();
     output.reserve_exact(expected_len);
     let mut cursor = 0;
-    while cursor < input.len() {
-        let byte = input[cursor];
+    while let Some(&byte) = input.get(cursor) {
         cursor += 1;
         if byte == 0 {
             let count = read_zero_count(input, &mut cursor)?;
@@ -108,29 +113,25 @@ pub(crate) fn decode_into(input: &[u8], output: &mut Vec<u8>, expected_len: usiz
     Ok(())
 }
 
-pub(crate) fn decode_to_slice(input: &[u8], output: &mut [u8]) -> Result<usize, LLUdpError> {
+pub(crate) fn decode_to_slice(input: &[u8], mut output: &mut [u8]) -> Result<usize, LLUdpError> {
+    let total = output.len();
     let mut cursor = 0;
-    let mut output_cursor = 0usize;
-    while cursor < input.len() {
-        let byte = input[cursor];
+    while let Some(&byte) = input.get(cursor) {
         cursor += 1;
         if byte == 0 {
             let count = read_zero_count(input, &mut cursor)?;
-            let end = output_cursor.checked_add(count).ok_or(LLUdpError::InvalidZeroCode)?;
-            if end > output.len() {
+            let Some(zeros) = output.split_off_mut(..count) else {
                 return Err(LLUdpError::InvalidZeroCode);
-            }
-            output[output_cursor..end].fill(0);
-            output_cursor = end;
+            };
+            zeros.fill(0);
         } else {
-            let Some(slot) = output.get_mut(output_cursor) else {
+            let Some(slot) = output.split_off_first_mut() else {
                 return Err(LLUdpError::InvalidZeroCode);
             };
             *slot = byte;
-            output_cursor += 1;
         }
     }
-    Ok(output_cursor)
+    Ok(total - output.len())
 }
 
 #[cfg(test)]
