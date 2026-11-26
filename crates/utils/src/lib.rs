@@ -1,3 +1,5 @@
+#![expect(clippy::indexing_slicing)]
+
 mod fast_hash;
 pub mod hardware;
 mod summary;

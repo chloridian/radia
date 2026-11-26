@@ -1,3 +1,5 @@
+#![expect(clippy::indexing_slicing)]
+
 mod conformance;
 mod coverage;
 mod generation;

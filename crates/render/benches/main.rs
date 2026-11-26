@@ -1,4 +1,5 @@
 #![cfg_attr(codspeed, allow(dead_code))]
+#![expect(clippy::unwrap_used, clippy::indexing_slicing)]
 
 #[cfg(not(codspeed))]
 mod prepare;

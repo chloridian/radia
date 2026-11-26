@@ -1,3 +1,5 @@
+#![expect(clippy::indexing_slicing)]
+
 #[path = "build/mod.rs"]
 mod build;
 

@@ -1,3 +1,5 @@
+#![expect(clippy::unwrap_used)]
+
 use std::{assert_matches, sync::Arc};
 
 use utils::AssetId;

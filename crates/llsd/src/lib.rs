@@ -1,5 +1,3 @@
-#![deny(clippy::unwrap_used, clippy::indexing_slicing)]
-
 mod decode;
 mod encoding;
 mod error;

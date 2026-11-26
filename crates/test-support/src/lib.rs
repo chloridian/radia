@@ -1,3 +1,5 @@
+#![expect(clippy::indexing_slicing)]
+
 pub mod allocation;
 pub mod http_peer;
 

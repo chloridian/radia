@@ -1,3 +1,5 @@
+#![expect(clippy::unwrap_used)]
+
 use std::{
     assert_matches,
     f32::consts::{FRAC_PI_2, PI},
