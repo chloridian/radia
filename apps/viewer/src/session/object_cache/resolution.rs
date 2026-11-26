@@ -112,7 +112,7 @@ impl ObjectCacheSession {
                         if current_id != Some(pending.object_id) {
                             self.resolve_stored_override(continuation, pending.source, pending.local_id, Some(pending.object_id));
                         }
-                        continuation.batch.blocks[pending.index] = match current_id {
+                        *continuation.batch.blocks.get_mut(pending.index).expect("pending block index is within batch") = match current_id {
                             Some(current_id) if current_id == pending.object_id => None,
                             Some(_) => {
                                 Some(ObjectOperation::Cached { source: pending.source, local_id: pending.local_id, cache_miss_type: Full })
@@ -127,7 +127,8 @@ impl ObjectCacheSession {
                         lookup_work = lookup_work.saturating_add(work_units);
                         self.resolve_stored_override(continuation, pending.source, pending.local_id, Some(pending.object_id));
                         continuation.media_requests.append(&mut pending.media_requests);
-                        continuation.batch.blocks[pending.index] = Some(pending.operation);
+                        *continuation.batch.blocks.get_mut(pending.index).expect("pending block index is within batch") =
+                            Some(pending.operation);
                     }
                     ObjectLookupProgress::Pending { cursor, .. } => {
                         pending.cursor = Some(cursor);
@@ -171,7 +172,9 @@ impl ObjectCacheSession {
             processed += 1;
             let index = continuation.index;
             continuation.index += 1;
-            let Some(ObjectOperation::Cached { source, local_id, .. }) = continuation.batch.blocks[index].as_ref() else {
+            let Some(ObjectOperation::Cached { source, local_id, .. }) =
+                continuation.batch.blocks.get(index).expect("index is within batch").as_ref()
+            else {
                 continue;
             };
             let source = *source;
@@ -216,7 +219,8 @@ impl ObjectCacheSession {
 
             let Some((reference, payload, mut operation)) = decoded else {
                 self.resolve_stored_override(continuation, source, local_id, None);
-                continuation.batch.blocks[index] = Some(ObjectOperation::Cached { source, local_id, cache_miss_type });
+                *continuation.batch.blocks.get_mut(index).expect("index is within batch") =
+                    Some(ObjectOperation::Cached { source, local_id, cache_miss_type });
                 continue;
             };
             let object_id = match &operation {
@@ -224,7 +228,8 @@ impl ObjectCacheSession {
                 _ => {
                     continuation.stale.insert(local_id.get());
                     self.resolve_stored_override(continuation, source, local_id, None);
-                    continuation.batch.blocks[index] = Some(ObjectOperation::Cached { source, local_id, cache_miss_type });
+                    *continuation.batch.blocks.get_mut(index).expect("index is within batch") =
+                        Some(ObjectOperation::Cached { source, local_id, cache_miss_type });
                     continue;
                 }
             };
@@ -235,7 +240,8 @@ impl ObjectCacheSession {
             let Some(ordinal) = u32::try_from(index).ok() else {
                 continuation.stale.insert(local_id.get());
                 self.resolve_stored_override(continuation, source, local_id, None);
-                continuation.batch.blocks[index] = Some(ObjectOperation::Cached { source, local_id, cache_miss_type });
+                *continuation.batch.blocks.get_mut(index).expect("index is within batch") =
+                    Some(ObjectOperation::Cached { source, local_id, cache_miss_type });
                 continue;
             };
             let mut media_requests = object_media_requests(continuation.region, continuation.sequence, continuation.order, &payload);

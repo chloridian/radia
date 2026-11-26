@@ -33,14 +33,14 @@ pub(super) fn decode_entry(entry: &StoredEntry, local_id: u32) -> Option<Message
     }
     let message = packet.into_message();
     let (kind, object_local_id, crc, update_flags) = match &message {
-        Message::ObjectUpdate(update) if update.objects.len() == 1 => {
-            let object = &update.objects[0];
-            (0, object.local_id, object.crc, object.update_flags)
-        }
-        Message::ObjectUpdateCompressed(update) if update.objects.len() == 1 => {
-            let object = &update.objects[0];
-            (1, object.local_id, object.crc, object.update_flags)
-        }
+        Message::ObjectUpdate(update) => match update.objects.as_slice() {
+            [object] => (0, object.local_id, object.crc, object.update_flags),
+            _ => return None,
+        },
+        Message::ObjectUpdateCompressed(update) => match update.objects.as_slice() {
+            [object] => (1, object.local_id, object.crc, object.update_flags),
+            _ => return None,
+        },
         _ => return None,
     };
     (entry.update_kind == kind

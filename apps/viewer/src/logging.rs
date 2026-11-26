@@ -259,8 +259,10 @@ impl RecentLogs {
             Some(LogLevel::Warn) | None => matches!(entry.level, LogLevel::Warn | LogLevel::Error),
             Some(_) => true,
         });
-        let all: Vec<RecentLogEntry> = filtered.cloned().collect();
-        if all.len() <= limit { all } else { all[all.len() - limit..].to_vec() }
+        let mut all: Vec<RecentLogEntry> = filtered.cloned().collect();
+        let excess = all.len().saturating_sub(limit);
+        all.drain(..excess);
+        all
     }
 }
 
@@ -542,8 +544,11 @@ fn prune_logs(dir: &Path) -> io::Result<()> {
             return false;
         };
 
-        let bytes = stamp.as_bytes();
-        bytes.len() == 15 && bytes[8] == b'-' && bytes[..8].iter().all(u8::is_ascii_digit) && bytes[9..].iter().all(u8::is_ascii_digit)
+        let Ok(bytes) = <[u8; 15]>::try_from(stamp.as_bytes()) else {
+            return false;
+        };
+        let (date, rest) = bytes.split_at(8);
+        matches!(rest, [b'-', time @ ..] if date.iter().all(u8::is_ascii_digit) && time.iter().all(u8::is_ascii_digit))
     });
 
     logs.sort();

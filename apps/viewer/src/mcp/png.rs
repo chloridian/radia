@@ -18,9 +18,9 @@ pub fn encode_rgba_png(pixels: &[u8], width: u32, height: u32, bytes_per_row: u3
     let swap_rb = matches!(format, TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb);
 
     let mut raw = Vec::with_capacity(rows.saturating_mul(row_bytes + 1));
-    for y in 0..rows {
+    for row_stride in pixels.chunks_exact(stride).take(rows) {
         raw.push(0);
-        let row = &pixels[y * stride..y * stride + row_bytes];
+        let row = row_stride.get(..row_bytes).expect("stride is at least row_bytes");
         if swap_rb {
             for px in row.as_chunks::<4>().0 {
                 raw.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
