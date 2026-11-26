@@ -363,15 +363,11 @@ impl WorkerState {
             match self.single_put_fits_empty(key, bytes.len()) {
                 Ok(true) => {}
                 Ok(false) => {
-                    if let Some(result) = results.get_mut(index) {
-                        *result = Some(Err(StorageError::TooLarge));
-                    }
+                    *results.get_mut(index).expect("results has one slot per entry") = Some(Err(StorageError::TooLarge));
                     continue;
                 }
                 Err(error) => {
-                    if let Some(result) = results.get_mut(index) {
-                        *result = Some(Err(error));
-                    }
+                    *results.get_mut(index).expect("results has one slot per entry") = Some(Err(error));
                     continue;
                 }
             }
@@ -390,9 +386,7 @@ impl WorkerState {
                         }
                         return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
                     }
-                    if let Some(result) = results.get_mut(index) {
-                        *result = Some(Err(error));
-                    }
+                    *results.get_mut(index).expect("results has one slot per entry") = Some(Err(error));
                 }
             }
         }
@@ -402,9 +396,8 @@ impl WorkerState {
         let mut staged_entries = Vec::new();
         if staged_entries.try_reserve_exact(staged.len()).is_err() {
             for index in staged_indices {
-                if let Some(result) = results.get_mut(index) {
-                    *result = Some(Err(StorageError::Unavailable(UnavailableReason::Allocation)));
-                }
+                *results.get_mut(index).expect("results has one slot per entry") =
+                    Some(Err(StorageError::Unavailable(UnavailableReason::Allocation)));
             }
             return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
         }
@@ -417,9 +410,8 @@ impl WorkerState {
             || accepted_indices.try_reserve_exact(staged.len()).is_err()
         {
             for index in staged_indices {
-                if let Some(result) = results.get_mut(index) {
-                    *result = Some(Err(StorageError::Unavailable(UnavailableReason::Allocation)));
-                }
+                *results.get_mut(index).expect("results has one slot per entry") =
+                    Some(Err(StorageError::Unavailable(UnavailableReason::Allocation)));
             }
             return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
         }
