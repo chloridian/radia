@@ -507,7 +507,7 @@ fn decode_mesh(
                     return Err(Failure::MalformedBlock);
                 }
             }
-            let header_bytes = &bytes[..bytes.len().min(mesh::MAX_MESH_HEADER_BYTES)];
+            let header_bytes = bytes.get(..mesh::MAX_MESH_HEADER_BYTES).unwrap_or(bytes);
             mesh::decode_header(header_bytes, total_length).map(|header| Data::MeshHeader { id, header }).map_err(mesh_failure)
         }
         Request::MeshLod(block) => {

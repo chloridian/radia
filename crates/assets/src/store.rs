@@ -1008,7 +1008,7 @@ impl Store {
 
     pub fn texture_stats(&self) -> TextureStoreStats {
         let mut stats = TextureStoreStats::default();
-        for candidate in &self.candidate_queues[fetch_pool(Kind::Texture)] {
+        for candidate in fetch_pool_ref(&self.candidate_queues, Kind::Texture) {
             if candidate.key.resource.kind != Kind::Texture {
                 continue;
             }
@@ -1023,9 +1023,9 @@ impl Store {
             }
             if let Some(Content::Texture(image)) = entry.ready()
                 && let Some(info) = image.info()
+                && let Some(slot) = stats.discard_histogram.get_mut(usize::from(info.discard).min(DISCARD_HISTOGRAM_BUCKETS - 1))
             {
-                let bucket = usize::from(info.discard).min(DISCARD_HISTOGRAM_BUCKETS - 1);
-                stats.discard_histogram[bucket] += 1;
+                *slot += 1;
             }
         }
         stats
@@ -1495,7 +1495,7 @@ impl Store {
         }
         Self::remove_candidate(candidate_queues, entry);
         if let Some(candidate) = candidate {
-            candidate_queues[fetch_pool(key.resource.kind)].insert(candidate);
+            fetch_pool_mut(candidate_queues, key.resource.kind).insert(candidate);
             entry.candidate = Some(candidate);
         }
         true
@@ -1503,7 +1503,7 @@ impl Store {
 
     fn remove_candidate(candidate_queues: &mut [BTreeSet<ScheduleKey>; 3], entry: &mut AssetEntry) -> bool {
         if let Some(previous) = entry.candidate.take() {
-            candidate_queues[fetch_pool(previous.key.resource.kind)].remove(&previous);
+            fetch_pool_mut(candidate_queues, previous.key.resource.kind).remove(&previous);
             true
         } else {
             false
@@ -1542,7 +1542,7 @@ impl Store {
         self.build_candidates();
         let mut selected = None;
         for index in (0..self.candidates.len()).rev() {
-            let candidate = self.candidates[index];
+            let candidate = *self.candidates.get(index).expect("index is below the candidate count");
             let key = candidate.key;
             let resource = key.resource;
             let Some(entry) = self.entries.get_mut(&key) else {
@@ -1573,7 +1573,7 @@ impl Store {
                 {
                     continue;
                 }
-            } else if self.running_fetches[fetch_pool(resource.kind)] >= FETCH_LIMITS[fetch_pool(resource.kind)] {
+            } else if *fetch_pool_ref(&self.running_fetches, resource.kind) >= *fetch_pool_ref(&FETCH_LIMITS, resource.kind) {
                 continue;
             }
             let prefix_lod = (!cache_read).then(|| self.mesh_lod_prefix(request)).flatten();
@@ -2018,7 +2018,7 @@ impl Store {
 
     fn quarantine_candidate(&mut self, candidate: ScheduleKey) {
         let Store { entries, candidate_queues, candidates_dirty, .. } = self;
-        candidate_queues[fetch_pool(candidate.key.resource.kind)].remove(&candidate);
+        fetch_pool_mut(candidate_queues, candidate.key.resource.kind).remove(&candidate);
         if let Some(entry) = entries.get_mut(&candidate.key)
             && entry.candidate == Some(candidate)
         {
@@ -2302,16 +2302,24 @@ fn content_satisfies(content: &Content, desired: Option<TextureSize>) -> bool {
     }
 }
 
-fn fetch_pool(kind: Kind) -> usize {
+fn fetch_pool_ref<T>(pools: &[T; 3], kind: Kind) -> &T {
     match kind {
-        Kind::Mesh => MESH_FETCH_POOL,
-        Kind::LegacyMaterial => LEGACY_MATERIAL_FETCH_POOL,
-        Kind::Texture | Kind::PbrMaterial | Kind::Environment => OTHER_FETCH_POOL,
+        Kind::Mesh => &pools[MESH_FETCH_POOL],
+        Kind::LegacyMaterial => &pools[LEGACY_MATERIAL_FETCH_POOL],
+        Kind::Texture | Kind::PbrMaterial | Kind::Environment => &pools[OTHER_FETCH_POOL],
+    }
+}
+
+fn fetch_pool_mut<T>(pools: &mut [T; 3], kind: Kind) -> &mut T {
+    match kind {
+        Kind::Mesh => &mut pools[MESH_FETCH_POOL],
+        Kind::LegacyMaterial => &mut pools[LEGACY_MATERIAL_FETCH_POOL],
+        Kind::Texture | Kind::PbrMaterial | Kind::Environment => &mut pools[OTHER_FETCH_POOL],
     }
 }
 
 fn start_fetch(kind: Kind, running: &mut [usize; 3]) {
-    running[fetch_pool(kind)] += 1;
+    *fetch_pool_mut(running, kind) += 1;
 }
 
 fn finish_cache_read(reads: &mut usize) {
@@ -2319,7 +2327,7 @@ fn finish_cache_read(reads: &mut usize) {
 }
 
 fn finish_fetch(kind: Kind, running: &mut [usize; 3]) {
-    running[fetch_pool(kind)] -= 1;
+    *fetch_pool_mut(running, kind) -= 1;
 }
 
 fn start_decode(kind: Kind, texture: &mut usize, other: &mut usize) {

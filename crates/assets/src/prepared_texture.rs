@@ -24,15 +24,15 @@ impl PreparedTextureKey {
     }
 
     pub(crate) fn storage_name(self) -> [u8; 16] {
-        let mut input = [0u8; KEY_DOMAIN.len() + 32 + 4 + 4];
-        let mut offset = 0usize;
-        input[offset..offset + KEY_DOMAIN.len()].copy_from_slice(KEY_DOMAIN);
-        offset += KEY_DOMAIN.len();
-        input[offset..offset + 32].copy_from_slice(&self.source_sha256);
-        offset += 32;
-        input[offset..offset + 4].copy_from_slice(&self.format_version.to_le_bytes());
-        offset += 4;
-        input[offset..offset + 4].copy_from_slice(&self.target_edge.to_le_bytes());
+        const DOMAIN_END: usize = KEY_DOMAIN.len();
+        const HASH_END: usize = DOMAIN_END + 32;
+        const VERSION_END: usize = HASH_END + 4;
+        const EDGE_END: usize = VERSION_END + 4;
+        let mut input = [0u8; EDGE_END];
+        input[..DOMAIN_END].copy_from_slice(KEY_DOMAIN);
+        input[DOMAIN_END..HASH_END].copy_from_slice(&self.source_sha256);
+        input[HASH_END..VERSION_END].copy_from_slice(&self.format_version.to_le_bytes());
+        input[VERSION_END..EDGE_END].copy_from_slice(&self.target_edge.to_le_bytes());
         let digest = storage::sha256(&input);
         let mut name = [0u8; 16];
         name.copy_from_slice(&digest[..16]);

@@ -52,7 +52,7 @@ pub fn split_legacy_response(bytes: Vec<u8>) -> Result<HashMap<AssetId, Vec<u8>>
         if inflated.len() + count > MAX_ENVELOPE_BYTES {
             return Err(Failure::TooLarge);
         }
-        inflated.extend_from_slice(&chunk[..count]);
+        inflated.extend_from_slice(chunk.get(..count).ok_or(Failure::Malformed)?);
     }
     let Value::Array(entries) = binary::from_slice_with_limits(&inflated, limits(MAX_ENVELOPE_BYTES)).map_err(|_| Failure::Malformed)?
     else {
