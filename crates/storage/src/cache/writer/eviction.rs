@@ -102,7 +102,8 @@ impl WorkerState {
             let middle = low + (high - low) / 2;
             let scan_cursor = self.eviction_scan_cursor;
             let evictions_this_batch = self.evictions_this_batch;
-            let result = self.plan_puts_inner(&entries[..middle], protection);
+            let prefix = entries.get(..middle).expect("binary search midpoint is within entries");
+            let result = self.plan_puts_inner(prefix, protection);
             self.eviction_scan_cursor = scan_cursor;
             self.evictions_this_batch = evictions_this_batch;
             match result {
