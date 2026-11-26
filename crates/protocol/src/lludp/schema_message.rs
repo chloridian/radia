@@ -194,10 +194,7 @@ impl SchemaMessage {
             if missing_variable_count && block_is_final {
                 encoded_schema_len.get_or_insert_with(|| reader.position());
                 blocks.push(BlockValues::new(Vec::new()));
-                if block_is_final {
-                    break;
-                }
-                continue;
+                break;
             }
 
             let count = match block_schema.mode {

@@ -624,10 +624,14 @@ impl SessionWorld {
         self.world.observe_region_flags(source, low, extended)
     }
 
-    pub(super) fn record_parcel_rejection(&mut self) -> Option<u64> {
+    pub(super) fn record_parcel_rejection(&mut self, simulator_id: SimulatorId, region: Region) -> Option<u64> {
         self.parcel_rejections = self.parcel_rejections.saturating_add(1);
-        (self.parcel_rejections != u64::MAX && self.parcel_rejections.is_multiple_of(PARCEL_REJECTION_LOG_INTERVAL))
-            .then_some(self.parcel_rejections)
+        let rejected = (self.parcel_rejections != u64::MAX && self.parcel_rejections.is_multiple_of(PARCEL_REJECTION_LOG_INTERVAL))
+            .then_some(self.parcel_rejections);
+        if let Some(rejected) = rejected {
+            tracing::debug!(simulator = simulator_id.get(), region = region.get(), rejected, "parcel updates were repeatedly rejected");
+        }
+        rejected
     }
 
     pub(super) fn observe_environment(
