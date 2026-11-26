@@ -30,9 +30,9 @@ use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
 use super::{
-    BackgroundQueueGauge, ForegroundRequest, InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequests, InventoryLoadingStatus,
-    MAX_AIS_DEPTH, MAX_BACKGROUND_CONCURRENCY, MAX_RETRY_AFTER, MAX_TOTAL_CONCURRENCY, REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais,
-    retry_delay, run_scheduler,
+    AdaptiveConcurrency, BackgroundQueueGauge, ForegroundRequest, InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequests,
+    InventoryLoadingStatus, MAX_AIS_DEPTH, MAX_BACKGROUND_CONCURRENCY, MAX_RETRY_AFTER, MAX_TOTAL_CONCURRENCY, RECOVERY_SUCCESS_THRESHOLD,
+    REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, retry_delay, run_scheduler,
 };
 use crate::{
     inventory::{
@@ -2165,98 +2165,43 @@ async fn foreground_uses_reserved_slot() {
     task.await.expect("scheduler stopped");
 }
 
-#[tokio::test(start_paused = true)]
-async fn rate_limit_backs_off_with_retry_after() {
-    let mut peer = LoopbackPeer::start().await;
-    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
-    let (mut inventory, root, _leaves) = inventory_with_independent_leaves(MAX_BACKGROUND_CONCURRENCY + 6);
-    let owner = root.owner();
-    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
-    peer.grant(&[("InventoryAPIv3", "/ais")]).await;
+#[test]
+fn rate_limit_halves_and_waits() {
+    let mut c = AdaptiveConcurrency::new();
+    let now = time::Instant::now();
+    c.on_backoff(now, 0, Some(Duration::from_secs(5)));
+    c.on_backoff(now, 0, Some(Duration::from_secs(5)));
 
-    let mut held = Vec::with_capacity(MAX_BACKGROUND_CONCURRENCY);
-    for _ in 0..MAX_BACKGROUND_CONCURRENCY {
-        held.push(peer.next().await);
-    }
-
-    held.remove(0).respond_with_headers(429, "", &[("Retry-After", "5")]).await;
-    held.remove(0).respond_with_headers(503, "", &[("Retry-After", "5")]).await;
-    for req in held.drain(..) {
-        let f = folder_from_path(&req.path, owner);
-        req.respond(200, empty_folder_response(f, 2)).await;
-        let (fetch, applied) = take_folder_event(next_event(&mut events).await, f);
-        apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply in-flight leaf");
-    }
-
-    time::advance(Duration::from_secs(4)).await;
-    task::yield_now().await;
-    assert!(timeout(Duration::from_millis(50), peer.next()).await.is_err(), "no background requests during Retry-After backoff");
-
-    time::advance(Duration::from_secs(2)).await;
-    let mut resumed = Vec::new();
-    for _ in 0..4 {
-        resumed.push(timeout(TEST_TIMEOUT, peer.next()).await.expect("resumed request after backoff"));
-    }
-    assert!(timeout(Duration::from_millis(50), peer.next()).await.is_err(), "two rate limits halve concurrency from 19 -> 9 -> 4");
-
-    for req in resumed {
-        let f = folder_from_path(&req.path, owner);
-        req.respond(200, empty_folder_response(f, 2)).await;
-    }
-    drop(requests);
-    stop.send(()).expect("stop backoff scheduler");
-    task.await.expect("scheduler stopped");
+    assert_eq!(c.limit, 4, "two rate limits halve concurrency from 19 -> 9 -> 4");
+    assert_eq!(c.backoff_deadline(now), Some(now + Duration::from_secs(5)));
+    assert!(!c.can_launch_background(0, 0, now + Duration::from_secs(4)), "no background requests during Retry-After");
+    assert!(c.can_launch_background(3, 3, now + Duration::from_secs(5)));
+    assert!(!c.can_launch_background(4, 4, now + Duration::from_secs(5)));
+    assert_eq!(c.backoff_deadline(now + Duration::from_secs(5)), None);
 }
 
-#[tokio::test(start_paused = true)]
-async fn concurrency_recovers_after_backoff() {
-    let mut peer = LoopbackPeer::start().await;
-    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
-    let (mut inventory, root, _leaves) = inventory_with_independent_leaves(40);
-    let owner = root.owner();
-    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
-    peer.grant(&[("InventoryAPIv3", "/ais")]).await;
-
-    let mut held = Vec::with_capacity(MAX_BACKGROUND_CONCURRENCY);
-    for _ in 0..MAX_BACKGROUND_CONCURRENCY {
-        held.push(peer.next().await);
-    }
-
+#[test]
+fn concurrency_recovers_after_backoff() {
+    let mut c = AdaptiveConcurrency::new();
+    let now = time::Instant::now();
     for _ in 0..3 {
-        held.remove(0).respond_with_headers(429, "", &[("Retry-After", "2")]).await;
+        c.on_backoff(now, 0, Some(Duration::from_secs(2)));
     }
-    for req in held.drain(..) {
-        let f = folder_from_path(&req.path, owner);
-        req.respond(200, empty_folder_response(f, 2)).await;
-        let (fetch, applied) = take_folder_event(next_event(&mut events).await, f);
-        apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply drained leaf");
-    }
+    assert_eq!(c.limit, 2, "three rate limits reduce concurrency from 19 -> 9 -> 4 -> 2");
 
-    time::advance(Duration::from_secs(3)).await;
-    let mut first_wave = Vec::new();
-    for _ in 0..2 {
-        first_wave.push(timeout(TEST_TIMEOUT, peer.next()).await.expect("post-backoff request"));
-    }
-    assert!(timeout(Duration::from_millis(50), peer.next()).await.is_err(), "three rate limits reduce concurrency from 19 -> 9 -> 4 -> 2");
+    c.on_success(now + Duration::from_secs(1));
+    c.on_success(now + Duration::from_secs(1));
+    assert_eq!(c.limit, 2, "successes during backoff do not raise the limit");
 
-    for req in first_wave {
-        let f = folder_from_path(&req.path, owner);
-        req.respond(200, empty_folder_response(f, 2)).await;
-        let (fetch, applied) = take_folder_event(next_event(&mut events).await, f);
-        apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply first recovery wave");
+    let after = now + Duration::from_secs(2);
+    for _ in 0..RECOVERY_SUCCESS_THRESHOLD {
+        c.on_success(after);
     }
+    assert_eq!(c.limit, 3);
 
-    let mut second_wave = Vec::new();
-    for _ in 0..3 {
-        second_wave.push(timeout(TEST_TIMEOUT, peer.next()).await.expect("recovered concurrency allows 3 in flight"));
+    for _ in 0..MAX_BACKGROUND_CONCURRENCY * RECOVERY_SUCCESS_THRESHOLD {
+        c.on_success(after);
     }
-    assert!(timeout(Duration::from_millis(50), peer.next()).await.is_err());
-
-    for req in second_wave {
-        let f = folder_from_path(&req.path, owner);
-        req.respond(200, empty_folder_response(f, 2)).await;
-    }
-    drop(requests);
-    stop.send(()).expect("stop recovery scheduler");
-    task.await.expect("scheduler stopped");
+    assert_eq!(c.limit, MAX_BACKGROUND_CONCURRENCY);
+    assert!(!c.can_launch_background(0, MAX_TOTAL_CONCURRENCY, after), "the reserved slot stays free");
 }
