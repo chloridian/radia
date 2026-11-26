@@ -186,17 +186,6 @@ pub(super) fn ping_status(ms: f64) -> MetricStatus {
     }
 }
 
-#[allow(dead_code)]
-pub(super) fn packet_loss_status(percent: f64) -> MetricStatus {
-    if percent <= 0.0 {
-        MetricStatus::Green
-    } else if percent <= 1.0 {
-        MetricStatus::Yellow
-    } else {
-        MetricStatus::Red
-    }
-}
-
 pub(super) fn format_bytes(bytes: usize) -> String {
     const MIB: f64 = 1024.0 * 1024.0;
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -249,11 +238,6 @@ mod tests {
         assert_eq!(ping_status(100.0), MetricStatus::Yellow);
         assert_eq!(ping_status(200.0), MetricStatus::Yellow);
         assert_eq!(ping_status(200.1), MetricStatus::Red);
-
-        assert_eq!(packet_loss_status(0.0), MetricStatus::Green);
-        assert_eq!(packet_loss_status(0.5), MetricStatus::Yellow);
-        assert_eq!(packet_loss_status(1.0), MetricStatus::Yellow);
-        assert_eq!(packet_loss_status(1.01), MetricStatus::Red);
     }
 
     #[test]

@@ -1713,7 +1713,7 @@ impl Store {
         Some((block, bytes))
     }
 
-    #[allow(clippy::result_large_err)]
+    #[expect(clippy::result_large_err)]
     pub fn start_decode(&mut self, mut input: DecodeInput) -> Result<DecodeJob, DecodeInput> {
         if self.closed || input.is_cancelled() || input.job.route.store != self.id {
             return Err(input);
