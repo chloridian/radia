@@ -172,20 +172,6 @@ impl PacketRejections {
     }
 }
 
-#[cfg(test)]
-fn rejection_index(kind: RejectionKind) -> usize {
-    match kind {
-        RejectionKind::FrameInspection => 0,
-        RejectionKind::AcknowledgementAdmission => 1,
-        RejectionKind::DecodeAdmission => 2,
-        RejectionKind::Preflight => 3,
-        RejectionKind::RetainedMemoryAdmission => 4,
-        RejectionKind::Decode => 5,
-        RejectionKind::AllocationEstimateMismatch => 6,
-        RejectionKind::EventAdmission => 7,
-    }
-}
-
 fn format_message_id(message_id: MessageId) -> String {
     if let Some(schema) = SchemaMessage::schema_by_id(message_id) {
         schema.name.to_owned()
@@ -843,11 +829,11 @@ mod tests {
     fn known_schema_records_failure() {
         let mut rejections = PacketRejections::default();
         let now = time::Instant::now();
-        let window = rejections
+        let mut window = rejections
             .record_decode_failure_at(now, OBJECT_UPDATE, &LLUdpError::TruncatedPacket)
             .expect("first rejection reports immediately");
 
-        assert_eq!(window.counts[rejection_index(RejectionKind::Decode)], 1);
+        assert_eq!(*window.count_mut(RejectionKind::Decode), 1);
         assert_eq!(window.decode_failures.len(), 1);
         assert_eq!(window.decode_failures[0].message, "ObjectUpdate");
         assert_eq!(window.decode_failures[0].error, LLUdpError::TruncatedPacket.to_string());
@@ -890,11 +876,11 @@ mod tests {
         assert!(rejections.record_decode_failure_at(within_window, MessageId::low(0xfff1), &LLUdpError::InvalidMessageId).is_none());
         assert!(rejections.record_decode_failure_at(within_window, MessageId::low(0xfff2), &LLUdpError::InvalidMessageId).is_none());
 
-        let window = rejections
+        let mut window = rejections
             .record_decode_failure_at(start + PACKET_REJECTION_SUMMARY_INTERVAL, OBJECT_UPDATE, &LLUdpError::TruncatedPacket)
             .expect("summary reports when interval elapses");
 
-        assert_eq!(window.counts[rejection_index(RejectionKind::Decode)], 8);
+        assert_eq!(*window.count_mut(RejectionKind::Decode), 8);
         assert_eq!(window.decode_failures.len(), MAX_DECODE_FAILURE_SAMPLES);
         assert_eq!(window.decode_failures[0].message, "ObjectUpdate");
         assert_eq!(window.decode_failures[0].count, 3);

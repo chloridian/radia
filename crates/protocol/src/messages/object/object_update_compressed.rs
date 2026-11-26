@@ -454,7 +454,7 @@ fn write_binary_data(writer: &mut Writer<'_>, bytes: &[u8]) -> Result<(), LLUdpE
 fn read_c_string(reader: &mut Reader<'_>) -> Result<String, LLUdpError> {
     let len = reader.remaining().iter().position(|byte| *byte == 0).ok_or(LLUdpError::TruncatedPacket)?;
     let bytes = reader.take(len)?;
-    let _ = reader.u8()?;
+    reader.u8()?;
     str::from_utf8(bytes).map(str::to_owned).map_err(|_| LLUdpError::InvalidUtf8)
 }
 
