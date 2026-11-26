@@ -958,26 +958,16 @@ pub(crate) async fn fetch_single_items(
     if let Some(capability) = ais_capability {
         let mut items = Vec::with_capacity(item_ids.len());
         for item_id in item_ids {
-            let mut retries = 0;
-            loop {
-                match ais::fetch_item_once(client, capability, owner, *item_id).await {
-                    Ok(item) => {
-                        items.push(item);
-                        break;
-                    }
-                    Err(RequestFailure::Cancelled) => return Err(InventoryFetchError::Cancelled),
-                    Err(RequestFailure::Transient { retry_after, .. }) if retries < MAX_FETCH_RETRIES => {
-                        wait_retry_cancellable(retries, retry_after, None).await?;
-                        retries += 1;
-                    }
-                    Err(RequestFailure::Transient { cause, .. }) => return Err(InventoryFetchError::RetryExhausted(cause)),
-                    Err(RequestFailure::Missing(_)) => break,
-                    Err(RequestFailure::FolderTooLarge) => return Err(InventoryFetchError::FolderTooLarge),
-                    Err(RequestFailure::InvalidResponse(decode)) => return Err(InventoryFetchError::InvalidResponse(decode)),
-                    Err(RequestFailure::Forbidden) => return Err(InventoryFetchError::HttpStatus(403)),
-                    Err(RequestFailure::HttpStatus(status)) => return Err(InventoryFetchError::HttpStatus(status)),
-                    Err(RequestFailure::Failed) => return Err(InventoryFetchError::RequestFailed),
-                }
+            match retry_transient(None, || ais::fetch_item_once(client, capability, owner, *item_id)).await {
+                Ok(item) => items.push(item),
+                Err(RequestFailure::Cancelled) => return Err(InventoryFetchError::Cancelled),
+                Err(RequestFailure::Transient { cause, .. }) => return Err(InventoryFetchError::RetryExhausted(cause)),
+                Err(RequestFailure::Missing(_)) => {}
+                Err(RequestFailure::FolderTooLarge) => return Err(InventoryFetchError::FolderTooLarge),
+                Err(RequestFailure::InvalidResponse(decode)) => return Err(InventoryFetchError::InvalidResponse(decode)),
+                Err(RequestFailure::Forbidden) => return Err(InventoryFetchError::HttpStatus(403)),
+                Err(RequestFailure::HttpStatus(status)) => return Err(InventoryFetchError::HttpStatus(status)),
+                Err(RequestFailure::Failed) => return Err(InventoryFetchError::RequestFailed),
             }
         }
         Ok(items)
@@ -1007,24 +997,23 @@ async fn fetch_ais_with_provenance(
     mut capture_snapshot: impl FnMut() -> Option<InventorySnapshot>,
 ) -> Result<Vec<FolderFetch>, InventoryFetchError> {
     let mut depth = initial_depth.min(MAX_AIS_DEPTH);
-    let mut retries = 0;
     loop {
-        let request_snapshot = capture_snapshot();
-        match ais::fetch_once(client, capability, folder, depth, is_library).await {
-            Ok(mut folders) => {
+        match retry_transient(cancellation, || {
+            let request_snapshot = capture_snapshot();
+            async move {
+                let mut folders = ais::fetch_once(client, capability, folder, depth, is_library).await?;
                 stamp_request_provenance(&mut folders, request_snapshot.as_ref());
-                return Ok(folders);
+                Ok(folders)
             }
+        })
+        .await
+        {
+            Ok(folders) => return Ok(folders),
             Err(RequestFailure::Cancelled) => return Err(InventoryFetchError::Cancelled),
             Err(RequestFailure::Forbidden | RequestFailure::FolderTooLarge) if depth > 0 => {
                 depth /= 2;
-                retries = 0;
             }
             Err(RequestFailure::Forbidden | RequestFailure::FolderTooLarge) => return Err(InventoryFetchError::FolderTooLarge),
-            Err(RequestFailure::Transient { retry_after, .. }) if retries < MAX_FETCH_RETRIES => {
-                wait_retry_cancellable(retries, retry_after, cancellation).await?;
-                retries += 1;
-            }
             Err(RequestFailure::Transient { cause, .. }) => return Err(InventoryFetchError::RetryExhausted(cause)),
             Err(RequestFailure::InvalidResponse(decode)) => return Err(InventoryFetchError::InvalidResponse(decode)),
             Err(RequestFailure::Missing(status) | RequestFailure::HttpStatus(status)) => {
@@ -1051,28 +1040,24 @@ async fn fetch_legacy_with_provenance(
     cancellation: Option<&Cancellation>,
     mut capture_snapshot: impl FnMut() -> Option<InventorySnapshot>,
 ) -> Result<Vec<FolderFetch>, InventoryFetchError> {
-    let mut retries = 0;
-    loop {
+    match retry_transient(cancellation, || {
         let request_snapshot = capture_snapshot();
-        match legacy::fetch_batch(client, capability, folders, is_library).await {
-            Ok(mut folders) => {
-                stamp_request_provenance(&mut folders, request_snapshot.as_ref());
-                return Ok(folders);
-            }
-            Err(RequestFailure::Cancelled) => return Err(InventoryFetchError::Cancelled),
-            Err(RequestFailure::Transient { retry_after, .. }) if retries < MAX_FETCH_RETRIES => {
-                wait_retry_cancellable(retries, retry_after, cancellation).await?;
-                retries += 1;
-            }
-            Err(RequestFailure::Transient { cause, .. }) => return Err(InventoryFetchError::RetryExhausted(cause)),
-            Err(RequestFailure::FolderTooLarge) => return Err(InventoryFetchError::FolderTooLarge),
-            Err(RequestFailure::InvalidResponse(decode)) => return Err(InventoryFetchError::InvalidResponse(decode)),
-            Err(RequestFailure::Forbidden) => return Err(InventoryFetchError::HttpStatus(403)),
-            Err(RequestFailure::Missing(status) | RequestFailure::HttpStatus(status)) => {
-                return Err(InventoryFetchError::HttpStatus(status));
-            }
-            Err(RequestFailure::Failed) => return Err(InventoryFetchError::RequestFailed),
+        async move {
+            let mut folders = legacy::fetch_batch(client, capability, folders, is_library).await?;
+            stamp_request_provenance(&mut folders, request_snapshot.as_ref());
+            Ok(folders)
         }
+    })
+    .await
+    {
+        Ok(folders) => Ok(folders),
+        Err(RequestFailure::Cancelled) => Err(InventoryFetchError::Cancelled),
+        Err(RequestFailure::Transient { cause, .. }) => Err(InventoryFetchError::RetryExhausted(cause)),
+        Err(RequestFailure::FolderTooLarge) => Err(InventoryFetchError::FolderTooLarge),
+        Err(RequestFailure::InvalidResponse(decode)) => Err(InventoryFetchError::InvalidResponse(decode)),
+        Err(RequestFailure::Forbidden) => Err(InventoryFetchError::HttpStatus(403)),
+        Err(RequestFailure::Missing(status) | RequestFailure::HttpStatus(status)) => Err(InventoryFetchError::HttpStatus(status)),
+        Err(RequestFailure::Failed) => Err(InventoryFetchError::RequestFailed),
     }
 }
 
@@ -1086,21 +1071,28 @@ fn stamp_request_provenance(folders: &mut [FolderFetch], snapshot: Option<&Inven
     }
 }
 
-async fn wait_retry_cancellable(
-    retries: u32,
-    retry_after: Option<Duration>,
-    cancellation: Option<&Cancellation>,
-) -> Result<(), InventoryFetchError> {
-    let delay = retry_delay(retries, retry_after);
-    if let Some(cancellation) = cancellation {
-        tokio::select! {
-            biased;
-            _ = cancellation.clone() => Err(InventoryFetchError::Cancelled),
-            _ = time::sleep(delay) => Ok(()),
+async fn retry_transient<T, F>(cancellation: Option<&Cancellation>, mut attempt: impl FnMut() -> F) -> Result<T, RequestFailure>
+where
+    F: Future<Output = Result<T, RequestFailure>>,
+{
+    let mut retries = 0;
+    loop {
+        match attempt().await {
+            Err(RequestFailure::Transient { retry_after, .. }) if retries < MAX_FETCH_RETRIES => {
+                let delay = retry_delay(retries, retry_after);
+                if let Some(cancellation) = cancellation {
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.clone() => return Err(RequestFailure::Cancelled),
+                        _ = time::sleep(delay) => {}
+                    }
+                } else {
+                    time::sleep(delay).await;
+                }
+                retries += 1;
+            }
+            result => return result,
         }
-    } else {
-        time::sleep(delay).await;
-        Ok(())
     }
 }
 

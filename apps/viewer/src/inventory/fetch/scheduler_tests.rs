@@ -23,7 +23,7 @@ use network::capabilities::{CapabilityUrl, Client};
 use protocol::inventory::DecodeError;
 use tokio::{
     sync::{mpsc, oneshot, watch},
-    task::{self, JoinHandle},
+    task::JoinHandle,
     time::{self, timeout},
 };
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
@@ -32,7 +32,7 @@ use uuid::Uuid;
 use super::{
     AdaptiveConcurrency, BackgroundQueueGauge, ForegroundRequest, InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequests,
     InventoryLoadingStatus, MAX_AIS_DEPTH, MAX_BACKGROUND_CONCURRENCY, MAX_RETRY_AFTER, MAX_TOTAL_CONCURRENCY, RECOVERY_SUCCESS_THRESHOLD,
-    REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, retry_delay, run_scheduler,
+    REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, retry_delay, retry_transient, run_scheduler,
 };
 use crate::{
     inventory::{
@@ -1929,32 +1929,50 @@ async fn malformed_response_keeps_cause() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn retry_after_paces_and_preserves_status() {
+async fn retry_after_paces_attempts() {
+    let mut attempts = Vec::new();
+    let result = retry_transient(None, || {
+        attempts.push(time::Instant::now());
+        let attempt = attempts.len();
+        async move {
+            if attempt == 1 {
+                Err(RequestFailure::Transient { cause: FetchFailureCause::HttpStatus(429), retry_after: Some(Duration::from_secs(5)) })
+            } else {
+                Ok(())
+            }
+        }
+    })
+    .await;
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[1].duration_since(attempts[0]), Duration::from_secs(5));
+}
+
+#[tokio::test(start_paused = true)]
+async fn exhausted_retries_keep_last_failure() {
+    let mut attempts = 0_u32;
+    let result: Result<(), RequestFailure> = retry_transient(None, || {
+        let attempt = attempts;
+        attempts += 1;
+        async move {
+            let status = if attempt < MAX_FETCH_RETRIES { 429 } else { 503 };
+            Err(RequestFailure::Transient { cause: FetchFailureCause::HttpStatus(status), retry_after: Some(Duration::ZERO) })
+        }
+    })
+    .await;
+
+    assert_eq!(attempts, MAX_FETCH_RETRIES + 1);
+    assert_matches!(result, Err(RequestFailure::Transient { cause: FetchFailureCause::HttpStatus(503), .. }));
+}
+
+#[tokio::test]
+async fn retry_exhaustion_reports_status() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let capability = CapabilityUrl::parse(peer.url("/ais").as_str()).expect("valid AIS URL");
     let owner = InventoryOwner::new(Uuid::from_u128(120));
     let root = key(owner, 121);
-    let successful_body = empty_folder_response(root, 1);
-
-    let fetch_task = tokio::spawn({
-        let client = client.clone();
-        let capability = capability.clone();
-        async move { fetch_ais(&client, &capability, root, 0).await }
-    });
-
-    let first = peer.next().await;
-    first.respond_with_headers(429, "", &[("Retry-After", "5")]).await;
-
-    time::advance(Duration::from_secs(4)).await;
-    task::yield_now().await;
-    assert!(timeout(Duration::from_millis(50), peer.next()).await.is_err());
-
-    time::advance(Duration::from_secs(2)).await;
-    let second = peer.next().await;
-    second.respond(200, successful_body).await;
-    let fetched = fetch_task.await.expect("fetch task").expect("retry after 5s should succeed");
-    assert_eq!(fetched.len(), 1);
 
     let exhaust_task = tokio::spawn({
         let client = client.clone();
