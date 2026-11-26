@@ -28,7 +28,8 @@ impl Bits<'_> {
             let width = (count - shift).min(8);
             let mut byte = 0;
             for _ in 0..width {
-                byte = (byte << 1) | u32::from((self.data[self.position / 8] >> (7 - self.position % 8)) & 1);
+                let source = *self.data.get(self.position / 8).ok_or(Error::Truncated)?;
+                byte = (byte << 1) | u32::from((source >> (7 - self.position % 8)) & 1);
                 self.position += 1;
             }
             value |= byte << shift;

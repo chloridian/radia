@@ -233,8 +233,8 @@ pub(crate) fn write_id(writer: &mut Writer<'_>, id: Uuid) -> Result<(), LLUdpErr
 
 pub(crate) fn read_string(reader: &mut Reader<'_>) -> Result<Option<String>, LLUdpError> {
     let bytes = reader.variable1()?;
-    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
-    Ok(str::from_utf8(&bytes[..end]).ok().map(str::to_owned))
+    let text = bytes.split(|byte| *byte == 0).next().unwrap_or(bytes);
+    Ok(str::from_utf8(text).ok().map(str::to_owned))
 }
 
 pub(crate) fn add_item_capacity(total: &mut usize, block: &InventoryItemBlock) {

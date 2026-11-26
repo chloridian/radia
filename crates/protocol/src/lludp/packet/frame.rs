@@ -20,7 +20,8 @@ impl<'a> PacketFrame<'a> {
     pub fn message_id(&self) -> Result<MessageId, LLUdpError> {
         if self.flags.contains(PacketFlags::ZEROCODED) {
             let mut prefix = [0; u8::MAX as usize + 4];
-            let prefix_len = zero_code::decode_prefix(self.wire_data, &mut prefix[..self.extra_header_len + 4])?;
+            let prefix_buf = prefix.get_mut(..self.extra_header_len + 4).expect("extra header length fits in u8");
+            let prefix_len = zero_code::decode_prefix(self.wire_data, prefix_buf)?;
             let message_bytes = prefix.get(self.extra_header_len..prefix_len).ok_or(LLUdpError::TruncatedPacket)?;
             MessageId::decode(message_bytes).map(|(id, _)| id)
         } else {
@@ -53,14 +54,16 @@ impl<'a> PacketFrame<'a> {
     fn preflight_values(&self) -> Result<(PacketPreflight, usize, usize), LLUdpError> {
         let (id, allocation_bytes, decoded_body_len, id_len) = if self.flags.contains(PacketFlags::ZEROCODED) {
             let mut id_prefix = [0; u8::MAX as usize + 4];
-            let prefix_len = zero_code::decode_prefix(self.wire_data, &mut id_prefix[..self.extra_header_len + 4])?;
+            let id_buf = id_prefix.get_mut(..self.extra_header_len + 4).expect("extra header length fits in u8");
+            let prefix_len = zero_code::decode_prefix(self.wire_data, id_buf)?;
             let message_prefix = id_prefix.get(self.extra_header_len..prefix_len).ok_or(LLUdpError::TruncatedPacket)?;
             let (id, id_len) = MessageId::decode(message_prefix)?;
             let max_decoded_body_size = MAX_LLUDP_PACKET_SIZE
                 .checked_sub(HEADER_BYTES + self.appended_ack_bytes.len() + usize::from(self.flags.contains(PacketFlags::APPENDED_ACKS)))
                 .ok_or(LLUdpError::DatagramTooLarge)?;
             let mut decoded_data = [0; MAX_LLUDP_PACKET_SIZE];
-            let decoded_len = zero_code::decode_to_slice(self.wire_data, &mut decoded_data[..max_decoded_body_size])?;
+            let decoded_buf = decoded_data.get_mut(..max_decoded_body_size).expect("decoded body limit fits in packet buffer");
+            let decoded_len = zero_code::decode_to_slice(self.wire_data, decoded_buf)?;
             let message_start = self.extra_header_len;
             let message_end = decoded_len;
             let message_bytes = decoded_data.get(message_start..message_end).ok_or(LLUdpError::TruncatedPacket)?;
@@ -179,16 +182,14 @@ impl Packet {
         if bytes.len() > MAX_LLUDP_PACKET_SIZE {
             return Err(LLUdpError::DatagramTooLarge);
         }
-        if bytes.len() < HEADER_BYTES {
-            return Err(LLUdpError::TruncatedPacket);
-        }
-
-        let flags = PacketFlags::from_bits_retain(bytes[0]);
+        let (&[flags_byte, seq0, seq1, seq2, seq3, extra_header_byte], _) =
+            bytes.split_first_chunk::<HEADER_BYTES>().ok_or(LLUdpError::TruncatedPacket)?;
+        let flags = PacketFlags::from_bits_retain(flags_byte);
         if flags.contains(PacketFlags::RESENT) && !flags.contains(PacketFlags::RELIABLE) {
             return Err(LLUdpError::InvalidPacketFlags);
         }
-        let sequence = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-        let extra_header_len = usize::from(bytes[5]);
+        let sequence = u32::from_be_bytes([seq0, seq1, seq2, seq3]);
+        let extra_header_len = usize::from(extra_header_byte);
         let data_start = HEADER_BYTES;
         if !flags.contains(PacketFlags::ZEROCODED)
             && bytes.len() < data_start.checked_add(extra_header_len).ok_or(LLUdpError::TruncatedPacket)?
@@ -213,9 +214,15 @@ impl Packet {
         } else {
             bytes.len()
         };
-        let appended_ack_bytes = if flags.contains(PacketFlags::APPENDED_ACKS) { &bytes[body_end..bytes.len() - 1] } else { &[] };
+        let appended_ack_bytes = if flags.contains(PacketFlags::APPENDED_ACKS) {
+            let ack_end = bytes.len().checked_sub(1).ok_or(LLUdpError::InvalidAcknowledgementList)?;
+            bytes.get(body_end..ack_end).ok_or(LLUdpError::InvalidAcknowledgementList)?
+        } else {
+            &[]
+        };
+        let wire_data = bytes.get(data_start..body_end).ok_or(LLUdpError::TruncatedPacket)?;
 
-        Ok(PacketFrame { sequence, flags, extra_header_len, wire_data: &bytes[data_start..body_end], appended_ack_bytes })
+        Ok(PacketFrame { sequence, flags, extra_header_len, wire_data, appended_ack_bytes })
     }
 
     pub fn preflight(bytes: &[u8]) -> Result<PacketPreflight, LLUdpError> {

@@ -1,3 +1,5 @@
+#![deny(clippy::unwrap_used, clippy::indexing_slicing)]
+
 pub mod inventory;
 pub mod lludp;
 pub mod login;
