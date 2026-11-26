@@ -82,11 +82,14 @@ fn quoted(output: &mut Output, text: &str, quote: u8) -> Result<()> {
             b'\t' => output.append(b"\\t")?,
             byte if byte == quote => output.append(&[b'\\', byte])?,
             0..=0x1f | 0x7f => {
-                const HEX: &[u8] = b"0123456789abcdef";
-                output.append(&[b'\\', b'x', HEX[(byte >> 4) as usize], HEX[(byte & 15) as usize]])?;
+                output.append(&[b'\\', b'x', hex_nibble(byte >> 4), hex_nibble(byte & 15)])?;
             }
             byte => output.append(&[byte])?,
         }
     }
     output.append(&[quote])
+}
+
+fn hex_nibble(nibble: u8) -> u8 {
+    if nibble < 10 { b'0' + nibble } else { b'a' + (nibble - 10) }
 }

@@ -46,7 +46,8 @@ impl Output {
         self.bytes.extend_from_slice(prefix);
         let start = self.bytes.len();
         self.bytes.resize(start + encoded_len, 0);
-        STANDARD.encode_slice(bytes, &mut self.bytes[start..]).map_err(|e| Error::InvalidValue(e.to_string()))?;
+        let target = self.bytes.get_mut(start..).expect("resized buffer covers start");
+        STANDARD.encode_slice(bytes, target).map_err(|e| Error::InvalidValue(e.to_string()))?;
         self.bytes.extend_from_slice(suffix);
         Ok(())
     }

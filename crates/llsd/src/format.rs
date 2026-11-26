@@ -20,9 +20,14 @@ pub fn from_slice_with_limits<T: DeserializeOwned>(input: &[u8], limits: Limits)
     }
 }
 
-fn trim_text_end(input: &[u8]) -> &[u8] {
-    let end = input.iter().rposition(|byte| *byte != 0 && !byte.is_ascii_whitespace()).map_or(0, |index| index + 1);
-    &input[..end]
+fn trim_text_end(mut input: &[u8]) -> &[u8] {
+    while let Some((&last, rest)) = input.split_last() {
+        if last != 0 && !last.is_ascii_whitespace() {
+            break;
+        }
+        input = rest;
+    }
+    input
 }
 
 #[cfg(test)]
