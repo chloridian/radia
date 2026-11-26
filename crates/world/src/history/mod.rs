@@ -121,17 +121,7 @@ impl Journal {
     }
 
     pub(crate) fn entry_index(&self, revision: WorldRevision) -> usize {
-        let mut low = 0;
-        let mut high = self.entries.len();
-        while low < high {
-            let middle = low + (high - low) / 2;
-            if self.entries[middle].revision < revision {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        low
+        self.entries.partition_point(|entry| entry.revision < revision)
     }
 
     fn note_loss_through(&mut self, revision: WorldRevision) {

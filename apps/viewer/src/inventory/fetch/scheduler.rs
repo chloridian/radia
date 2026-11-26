@@ -894,7 +894,10 @@ async fn execute_background_ais(
             Some(parent) if job.folders.len() > 1 => {
                 ais::fetch_batch_once(client, capability, parent, &job.folders, depth, is_library).await
             }
-            _ => ais::fetch_once(client, capability, job.folders[0], depth, is_library).await,
+            _ => {
+                let folder = *job.folders.first().expect("fetch job contains at least one folder");
+                ais::fetch_once(client, capability, folder, depth, is_library).await
+            }
         };
         match result {
             Ok(mut folders) => {

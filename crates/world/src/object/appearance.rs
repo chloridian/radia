@@ -197,10 +197,12 @@ impl SurfaceAppearance {
         }
 
         overrides.sort_unstable_by_key(|(index, _)| *index);
-        for pair in overrides.windows(2) {
-            if pair[0].0 == pair[1].0 {
-                return Err(SurfaceAppearanceError::DuplicateFaceIndex(pair[0].0));
+        let mut previous = None;
+        for &(index, _) in &overrides {
+            if previous == Some(index) {
+                return Err(SurfaceAppearanceError::DuplicateFaceIndex(index));
             }
+            previous = Some(index);
         }
         overrides.retain(|(_, face)| *face != default_face);
 
@@ -218,7 +220,7 @@ impl SurfaceAppearance {
         Some(
             self.overrides
                 .binary_search_by_key(&index, |(face_index, _)| *face_index)
-                .map_or(&self.default_face, |slot| &self.overrides[slot].1),
+                .map_or(&self.default_face, |slot| &self.overrides.get(slot).expect("binary search returns a valid index").1),
         )
     }
 
@@ -269,10 +271,12 @@ impl PbrMaterialAssignments {
         }
 
         bindings.sort_unstable_by_key(|(index, _)| *index);
-        for pair in bindings.windows(2) {
-            if pair[0].0 == pair[1].0 {
-                return Err(PbrMaterialAssignmentsError::DuplicateFaceIndex(pair[0].0));
+        let mut previous = None;
+        for &(index, _) in &bindings {
+            if previous == Some(index) {
+                return Err(PbrMaterialAssignmentsError::DuplicateFaceIndex(index));
             }
+            previous = Some(index);
         }
         bindings.retain(|(_, asset_id)| !asset_id.uuid().is_nil());
 
@@ -283,7 +287,10 @@ impl PbrMaterialAssignments {
         if usize::from(face_index) >= MAX_SURFACE_FACES {
             return None;
         }
-        self.bindings.binary_search_by_key(&face_index, |(index, _)| *index).ok().map(|slot| self.bindings[slot].1)
+        self.bindings
+            .binary_search_by_key(&face_index, |(index, _)| *index)
+            .ok()
+            .map(|slot| self.bindings.get(slot).expect("binary search returns a valid index").1)
     }
 
     pub fn bindings(&self) -> impl Iterator<Item = (u8, AssetId)> + '_ {
@@ -405,8 +412,12 @@ impl PbrMaterialOverrides {
             return Err(PbrMaterialOverridesError::FaceIndexOutOfRange(*index));
         }
         faces.sort_unstable_by_key(|(index, _)| *index);
-        if let Some(pair) = faces.windows(2).find(|pair| pair[0].0 == pair[1].0) {
-            return Err(PbrMaterialOverridesError::DuplicateFaceIndex(pair[0].0));
+        let mut previous = None;
+        for &(index, _) in &faces {
+            if previous == Some(index) {
+                return Err(PbrMaterialOverridesError::DuplicateFaceIndex(index));
+            }
+            previous = Some(index);
         }
         for (_, material) in &faces {
             material.validate()?;
@@ -423,7 +434,10 @@ impl PbrMaterialOverrides {
     }
 
     pub fn face(&self, index: u8) -> Option<&PbrMaterialOverride> {
-        self.faces.binary_search_by_key(&index, |(face, _)| *face).ok().map(|offset| &self.faces[offset].1)
+        self.faces
+            .binary_search_by_key(&index, |(face, _)| *face)
+            .ok()
+            .map(|offset| &self.faces.get(offset).expect("binary search returns a valid index").1)
     }
 
     pub fn is_empty(&self) -> bool {

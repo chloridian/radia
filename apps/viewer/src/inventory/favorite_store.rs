@@ -371,21 +371,15 @@ fn hex_digit(nibble: u8) -> char {
 }
 
 fn percent_decode(input: &str) -> Option<String> {
-    let bytes = input.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            if index + 2 >= bytes.len() {
-                return None;
-            }
-            let high = from_hex(bytes[index + 1])?;
-            let low = from_hex(bytes[index + 2])?;
+    let mut bytes = input.as_bytes().iter().copied();
+    let mut decoded = Vec::with_capacity(input.len());
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let high = from_hex(bytes.next()?)?;
+            let low = from_hex(bytes.next()?)?;
             decoded.push((high << 4) | low);
-            index += 3;
         } else {
-            decoded.push(bytes[index]);
-            index += 1;
+            decoded.push(byte);
         }
     }
     String::from_utf8(decoded).ok()

@@ -259,10 +259,10 @@ impl IngestSummary {
                 BlockOutcome::Invalid | BlockOutcome::RecoveryRequired { .. } => {}
             }
             if rejected
-                && rejected_address_count < MAX_INGEST_DIAGNOSTIC_ADDRESSES
+                && let Some(slot) = rejected_addresses.get_mut(rejected_address_count)
                 && let Some(address) = block.address()
             {
-                rejected_addresses[rejected_address_count] = Some(address);
+                *slot = Some(address);
                 rejected_address_count += 1;
             }
         }

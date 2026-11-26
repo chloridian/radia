@@ -79,7 +79,7 @@ impl FrameTimes {
             (work_ms, Some(work_ms))
         };
         if let Some(sample_ms) = frame_sample_ms {
-            self.recent_frame_ms[self.frame_head] = sample_ms;
+            *self.recent_frame_ms.get_mut(self.frame_head).expect("frame_head is within FRAME_WINDOW") = sample_ms;
             self.frame_head = (self.frame_head + 1) % FRAME_WINDOW;
             if self.frame_len < FRAME_WINDOW {
                 self.frame_len += 1;
@@ -91,7 +91,7 @@ impl FrameTimes {
         {
             self.spikes.push(FrameSpike { work_ms, frame_ms: present_delta_ms, game_ms, render_ms, gpu_timings_ms });
         }
-        self.recent_work_ms[self.recent_head] = work_ms;
+        *self.recent_work_ms.get_mut(self.recent_head).expect("recent_head is within MEDIAN_WINDOW") = work_ms;
         self.recent_head = (self.recent_head + 1) % MEDIAN_WINDOW;
         if self.recent_len < MEDIAN_WINDOW {
             self.recent_len += 1;
@@ -118,7 +118,7 @@ impl FrameTimes {
             return None;
         }
         let mut scratch = self.recent_frame_ms;
-        let slice = &mut scratch[..self.frame_len];
+        let slice = scratch.get_mut(..self.frame_len).expect("frame_len is at most FRAME_WINDOW");
         let rank = ((self.frame_len as f64 * percentile).ceil() as usize).saturating_sub(1).min(self.frame_len - 1);
         let (_, value, _) = slice.select_nth_unstable_by(rank, f64::total_cmp);
         Some(*value)
@@ -129,7 +129,7 @@ impl FrameTimes {
             return None;
         }
         let mut scratch = self.recent_work_ms;
-        let slice = &mut scratch[..self.recent_len];
+        let slice = scratch.get_mut(..self.recent_len).expect("recent_len is at most MEDIAN_WINDOW");
         let (_, median, _) = slice.select_nth_unstable_by(self.recent_len / 2, f64::total_cmp);
         Some(*median)
     }

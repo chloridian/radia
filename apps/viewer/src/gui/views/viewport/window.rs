@@ -879,7 +879,7 @@ impl SceneView {
         let current = self.feed.as_ref().and_then(|feed| feed.environment_choice().sky_choice().cloned());
         let index = self.sky_options_cache.iter().position(|opt| opt.choice == current).unwrap_or(0);
         let Some(next_index) = step_index(index, self.sky_options_cache.len(), delta) else { return };
-        let next_choice = self.sky_options_cache[next_index].choice.clone();
+        let next_choice = self.sky_options_cache.get(next_index).expect("step_index returns an in-bounds index").choice.clone();
         self.sky_select.update(cx, |state, cx| state.set_selected_value(&next_choice, window, cx));
         if let Some(feed) = &self.feed {
             feed.set_sky_choice(next_choice);
@@ -892,7 +892,7 @@ impl SceneView {
         let current = self.feed.as_ref().and_then(|feed| feed.environment_choice().water_choice().cloned());
         let index = self.water_options_cache.iter().position(|opt| opt.choice == current).unwrap_or(0);
         let Some(next_index) = step_index(index, self.water_options_cache.len(), delta) else { return };
-        let next_choice = self.water_options_cache[next_index].choice.clone();
+        let next_choice = self.water_options_cache.get(next_index).expect("step_index returns an in-bounds index").choice.clone();
         self.water_select.update(cx, |state, cx| state.set_selected_value(&next_choice, window, cx));
         if let Some(feed) = &self.feed {
             feed.set_water_choice(next_choice);

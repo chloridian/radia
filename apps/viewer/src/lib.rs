@@ -1,5 +1,3 @@
-#![expect(clippy::indexing_slicing)]
-
 mod agent_movement;
 pub mod asset_coordinator;
 pub(crate) mod camera;

@@ -49,7 +49,7 @@ pub struct FrameSpikeRing {
 
 impl FrameSpikeRing {
     pub fn push(&mut self, spike: FrameSpike) {
-        self.entries[self.head] = Some(spike);
+        *self.entries.get_mut(self.head).expect("head is within FRAME_SPIKE_CAPACITY") = Some(spike);
         self.head = (self.head + 1) % FRAME_SPIKE_CAPACITY;
         if self.len < FRAME_SPIKE_CAPACITY {
             self.len += 1;
@@ -65,8 +65,13 @@ impl FrameSpikeRing {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = FrameSpike> + '_ {
-        let start = if self.len == FRAME_SPIKE_CAPACITY { self.head } else { 0 };
-        (0..self.len).filter_map(move |offset| self.entries[(start + offset) % FRAME_SPIKE_CAPACITY])
+        let (tail, head) = if self.len == FRAME_SPIKE_CAPACITY {
+            let (first, second) = self.entries.split_at_checked(self.head).expect("head is within FRAME_SPIKE_CAPACITY");
+            (second, first)
+        } else {
+            (self.entries.get(..self.len).expect("len is at most FRAME_SPIKE_CAPACITY"), [].as_slice())
+        };
+        tail.iter().chain(head.iter()).copied().flatten()
     }
 }
 

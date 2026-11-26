@@ -618,32 +618,33 @@ fn object_classification(
             }
 
             let shape = match sculpt_parameter {
-                Some(parameter) if parameter.data.len() != SCULPT_EXTRA_PARAM_LEN => FieldUpdate::Keep,
-                Some(parameter) => {
-                    let raw_type = parameter.data[16];
-                    let sculpt_type = raw_type & SCULPT_TYPE_MASK;
-                    if raw_type & SCULPT_RESERVED_TYPE_MASK != 0 || sculpt_type > 6 {
-                        FieldUpdate::Set(Shape::Sculpt {
-                            asset_id: AssetId::new(Uuid::from_u128(SCULPT_DEFAULT_TEXTURE)),
-                            sculpt_type: SculptType::Sphere,
-                            flags: SculptFlags::default(),
-                        })
-                    } else {
-                        let flags = SculptFlags { invert: raw_type & SCULPT_FLAG_INVERT != 0, mirror: raw_type & SCULPT_FLAG_MIRROR != 0 };
-                        let asset_id =
-                            AssetId::new(Uuid::from_slice(&parameter.data[..16]).expect("sculpt parameter contains a complete asset UUID"));
-                        match sculpt_type {
-                            0 => prim.map_or(FieldUpdate::Keep, |shape| FieldUpdate::Set(Shape::Prim(prim_shape(shape)))),
-                            1 => FieldUpdate::Set(Shape::Sculpt { asset_id, sculpt_type: SculptType::Sphere, flags }),
-                            2 => FieldUpdate::Set(Shape::Sculpt { asset_id, sculpt_type: SculptType::Torus, flags }),
-                            3 => FieldUpdate::Set(Shape::Sculpt { asset_id, sculpt_type: SculptType::Plane, flags }),
-                            4 => FieldUpdate::Set(Shape::Sculpt { asset_id, sculpt_type: SculptType::Cylinder, flags }),
-                            5 => FieldUpdate::Set(Shape::Mesh { asset_id, flags }),
-                            6 => FieldUpdate::Clear,
-                            _ => FieldUpdate::Keep,
+                Some(parameter) => match <[u8; SCULPT_EXTRA_PARAM_LEN]>::try_from(parameter.data.as_slice()) {
+                    Err(_) => FieldUpdate::Keep,
+                    Ok([uuid_bytes @ .., raw_type]) => {
+                        let sculpt_type = raw_type & SCULPT_TYPE_MASK;
+                        if raw_type & SCULPT_RESERVED_TYPE_MASK != 0 || sculpt_type > 6 {
+                            FieldUpdate::Set(Shape::Sculpt {
+                                asset_id: AssetId::new(Uuid::from_u128(SCULPT_DEFAULT_TEXTURE)),
+                                sculpt_type: SculptType::Sphere,
+                                flags: SculptFlags::default(),
+                            })
+                        } else {
+                            let flags =
+                                SculptFlags { invert: raw_type & SCULPT_FLAG_INVERT != 0, mirror: raw_type & SCULPT_FLAG_MIRROR != 0 };
+                            let asset_id = AssetId::new(Uuid::from_bytes(uuid_bytes));
+                            match sculpt_type {
+                                0 => prim.map_or(FieldUpdate::Keep, |shape| FieldUpdate::Set(Shape::Prim(prim_shape(shape)))),
+                                1 => FieldUpdate::Set(Shape::Sculpt { asset_id, sculpt_type: SculptType::Sphere, flags }),
+                                2 => FieldUpdate::Set(Shape::Sculpt { asset_id, sculpt_type: SculptType::Torus, flags }),
+                                3 => FieldUpdate::Set(Shape::Sculpt { asset_id, sculpt_type: SculptType::Plane, flags }),
+                                4 => FieldUpdate::Set(Shape::Sculpt { asset_id, sculpt_type: SculptType::Cylinder, flags }),
+                                5 => FieldUpdate::Set(Shape::Mesh { asset_id, flags }),
+                                6 => FieldUpdate::Clear,
+                                _ => FieldUpdate::Keep,
+                            }
                         }
                     }
-                }
+                },
                 None => prim.map_or(FieldUpdate::Keep, |shape| FieldUpdate::Set(Shape::Prim(prim_shape(shape)))),
             };
 

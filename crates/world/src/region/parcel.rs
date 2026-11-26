@@ -493,12 +493,14 @@ impl World {
         }
         let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let fence = FieldStamp { authority: source.authority(), stamp };
-        let parcels = &self.regions[&region].parcels;
+        let parcels = &self.regions.get(&region).expect("active region").parcels;
         let assembly = &parcels.overlay;
-        if !newer_field(fence, assembly.complete_fences[index]) {
+        if !newer_field(fence, *assembly.complete_fences.get(index).expect("validated overlay part index")) {
             return Ok(RegionApplied::unchanged());
         }
-        if assembly.present & (1 << index) != 0 && !newer_field(fence, assembly.staging_fences[index]) {
+        if assembly.present & (1 << index) != 0
+            && !newer_field(fence, *assembly.staging_fences.get(index).expect("validated overlay part index"))
+        {
             return Ok(RegionApplied::unchanged());
         }
 
@@ -511,12 +513,9 @@ impl World {
         }
         let mut preserved = 0_u8;
         if restart {
-            for part in 0..PARCEL_OVERLAY_PARTS {
+            for (part, staged) in assembly.staging_fences.iter().enumerate() {
                 let bit = 1 << part;
-                if part != index
-                    && assembly.present & bit != 0
-                    && assembly.staging_fences[part].is_some_and(|staged| newer_field(staged, Some(fence)))
-                {
+                if part != index && assembly.present & bit != 0 && staged.is_some_and(|staged| newer_field(staged, Some(fence))) {
                     preserved |= bit;
                 }
             }
@@ -536,20 +535,19 @@ impl World {
                     Box::new([0; PARCEL_OVERLAY_CELLS])
                 }
             };
+            let (chunks, _) = staging.as_chunks_mut::<PARCEL_OVERLAY_PART_BYTES>();
             if restart {
-                for part in 0..PARCEL_OVERLAY_PARTS {
+                for (part, (chunk, staged)) in chunks.iter_mut().zip(&mut assembly.staging_fences).enumerate() {
                     let bit = 1 << part;
                     if part != index && assembly.present & bit != 0 && preserved & bit == 0 {
-                        let start = part * PARCEL_OVERLAY_PART_BYTES;
-                        staging[start..start + PARCEL_OVERLAY_PART_BYTES].fill(0);
+                        chunk.fill(0);
                         assembly.present &= !bit;
-                        assembly.staging_fences[part] = None;
+                        *staged = None;
                     }
                 }
             }
-            let offset = index * PARCEL_OVERLAY_PART_BYTES;
-            staging[offset..offset + PARCEL_OVERLAY_PART_BYTES].copy_from_slice(&observation.data);
-            assembly.staging_fences[index] = Some(fence);
+            chunks.get_mut(index).expect("validated overlay part index").copy_from_slice(&observation.data);
+            *assembly.staging_fences.get_mut(index).expect("validated overlay part index") = Some(fence);
             assembly.present |= 1 << index;
             if assembly.present == (1 << PARCEL_OVERLAY_PARTS) - 1 {
                 assembly.complete = Some(ParcelOverlayGrid(Arc::from(staging)));
@@ -562,7 +560,7 @@ impl World {
                 false
             }
         };
-        let new_bytes = self.regions[&region].parcels.retained_bytes();
+        let new_bytes = self.regions.get(&region).expect("active region").parcels.retained_bytes();
         self.parcel_bytes = self.parcel_bytes - old_bytes + new_bytes;
         if !publish {
             return Ok(RegionApplied::unchanged());
@@ -590,7 +588,7 @@ impl World {
         let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let authority = source.authority();
         let fence = FieldStamp { authority, stamp };
-        let current = &self.regions[&region].parcels;
+        let current = &self.regions.get(&region).expect("active region").parcels;
         let source_fence = current.property_fence(authority);
         let newer_source = newer_field(fence, source_fence);
         let newer_sequence = sequence_id > 0 && current.last_agent_sequence.is_some_and(|last| sequence_id > last);
@@ -609,7 +607,8 @@ impl World {
             return Err(ApplyError::ParcelBudgetExhausted);
         }
         let supersedes_selection = newer_sequence || (authority == UpdateAuthority::Untracked && newer_source);
-        let selection_changed = self.regions[&region].environment.selected_parcel() != Some(properties.local_id);
+        let selection_changed =
+            self.regions.get(&region).expect("active region").environment.selected_parcel() != Some(properties.local_id);
         let environment_changed =
             self.agent_parcel_selection_changes(region, properties.local_id, fence) || (supersedes_selection && selection_changed);
         let properties_changed =
@@ -651,7 +650,7 @@ impl World {
         }
         let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let fence = FieldStamp { authority: source.authority(), stamp };
-        let current = &self.regions[&region].parcels;
+        let current = &self.regions.get(&region).expect("active region").parcels;
         let low_changed = low.is_some_and(|flags| newer_field(fence, current.region_low_fence) && current.region_flags.low != Some(flags));
         let extended_changed =
             extended.is_some_and(|flags| newer_field(fence, current.region_extended_fence) && current.region_flags.extended != Some(flags));
@@ -680,9 +679,10 @@ impl World {
 
     pub fn clear_agent_parcel(&mut self, region: Region) -> Result<RegionApplied, ApplyError> {
         self.require_active_region(region)?;
-        let parcels = &self.regions[&region].parcels;
+        let region_state = self.regions.get(&region).expect("active region");
+        let parcels = &region_state.parcels;
         let had_current = parcels.current.is_some();
-        let had_selection = self.regions[&region].environment.selected_parcel().is_some();
+        let had_selection = region_state.environment.selected_parcel().is_some();
         if !had_current && !had_selection {
             return Ok(RegionApplied::unchanged());
         }
@@ -706,7 +706,7 @@ impl World {
     }
 
     fn agent_parcel_selection_changes(&self, region: Region, parcel: ParcelLocalId, fence: FieldStamp) -> bool {
-        let environment = &self.regions[&region].environment;
+        let environment = &self.regions.get(&region).expect("active region").environment;
         newer_field(fence, environment.parcel_fence()) && environment.selected_parcel() != Some(parcel)
     }
 

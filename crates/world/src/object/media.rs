@@ -126,7 +126,10 @@ impl ObjectMedia {
         if usize::from(index) >= MAX_SURFACE_FACES {
             return None;
         }
-        self.faces.binary_search_by_key(&index, |(face_index, _)| *face_index).ok().map(|slot| &self.faces[slot].1)
+        self.faces
+            .binary_search_by_key(&index, |(face_index, _)| *face_index)
+            .ok()
+            .map(|slot| &self.faces.get(slot).expect("binary search returns a valid index").1)
     }
 
     pub fn faces(&self) -> impl Iterator<Item = (u8, &MediaEntry)> {
@@ -150,7 +153,7 @@ impl ObjectMedia {
         for (index, entry) in update.faces.iter().enumerate() {
             let index = u8::try_from(index).expect("ObjectMedia face prefix is at most 45 entries");
             match (self.faces.binary_search_by_key(&index, |(face_index, _)| *face_index), entry) {
-                (Ok(slot), Some(entry)) => self.faces[slot].1 = entry.clone(),
+                (Ok(slot), Some(entry)) => self.faces.get_mut(slot).expect("binary search returns a valid index").1 = entry.clone(),
                 (Ok(slot), None) => {
                     self.faces.remove(slot);
                 }

@@ -1,5 +1,3 @@
-#![expect(clippy::indexing_slicing)]
-
 mod history;
 mod identity;
 #[cfg(test)]
