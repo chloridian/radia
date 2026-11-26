@@ -232,7 +232,7 @@ impl PostProcess {
                 device,
                 "Luminance reduction input",
                 &self.reduction_layout,
-                luminance_views[index].as_ref().expect("luminance source is initialized"),
+                luminance_views.get(index).and_then(Option::as_ref).expect("luminance source is initialized"),
             ))
         });
         let tone_bindings = array::from_fn(|index| {
@@ -264,36 +264,38 @@ impl PostProcess {
     pub(crate) fn set_depth_view(&mut self, device: &Device, depth: Option<&TextureView>) {
         let depth = depth.unwrap_or(&self.dummy_depth_view);
         let Some(scene_view) = self.scene_view.as_ref() else { return };
-        self.exposure_bindings = array::from_fn(|index| {
+        let [first_exposure, second_exposure] = self.exposure_views.each_ref();
+        let swapped_exposures = [second_exposure, first_exposure];
+        self.exposure_bindings = swapped_exposures.map(|exposure| {
             Some(source_binding(
                 device,
                 "Reduced luminance inputs",
                 &self.source_layout,
                 &self.luminance_sampler,
                 self.luminance_views.last().and_then(Option::as_ref).expect("luminance reduction is initialized"),
-                self.exposure_views[1 - index].as_ref().expect("exposure history is initialized"),
+                exposure.as_ref().expect("exposure history is initialized"),
                 depth,
             ))
         });
-        self.scene_bindings = array::from_fn(|index| {
+        self.scene_bindings = swapped_exposures.map(|exposure| {
             Some(source_binding(
                 device,
                 "Scene luminance inputs",
                 &self.source_layout,
                 &self.luminance_sampler,
                 scene_view,
-                self.exposure_views[1 - index].as_ref().expect("exposure history is initialized"),
+                exposure.as_ref().expect("exposure history is initialized"),
                 depth,
             ))
         });
-        self.tone_bindings = array::from_fn(|index| {
+        self.tone_bindings = [first_exposure, second_exposure].map(|exposure| {
             Some(source_binding(
                 device,
                 "Tonemap inputs",
                 &self.source_layout,
                 &self.luminance_sampler,
                 scene_view,
-                self.exposure_views[index].as_ref().expect("exposure history is initialized"),
+                exposure.as_ref().expect("exposure history is initialized"),
                 depth,
             ))
         });
@@ -357,8 +359,9 @@ impl PostProcess {
         write_values(queue, &self.exposure_uniform, &exposure, &mut exposure_bytes);
         write_values(queue, &self.tone_uniform, &tone, &mut tone_bytes);
 
-        for level in 0..LUMINANCE_LEVELS {
-            let target = self.luminance_views[level].as_ref().expect("luminance targets are initialized before rendering");
+        let destination = 1 - self.current_exposure;
+        for (level, target) in self.luminance_views.iter().enumerate() {
+            let target = target.as_ref().expect("luminance targets are initialized before rendering");
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some(if level == 0 { "Environment luminance crop" } else { "Environment luminance reduction" }),
                 color_attachments: &[Some(RenderPassColorAttachment {
@@ -374,18 +377,22 @@ impl PostProcess {
                 pass.set_bind_group(0, &self.exposure_uniform_binding, &[]);
                 pass.set_bind_group(
                     1,
-                    self.scene_bindings[1 - self.current_exposure].as_ref().expect("scene luminance inputs are initialized"),
+                    self.scene_bindings.get(destination).and_then(Option::as_ref).expect("scene luminance inputs are initialized"),
                     &[],
                 );
             } else {
                 pass.set_pipeline(&self.reduction_pipeline);
-                pass.set_bind_group(0, self.reduction_bindings[level - 1].as_ref().expect("luminance reductions are initialized"), &[]);
+                pass.set_bind_group(
+                    0,
+                    self.reduction_bindings.get(level - 1).and_then(Option::as_ref).expect("luminance reductions are initialized"),
+                    &[],
+                );
             }
             pass.draw(0..3, 0..1);
         }
-        let destination = 1 - self.current_exposure;
         {
-            let target = self.exposure_views[destination].as_ref().expect("exposure targets are initialized before rendering");
+            let target =
+                self.exposure_views.get(destination).and_then(Option::as_ref).expect("exposure targets are initialized before rendering");
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("Environment exposure"),
                 color_attachments: &[Some(RenderPassColorAttachment {
@@ -400,7 +407,10 @@ impl PostProcess {
             pass.set_bind_group(0, &self.exposure_uniform_binding, &[]);
             pass.set_bind_group(
                 1,
-                self.exposure_bindings[destination].as_ref().expect("reduced luminance inputs are initialized before rendering"),
+                self.exposure_bindings
+                    .get(destination)
+                    .and_then(Option::as_ref)
+                    .expect("reduced luminance inputs are initialized before rendering"),
                 &[],
             );
             pass.draw(0..3, 0..1);
@@ -422,7 +432,10 @@ impl PostProcess {
             pass.set_bind_group(0, &self.tone_uniform_binding, &[]);
             pass.set_bind_group(
                 1,
-                self.tone_bindings[self.current_exposure].as_ref().expect("tonemap inputs are initialized before rendering"),
+                self.tone_bindings
+                    .get(self.current_exposure)
+                    .and_then(Option::as_ref)
+                    .expect("tonemap inputs are initialized before rendering"),
                 &[],
             );
             pass.draw(0..3, 0..1);

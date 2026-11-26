@@ -287,7 +287,7 @@ impl MeshPlanner {
                 }
                 continue;
             }
-            let object = &mirror.objects[entity];
+            let object = mirror.objects.get(entity).expect("visible object exists in mirror");
             self.reconcile_entity(camera, *entity, object, &mut changes);
         }
         if finished {

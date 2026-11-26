@@ -107,13 +107,15 @@ impl Terrain {
         let mut composition_values = Vec::with_capacity(289);
         let mut indices = Vec::with_capacity(1536);
         let mut grid = [[None; 17]; 17];
-        for y in 0..17 {
+        for (y, grid_row) in grid.iter_mut().enumerate() {
             if cancelled.load(Ordering::Acquire) {
                 return Err(MeshBuildError::Cancelled);
             }
-            for x in 0..17 {
-                let Some(z) = sample(tiles, x, y) else { continue };
-                let normal = classic_normal(x, y, |x, y| sample(tiles, x, y).unwrap_or(z));
+            for (x, cell) in grid_row.iter_mut().enumerate() {
+                let xi = x as i32;
+                let yi = y as i32;
+                let Some(z) = sample(tiles, xi, yi) else { continue };
+                let normal = classic_normal(xi, yi, |x, y| sample(tiles, x, y).unwrap_or(z));
                 let local_x = f32::from(patch_x) * 16.0 + x as f32;
                 let local_y = f32::from(patch_y) * 16.0 + y as f32;
                 let composition = self.settings.map_or(0.0, |settings| {
@@ -126,7 +128,7 @@ impl Terrain {
                         (self.origin.y + f64::from(local_y)) as f32,
                     )
                 });
-                grid[y as usize][x as usize] = Some(vertices.len() as u32);
+                *cell = Some(vertices.len() as u32);
                 vertices.push(Vertex {
                     position: Vec3::new(x as f32, y as f32, z as f32),
                     normal,
@@ -135,9 +137,12 @@ impl Terrain {
                 composition_values.push(composition);
             }
         }
-        for y in 0..16 {
-            for x in 0..16 {
-                let [Some(a), Some(b), Some(c), Some(d)] = [grid[y][x], grid[y][x + 1], grid[y + 1][x], grid[y + 1][x + 1]] else {
+        let (_, grid_tail) = grid.split_first().expect("17x17 grid is nonempty");
+        for (top_row, bottom_row) in grid.iter().zip(grid_tail) {
+            let (_, top_tail) = top_row.split_first().expect("17-wide row is nonempty");
+            let (_, bottom_tail) = bottom_row.split_first().expect("17-wide row is nonempty");
+            for (((&a, &b), &c), &d) in top_row.iter().zip(top_tail).zip(bottom_row).zip(bottom_tail) {
+                let [Some(a), Some(b), Some(c), Some(d)] = [a, b, c, d] else {
                     continue;
                 };
                 indices.extend([a, b, d, a, d, c]);
@@ -202,14 +207,15 @@ fn locate(mirror: &Mirror, region: Region, x: i32, y: i32) -> Option<(Region, Te
 }
 
 fn sample(tiles: &[Option<Tile>; 9], x: i32, y: i32) -> Option<f64> {
-    let tile = tiles[((y.div_euclid(16) + 1) * 3 + x.div_euclid(16) + 1) as usize].as_ref()?;
+    let tile_index = usize::try_from((y.div_euclid(16) + 1) * 3 + x.div_euclid(16) + 1).ok()?;
+    let tile = tiles.get(tile_index)?.as_ref()?;
     let x = tile.x.unwrap_or(x.rem_euclid(16) as usize);
     let y = tile.y.unwrap_or(y.rem_euclid(16) as usize);
     Some(patch_height(&tile.patch, x, y))
 }
 
 fn patch_height(patch: &Patch, x: usize, y: usize) -> f64 {
-    f64::from(patch.source().heights()[y * TERRAIN_PATCH_SIZE + x])
+    f64::from(*patch.source().heights().get(y * TERRAIN_PATCH_SIZE + x).expect("terrain patch coordinates are in 0..16"))
 }
 
 fn composition_coordinate(settings: &TerrainSettings, local_x: f32, local_y: f32, height: f32, global_x: f32, global_y: f32) -> f32 {
@@ -241,8 +247,10 @@ impl NoiseTable {
         let mut random = 42u32;
         let mut permutation = [0u8; 514];
         let mut gradients = [[0.0; 2]; 514];
-        for index in 0..256 {
-            permutation[index] = index as u8;
+        let (perm_lo, perm_hi) = permutation.split_at_mut(256);
+        let (grad_lo, grad_hi) = gradients.split_at_mut(256);
+        for (index, (perm, grad)) in perm_lo.iter_mut().zip(grad_lo.iter_mut()).enumerate() {
+            *perm = index as u8;
             let _ = random_mod(&mut random, 512);
             let mut gradient = [0.0; 2];
             for component in &mut gradient {
@@ -251,18 +259,20 @@ impl NoiseTable {
             let length = (gradient[0] * gradient[0] + gradient[1] * gradient[1]).sqrt();
             gradient[0] /= length;
             gradient[1] /= length;
-            gradients[index] = gradient;
+            *grad = gradient;
             for _ in 0..3 {
                 let _ = random_mod(&mut random, 512);
             }
         }
         for index in (1..256).rev() {
             let other = random_mod(&mut random, 256) as usize;
-            permutation.swap(index, other);
+            perm_lo.swap(index, other);
         }
-        for index in 0..258 {
-            permutation[256 + index] = permutation[index];
-            gradients[256 + index] = gradients[index];
+        for (dst, src) in perm_hi.iter_mut().zip(perm_lo.iter().cycle()) {
+            *dst = *src;
+        }
+        for (dst, src) in grad_hi.iter_mut().zip(grad_lo.iter().cycle()) {
+            *dst = *src;
         }
         Self { permutation, gradients }
     }
@@ -285,19 +295,21 @@ fn noise2(point: [f32; 2]) -> f32 {
     };
     let (x0, x1, rx0, rx1) = setup(point[0]);
     let (y0, y1, ry0, ry1) = setup(point[1]);
-    let i = usize::from(table.permutation[x0]);
-    let j = usize::from(table.permutation[x1]);
-    let b00 = usize::from(table.permutation[i + y0]);
-    let b10 = usize::from(table.permutation[j + y0]);
-    let b01 = usize::from(table.permutation[i + y1]);
-    let b11 = usize::from(table.permutation[j + y1]);
+    let perm = |index: usize| usize::from(*table.permutation.get(index).expect("noise permutation index fits in 514-entry table"));
+    let grad = |index: usize| *table.gradients.get(index).expect("noise gradient index fits in 514-entry table");
+    let i = perm(x0);
+    let j = perm(x1);
+    let b00 = perm(i + y0);
+    let b10 = perm(j + y0);
+    let b01 = perm(i + y1);
+    let b11 = perm(j + y1);
     let at = |x, y, gradient: [f32; 2]| x * gradient[0] + y * gradient[1];
     let curve = |value: f32| value * value * (3.0 - 2.0 * value);
     let lerp = |t: f32, a: f32, b: f32| a + t * (b - a);
     let sx = curve(rx0);
     let sy = curve(ry0);
-    let a = lerp(sx, at(rx0, ry0, table.gradients[b00]), at(rx1, ry0, table.gradients[b10]));
-    let b = lerp(sx, at(rx0, ry1, table.gradients[b01]), at(rx1, ry1, table.gradients[b11]));
+    let a = lerp(sx, at(rx0, ry0, grad(b00)), at(rx1, ry0, grad(b10)));
+    let b = lerp(sx, at(rx0, ry1, grad(b01)), at(rx1, ry1, grad(b11)));
     lerp(sy, a, b)
 }
 

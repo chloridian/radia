@@ -178,7 +178,9 @@ impl Reconciler {
                             self.state.dependencies.replace(entity, detail.summary.parent);
                             self.state.mirror.apply(Change::Object(Object::new(detail, charge)));
                             self.preparation.meshes.invalidate();
-                            self.preparation.assets.invalidate(&self.state.mirror.objects[&entity]);
+                            self.preparation
+                                .assets
+                                .invalidate(self.state.mirror.objects.get(&entity).expect("applied object exists in mirror"));
                             self.publication.dirty.objects.insert(entity);
                         }
                         ObjectDetailResult::Gone(_) => self.remove(entity),

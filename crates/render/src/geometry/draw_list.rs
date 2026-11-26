@@ -813,8 +813,8 @@ impl DrawList {
             match build.phase {
                 LayoutPhase::CountVisible | LayoutPhase::CountSelected => {
                     let count_visible = matches!(build.phase, LayoutPhase::CountVisible);
-                    let input_len = if count_visible { build.visible.len() } else { build.layout_items.len() };
-                    if build.item_cursor >= input_len {
+                    let input = if count_visible { &build.visible } else { &build.layout_items };
+                    let Some(&index) = input.get(build.item_cursor) else {
                         build.item_cursor = 0;
                         build.face_cursor = 0;
                         if count_visible && build.over_capacity() {
@@ -827,8 +827,7 @@ impl DrawList {
                             build.phase = LayoutPhase::HideOmitted;
                         }
                         continue;
-                    }
-                    let index = if count_visible { build.visible[build.item_cursor] } else { build.layout_items[build.item_cursor] };
+                    };
                     let Some(item) = items.get(index) else {
                         build.item_cells.push(u32::MAX);
                         build.item_cursor += 1;
@@ -840,12 +839,12 @@ impl DrawList {
                         let cell = build.cell(item.position);
                         build.item_cells.push(cell);
                     }
-                    if build.face_cursor >= item.faces.len() {
+                    let Some(face) = item.faces.get(build.face_cursor) else {
                         build.item_cursor += 1;
                         build.face_cursor = 0;
                         continue;
-                    }
-                    let group = item.faces[build.face_cursor].group;
+                    };
+                    let group = face.group;
                     let cell = build.item_cells.last().copied().unwrap_or(u32::MAX);
                     let pending = build.commands.entry((group, cell)).or_insert_with(|| {
                         build.command_keys.push((group, cell));
@@ -870,12 +869,11 @@ impl DrawList {
                     build.item_cursor = 0;
                 }
                 LayoutPhase::Priority => {
-                    if build.item_cursor >= build.visible.len() {
+                    let Some(&index) = build.visible.get(build.item_cursor) else {
                         build.item_cursor = 0;
                         build.phase = LayoutPhase::Select;
                         continue;
-                    }
-                    let index = build.visible[build.item_cursor];
+                    };
                     build.item_cursor += 1;
                     items_visited += 1;
                     build.items_visited += 1;
@@ -901,14 +899,13 @@ impl DrawList {
                     }
                 }
                 LayoutPhase::HideOmitted => {
-                    if !build.over_capacity() || build.item_cursor >= build.visible.len() {
+                    let Some(&index) = build.over_capacity().then(|| build.visible.get(build.item_cursor)).flatten() else {
                         build.phase = LayoutPhase::Commands;
                         build.item_cursor = 0;
                         build.face_cursor = 0;
                         build.command_cursor = 0;
                         continue;
-                    }
-                    let index = build.visible[build.item_cursor];
+                    };
                     if build.selected_items.contains(&index) {
                         build.item_cursor += 1;
                         build.face_cursor = 0;
@@ -1003,12 +1000,10 @@ impl DrawList {
                     build.phase = LayoutPhase::Fill;
                 }
                 LayoutPhase::Fill => {
-                    let input_len = build.input_items().len();
-                    if build.item_cursor >= input_len {
+                    let Some(&index) = build.input_items().get(build.item_cursor) else {
                         build.phase = LayoutPhase::EmitBlended;
                         continue;
-                    }
-                    let index = build.input_items()[build.item_cursor];
+                    };
                     let cell = build.item_cells.get(build.item_cursor).copied().unwrap_or(u32::MAX);
                     let Some(item) = items.get_mut(index) else {
                         build.item_cursor += 1;
@@ -1286,22 +1281,26 @@ impl DrawList {
         view.blended_marks.resize(state.blended.len(), 0);
         view.blended_distances.resize(state.blended.len(), 0.0);
         let blended_draws = state.draws.get(state.opaque_draws..).unwrap_or_default();
-        for (record, (blended, draw)) in state.blended.iter().zip(blended_draws).enumerate() {
+        for (((blended, draw), mark_slot), dist_slot) in
+            state.blended.iter().zip(blended_draws).zip(&mut view.blended_marks).zip(&mut view.blended_distances)
+        {
             if !draw.visible(&view.cells, eye, draw_distance, frustum) {
                 continue;
             }
             let Some((item, face)) = blended_face(items, blended) else { continue };
-            view.blended_marks[record] = mark;
-            view.blended_distances[record] = blend_distance(item.position, item.rotation, item.scale, face.center, camera);
+            *mark_slot = mark;
+            *dist_slot = blend_distance(item.position, item.rotation, item.scale, face.center, camera);
         }
         view.blended_keys.clear();
         let push = |view: &mut ViewDraws, record: u32| {
             let index = record as usize;
-            if view.blended_marks.get(index) == Some(&mark)
+            if let Some(mark_slot) = view.blended_marks.get_mut(index)
+                && *mark_slot == mark
+                && let Some(&distance) = view.blended_distances.get(index)
                 && let Some(blended) = state.blended.get(index)
             {
-                view.blended_marks[index] = mark + 1;
-                view.blended_keys.push((view.blended_distances[index], blended.order, record));
+                *mark_slot = mark + 1;
+                view.blended_keys.push((distance, blended.order, record));
             }
         };
         let previous = mem::take(&mut view.blended);

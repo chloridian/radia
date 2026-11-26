@@ -2,7 +2,6 @@ mod mesh;
 mod sculpt;
 
 use std::{
-    array,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque, btree_map},
     mem,
     ops::Bound::{Excluded, Unbounded},
@@ -300,12 +299,8 @@ impl AssetDemand {
 
     pub(in crate::scene) fn terrain_textures(&self, region: Region) -> [Option<TextureHandle>; 4] {
         let Some(target) = self.terrain_targets.get(&region) else { return [None, None, None, None] };
-        array::from_fn(|index| {
-            let key = AssetKey {
-                region,
-                resource: Resource { id: AssetId::new(target.textures[index]), kind: Kind::Texture },
-                unit: AssetUnit::Whole,
-            };
+        target.textures.map(|texture| {
+            let key = AssetKey { region, resource: Resource { id: AssetId::new(texture), kind: Kind::Texture }, unit: AssetUnit::Whole };
             self.entries.get(&key).and_then(|entry| entry.status.as_ref()).and_then(Status::content).and_then(|content| match content {
                 Content::Texture(texture) => Some(texture.clone()),
                 _ => None,

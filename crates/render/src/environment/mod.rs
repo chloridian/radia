@@ -3,7 +3,7 @@ mod runtime;
 mod stars;
 mod transition;
 
-use std::{array, cmp, f32::consts::PI};
+use std::{cmp, f32::consts::PI};
 
 use assets::{
     CelestialBody, DayCycle, EnvironmentDescription, EnvironmentSettings, Haze, HazeProvenance, Keyframe, Sky, TextureRef, Water,
@@ -51,12 +51,9 @@ impl Schedule {
             default.day_length
         };
         let day_offset = if self.day_offset.is_finite() { self.day_offset.clamp(0.0, MAX_DAY_OFFSET) } else { default.day_offset };
-        let altitudes = if self.altitudes.iter().all(|value| value.is_finite()) && self.altitudes.windows(2).all(|pair| pair[0] <= pair[1])
-        {
-            self.altitudes
-        } else {
-            default.altitudes
-        };
+        let [a, b, c] = self.altitudes;
+        let altitudes =
+            if self.altitudes.iter().all(|value| value.is_finite()) && a <= b && b <= c { self.altitudes } else { default.altitudes };
         Self { day_length, day_offset, altitudes }
     }
 }
@@ -804,9 +801,9 @@ pub(super) fn blend_sky_property(output: &mut SkyState, from: &SkyState, to: &Sk
     if property.clouds.color.is_some() {
         output.clouds.color = blended.clouds.color;
     }
-    for (index, value) in property.clouds.density.iter().enumerate() {
+    for ((value, dst), src) in property.clouds.density.iter().zip(&mut output.clouds.density).zip(blended.clouds.density) {
         if value.is_some() {
-            output.clouds.density[index] = blended.clouds.density[index];
+            *dst = src;
         }
     }
     if property.clouds.scale.is_some() {
@@ -913,9 +910,9 @@ pub(super) fn blend_water_property(output: &mut WaterState, from: &WaterState, t
     if property.scale_below.is_some() {
         output.scale_below = blended.scale_below;
     }
-    for (index, value) in property.waves.iter().enumerate() {
+    for ((value, dst), src) in property.waves.iter().zip(&mut output.waves).zip(blended.waves) {
         if value.is_some() {
-            output.waves[index] = blended.waves[index];
+            *dst = src;
         }
     }
 }
@@ -925,7 +922,11 @@ fn lerp(start: f32, end: f32, factor: f32) -> f32 {
 }
 
 fn blend_array<const N: usize>(start: [f32; N], end: [f32; N], factor: f32) -> [f32; N] {
-    array::from_fn(|index| lerp(start[index], end[index], factor))
+    let mut result = [0.0; N];
+    for ((dst, start), end) in result.iter_mut().zip(start).zip(end) {
+        *dst = lerp(start, end, factor);
+    }
+    result
 }
 
 #[cfg(test)]

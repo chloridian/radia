@@ -1,5 +1,3 @@
-#![expect(clippy::indexing_slicing)]
-
 mod benchmark;
 pub mod environment;
 mod geometry;

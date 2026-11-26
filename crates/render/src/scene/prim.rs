@@ -61,7 +61,7 @@ impl Builder {
     pub(super) fn seam(&mut self, a: usize, b: usize) {
         let a = root(&mut self.parents, a);
         let b = root(&mut self.parents, b);
-        self.parents[b] = a;
+        *self.parents.get_mut(b).expect("seam vertex index is in bounds") = a;
     }
 
     fn normal_override(&mut self, index: usize, normal: Vec3) {
@@ -72,39 +72,60 @@ impl Builder {
         if self.indices.is_empty() {
             return Err(MeshBuildError::Degenerate);
         }
+        for index in 0..self.parents.len() {
+            let r = root(&mut self.parents, index);
+            if let Some(slot) = self.parents.get_mut(index) {
+                *slot = r;
+            }
+        }
         let mut normals = vec![Vec3::ZERO; self.vertices.len()];
         for face in &self.faces {
-            let indices = &self.indices[face.indices.start as usize..face.indices.end as usize];
+            let indices = self.indices.get(face.indices.start as usize..face.indices.end as usize).expect("face index range is in bounds");
             for (ordinal, triangle) in indices.as_chunks::<3>().0.iter().enumerate() {
                 if ordinal % 256 == 0 && cancelled.load(Ordering::Acquire) {
                     return Err(MeshBuildError::Cancelled);
                 }
                 let [a, b, c] = [triangle[0] as usize, triangle[1] as usize, triangle[2] as usize];
-                let normal =
-                    (self.vertices[b].position - self.vertices[a].position).cross(self.vertices[c].position - self.vertices[a].position);
-                for index in [a, b, c] {
-                    normals[root(&mut self.parents, index)] += normal;
+                let pos_a = self.vertices.get(a).expect("triangle vertex index is in bounds").position;
+                let pos_b = self.vertices.get(b).expect("triangle vertex index is in bounds").position;
+                let pos_c = self.vertices.get(c).expect("triangle vertex index is in bounds").position;
+                let normal = (pos_b - pos_a).cross(pos_c - pos_a);
+                let ra = *self.parents.get(a).expect("triangle vertex index is in bounds");
+                let rb = *self.parents.get(b).expect("triangle vertex index is in bounds");
+                let rc = *self.parents.get(c).expect("triangle vertex index is in bounds");
+                *normals.get_mut(ra).expect("vertex root is in bounds") += normal;
+                let nb = normals.get_mut(rb).expect("vertex root is in bounds");
+                *nb += normal;
+                if ordinal % 2 == 0 {
+                    *nb += normal;
                 }
-                let extra = if ordinal % 2 == 0 { b } else { c };
-                normals[root(&mut self.parents, extra)] += normal;
+                let nc = normals.get_mut(rc).expect("vertex root is in bounds");
+                *nc += normal;
+                if ordinal % 2 != 0 {
+                    *nc += normal;
+                }
             }
         }
-        for (index, vertex) in self.vertices.iter_mut().enumerate() {
-            vertex.normal = normals[root(&mut self.parents, index)].try_normalize().unwrap_or(Vec3::Z);
+        for (vertex, &r) in self.vertices.iter_mut().zip(&self.parents) {
+            vertex.normal = normals.get(r).expect("vertex root is in bounds").try_normalize().unwrap_or(Vec3::Z);
         }
         for (index, normal) in self.normal_overrides {
-            self.vertices[index].normal = normal;
+            self.vertices.get_mut(index).expect("override vertex index is in bounds").normal = normal;
         }
         Mesh::from_parts(self.vertices, self.indices, self.faces).map_err(MeshBuildError::from)
     }
 }
 
 fn root(parents: &mut [usize], mut index: usize) -> usize {
-    while parents[index] != index {
-        parents[index] = parents[parents[index]];
-        index = parents[index];
+    loop {
+        let parent = *parents.get(index).expect("parent index is in bounds");
+        if parent == index {
+            return index;
+        }
+        let grandparent = *parents.get(parent).expect("parent index is in bounds");
+        *parents.get_mut(index).expect("parent index is in bounds") = grandparent;
+        index = grandparent;
     }
-    index
 }
 
 #[derive(Clone, Copy)]
@@ -235,22 +256,22 @@ pub(super) fn tessellate(shape: PrimShape, detail: Detail, cancelled: &AtomicBoo
     check(cancelled)?;
     if let Some(sides) = profile.sides {
         let mut begin = 0;
-        while begin + 1 < profile.outer.len() {
-            let side = ((profile.outer[begin].t + profile.outer[begin + 1].t) * 0.5 * sides as f32).floor() as usize;
+        while let Some(&[first, second]) = profile.outer.get(begin..begin + 2) {
+            let side = ((first.t + second.t) * 0.5 * sides as f32).floor() as usize;
             let mut end = begin + 1;
-            while end + 1 < profile.outer.len()
-                && ((profile.outer[end].t + profile.outer[end + 1].t) * 0.5 * sides as f32).floor() as usize == side
+            while let Some(&[a, b]) = profile.outer.get(end..end + 2)
+                && ((a.t + b.t) * 0.5 * sides as f32).floor() as usize == side
             {
                 end += 1;
             }
             let start = mesh.begin_face();
-            let points = &profile.outer[begin..=end];
+            let points = profile.outer.get(begin..=end).expect("profile side slice is in bounds");
             side_grid(
                 &mut mesh,
                 points,
                 &path,
                 sides as f32,
-                (points[0].t * sides as f32).floor(),
+                (first.t * sides as f32).floor(),
                 false,
                 false,
                 closed,
@@ -265,16 +286,16 @@ pub(super) fn tessellate(shape: PrimShape, detail: Detail, cancelled: &AtomicBoo
         side_grid(&mut mesh, &profile.outer, &path, 1.0, 0.0, false, !profile.open, closed, pole_normals, cancelled)?;
         mesh.end_face(start)?;
     }
-    if !profile.inner.is_empty() {
+    if let Some(&first_inner) = profile.inner.last() {
         let points: Vec<_> = profile.inner.iter().rev().copied().collect();
         let start = mesh.begin_face();
-        let uv_origin = if profile.inner_flat { points[0].t.floor() } else { 0.0 };
+        let uv_origin = if profile.inner_flat { first_inner.t.floor() } else { 0.0 };
         if profile.inner_flat {
-            let mut flat_points = vec![points[0]];
+            let mut flat_points = vec![first_inner];
             for point in points.iter().skip(1) {
                 flat_points.extend([*point, *point]);
             }
-            flat_points.push(if profile.open { *points.last().expect("inner profile endpoints") } else { points[0] });
+            flat_points.push(if profile.open { *points.last().expect("inner profile endpoints") } else { first_inner });
             side_grid(&mut mesh, &flat_points, &path, 1.0, uv_origin, false, !profile.open, closed, pole_normals, cancelled)?;
         } else {
             side_grid(&mut mesh, &points, &path, 1.0, uv_origin, false, !profile.open, closed, pole_normals, cancelled)?;
@@ -282,14 +303,15 @@ pub(super) fn tessellate(shape: PrimShape, detail: Detail, cancelled: &AtomicBoo
         mesh.end_face(start)?;
     }
     if !closed {
+        let first_ring = path.first().expect("nonempty bounded path");
         if uncut_cube {
-            cube_cap(&mut mesh, &profile, &path[0], false)?;
+            cube_cap(&mut mesh, &profile, first_ring, false)?;
         } else {
-            cap(&mut mesh, &profile, &profile.cap_end, &path[0], false)?;
+            cap(&mut mesh, &profile, &profile.cap_end, first_ring, false)?;
         }
     }
     if profile.open {
-        let outer_begin = profile.outer[0];
+        let outer_begin = *profile.outer.first().expect("profile endpoints");
         let outer_end = *profile.outer.last().expect("profile endpoints");
         let center = Point { position: Vec2::ZERO, t: 0.0 };
         let inner_begin = profile.inner.first().copied().unwrap_or(center);
@@ -419,7 +441,7 @@ fn profile(params: &Params, detail: Detail) -> Profile {
         let center = Point { position: Vec2::ZERO, t: 0.0 };
         cap_begin.push(center);
         cap_end.push(center);
-        cap_end.push(outer[0]);
+        cap_end.push(*outer.first().expect("nonempty outer profile"));
     }
     Profile { outer, inner, cap_begin, cap_end, sides, inner_flat, open }
 }
@@ -553,11 +575,12 @@ fn side_grid(
             mesh.triangle(a, a + 1, a + width + 1)?;
         }
     }
-    let bottom_converges = path[0].point(points[0]).distance_squared(path[path.len() - 2].point(points[0])) < 1e-6;
-    let top_converges = path[0]
-        .point(*points.last().expect("profile endpoints"))
-        .distance_squared(path[path.len() - 2].point(*points.last().expect("profile endpoints")))
-        < 1e-6;
+    let first_ring = path.first().expect("nonempty path");
+    let prev_ring = path.len().checked_sub(2).and_then(|i| path.get(i)).expect("path has at least two rings");
+    let first_point = *points.first().expect("profile endpoints");
+    let last_point = *points.last().expect("profile endpoints");
+    let bottom_converges = first_ring.point(first_point).distance_squared(prev_ring.point(first_point)) < 1e-6;
+    let top_converges = first_ring.point(last_point).distance_squared(prev_ring.point(last_point)) < 1e-6;
     if wrap_s && !bottom_converges {
         for row in 0..path.len() {
             mesh.seam(base + row * width, base + row * width + width - 1);
@@ -620,11 +643,15 @@ fn cap(mesh: &mut Builder, profile: &Profile, cap_profile: &[Point], ring: &Ring
     } else {
         let mut first = 0;
         let mut last = points.len() - 1;
-        while last - first > 1 {
-            let p1 = points[first].position;
-            let p2 = points[last].position;
-            let pa = points[first + 1].position;
-            let pb = points[last - 1].position;
+        while let Some(window) = points.get(first..=last)
+            && let Some((&p1, rest)) = window.split_first()
+            && let Some((&p2, middle)) = rest.split_last()
+            && let (Some(&pa), Some(&pb)) = (middle.first(), middle.last())
+        {
+            let p1 = p1.position;
+            let p2 = p2.position;
+            let pa = pa.position;
+            let pb = pb.position;
             let area_1a2 = (pa - p1).perp_dot(p2 - p1);
             let area_1ba = (pb - p1).perp_dot(pa - p1);
             let area_21b = (p1 - p2).perp_dot(pb - p2);
@@ -684,7 +711,7 @@ fn cube_cap(mesh: &mut Builder, profile: &Profile, ring: &Ring, top: bool) -> Re
     let grid = (profile.outer.len() - 1) / 4;
     let mut corners = [(Vec3::ZERO, Vec2::ZERO); 4];
     for (corner, value) in corners.iter_mut().enumerate() {
-        let point = profile.outer[grid * corner];
+        let point = *profile.outer.get(grid * corner).expect("cube profile has four corners");
         value.0 = ring.point(point);
         value.1 = Vec2::new(point.position.x + 0.5, 0.5 - point.position.y);
     }

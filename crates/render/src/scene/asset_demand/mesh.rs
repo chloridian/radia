@@ -266,7 +266,9 @@ impl MeshAssets {
             selected_lod(record, header, asset, desired)
         } else if retained_pending_desired {
             Some(desired)
-        } else if header.lod(asset, MeshLod::Lowest).is_ok() && !matches!(record.lods[MeshLod::Lowest.index()], LodContent::Unavailable) {
+        } else if header.lod(asset, MeshLod::Lowest).is_ok()
+            && !matches!(record.lods.get(MeshLod::Lowest.index()), Some(LodContent::Unavailable))
+        {
             Some(MeshLod::Lowest)
         } else {
             None
@@ -380,7 +382,8 @@ fn fallback_lod(record: &MeshRecord, header: &MeshHeaderAsset, asset: AssetId, d
     if desired == MeshLod::Lowest {
         return None;
     }
-    let available = |lod: &MeshLod| header.lod(asset, *lod).is_ok() && !matches!(record.lods[lod.index()], LodContent::Unavailable);
+    let available =
+        |lod: &MeshLod| header.lod(asset, *lod).is_ok() && !matches!(record.lods.get(lod.index()), Some(LodContent::Unavailable));
     if available(&MeshLod::Lowest) {
         return Some(MeshLod::Lowest);
     }

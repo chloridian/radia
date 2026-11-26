@@ -59,7 +59,11 @@ impl Reconciler {
                     .into_iter()
                     .filter_map(|key| self.state.mirror.patches.get(&key).cloned().map(|patch| Change::Patch(key.0, patch))),
             );
-            changes.extend(dirty.water.into_iter().map(|region| Change::Water(region, self.state.mirror.water[&region])));
+            changes.extend(
+                dirty.water.into_iter().map(|region| {
+                    Change::Water(region, *self.state.mirror.water.get(&region).expect("dirty water region exists in mirror"))
+                }),
+            );
             changes.extend(dirty.surfaces.into_iter().map(|(region, kind)| {
                 self.state.mirror.surfaces.get(&(region, kind)).cloned().map_or(Change::RemoveSurface(region, kind), Change::Surface)
             }));

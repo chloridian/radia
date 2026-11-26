@@ -49,18 +49,23 @@ impl TextureJob {
 }
 
 fn expand(src: &[u8], format: PixelFormat, dest: &mut [u8]) {
-    if format == PixelFormat::Rgba8 {
-        dest.copy_from_slice(src);
-        return;
-    }
-    for (src, dest) in src.chunks_exact(format.channels()).zip(dest.as_chunks_mut::<4>().0) {
-        let pixel = match format {
-            PixelFormat::Gray8 => [src[0], src[0], src[0], 255],
-            PixelFormat::GrayAlpha8 => [src[0], src[0], src[0], src[1]],
-            PixelFormat::Rgb8 => [src[0], src[1], src[2], 255],
-            PixelFormat::Rgba8 => unreachable!("RGBA copied above"),
-        };
-        dest.copy_from_slice(&pixel);
+    match format {
+        PixelFormat::Gray8 => {
+            for (&g, dest) in src.iter().zip(dest.as_chunks_mut::<4>().0) {
+                *dest = [g, g, g, 255];
+            }
+        }
+        PixelFormat::GrayAlpha8 => {
+            for (&[g, a], dest) in src.as_chunks::<2>().0.iter().zip(dest.as_chunks_mut::<4>().0) {
+                *dest = [g, g, g, a];
+            }
+        }
+        PixelFormat::Rgb8 => {
+            for (&[r, g, b], dest) in src.as_chunks::<3>().0.iter().zip(dest.as_chunks_mut::<4>().0) {
+                *dest = [r, g, b, 255];
+            }
+        }
+        PixelFormat::Rgba8 => dest.copy_from_slice(src),
     }
 }
 

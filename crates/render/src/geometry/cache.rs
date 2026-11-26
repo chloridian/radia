@@ -259,11 +259,10 @@ impl MeshInfoBuild {
         let mut bytes: usize = 0;
         let mut faces = 0;
         let bytes_per_index = size_of::<u32>() + size_of::<Vec3>();
-        while self.face < source.faces().len() {
+        while let Some(face) = source.faces().get(self.face) {
             if self.index.is_multiple_of(64) && started.elapsed() >= time_limit {
                 break;
             }
-            let face = &source.faces()[self.face];
             let range = usize::try_from(face.indices.start)
                 .ok()
                 .zip(usize::try_from(face.indices.end).ok())
@@ -281,7 +280,7 @@ impl MeshInfoBuild {
                 self.max = Vec3::splat(f32::NEG_INFINITY);
                 continue;
             };
-            if self.index >= range.len() {
+            let Some(&vertex_index) = range.get(self.index) else {
                 if faces >= face_limit {
                     break;
                 }
@@ -292,11 +291,11 @@ impl MeshInfoBuild {
                 self.min = Vec3::splat(f32::INFINITY);
                 self.max = Vec3::splat(f32::NEG_INFINITY);
                 continue;
-            }
+            };
             if bytes.saturating_add(bytes_per_index) > byte_limit {
                 break;
             }
-            if let Some(vertex) = usize::try_from(range[self.index]).ok().and_then(|index| source.vertices().get(index)) {
+            if let Some(vertex) = usize::try_from(vertex_index).ok().and_then(|index| source.vertices().get(index)) {
                 self.min = self.min.min(vertex.position);
                 self.max = self.max.max(vertex.position);
             }
@@ -1154,13 +1153,12 @@ impl GeometryRenderer {
                         bytes += size_of::<MeshInfo>();
                         continue;
                     }
-                    if rebuild.mesh_info_cursor >= self.cache.mesh_info_order.len() {
+                    let Some(&id) = self.cache.mesh_info_order.get(rebuild.mesh_info_cursor) else {
                         let Some(rebuild) = self.cache.rebuild.as_mut() else { break };
                         rebuild.finish_mesh_info();
                         continue;
-                    }
+                    };
                     let Some(rebuild) = self.cache.rebuild.as_mut() else { break };
-                    let id = self.cache.mesh_info_order[rebuild.mesh_info_cursor];
                     self.stats.rebuild_mesh_info_entries += 1;
                     if rebuild.retained_meshes.contains(&id) {
                         rebuild.mesh_info_cursor += 1;

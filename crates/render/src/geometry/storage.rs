@@ -75,10 +75,11 @@ impl Ranges {
     }
 
     fn take(&mut self, index: usize, count: u32) -> Range<u32> {
-        let start = self.0[index].start;
+        let free = self.0.get_mut(index).expect("free range index came from find");
+        let start = free.start;
         let end = start + count;
-        self.0[index].start = end;
-        if self.0[index].is_empty() {
+        free.start = end;
+        if free.start == free.end {
             self.0.remove(index);
         }
         start..end
@@ -86,8 +87,10 @@ impl Ranges {
 
     fn release(&mut self, mut range: Range<u32>) {
         let mut index = self.0.partition_point(|free| free.start < range.start);
-        if index > 0 && self.0[index - 1].end == range.start {
-            index -= 1;
+        if let Some(prev) = index.checked_sub(1)
+            && self.0.get(prev).is_some_and(|free| free.end == range.start)
+        {
+            index = prev;
             range.start = self.0.remove(index).start;
         }
         if self.0.get(index).is_some_and(|free| free.start == range.end) {
