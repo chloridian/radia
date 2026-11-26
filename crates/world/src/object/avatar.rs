@@ -151,7 +151,7 @@ impl AvatarTextureSlots {
     }
 
     pub fn texture(&self, slot: AvatarTextureSlot) -> Option<AssetId> {
-        self.values[usize::from(slot.index())]
+        *self.values.get(usize::from(slot.index())).expect("avatar texture slot index is within bounds")
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (AvatarTextureSlot, Option<AssetId>)> + '_ {
@@ -181,7 +181,10 @@ impl AvatarAppearance {
     }
 
     pub fn visual_param(&self, index: AvatarVisualParamIndex) -> Option<u8> {
-        self.visual_params.binary_search_by_key(&index, |(id, _)| *id).ok().map(|at| self.visual_params[at].1)
+        self.visual_params
+            .binary_search_by_key(&index, |(id, _)| *id)
+            .ok()
+            .map(|at| self.visual_params.get(at).expect("binary search returns a valid index").1)
     }
 
     pub fn visual_params(&self) -> impl Iterator<Item = (AvatarVisualParamIndex, u8)> + '_ {
@@ -206,7 +209,7 @@ impl AvatarAppearance {
         }
         for (index, value) in update.visual_params {
             match self.visual_params.binary_search_by_key(&index, |(id, _)| *id) {
-                Ok(at) => self.visual_params[at].1 = value,
+                Ok(at) => self.visual_params.get_mut(at).expect("binary search returns a valid index").1 = value,
                 Err(at) => self.visual_params.insert(at, (index, value)),
             }
         }
@@ -235,8 +238,12 @@ impl AvatarAppearanceUpdate {
             return Err(AvatarAppearanceError::TooManyVisualParams);
         }
         visual_params.sort_unstable_by_key(|(index, _)| *index);
-        if visual_params.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-            return Err(AvatarAppearanceError::DuplicateVisualParam);
+        let mut previous = None;
+        for &(index, _) in &visual_params {
+            if previous == Some(index) {
+                return Err(AvatarAppearanceError::DuplicateVisualParam);
+            }
+            previous = Some(index);
         }
         Ok(Self { appearance_version, cof_version, visual_params, texture_slots: texture_slots.map(Arc::new) })
     }

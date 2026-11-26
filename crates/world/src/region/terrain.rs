@@ -1,9 +1,6 @@
-use std::{
-    array,
-    collections::{
-        BTreeMap,
-        Bound::{Excluded, Unbounded},
-    },
+use std::collections::{
+    BTreeMap,
+    Bound::{Excluded, Unbounded},
 };
 
 use uuid::Uuid;
@@ -41,13 +38,13 @@ impl TerrainSettings {
         if !height_ranges.iter().all(|range| range.is_finite() && *range > 0.0) {
             return Err(TerrainSettingsError::InvalidHeightRange);
         }
-        Ok(Self {
-            detail_textures: array::from_fn(|index| {
-                if detail_textures[index].is_nil() { DEFAULT_DETAIL_TEXTURES[index] } else { detail_textures[index] }
-            }),
-            start_heights,
-            height_ranges,
-        })
+        let mut resolved_textures = DEFAULT_DETAIL_TEXTURES;
+        for (slot, texture) in resolved_textures.iter_mut().zip(detail_textures) {
+            if !texture.is_nil() {
+                *slot = texture;
+            }
+        }
+        Ok(Self { detail_textures: resolved_textures, start_heights, height_ranges })
     }
 
     pub fn detail_textures(&self) -> &[Uuid; 4] {
@@ -162,7 +159,7 @@ impl World {
         self.require_active_region(region)?;
         let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let fence = FieldStamp { authority: source.authority(), stamp };
-        let current = self.regions[&region].terrain.patches.get(&patch.id);
+        let current = self.regions.get(&region).expect("active region").terrain.patches.get(&patch.id);
         if !newer_field(fence, current.map(|current| current.fence)) {
             return Ok(RegionApplied::unchanged());
         }
@@ -188,7 +185,7 @@ impl World {
         }
         let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let fence = FieldStamp { authority: source.authority(), stamp };
-        let current = self.regions[&region].terrain.water;
+        let current = self.regions.get(&region).expect("active region").terrain.water;
         if !newer_field(fence, current.map(|(_, fence)| fence)) {
             return Ok(RegionApplied::unchanged());
         }
@@ -205,7 +202,7 @@ impl World {
         self.require_active_region(region)?;
         let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let fence = FieldStamp { authority: source.authority(), stamp };
-        let current = self.regions[&region].terrain.settings;
+        let current = self.regions.get(&region).expect("active region").terrain.settings;
         if !newer_field(fence, current.map(|(_, fence)| fence)) {
             return Ok(RegionApplied::unchanged());
         }

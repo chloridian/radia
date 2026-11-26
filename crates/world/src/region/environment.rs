@@ -195,7 +195,7 @@ impl World {
         self.require_active_region(region)?;
         let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let fence = FieldStamp { authority: source.authority(), stamp };
-        let environment = &self.regions[&region].environment;
+        let environment = &self.regions.get(&region).expect("active region").environment;
         if !newer_field(fence, environment.parcel_fence()) {
             return Ok(RegionApplied::unchanged());
         }
@@ -217,7 +217,7 @@ impl World {
         supersedes_fence: bool,
         revision: WorldRevision,
     ) -> bool {
-        let environment = &self.regions[&region].environment;
+        let environment = &self.regions.get(&region).expect("active region").environment;
         let current_fence = environment.parcel_fence();
         if fence.is_some_and(|fence| !supersedes_fence && !newer_field(fence, current_fence)) {
             return false;
@@ -253,7 +253,7 @@ impl World {
         assignment.validate()?;
         let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let fence = FieldStamp { authority: source.authority(), stamp };
-        let current = self.regions[&target.region].environment.assignment(target.scope);
+        let current = self.regions.get(&target.region).expect("current target region").environment.assignment(target.scope);
         if !newer_field(fence, current.as_ref().map(|current| current.fence)) {
             return Ok(RegionApplied::unchanged());
         }
