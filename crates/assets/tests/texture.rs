@@ -7,8 +7,8 @@ use assets::{
 };
 use proptest::prelude;
 use test_support::texture::{
-    GRAY_4096_J2C, GRAY_ALPHA_J2C, GRAY_ALPHA_RAW, GRAY_J2C, GRAY_RAW, RGB_J2C, RGB_RAW, RGBA_J2C, RGBA_JP2, RGBA_LOSSY_J2C,
-    RGBA_LOSSY_RAW, RGBA_RAW,
+    GRAY_4096_J2C, GRAY_ALPHA_J2C, GRAY_ALPHA_RAW, GRAY_J2C, GRAY_RAW, RGB_J2C, RGB_RAW, RGBA_2048_LOSSY_J2C, RGBA_J2C, RGBA_JP2,
+    RGBA_LOSSY_J2C, RGBA_LOSSY_RAW, RGBA_RAW,
 };
 use utils::AssetId;
 use uuid::Uuid;
@@ -68,6 +68,14 @@ fn reduced_gray_matches_openjpeg() {
     assert_eq!(image.size(), [2048, 2048]);
     assert_eq!(image.format(), PixelFormat::Gray8);
     assert!(image.pixels().iter().all(|sample| *sample == 73));
+}
+
+#[test]
+fn detailed_lossy_rgba_decodes() {
+    let image = decode(RGBA_2048_LOSSY_J2C).unwrap();
+    assert_eq!(image.size(), [2048, 2048]);
+    assert_eq!(image.format(), PixelFormat::Rgba8);
+    assert!(image.pixels().windows(2).any(|pair| pair[0] != pair[1]), "fixture has detail");
 }
 
 #[test]
