@@ -193,8 +193,10 @@ pub(crate) fn decode(bytes: &[u8], target: TextureSize, cancelled: impl Fn() -> 
             if cancelled() {
                 return Err(Failure::Cancelled);
             }
-            for (source, target) in row.iter().zip(dest.iter_mut().skip(channel).step_by(format.channels())) {
-                *target = u8::try_from(*source).map_err(|_| Failure::Malformed)?;
+            for (source, pixel) in row.iter().zip(dest.chunks_exact_mut(format.channels())) {
+                if let Some(target) = pixel.get_mut(channel) {
+                    *target = u8::try_from(*source).map_err(|_| Failure::Malformed)?;
+                }
             }
         }
     }
