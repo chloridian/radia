@@ -124,8 +124,9 @@ impl NamespaceTable {
             return Err(StorageError::InvalidNamespaces);
         }
         for (index, definition) in definitions.iter().enumerate() {
-            if definitions[..index]
+            if definitions
                 .iter()
+                .take(index)
                 .any(|previous| previous.directory == definition.directory && previous.extension == definition.extension)
             {
                 return Err(StorageError::InvalidNamespaces);
@@ -199,14 +200,14 @@ impl NamespaceTable {
         let mut cursor = 0usize;
         for (index, byte) in key.name.iter().copied().enumerate() {
             if matches!(index, 4 | 6 | 8 | 10) {
-                file_name[cursor] = b'-';
+                *file_name.get_mut(cursor)? = b'-';
                 cursor += 1;
             }
-            file_name[cursor] = hex_digit(byte >> 4) as u8;
-            file_name[cursor + 1] = hex_digit(byte & 0x0f) as u8;
+            *file_name.get_mut(cursor)? = hex_digit(byte >> 4) as u8;
+            *file_name.get_mut(cursor + 1)? = hex_digit(byte & 0x0f) as u8;
             cursor += 2;
         }
-        file_name[cursor] = b'.';
+        *file_name.get_mut(cursor)? = b'.';
         cursor += 1;
         file_name.get_mut(cursor..cursor + definition.extension.len())?.copy_from_slice(definition.extension.as_bytes());
         cursor += definition.extension.len();

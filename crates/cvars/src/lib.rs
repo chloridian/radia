@@ -1,5 +1,3 @@
-#![expect(clippy::indexing_slicing)]
-
 use std::{array, borrow::Cow, error::Error, fmt, marker::PhantomData, sync::Arc};
 
 include!(concat!(env!("OUT_DIR"), "/generated_cvars.rs"));
@@ -13,7 +11,7 @@ impl CvarId {
     }
 
     pub fn descriptor(self) -> &'static CvarDescriptor {
-        &DESCRIPTORS[self.0]
+        DESCRIPTORS.get(self.0).expect("CvarId is within DESCRIPTORS")
     }
 }
 
@@ -53,16 +51,75 @@ pub enum Layer {
 }
 
 impl Layer {
-    const OVERRIDE_LAYERS: [Self; 4] = [Self::Preset, Self::Global, Self::StartupDeveloper, Self::Session];
-
-    const fn slot(self) -> Option<usize> {
+    const fn override_layer(self) -> Option<OverrideLayer> {
         match self {
             Self::Default => None,
-            Self::Preset => Some(0),
-            Self::Global => Some(1),
-            Self::StartupDeveloper => Some(2),
-            Self::Session => Some(3),
+            Self::Preset => Some(OverrideLayer::Preset),
+            Self::Global => Some(OverrideLayer::Global),
+            Self::StartupDeveloper => Some(OverrideLayer::StartupDeveloper),
+            Self::Session => Some(OverrideLayer::Session),
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OverrideLayer {
+    Preset,
+    Global,
+    StartupDeveloper,
+    Session,
+}
+
+impl OverrideLayer {
+    const DESCENDING: [(Self, Layer); 4] = [
+        (Self::Session, Layer::Session),
+        (Self::StartupDeveloper, Layer::StartupDeveloper),
+        (Self::Global, Layer::Global),
+        (Self::Preset, Layer::Preset),
+    ];
+}
+
+struct OverrideLayers {
+    preset: [Option<CvarValue>; CVAR_COUNT],
+    global: [Option<CvarValue>; CVAR_COUNT],
+    startup_developer: [Option<CvarValue>; CVAR_COUNT],
+    session: [Option<CvarValue>; CVAR_COUNT],
+}
+
+impl OverrideLayers {
+    fn new() -> Self {
+        Self {
+            preset: array::from_fn(|_| None),
+            global: array::from_fn(|_| None),
+            startup_developer: array::from_fn(|_| None),
+            session: array::from_fn(|_| None),
+        }
+    }
+
+    fn layer(&self, layer: OverrideLayer) -> &[Option<CvarValue>; CVAR_COUNT] {
+        match layer {
+            OverrideLayer::Preset => &self.preset,
+            OverrideLayer::Global => &self.global,
+            OverrideLayer::StartupDeveloper => &self.startup_developer,
+            OverrideLayer::Session => &self.session,
+        }
+    }
+
+    fn layer_mut(&mut self, layer: OverrideLayer) -> &mut [Option<CvarValue>; CVAR_COUNT] {
+        match layer {
+            OverrideLayer::Preset => &mut self.preset,
+            OverrideLayer::Global => &mut self.global,
+            OverrideLayer::StartupDeveloper => &mut self.startup_developer,
+            OverrideLayer::Session => &mut self.session,
+        }
+    }
+
+    fn get(&self, layer: OverrideLayer, id: CvarId) -> &Option<CvarValue> {
+        self.layer(layer).get(id.0).expect("CvarId is within CVAR_COUNT")
+    }
+
+    fn get_mut(&mut self, layer: OverrideLayer, id: CvarId) -> &mut Option<CvarValue> {
+        self.layer_mut(layer).get_mut(id.0).expect("CvarId is within CVAR_COUNT")
     }
 }
 
@@ -345,29 +402,33 @@ impl CvarSnapshot {
     }
 
     pub fn get<T: CvarTyped>(&self, key: CvarKey<T>) -> T {
-        T::from_value(&self.entries[key.id.0].effective).expect("validated CVar value matches CvarKey type")
+        T::from_value(&self.entry(key.id).effective).expect("validated CVar value matches CvarKey type")
     }
 
     pub fn get_value(&self, id: CvarId) -> &CvarValue {
-        &self.entries[id.0].effective
+        &self.entry(id).effective
     }
 
     pub fn provenance(&self, id: CvarId) -> CvarProvenance {
-        let entry = &self.entries[id.0];
+        let entry = self.entry(id);
         CvarProvenance { value: entry.effective.clone(), source: entry.source, pending_restart_value: entry.pending_restart_value.clone() }
     }
 
     pub fn pending_restarts(&self) -> Vec<(&'static CvarDescriptor, CvarValue)> {
         self.entries
             .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| entry.pending_restart_value.as_ref().map(|pending| (&DESCRIPTORS[index], pending.clone())))
+            .zip(&DESCRIPTORS)
+            .filter_map(|(entry, descriptor)| entry.pending_restart_value.as_ref().map(|pending| (descriptor, pending.clone())))
             .collect()
+    }
+
+    fn entry(&self, id: CvarId) -> &SnapshotEntry {
+        self.entries.get(id.0).expect("CvarId is within CVAR_COUNT")
     }
 }
 
 pub struct CvarRegistry {
-    layers: [[Option<CvarValue>; CVAR_COUNT]; 4],
+    layers: OverrideLayers,
     startup_locked: [Option<(CvarValue, Layer)>; CVAR_COUNT],
     revision: CvarRevision,
     snapshot: CvarSnapshot,
@@ -381,11 +442,10 @@ impl Default for CvarRegistry {
 
 impl CvarRegistry {
     pub fn new() -> Self {
-        let layers: [[Option<CvarValue>; CVAR_COUNT]; 4] = array::from_fn(|_| array::from_fn(|_| None));
-        let startup_locked: [Option<(CvarValue, Layer)>; CVAR_COUNT] = array::from_fn(|index| {
-            let descriptor = &DESCRIPTORS[index];
-            (descriptor.apply == ApplyScope::RestartRequired).then(|| (descriptor.default.clone(), Layer::Default))
-        });
+        let layers = OverrideLayers::new();
+        let startup_locked: [Option<(CvarValue, Layer)>; CVAR_COUNT] = DESCRIPTORS
+            .each_ref()
+            .map(|descriptor| (descriptor.apply == ApplyScope::RestartRequired).then(|| (descriptor.default.clone(), Layer::Default)));
         let revision = CvarRevision(1);
         let snapshot = Self::build_snapshot(revision, &layers, &startup_locked);
         Self { layers, startup_locked, revision, snapshot }
@@ -414,11 +474,12 @@ impl CvarRegistry {
 
     pub fn set_value(&mut self, id: CvarId, layer: Layer, value: &CvarValue) -> Result<CvarRevision, CvarError> {
         let descriptor = id.descriptor();
-        let slot = Self::validate_layer(descriptor, layer)?;
+        let override_layer = Self::validate_layer(descriptor, layer)?;
         let validated = descriptor.validate(value)?;
         let normalized = if layer == Layer::Global && validated == descriptor.default { None } else { Some(validated) };
-        if self.layers[slot][id.0] != normalized {
-            self.layers[slot][id.0] = normalized;
+        let slot = self.layers.get_mut(override_layer, id);
+        if *slot != normalized {
+            *slot = normalized;
             self.commit_layer_changes();
         }
         Ok(self.revision)
@@ -426,8 +487,8 @@ impl CvarRegistry {
 
     pub fn clear_layer(&mut self, id: CvarId, layer: Layer) -> Result<CvarRevision, CvarError> {
         let descriptor = id.descriptor();
-        let slot = Self::validate_layer(descriptor, layer)?;
-        if self.layers[slot][id.0].take().is_some() {
+        let override_layer = Self::validate_layer(descriptor, layer)?;
+        if self.layers.get_mut(override_layer, id).take().is_some() {
             self.commit_layer_changes();
         }
         Ok(self.revision)
@@ -437,15 +498,16 @@ impl CvarRegistry {
         let mut staged = Vec::with_capacity(entries.len());
         for (name, value) in entries {
             let descriptor = lookup_by_name(name).ok_or_else(|| CvarError::UnknownName((*name).to_owned()))?;
-            let slot = Self::validate_layer(descriptor, layer)?;
+            let override_layer = Self::validate_layer(descriptor, layer)?;
             let validated = descriptor.validate(value)?;
             let normalized = if layer == Layer::Global && validated == descriptor.default { None } else { Some(validated) };
-            staged.push((slot, descriptor.id.0, normalized));
+            staged.push((override_layer, descriptor.id, normalized));
         }
         let mut changed = false;
-        for (slot, index, normalized) in staged {
-            if self.layers[slot][index] != normalized {
-                self.layers[slot][index] = normalized;
+        for (override_layer, id, normalized) in staged {
+            let slot = self.layers.get_mut(override_layer, id);
+            if *slot != normalized {
+                *slot = normalized;
                 changed = true;
             }
         }
@@ -456,7 +518,7 @@ impl CvarRegistry {
     }
 
     pub fn replace_layer(&mut self, layer: Layer, entries: &[(&str, CvarValue)]) -> Result<CvarRevision, CvarError> {
-        let Some(slot) = layer.slot() else {
+        let Some(override_layer) = layer.override_layer() else {
             return Err(CvarError::LayerNotAllowed { name: "", layer });
         };
         let mut next: [Option<CvarValue>; CVAR_COUNT] = array::from_fn(|_| None);
@@ -465,10 +527,10 @@ impl CvarRegistry {
             Self::validate_layer(descriptor, layer)?;
             let validated = descriptor.validate(value)?;
             let normalized = if layer == Layer::Global && validated == descriptor.default { None } else { Some(validated) };
-            next[descriptor.id.0] = normalized;
+            *next.get_mut(descriptor.id.0).expect("CvarId is within CVAR_COUNT") = normalized;
         }
-        if self.layers[slot] != next {
-            self.layers[slot] = next;
+        if *self.layers.layer(override_layer) != next {
+            *self.layers.layer_mut(override_layer) = next;
             self.commit_layer_changes();
         }
         Ok(self.revision)
@@ -496,34 +558,32 @@ impl CvarRegistry {
     }
 
     pub fn layer_value(&self, id: CvarId, layer: Layer) -> Option<&CvarValue> {
-        layer.slot().and_then(|slot| self.layers[slot][id.0].as_ref())
+        layer.override_layer().and_then(|override_layer| self.layers.get(override_layer, id).as_ref())
     }
 
     pub fn masking_layer(&self, id: CvarId, layer: Layer) -> Option<Layer> {
-        Layer::OVERRIDE_LAYERS
-            .into_iter()
-            .rev()
-            .find(|candidate| *candidate > layer && candidate.slot().is_some_and(|slot| self.layers[slot][id.0].is_some()))
+        OverrideLayer::DESCENDING.into_iter().find_map(|(override_layer, candidate)| {
+            (candidate > layer && self.layers.get(override_layer, id).is_some()).then_some(candidate)
+        })
     }
 
     pub fn lock_startup_values(&mut self) {
-        for index in 0..CVAR_COUNT {
-            let descriptor = &DESCRIPTORS[index];
+        for (descriptor, locked) in DESCRIPTORS.iter().zip(&mut self.startup_locked) {
             if descriptor.apply == ApplyScope::RestartRequired {
-                self.startup_locked[index] = Some(Self::resolve_layers(&self.layers, index));
+                *locked = Some(Self::resolve_layers(&self.layers, descriptor));
             }
         }
         self.snapshot = Self::build_snapshot(self.revision, &self.layers, &self.startup_locked);
     }
 
-    fn validate_layer(descriptor: &'static CvarDescriptor, layer: Layer) -> Result<usize, CvarError> {
-        let Some(slot) = layer.slot() else {
+    fn validate_layer(descriptor: &'static CvarDescriptor, layer: Layer) -> Result<OverrideLayer, CvarError> {
+        let Some(override_layer) = layer.override_layer() else {
             return Err(CvarError::LayerNotAllowed { name: descriptor.name, layer });
         };
         if layer == Layer::Global && descriptor.persistence == PersistenceScope::SessionOnly {
             return Err(CvarError::LayerNotAllowed { name: descriptor.name, layer });
         }
-        Ok(slot)
+        Ok(override_layer)
     }
 
     fn commit_layer_changes(&mut self) {
@@ -540,23 +600,21 @@ impl CvarRegistry {
         self.snapshot = CvarSnapshot { revision: self.revision, entries: Arc::new(next_entries) };
     }
 
-    fn resolve_layers(layers: &[[Option<CvarValue>; CVAR_COUNT]; 4], index: usize) -> (CvarValue, Layer) {
-        for layer in Layer::OVERRIDE_LAYERS.into_iter().rev() {
-            let slot = layer.slot().expect("override layer has slot");
-            if let Some(value) = &layers[slot][index] {
+    fn resolve_layers(layers: &OverrideLayers, descriptor: &'static CvarDescriptor) -> (CvarValue, Layer) {
+        for (override_layer, layer) in OverrideLayer::DESCENDING {
+            if let Some(value) = layers.get(override_layer, descriptor.id) {
                 return (value.clone(), layer);
             }
         }
-        (DESCRIPTORS[index].default.clone(), Layer::Default)
+        (descriptor.default.clone(), Layer::Default)
     }
 
-    fn build_entries(
-        layers: &[[Option<CvarValue>; CVAR_COUNT]; 4],
-        startup_locked: &[Option<(CvarValue, Layer)>; CVAR_COUNT],
-    ) -> [SnapshotEntry; CVAR_COUNT] {
-        array::from_fn(|index| {
-            let (resolved_value, resolved_layer) = Self::resolve_layers(layers, index);
-            if let Some((locked_value, locked_layer)) = &startup_locked[index] {
+    fn build_entries(layers: &OverrideLayers, startup_locked: &[Option<(CvarValue, Layer)>; CVAR_COUNT]) -> [SnapshotEntry; CVAR_COUNT] {
+        let mut descriptors = DESCRIPTORS.iter();
+        startup_locked.each_ref().map(|locked| {
+            let descriptor = descriptors.next().expect("DESCRIPTORS length matches startup_locked");
+            let (resolved_value, resolved_layer) = Self::resolve_layers(layers, descriptor);
+            if let Some((locked_value, locked_layer)) = locked {
                 let pending_restart_value = (&resolved_value != locked_value).then_some(resolved_value);
                 SnapshotEntry { effective: locked_value.clone(), source: *locked_layer, pending_restart_value }
             } else {
@@ -567,7 +625,7 @@ impl CvarRegistry {
 
     fn build_snapshot(
         revision: CvarRevision,
-        layers: &[[Option<CvarValue>; CVAR_COUNT]; 4],
+        layers: &OverrideLayers,
         startup_locked: &[Option<(CvarValue, Layer)>; CVAR_COUNT],
     ) -> CvarSnapshot {
         CvarSnapshot { revision, entries: Arc::new(Self::build_entries(layers, startup_locked)) }

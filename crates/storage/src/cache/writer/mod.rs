@@ -363,11 +363,11 @@ impl WorkerState {
             match self.single_put_fits_empty(key, bytes.len()) {
                 Ok(true) => {}
                 Ok(false) => {
-                    results[index] = Some(Err(StorageError::TooLarge));
+                    *results.get_mut(index).expect("results has one slot per entry") = Some(Err(StorageError::TooLarge));
                     continue;
                 }
                 Err(error) => {
-                    results[index] = Some(Err(error));
+                    *results.get_mut(index).expect("results has one slot per entry") = Some(Err(error));
                     continue;
                 }
             }
@@ -386,7 +386,7 @@ impl WorkerState {
                         }
                         return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
                     }
-                    results[index] = Some(Err(error));
+                    *results.get_mut(index).expect("results has one slot per entry") = Some(Err(error));
                 }
             }
         }
@@ -396,9 +396,8 @@ impl WorkerState {
         let mut staged_entries = Vec::new();
         if staged_entries.try_reserve_exact(staged.len()).is_err() {
             for index in staged_indices {
-                if let Some(result) = results.get_mut(index) {
-                    *result = Some(Err(StorageError::Unavailable(UnavailableReason::Allocation)));
-                }
+                *results.get_mut(index).expect("results has one slot per entry") =
+                    Some(Err(StorageError::Unavailable(UnavailableReason::Allocation)));
             }
             return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
         }
@@ -411,9 +410,8 @@ impl WorkerState {
             || accepted_indices.try_reserve_exact(staged.len()).is_err()
         {
             for index in staged_indices {
-                if let Some(result) = results.get_mut(index) {
-                    *result = Some(Err(StorageError::Unavailable(UnavailableReason::Allocation)));
-                }
+                *results.get_mut(index).expect("results has one slot per entry") =
+                    Some(Err(StorageError::Unavailable(UnavailableReason::Allocation)));
             }
             return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
         }
@@ -422,14 +420,18 @@ impl WorkerState {
             let mut protection = lock(&protection_shared.state);
             self.plan_puts(&staged_entries, &protection).and_then(|put_plan| {
                 for index in &put_plan.rejected {
-                    if let Some(result) = results.get_mut(staged_indices[*index]) {
+                    if let Some(&staged_index) = staged_indices.get(*index)
+                        && let Some(result) = results.get_mut(staged_index)
+                    {
                         *result = Some(Err(StorageError::TooLarge));
                     }
                 }
                 let accepted = put_plan.accepted;
                 for index in &accepted {
-                    accepted_entries.push(Arc::clone(&staged_entries[*index]));
-                    accepted_indices.push(staged_indices[*index]);
+                    let entry = staged_entries.get(*index).expect("put_plan accepted index is within staged entries");
+                    let staged_index = *staged_indices.get(*index).expect("put_plan accepted index is within staged indices");
+                    accepted_entries.push(Arc::clone(entry));
+                    accepted_indices.push(staged_index);
                 }
                 let Some(plan) = put_plan.plan else {
                     return Ok(None);
@@ -910,13 +912,13 @@ impl WorkerState {
         drop(entries);
         let mut offset = 0;
         while offset < pending_touches.len() {
-            let end = (offset + MAX_BATCH_ROWS).min(pending_touches.len());
+            let count = (pending_touches.len() - offset).min(MAX_BATCH_ROWS);
             let mut batch = Vec::new();
-            if batch.try_reserve_exact(end - offset).is_err() {
+            if batch.try_reserve_exact(count).is_err() {
                 self.restore_touches(pending_touches.drain(offset..));
                 return Err(StorageError::Unavailable(UnavailableReason::Allocation));
             }
-            batch.extend(pending_touches[offset..end].iter().map(PendingTouch::record));
+            batch.extend(pending_touches.iter().skip(offset).take(count).map(PendingTouch::record));
             #[cfg(test)]
             let result =
                 if self.hooks.check(WritePoint::IndexTouchBusy).is_err() { Err(SqliteError::Busy) } else { self.index.touch(batch) };
@@ -926,10 +928,10 @@ impl WorkerState {
                 self.restore_touches(pending_touches.drain(offset..));
                 return Err(self.index_failure(error, &[]));
             }
-            for touched in &pending_touches[offset..end] {
+            for touched in pending_touches.iter().skip(offset).take(count) {
                 touched.entry.persisted_use_count.store(touched.resulting_use_count(), Ordering::Relaxed);
             }
-            offset = end;
+            offset += count;
         }
         self.update_accounted_size();
         Ok(())

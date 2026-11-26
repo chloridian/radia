@@ -211,20 +211,23 @@ impl InventoryCacheRestore {
             && progress.units_processed < MAX_RESTORE_UNITS_PER_TURN
             && progress.rows_processed < MAX_RESTORE_ROWS_PER_TURN
         {
-            let unit = &self.units[self.unit_index];
+            let Some(unit) = self.units.get(self.unit_index) else {
+                break;
+            };
             if excluded.contains(&unit.metadata.key) {
                 self.advance_unit();
                 progress.units_processed = progress.units_processed.saturating_add(1);
                 continue;
             }
             let remaining_rows = MAX_RESTORE_ROWS_PER_TURN.saturating_sub(progress.rows_processed);
-            let available = unit.children.len().saturating_sub(self.child_offset);
-            let chunk_len = available.min(remaining_rows);
+            let remaining = unit.children.get(self.child_offset..).ok_or(InventoryCacheError::Inconsistent)?;
+            let chunk = remaining.get(..remaining_rows).unwrap_or(remaining);
+            let chunk_len = chunk.len();
             let end = self.child_offset.saturating_add(chunk_len);
             let final_chunk = end == unit.children.len();
             let result = inventory.apply_cached_folder(
                 &unit.metadata,
-                &unit.children[self.child_offset..end],
+                chunk,
                 unit.complete && !self.unit_conflict,
                 unit.expected_child_count,
                 final_chunk,
