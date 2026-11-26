@@ -2,7 +2,7 @@ use std::{hint::black_box, thread, time::Instant};
 
 use assets::{Budget, DecodeJob, Demand, LoadJob, Priority, Request, Store, TextureSize};
 use divan::counter::ItemsCount;
-use test_support::texture::GRAY_4096_J2C;
+use test_support::texture::RGBA_2048_LOSSY_J2C;
 use utils::AssetId;
 use uuid::Uuid;
 
@@ -22,7 +22,7 @@ fn decode_jobs(edge: u32, workers: usize) -> (Store, Vec<DecodeJob>, Vec<Demand>
         let LoadJob::Fetch(fetch) = store.next_job(now).expect("benchmark fetch") else {
             panic!("new texture request unexpectedly used a cached source");
         };
-        let input = fetch.complete(Ok(GRAY_4096_J2C.to_vec())).expect("fixture response");
+        let input = fetch.complete(Ok(RGBA_2048_LOSSY_J2C.to_vec())).expect("fixture response");
         let job = store.start_decode(input).unwrap_or_else(|_| panic!("decode admission available"));
         jobs.push(job);
     }
@@ -64,11 +64,11 @@ fn run(bencher: divan::Bencher, case: DecodeCase) {
 }
 
 #[divan::bench(args = ONE_WORKER)]
-fn texture_assets_decode_4096_1w(bencher: divan::Bencher, case: DecodeCase) {
+fn texture_assets_decode_1w(bencher: divan::Bencher, case: DecodeCase) {
     run(bencher, case);
 }
 
 #[divan::bench(args = TWO_WORKERS)]
-fn texture_assets_decode_4096_2w(bencher: divan::Bencher, case: DecodeCase) {
+fn texture_assets_decode_2w(bencher: divan::Bencher, case: DecodeCase) {
     run(bencher, case);
 }
