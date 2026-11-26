@@ -3,7 +3,6 @@ mod job;
 mod upload;
 
 use std::{
-    array,
     collections::{HashMap, HashSet, VecDeque},
     mem::{replace, take},
     sync::{
@@ -843,19 +842,17 @@ impl Textures {
         textures: &[Option<TextureHandle>; 4],
         epoch: u64,
     ) -> bool {
-        let key = array::from_fn(|index| {
-            let texture = textures[index].as_ref()?;
+        let key = textures.each_ref().map(|texture| {
+            let texture = texture.as_ref()?;
             self.request(texture, epoch, Priority::Visible);
             Some(TextureKey { id: texture.id(), sampler: Sampler::default() })
         });
-        let revisions =
-            array::from_fn(|index| key[index].and_then(|key| self.entries.get(&key.id).map(|entry| entry.state_revision)).unwrap_or(0));
+        let revisions = key.map(|key| key.and_then(|key| self.entries.get(&key.id).map(|entry| entry.state_revision)).unwrap_or(0));
         if self.terrain_bindings.get(&region).is_some_and(|binding| binding.key == key && binding.revisions == revisions) {
             return false;
         }
-        let views: [TextureView; 4] = array::from_fn(|index| {
-            key[index].and_then(|key| self.texture_view(key).cloned()).unwrap_or_else(|| self.terrain_fallback.clone())
-        });
+        let views: [TextureView; 4] =
+            key.map(|key| key.and_then(|key| self.texture_view(key).cloned()).unwrap_or_else(|| self.terrain_fallback.clone()));
         let mut entries: Vec<_> = views
             .iter()
             .enumerate()

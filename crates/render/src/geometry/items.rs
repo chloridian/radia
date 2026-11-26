@@ -176,7 +176,7 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
     let mut material_slots = [None; 256];
     if let Some(materials) = materials {
         for (index, material) in materials.iter().enumerate() {
-            material_slots[usize::from(material.slot)].get_or_insert(index);
+            material_slots.get_mut(usize::from(material.slot)).expect("u8 slot fits in 256-entry table").get_or_insert(index);
         }
     }
     let faces = mesh.mesh().faces();
@@ -185,7 +185,7 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
         if face.indices.is_empty() {
             continue;
         }
-        let material_index = material_slots[usize::from(face.slot)];
+        let material_index = *material_slots.get(usize::from(face.slot)).expect("u8 slot fits in 256-entry table");
         let material = materials.and_then(|materials| material_index.and_then(|index| materials.get(index)));
         let mut params = FaceParams::new(material);
         match shading {

@@ -81,11 +81,8 @@ impl GpuTimings {
                     }
                 };
                 let mut timestamps = [0; TIMESTAMP_COUNT as usize];
-                for (index, timestamp) in timestamps.iter_mut().enumerate() {
-                    let start = index * size_of::<u64>();
-                    let mut bytes = [0; size_of::<u64>()];
-                    bytes.copy_from_slice(&mapped[start..start + size_of::<u64>()]);
-                    *timestamp = u64::from_ne_bytes(bytes);
+                for (timestamp, chunk) in timestamps.iter_mut().zip(mapped.as_chunks::<{ size_of::<u64>() }>().0) {
+                    *timestamp = u64::from_ne_bytes(*chunk);
                 }
                 self.latest = Some((
                     elapsed_ms(timestamps[0], timestamps[1], self.timestamp_period_ns),

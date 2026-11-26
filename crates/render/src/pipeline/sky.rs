@@ -1,5 +1,3 @@
-use std::array;
-
 use assets::Sampler;
 use math::{Mat4, Quat, Vec3};
 use wgpu::{
@@ -467,9 +465,11 @@ fn sky_texture_binding(
     keys: [Option<TextureKey>; 12],
     celestial_sampler: &wgpu::Sampler,
 ) -> BindGroup {
-    let views = array::from_fn(|binding| {
-        let key = keys[binding];
-        sky_texture_view(binding, textures.view(key), textures.raw_view(key))
+    let mut binding = 0;
+    let views = keys.map(|key| {
+        let view = sky_texture_view(binding, textures.view(key), textures.raw_view(key));
+        binding += 1;
+        view
     });
     sky_texture_binding_for_views(device, layout, views, &textures.default_sampler, celestial_sampler)
 }

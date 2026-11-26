@@ -95,7 +95,8 @@ impl Textures {
                         let mut mapped = buffer.get_mapped_range_mut(..).expect("new staging buffer is mapped and unborrowed");
                         let start = *row as usize * level.row_bytes;
                         let end = start + rows as usize * level.row_bytes;
-                        for (index, src) in level.bytes[start..end].chunks_exact(level.row_bytes).enumerate() {
+                        let src_bytes = level.bytes.get(start..end).expect("staged texture rows are within level bytes");
+                        for (index, src) in src_bytes.chunks_exact(level.row_bytes).enumerate() {
                             let offset = index * pitch as usize;
                             mapped.slice(offset..offset + src.len()).copy_from_slice(src);
                         }

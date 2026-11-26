@@ -205,11 +205,16 @@ impl Camera {
             return Some(detail_from_index(THRESHOLDS.into_iter().take_while(|threshold| diameter >= *threshold).count()));
         };
         let mut index = detail_index(previous);
-        while index < 3 && diameter >= THRESHOLDS[index] * 1.2 {
+        while let Some(&threshold) = THRESHOLDS.get(index)
+            && diameter >= threshold * 1.2
+        {
             index += 1;
         }
-        while index > 0 && diameter < THRESHOLDS[index - 1] * 0.8 {
-            index -= 1;
+        while let Some(prev) = index.checked_sub(1)
+            && let Some(&threshold) = THRESHOLDS.get(prev)
+            && diameter < threshold * 0.8
+        {
+            index = prev;
         }
         Some(detail_from_index(index))
     }
@@ -245,11 +250,16 @@ impl Camera {
         if let Some(previous) = previous {
             const THRESHOLDS: [f32; 3] = [0.03, 0.06, 0.24];
             let mut index = previous.index();
-            while index < THRESHOLDS.len() && tangent >= THRESHOLDS[index] * 1.2 {
+            while let Some(&threshold) = THRESHOLDS.get(index)
+                && tangent >= threshold * 1.2
+            {
                 index += 1;
             }
-            while index > 0 && tangent < THRESHOLDS[index - 1] * 0.8 {
-                index -= 1;
+            while let Some(prev) = index.checked_sub(1)
+                && let Some(&threshold) = THRESHOLDS.get(prev)
+                && tangent < threshold * 0.8
+            {
+                index = prev;
             }
             Some(match index {
                 0 => MeshLod::Lowest,

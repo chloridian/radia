@@ -62,7 +62,7 @@ pub(in crate::scene) fn tessellate_sculpt_cancellable(
     };
 
     if !map_too_small && detail != Detail::Lowest {
-        let area = surface_area(&positions, rows, columns);
+        let area = surface_area(&positions, columns);
         if !area.is_finite() || !(MIN_SURFACE_AREA..=MAX_SURFACE_AREA).contains(&area) {
             positions = placeholder(rows, columns);
             used_placeholder = true;
@@ -112,17 +112,23 @@ pub(in crate::scene) fn pixels_to_rgba(
         if cancelled.load(Ordering::Acquire) {
             return Err(MeshBuildError::Cancelled);
         }
-        if format == PixelFormat::Rgba8 {
-            dest.copy_from_slice(src);
-            continue;
-        }
-        for (src, dest) in src.chunks_exact(channels).zip(dest.as_chunks_mut::<4>().0) {
-            *dest = match format {
-                PixelFormat::Gray8 => [src[0], src[0], src[0], 255],
-                PixelFormat::GrayAlpha8 => [src[0], src[0], src[0], src[1]],
-                PixelFormat::Rgb8 => [src[0], src[1], src[2], 255],
-                PixelFormat::Rgba8 => [src[0], src[1], src[2], src[3]],
-            };
+        match format {
+            PixelFormat::Gray8 => {
+                for (&g, dest) in src.iter().zip(dest.as_chunks_mut::<4>().0) {
+                    *dest = [g, g, g, 255];
+                }
+            }
+            PixelFormat::GrayAlpha8 => {
+                for (&[g, a], dest) in src.as_chunks::<2>().0.iter().zip(dest.as_chunks_mut::<4>().0) {
+                    *dest = [g, g, g, a];
+                }
+            }
+            PixelFormat::Rgb8 => {
+                for (&[r, g, b], dest) in src.as_chunks::<3>().0.iter().zip(dest.as_chunks_mut::<4>().0) {
+                    *dest = [r, g, b, 255];
+                }
+            }
+            PixelFormat::Rgba8 => dest.copy_from_slice(src),
         }
     }
     Ok(rgba)
@@ -140,15 +146,14 @@ fn build_grid(
 ) -> Result<Mesh, MeshBuildError> {
     let mut mesh = Builder::default();
     let start = mesh.begin_face();
-    for row in 0..rows {
+    for (row, row_positions) in positions.chunks_exact(columns).enumerate() {
         let v = row as f32 / (rows - 1) as f32;
-        for column in 0..columns {
+        for (column, &position) in row_positions.iter().enumerate() {
             let mut u = column as f32 / (columns - 1) as f32;
             if reverse_horizontal {
                 u = 1.0 - u;
             }
-            let index = row * columns + column;
-            mesh.vertex(positions[index], Vec2::new(u, v))?;
+            mesh.vertex(position, Vec2::new(u, v))?;
         }
     }
     for row in 0..rows - 1 {
@@ -293,18 +298,20 @@ fn placeholder(rows: usize, columns: usize) -> Vec<Vec3> {
     positions
 }
 
-fn surface_area(positions: &[Vec3], rows: usize, columns: usize) -> f32 {
+fn surface_area(positions: &[Vec3], columns: usize) -> f32 {
     let mut area = 0.0;
-    for row in 0..rows - 1 {
-        for column in 0..columns - 1 {
-            let p1 = positions[row * columns + column];
-            let p2 = positions[(row + 1) * columns + column];
-            let p3 = positions[row * columns + column + 1];
-            let p4 = positions[(row + 1) * columns + column + 1];
+    let mut row_iter = positions.chunks_exact(columns);
+    let Some(mut prev_row) = row_iter.next() else { return 0.0 };
+    for next_row in row_iter {
+        let (Some((_, prev_tail)), Some((_, next_tail))) = (prev_row.split_first(), next_row.split_first()) else {
+            break;
+        };
+        for (((&p1, &p3), &p2), &p4) in prev_row.iter().zip(prev_tail).zip(next_row).zip(next_tail) {
             let cross1 = (p1 - p2).cross(p1 - p3);
             let cross2 = (p4 - p2).cross(p4 - p3);
             area += (cross1.length() + cross2.length()) * 0.5;
         }
+        prev_row = next_row;
     }
     area
 }

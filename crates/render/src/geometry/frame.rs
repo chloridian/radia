@@ -842,8 +842,8 @@ impl GeometryRenderer {
             &mut self.regions,
         );
         self.stats.motion_entities_evaluated += self.motion_entities.len();
-        for motion_index in 0..self.motion_entities.len() {
-            let entity = self.motion_entities[motion_index];
+        let motion_entities = mem::take(&mut self.motion_entities);
+        for &entity in &motion_entities {
             let Some(index) = self.cache.objects.get(&entity).copied() else { continue };
             let Some(object) = view.object(entity).filter(|_| view.object_is_live(entity)) else { continue };
             if is_agent_pose_override(object.detail().summary.kind, object.detail().summary.id, agent_id) {
@@ -852,6 +852,7 @@ impl GeometryRenderer {
             let Some(pose) = self.placements.get(&entity).map(|transform| transform.pose) else { continue };
             self.set_item_pose(index, pose, origin, Some(update));
         }
+        self.motion_entities = motion_entities;
     }
 
     fn update_object_motion_page(

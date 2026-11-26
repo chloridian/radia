@@ -73,18 +73,14 @@ pub(crate) fn encode(rgba: &[u8], size: [u32; 2], quality: CompressionQuality, c
         let stride = padded_size[0] as usize * 4;
         let row_bytes = padded_size[0] as usize / 4 * format.block_bytes();
         let mut bytes = vec![0; row_bytes * (padded_size[1] as usize / 4)];
-        for row in (0..padded_size[1] as usize).step_by(64) {
+        let src_chunk_bytes = 64 * stride;
+        let dst_chunk_bytes = 16 * row_bytes;
+        for (src_chunk, blocks) in source.chunks(src_chunk_bytes).zip(bytes.chunks_mut(dst_chunk_bytes)) {
             if cancelled() {
                 return Err(Failure::Cancelled);
             }
-            let rows = (padded_size[1] as usize - row).min(64);
-            let surface = RgbaSurface {
-                data: &source[row * stride..(row + rows) * stride],
-                width: padded_size[0],
-                height: rows as u32,
-                stride: stride as u32,
-            };
-            let blocks = &mut bytes[row / 4 * row_bytes..(row + rows) / 4 * row_bytes];
+            let rows = src_chunk.len() / stride;
+            let surface = RgbaSurface { data: src_chunk, width: padded_size[0], height: rows as u32, stride: stride as u32 };
             match format {
                 CompressionFormat::Bc1 => bc1::compress_blocks_into(&surface, blocks),
                 CompressionFormat::Bc3 => bc3::compress_blocks_into(&surface, blocks),
@@ -110,12 +106,19 @@ fn select_compression_format(opaque: bool, quality: CompressionQuality) -> Compr
 }
 
 fn pad(source: &[u8], size: [u32; 2], padded: [u32; 2]) -> Vec<u8> {
-    let mut result = vec![0; padded[0] as usize * padded[1] as usize * 4];
-    for y in 0..padded[1] {
-        for x in 0..padded[0] {
-            let from = ((y.min(size[1] - 1) * size[0] + x.min(size[0] - 1)) * 4) as usize;
-            let to = ((y * padded[0] + x) * 4) as usize;
-            result[to..to + 4].copy_from_slice(&source[from..from + 4]);
+    let src_pixels = source.as_chunks::<4>().0;
+    let src_w = size[0] as usize;
+    let src_h = size[1] as usize;
+    let pad_w = padded[0] as usize;
+    let mut result = vec![0; pad_w * padded[1] as usize * 4];
+    for (y, dst_row) in result.chunks_exact_mut(pad_w * 4).enumerate() {
+        let sy = y.min(src_h - 1);
+        let src_row = src_pixels.get(sy * src_w..(sy + 1) * src_w).expect("padded row in source");
+        let dst_pixels = dst_row.as_chunks_mut::<4>().0;
+        let (copy_dst, edge_dst) = dst_pixels.split_at_mut(src_w);
+        copy_dst.copy_from_slice(src_row);
+        if let Some(&last) = src_row.last() {
+            edge_dst.fill(last);
         }
     }
     result
@@ -127,28 +130,36 @@ fn downsample(source: &[u8], size: [u32; 2], cancelled: impl Fn() -> bool) -> Re
         return downsample_even(source, size, next, cancelled);
     }
     let scale = [size[0] as f32 / next[0] as f32, size[1] as f32 / next[1] as f32];
-    let mut result = vec![0; next[0] as usize * next[1] as usize * 4];
-    for y in 0..next[1] {
+    let src_pixels = source.as_chunks::<4>().0;
+    let src_w = size[0] as usize;
+    let next_w = next[0] as usize;
+    let mut result = vec![0; next_w * next[1] as usize * 4];
+    for (y, dst_row) in result.chunks_exact_mut(next_w * 4).enumerate() {
         if cancelled() {
             return Err(Failure::Cancelled);
         }
-        for x in 0..next[0] {
+        for (x, dst_pixel) in dst_row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let lo = [x as f32 * scale[0], y as f32 * scale[1]];
             let hi = [lo[0] + scale[0], lo[1] + scale[1]];
             let mut sum = [0.0; 4];
-            for sy in lo[1].floor() as u32..(hi[1].ceil() as u32).min(size[1]) {
-                for sx in lo[0].floor() as u32..(hi[0].ceil() as u32).min(size[0]) {
-                    let weight = (hi[0].min(sx as f32 + 1.0) - lo[0].max(sx as f32)) * (hi[1].min(sy as f32 + 1.0) - lo[1].max(sy as f32));
-                    let index = ((sy * size[0] + sx) * 4) as usize;
-                    for channel in 0..4 {
-                        sum[channel] += f32::from(source[index + channel]) * weight;
+            let sy_start = lo[1].floor() as usize;
+            let sy_end = (hi[1].ceil() as usize).min(size[1] as usize);
+            let sx_start = lo[0].floor() as usize;
+            let sx_end = (hi[0].ceil() as usize).min(src_w);
+            for sy in sy_start..sy_end {
+                let row_slice = src_pixels.get(sy * src_w + sx_start..sy * src_w + sx_end).expect("downsample range in source");
+                let wy = hi[1].min(sy as f32 + 1.0) - lo[1].max(sy as f32);
+                for (dx, &pixel) in row_slice.iter().enumerate() {
+                    let sx = sx_start + dx;
+                    let weight = (hi[0].min(sx as f32 + 1.0) - lo[0].max(sx as f32)) * wy;
+                    for (acc, channel) in sum.iter_mut().zip(pixel) {
+                        *acc += f32::from(channel) * weight;
                     }
                 }
             }
             let area = scale[0] * scale[1];
-            let index = ((y * next[0] + x) * 4) as usize;
-            for channel in 0..4 {
-                result[index + channel] = (sum[channel] / area + 0.5) as u8;
+            for (dst, acc) in dst_pixel.iter_mut().zip(sum) {
+                *dst = (acc / area + 0.5) as u8;
             }
         }
     }
@@ -165,19 +176,29 @@ fn downsample_even(source: &[u8], size: [u32; 2], next: [u32; 2], cancelled: imp
         }
         let y0 = if size[1] == 1 { 0 } else { y * 2 };
         let y1 = (y0 + 1).min(size[1] as usize - 1);
-        let top = &source[y0 * width..(y0 + 1) * width];
-        let bottom = &source[y1 * width..(y1 + 1) * width];
-        for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let x0 = if width == 1 { 0 } else { x * 2 };
-            let x1 = (x0 + 1).min(width - 1);
-            let [a, b, c, d] = [top[x0], top[x1], bottom[x0], bottom[x1]];
-            for channel in 0..4 {
-                let sum = u16::from(a[channel]) + u16::from(b[channel]) + u16::from(c[channel]) + u16::from(d[channel]);
-                pixel[channel] = ((sum + 2) / 4) as u8;
+        let top = source.get(y0 * width..(y0 + 1) * width).expect("even downsample top row in bounds");
+        let bottom = source.get(y1 * width..(y1 + 1) * width).expect("even downsample bottom row in bounds");
+        let dst_pixels = row.as_chunks_mut::<4>().0;
+        if width == 1 {
+            if let (Some(&a), Some(&c), Some(pixel)) = (top.first(), bottom.first(), dst_pixels.first_mut()) {
+                *pixel = average_quad(a, a, c, c);
+            }
+        } else {
+            for ((&[a, b], &[c, d]), pixel) in top.as_chunks::<2>().0.iter().zip(bottom.as_chunks::<2>().0).zip(dst_pixels) {
+                *pixel = average_quad(a, b, c, d);
             }
         }
     }
     Ok(result)
+}
+
+fn average_quad(a: [u8; 4], b: [u8; 4], c: [u8; 4], d: [u8; 4]) -> [u8; 4] {
+    [
+        ((u16::from(a[0]) + u16::from(b[0]) + u16::from(c[0]) + u16::from(d[0]) + 2) / 4) as u8,
+        ((u16::from(a[1]) + u16::from(b[1]) + u16::from(c[1]) + u16::from(d[1]) + 2) / 4) as u8,
+        ((u16::from(a[2]) + u16::from(b[2]) + u16::from(c[2]) + u16::from(d[2]) + 2) / 4) as u8,
+        ((u16::from(a[3]) + u16::from(b[3]) + u16::from(c[3]) + u16::from(d[3]) + 2) / 4) as u8,
+    ]
 }
 
 #[cfg(test)]
