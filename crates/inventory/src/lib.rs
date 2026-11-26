@@ -1,5 +1,3 @@
-#![expect(clippy::indexing_slicing)]
-
 mod cache;
 mod delta;
 mod mutation;
