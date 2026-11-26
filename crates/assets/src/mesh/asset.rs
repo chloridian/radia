@@ -79,7 +79,14 @@ impl MeshHeader {
     }
 
     pub fn lod(self, id: AssetId, lod: MeshLod) -> Result<MeshLodRequest, AssetError> {
-        let block = self.blocks[lod.index()]?.ok_or(AssetError::MissingLod(lod))?;
+        let [lowest, low, medium, high, ..] = self.blocks;
+        let block = match lod {
+            MeshLod::Lowest => lowest,
+            MeshLod::Low => low,
+            MeshLod::Medium => medium,
+            MeshLod::High => high,
+        }?
+        .ok_or(AssetError::MissingLod(lod))?;
         Ok(MeshLodRequest { id, lod, block, asset_length: self.asset_length })
     }
 
@@ -152,10 +159,8 @@ pub fn decode_header(bytes: &[u8], asset_length: u64) -> Result<MeshHeader, Asse
     if version > MAX_MESH_VERSION {
         return Err(AssetError::UnsupportedVersion(version));
     }
-    let mut blocks = [Ok(None); 6];
-    for (index, name) in ["lowest_lod", "low_lod", "medium_lod", "high_lod", "physics_mesh", "skin"].into_iter().enumerate() {
-        blocks[index] = parse_block_range(fields.get(name), header_size, asset_length);
-    }
+    let blocks = ["lowest_lod", "low_lod", "medium_lod", "high_lod", "physics_mesh", "skin"]
+        .map(|name| parse_block_range(fields.get(name), header_size, asset_length));
     Ok(MeshHeader { asset_length, header_size, blocks })
 }
 
@@ -286,7 +291,12 @@ fn decode_lod_inner(
         if normal_chunks.is_none() {
             let start = usize::try_from(index_start).map_err(|_| AssetError::TooLarge)?;
             let base_index = usize::try_from(base).map_err(|_| AssetError::TooLarge)?;
-            generate_normals(vertices.get_mut(base_index..).ok_or(AssetError::MalformedBlock)?, &indices[start..], base, &cancelled)?;
+            generate_normals(
+                vertices.get_mut(base_index..).ok_or(AssetError::MalformedBlock)?,
+                indices.get(start..).ok_or(AssetError::MalformedBlock)?,
+                base,
+                &cancelled,
+            )?;
         }
         let index_end = u32::try_from(indices.len()).map_err(|_| AssetError::TooLarge)?;
         faces.push(Face { slot: u8::try_from(slot).map_err(|_| AssetError::TooLarge)?, indices: index_start..index_end });
@@ -382,7 +392,9 @@ fn prepare_submeshes<'a>(value: &'a Value, cancelled: &impl Fn() -> bool) -> Res
         if total_vertices > MAX_MESH_VERTICES || total_indices > MAX_MESH_INDICES {
             return Err(AssetError::TooLarge);
         }
-        for (index_position, encoded) in triangle_bytes[..triangle_count * 2].as_chunks::<2>().0.iter().enumerate() {
+        let triangle_end = triangle_count.checked_mul(2).ok_or(AssetError::TooLarge)?;
+        let triangle_slice = triangle_bytes.get(..triangle_end).ok_or(AssetError::MalformedBlock)?;
+        for (index_position, encoded) in triangle_slice.as_chunks::<2>().0.iter().enumerate() {
             if index_position.is_multiple_of(1024) && cancelled() {
                 return Err(AssetError::Cancelled);
             }
@@ -496,7 +508,7 @@ fn decompress_bounded(
         decoded.try_reserve_exact(produced).map_err(|_| AssetError::InsufficientBudget)?;
         let allocated = input_capacity.checked_add(decoded.capacity()).ok_or(AssetError::TooLarge)?;
         resize_reservation(reservation, allocated)?;
-        decoded.extend_from_slice(&chunk[..produced]);
+        decoded.extend_from_slice(chunk.get(..produced).ok_or(AssetError::MalformedBlock)?);
         if status == Status::StreamEnd {
             return (input_position == bytes.len()).then_some(decoded).ok_or(AssetError::MalformedBlock);
         }
@@ -562,25 +574,20 @@ impl Domain for Vec3 {
 }
 
 fn vector2(value: &Value) -> Result<Vec2, AssetError> {
-    let values = value.as_array().ok_or(AssetError::MalformedBlock)?;
-    if values.len() != 2 {
+    let [x, y] = value.as_array().ok_or(AssetError::MalformedBlock)? else {
         return Err(AssetError::MalformedBlock);
-    }
-    Ok(Vec2::new(
-        values[0].as_finite_f32().ok_or(AssetError::MalformedBlock)?,
-        values[1].as_finite_f32().ok_or(AssetError::MalformedBlock)?,
-    ))
+    };
+    Ok(Vec2::new(x.as_finite_f32().ok_or(AssetError::MalformedBlock)?, y.as_finite_f32().ok_or(AssetError::MalformedBlock)?))
 }
 
 fn vector3(value: &Value) -> Result<Vec3, AssetError> {
-    let values = value.as_array().ok_or(AssetError::MalformedBlock)?;
-    if values.len() != 3 {
+    let [x, y, z] = value.as_array().ok_or(AssetError::MalformedBlock)? else {
         return Err(AssetError::MalformedBlock);
-    }
+    };
     Ok(Vec3::new(
-        values[0].as_finite_f32().ok_or(AssetError::MalformedBlock)?,
-        values[1].as_finite_f32().ok_or(AssetError::MalformedBlock)?,
-        values[2].as_finite_f32().ok_or(AssetError::MalformedBlock)?,
+        x.as_finite_f32().ok_or(AssetError::MalformedBlock)?,
+        y.as_finite_f32().ok_or(AssetError::MalformedBlock)?,
+        z.as_finite_f32().ok_or(AssetError::MalformedBlock)?,
     ))
 }
 

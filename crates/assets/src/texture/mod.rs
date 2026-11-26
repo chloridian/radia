@@ -193,8 +193,8 @@ pub(crate) fn decode(bytes: &[u8], target: TextureSize, cancelled: impl Fn() -> 
             if cancelled() {
                 return Err(Failure::Cancelled);
             }
-            for (source, pixel) in row.iter().zip(dest.chunks_exact_mut(format.channels())) {
-                pixel[channel] = u8::try_from(*source).map_err(|_| Failure::Malformed)?;
+            for (source, target) in row.iter().zip(dest.iter_mut().skip(channel).step_by(format.channels())) {
+                *target = u8::try_from(*source).map_err(|_| Failure::Malformed)?;
             }
         }
     }
@@ -214,29 +214,31 @@ fn downsample(
     cancelled: impl Fn() -> bool,
 ) -> Result<Vec<u8>, Failure> {
     let channels = format.channels();
-    let mut output = vec![0; dest[0] as usize * dest[1] as usize * channels];
-    for y in 0..dest[1] {
+    let src_row_bytes = size[0] as usize * channels;
+    let dest_row_bytes = dest[0] as usize * channels;
+    let mut output = vec![0; dest_row_bytes * dest[1] as usize];
+    for (y, out_row) in output.chunks_exact_mut(dest_row_bytes).enumerate() {
         if cancelled() {
             return Err(Failure::Cancelled);
         }
-        for x in 0..dest[0] {
+        let y = y as u32;
+        let y0 = y * size[1] / dest[1];
+        let y1 = ((y + 1) * size[1] / dest[1]).max(y0 + 1);
+        for (x, out_pixel) in out_row.chunks_exact_mut(channels).enumerate() {
+            let x = x as u32;
             let x0 = x * size[0] / dest[0];
             let x1 = ((x + 1) * size[0] / dest[0]).max(x0 + 1);
-            let y0 = y * size[1] / dest[1];
-            let y1 = ((y + 1) * size[1] / dest[1]).max(y0 + 1);
             let mut sum = [0u32; 4];
-            for sy in y0..y1 {
-                for sx in x0..x1 {
-                    let offset = (sy as usize * size[0] as usize + sx as usize) * channels;
-                    for (sum, sample) in sum.iter_mut().zip(&pixels[offset..offset + channels]) {
+            for src_row in pixels.chunks_exact(src_row_bytes).skip(y0 as usize).take((y1 - y0) as usize) {
+                for sample_pixel in src_row.chunks_exact(channels).skip(x0 as usize).take((x1 - x0) as usize) {
+                    for (sum, sample) in sum.iter_mut().zip(sample_pixel) {
                         *sum += u32::from(*sample);
                     }
                 }
             }
             let count = (x1 - x0) * (y1 - y0);
-            let offset = (y as usize * dest[0] as usize + x as usize) * channels;
-            for (dest, sum) in output[offset..offset + channels].iter_mut().zip(sum) {
-                *dest = ((sum + count / 2) / count) as u8;
+            for (dest_channel, sum) in out_pixel.iter_mut().zip(sum) {
+                *dest_channel = ((sum + count / 2) / count) as u8;
             }
         }
     }

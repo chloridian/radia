@@ -1,5 +1,3 @@
-#![expect(clippy::indexing_slicing)]
-
 mod budget;
 pub mod cache;
 mod cache_policy;

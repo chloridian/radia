@@ -65,12 +65,12 @@ fn size(bytes: &[u8]) -> Result<Header, Failure> {
 }
 
 fn coding(header: Header, bytes: &[u8], layers: u32, flags: u8) -> Result<(), Failure> {
-    if bytes.len() < 5 {
+    let &[levels, block_x, block_y, _, _, ref rest @ ..] = bytes else {
         return Err(Failure::Malformed);
-    }
-    let levels = u32::from(bytes[0]);
-    let block_x = u32::from(bytes[1]) + 2;
-    let block_y = u32::from(bytes[2]) + 2;
+    };
+    let levels = u32::from(levels);
+    let block_x = u32::from(block_x) + 2;
+    let block_y = u32::from(block_y) + 2;
     if levels > 12 || layers > 32 {
         return Err(Failure::TooLarge);
     }
@@ -85,7 +85,7 @@ fn coding(header: Header, bytes: &[u8], layers: u32, flags: u8) -> Result<(), Fa
         let height = header.height.div_ceil(1 << shift);
         let bands = if level == 0 { 1 } else { 3 };
         blocks += u64::from((width.div_ceil(1 << block_x) + 1) * (height.div_ceil(1 << block_y) + 1) * bands);
-        let exponent = if flags & 1 != 0 { *bytes.get(5 + level as usize).ok_or(Failure::Malformed)? } else { 0xff };
+        let exponent = if flags & 1 != 0 { *rest.get(level as usize).ok_or(Failure::Malformed)? } else { 0xff };
         let x = u32::from(exponent & 15);
         let y = u32::from(exponent >> 4);
         precincts += u64::from(header.width.div_ceil(1 << (levels - level)).div_ceil(1 << x))
@@ -118,7 +118,8 @@ fn validate(stream: &[u8], header: Header, cancelled: &impl Fn() -> bool) -> Res
         }
         let marker = short(stream, offset)?;
         if marker == 0xffd9 {
-            if tile_end.is_some() || offset + 2 != stream.len() || parts[..header.tiles as usize].contains(&0) {
+            if tile_end.is_some() || offset + 2 != stream.len() || parts.get(..header.tiles as usize).is_none_or(|parts| parts.contains(&0))
+            {
                 return Err(Failure::Malformed);
             }
             if parts.iter().zip(totals).any(|(parts, total)| total != 0 && *parts != u16::from(total)) {
@@ -147,24 +148,32 @@ fn validate(stream: &[u8], header: Header, cancelled: &impl Fn() -> bool) -> Res
         match marker {
             0xff51 if offset == 2 => {}
             0xff90 => {
-                if tile_end.is_some() || data.len() != 8 {
+                if tile_end.is_some() {
                     return Err(Failure::Malformed);
                 }
-                let tile = usize::from(short(data, 0)?);
-                if tile >= header.tiles as usize || u16::from(data[6]) != parts[tile] {
+                let &[tile_hi, tile_lo, len_0, len_1, len_2, len_3, part_index, total_parts] = data else {
+                    return Err(Failure::Malformed);
+                };
+                let tile = usize::from(u16::from_be_bytes([tile_hi, tile_lo]));
+                if tile >= header.tiles as usize {
                     return Err(Failure::Malformed);
                 }
-                parts[tile] += 1;
-                if parts[tile] > 32 {
+                let part = parts.get_mut(tile).ok_or(Failure::Malformed)?;
+                if u16::from(part_index) != *part {
+                    return Err(Failure::Malformed);
+                }
+                *part += 1;
+                if *part > 32 {
                     return Err(Failure::TooLarge);
                 }
-                if data[7] != 0 {
-                    if (totals[tile] != 0 && totals[tile] != data[7]) || parts[tile] > u16::from(data[7]) {
+                if total_parts != 0 {
+                    let total = totals.get_mut(tile).ok_or(Failure::Malformed)?;
+                    if (*total != 0 && *total != total_parts) || *part > u16::from(total_parts) {
                         return Err(Failure::Malformed);
                     }
-                    totals[tile] = data[7];
+                    *total = total_parts;
                 }
-                let length = word(data, 2)? as usize;
+                let length = u32::from_be_bytes([len_0, len_1, len_2, len_3]) as usize;
                 let end = if length == 0 {
                     stream.len().checked_sub(2).ok_or(Failure::Malformed)?
                 } else {
@@ -176,20 +185,29 @@ fn validate(stream: &[u8], header: Header, cancelled: &impl Fn() -> bool) -> Res
                 tile_end = Some(end);
             }
             0xff52 => {
-                if data.len() < 10 {
+                let &[flags, _, count_hi, count_lo, _, ref rest @ ..] = data else {
                     return Err(Failure::Malformed);
-                }
-                let count = u32::from(short(data, 2)?);
-                coding(header, &data[5..], count, data[0])?;
-                levels = Some(levels.map_or(data[5], |levels| levels.min(data[5])));
+                };
+                let &[level, _, _, _, _, ..] = rest else {
+                    return Err(Failure::Malformed);
+                };
+                let count = u32::from(u16::from_be_bytes([count_hi, count_lo]));
+                coding(header, rest, count, flags)?;
+                levels = Some(levels.map_or(level, |levels| levels.min(level)));
                 layers = Some(layers.map_or(count, |layers| layers.max(count)));
             }
             0xff53 => {
-                if data.len() < 7 || data[0] >= header.channels {
+                let &[channel, flags, ref rest @ ..] = data else {
+                    return Err(Failure::Malformed);
+                };
+                let &[level, _, _, _, _, ..] = rest else {
+                    return Err(Failure::Malformed);
+                };
+                if channel >= header.channels {
                     return Err(Failure::Malformed);
                 }
-                coding(header, &data[2..], layers.unwrap_or(32), data[1])?;
-                levels = Some(levels.map_or(data[2], |levels| levels.min(data[2])));
+                coding(header, rest, layers.unwrap_or(32), flags)?;
+                levels = Some(levels.map_or(level, |levels| levels.min(level)));
             }
             0xff5f..=0xff61 => return Err(Failure::Unsupported),
             0xff55 | 0xff57 | 0xff58 | 0xff5c | 0xff5d | 0xff5e | 0xff63 | 0xff64 => {}
@@ -220,8 +238,9 @@ fn boxes<'a>(mut bytes: &'a [u8], mut visit: impl FnMut(&[u8], &'a [u8]) -> Resu
         if length < start {
             return Err(Failure::Malformed);
         }
-        visit(tag, bytes.get(start..length).ok_or(Failure::Malformed)?)?;
-        bytes = &bytes[length..];
+        let (content, rest) = bytes.split_at_checked(length).ok_or(Failure::Malformed)?;
+        visit(tag, content.get(start..).ok_or(Failure::Malformed)?)?;
+        bytes = rest;
     }
     Ok(())
 }
@@ -256,10 +275,13 @@ fn jp2(bytes: &[u8]) -> Result<&[u8], Failure> {
                         }
                     }
                     b"colr" => {
-                        if color.is_some() || data.len() != 7 || data[0] != 1 {
+                        let &[1, _, _, c0, c1, c2, c3] = data else {
+                            return Err(Failure::Unsupported);
+                        };
+                        if color.is_some() {
                             return Err(Failure::Unsupported);
                         }
-                        color = Some(word(data, 3)?);
+                        color = Some(u32::from_be_bytes([c0, c1, c2, c3]));
                     }
                     b"cdef" => {
                         if definitions.replace(data).is_some() {
@@ -282,8 +304,7 @@ fn jp2(bytes: &[u8]) -> Result<&[u8], Failure> {
         || word(image, 0)? != header.height
         || word(image, 4)? != header.width
         || short(image, 8)? != u16::from(header.channels)
-        || image[10] != 7
-        || image[11] != 7
+        || image.get(10..12) != Some(&[7, 7])
     {
         return Err(Failure::Malformed);
     }

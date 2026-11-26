@@ -484,7 +484,7 @@ fn track<T>(value: Option<&Value>, frames: &BTreeMap<&str, Arc<T>>) -> Result<Ve
         result.push(Keyframe { position, settings: Arc::clone(settings) });
     }
     result.sort_by(|a, b| a.position.total_cmp(&b.position));
-    if result.windows(2).any(|pair| pair[0].position == pair[1].position) {
+    if result.iter().zip(result.iter().skip(1)).any(|(a, b)| a.position == b.position) {
         return Err(Failure::Malformed);
     }
     Ok(result)
