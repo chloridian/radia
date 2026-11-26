@@ -1,5 +1,3 @@
-#![expect(clippy::indexing_slicing)]
-
 mod fast_hash;
 pub mod hardware;
 mod summary;
@@ -104,13 +102,16 @@ impl PersistBudget {
 }
 
 pub fn hex_lower(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
     for &byte in bytes {
-        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+        output.push(hex_nibble(byte >> 4));
+        output.push(hex_nibble(byte & 0x0f));
     }
     output
+}
+
+fn hex_nibble(nibble: u8) -> char {
+    char::from(if nibble < 10 { b'0' + nibble } else { b'a' + (nibble - 10) })
 }
 
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
