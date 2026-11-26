@@ -1542,9 +1542,7 @@ impl Store {
         self.build_candidates();
         let mut selected = None;
         for index in (0..self.candidates.len()).rev() {
-            let Some(&candidate) = self.candidates.get(index) else {
-                continue;
-            };
+            let candidate = *self.candidates.get(index).expect("index is below the candidate count");
             let key = candidate.key;
             let resource = key.resource;
             let Some(entry) = self.entries.get_mut(&key) else {
@@ -2301,15 +2299,6 @@ fn content_satisfies(content: &Content, desired: Option<TextureSize>) -> bool {
             desired.is_none_or(|size| image.info().is_some_and(|info| info.discard == size.discard_level(info.source_size)))
         }
         Content::Material(_) | Content::Environment(_) | Content::MeshHeader(_) | Content::Mesh(_) => true,
-    }
-}
-
-#[cfg(test)]
-fn fetch_pool(kind: Kind) -> usize {
-    match kind {
-        Kind::Mesh => MESH_FETCH_POOL,
-        Kind::LegacyMaterial => LEGACY_MATERIAL_FETCH_POOL,
-        Kind::Texture | Kind::PbrMaterial | Kind::Environment => OTHER_FETCH_POOL,
     }
 }
 

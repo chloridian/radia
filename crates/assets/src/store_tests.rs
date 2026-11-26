@@ -2100,7 +2100,7 @@ fn resize_preserves_pending_fetch() {
     assert!(fetch.is_cancelled(), "releasing the final lease cancels the fetch");
     drop(fetch);
     store.maintain(now);
-    assert_eq!(store.running_fetches[fetch_pool(Kind::Texture)], 0);
+    assert_eq!(*fetch_pool_ref(&store.running_fetches, Kind::Texture), 0);
 }
 
 #[test]
