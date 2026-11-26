@@ -1,3 +1,5 @@
+#![deny(clippy::unwrap_used, clippy::indexing_slicing)]
+
 pub mod capabilities;
 mod circuit;
 mod coverage;

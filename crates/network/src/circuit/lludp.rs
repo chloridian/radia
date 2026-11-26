@@ -276,7 +276,7 @@ impl Circuit {
         let ack_count = self.pending_acks.len().min(MAX_ACKS_PER_PACKET).min(available_ack_bytes / size_of::<u32>());
         let appended_acks = self.pending_acks.iter().take(ack_count).copied().collect::<Vec<_>>();
         if !appended_acks.is_empty() {
-            bytes[0] |= PacketFlags::APPENDED_ACKS.bits();
+            *bytes.first_mut().expect("encoded LLUDP packet has header byte") |= PacketFlags::APPENDED_ACKS.bits();
             for ack in &appended_acks {
                 bytes.extend_from_slice(&ack.to_be_bytes());
             }
@@ -310,7 +310,7 @@ impl Circuit {
             return Err(CircuitError::RetryLimit);
         }
         let mut bytes = packet.bytes.clone();
-        bytes[0] |= RESENT_FLAG;
+        *bytes.first_mut().expect("pending LLUDP packet has header byte") |= RESENT_FLAG;
         Ok(Some(PreparedDatagram {
             bytes,
             commit: DatagramCommit::Retransmission { sequence, sent_at: packet.sent_at, retries: packet.retries },

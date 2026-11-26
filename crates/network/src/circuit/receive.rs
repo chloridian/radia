@@ -78,9 +78,32 @@ struct PacketRejectionWindow {
 }
 
 impl PacketRejectionWindow {
+    fn count_mut(&mut self, kind: RejectionKind) -> &mut u64 {
+        let [
+            frame_inspection,
+            acknowledgement_admission,
+            decode_admission,
+            preflight,
+            retained_memory_admission,
+            decode,
+            allocation_estimate_mismatch,
+            event_admission,
+        ] = &mut self.counts;
+        match kind {
+            RejectionKind::FrameInspection => frame_inspection,
+            RejectionKind::AcknowledgementAdmission => acknowledgement_admission,
+            RejectionKind::DecodeAdmission => decode_admission,
+            RejectionKind::Preflight => preflight,
+            RejectionKind::RetainedMemoryAdmission => retained_memory_admission,
+            RejectionKind::Decode => decode,
+            RejectionKind::AllocationEstimateMismatch => allocation_estimate_mismatch,
+            RejectionKind::EventAdmission => event_admission,
+        }
+    }
+
     fn record(&mut self, kind: RejectionKind) {
-        let index = rejection_index(kind);
-        self.counts[index] = self.counts[index].saturating_add(1);
+        let count = self.count_mut(kind);
+        *count = count.saturating_add(1);
     }
 
     fn record_decode_failure(&mut self, message_id: MessageId, error: &LLUdpError) {
@@ -149,6 +172,7 @@ impl PacketRejections {
     }
 }
 
+#[cfg(test)]
 fn rejection_index(kind: RejectionKind) -> usize {
     match kind {
         RejectionKind::FrameInspection => 0,
@@ -223,7 +247,11 @@ impl ConnectionTask {
         if *self.shutdown.borrow() || self.events.is_closed() {
             return Ok(RunControl::Finish(None));
         }
-        self.receive_packet(&buffer[..size])
+        let Some(datagram) = buffer.get(..size) else {
+            self.reject(RejectionKind::FrameInspection, CoverageLossReason::PreflightRejected);
+            return Ok(RunControl::Continue);
+        };
+        self.receive_packet(datagram)
     }
 
     fn receive_packet(&mut self, bytes: &[u8]) -> Result<RunControl, ConnectionError> {

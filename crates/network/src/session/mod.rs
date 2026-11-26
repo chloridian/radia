@@ -81,7 +81,7 @@ use crate::{
 
 pub(crate) const COMMAND_CAPACITY: usize = 256;
 const NETWORK_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
-pub const DEFAULT_UPSTREAM_BYTES_PER_SECOND: NonZeroU64 = NonZeroU64::new(64_000).unwrap();
+pub const DEFAULT_UPSTREAM_BYTES_PER_SECOND: NonZeroU64 = NonZeroU64::new(64_000).expect("DEFAULT_UPSTREAM_BYTES_PER_SECOND is non-zero");
 const MAX_OUTBOUND_CHAT_MESSAGE_BYTES: usize = 8 * 1024 - 6 - 4 - 40 - (1 + u8::MAX as usize * 4);
 const MAX_OUTBOUND_OBJECT_REQUESTS: usize = u8::MAX as usize;
 
