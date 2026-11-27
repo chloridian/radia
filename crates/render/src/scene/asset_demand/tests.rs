@@ -963,3 +963,44 @@ fn camera_scan_reaches_target() {
 
     assert!(requested_high_lod, "a high UUID target receives its High LOD request under sustained low UUID updates");
 }
+
+#[test]
+fn turning_keeps_materials() {
+    const OBJECTS: u32 = 1_200;
+    const SLOTS: u8 = 32;
+    let texture = AssetId::new(Uuid::from_u128(704));
+    let (budget, _, mut mirror, identities) = textured_scene(OBJECTS, texture, |local_id, observation| {
+        let x = if local_id <= 600 { 140.0 } else { 100.0 };
+        observation.pose = Some(world::Pose { position: Some(Vec3::new(x, 128.0, 32.0)), rotation: Some(math::Quat::IDENTITY) });
+        let face = |color| FaceAppearance { texture: Some(texture), color: [color, 0, 0, 255], ..FaceAppearance::default() };
+        observation.surface_appearance =
+            Some(world::SurfaceAppearance::new(face(0), (1..SLOTS).map(|slot| (slot - 1, face(slot))).collect()).expect("fixture faces"));
+    });
+    let entity = |local_id: u32| identities[&Uuid::from_u128(u128::from(local_id))];
+    let settle = |demand: &mut AssetDemand, mirror: &mut Mirror| {
+        for _ in 0..64 {
+            if !demand.has_work() {
+                return;
+            }
+            for change in demand.step(mirror, &identities) {
+                mirror.apply(Change::Material(change));
+            }
+        }
+        panic!("bounded fixture scan finishes");
+    };
+    let assert_all_materials = |demand: &AssetDemand, mirror: &Mirror| {
+        let missing =
+            (1..=OBJECTS).find(|&local_id| mirror.objects[&entity(local_id)].materials().map(<[_]>::len) != Some(usize::from(SLOTS)));
+        assert_eq!(missing, None, "object {missing:?} missing materials");
+        assert!(demand.rejected_entities.is_empty(), "rejected entities: {}", demand.rejected_entities.len());
+    };
+
+    let mut demand = AssetDemand::new(budget);
+    demand.set_camera(camera());
+    settle(&mut demand, &mut mirror);
+    assert_all_materials(&demand, &mirror);
+
+    demand.set_camera(Camera::new(DVec3::new(128.0, 128.0, 32.0), Vec3::NEG_X, 1.0, [1280, 720]).expect("camera"));
+    settle(&mut demand, &mut mirror);
+    assert_all_materials(&demand, &mirror);
+}
