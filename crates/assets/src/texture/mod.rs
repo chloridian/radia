@@ -1,18 +1,12 @@
 mod handle;
 
-use std::cell::RefCell;
-
-use subband::{CancelHandle, DecodeError, DecodeSettings, DecoderContext};
+use subband::{Decode, DecodeError, DecodeSettings};
 
 pub use self::handle::{ImageInfo, TextureDecodeJob, TextureEvents, TextureHandle, TextureId, TextureUsage, WeakTexture};
 use crate::{Blob, Failure, budget::Reservation};
 
 pub const MAX_TEXTURE_EDGE: u32 = 2048;
 pub const MAX_SOURCE_EDGE: u32 = 4096;
-
-thread_local! {
-    static DECODER_CONTEXT: RefCell<DecoderContext> = RefCell::new(DecoderContext::default());
-}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TextureSize(u16);
@@ -161,21 +155,14 @@ const fn map_error(error: DecodeError) -> Failure {
     }
 }
 
-pub(crate) fn decode(bytes: &[u8], target: TextureSize, cancelled: impl Fn() -> bool + Send + Sync + 'static) -> Result<Decoded, Failure> {
+pub(crate) fn decode(bytes: &[u8], target: TextureSize, cancelled: impl Fn() -> bool) -> Result<Decoded, Failure> {
     if cancelled() {
         return Err(Failure::Cancelled);
     }
-    let cancel = CancelHandle::new(cancelled);
-    let mut settings = DecodeSettings { strict: true, cancel: Some(cancel.clone()), ..DecodeSettings::default() };
-    let probe = subband::Image::new(bytes, &settings).map_err(map_error)?;
-    let source_size = [probe.width(), probe.height()];
+    let settings = DecodeSettings { strict: true, max_edge: MAX_SOURCE_EDGE, ..DecodeSettings::default() };
+    let image = subband::Image::new(bytes, &settings).map_err(map_error)?;
+    let source_size = [image.width(), image.height()];
     let discard = target.discard_level(source_size);
-    let image = if discard == 0 {
-        probe
-    } else {
-        settings.discard = discard;
-        subband::Image::new(bytes, &settings).map_err(map_error)?
-    };
     let format = match image.components() {
         1 => PixelFormat::Gray8,
         2 => PixelFormat::GrayAlpha8,
@@ -183,19 +170,15 @@ pub(crate) fn decode(bytes: &[u8], target: TextureSize, cancelled: impl Fn() -> 
         4 => PixelFormat::Rgba8,
         _ => return Err(Failure::Unsupported),
     };
-    let (size, pixels) = DECODER_CONTEXT.with(|cell| {
-        let mut ctx = cell.borrow_mut();
-        let decoded = image.decode(&mut ctx).map_err(map_error)?;
-        let size = [decoded.width(), decoded.height()];
-        let mut pixels = vec![0; decoded.buffer_len()];
-        decoded.write_to(&mut pixels).map_err(map_error)?;
-        Ok::<_, Failure>((size, pixels))
-    })?;
+    let request = Decode { discard, max_layers: None };
+    let mut pixels = vec![0; image.output_len(&request)];
+    let decoded = image.decode_into(&request, &mut pixels, &cancelled).map_err(map_error)?;
+    let size = [decoded.width(), decoded.height()];
     let desired = source_size.map(|edge| edge.div_ceil(1 << discard));
     if desired[0] > size[0] || desired[1] > size[1] {
         return Err(Failure::Malformed);
     }
-    let pixels = if size == desired { pixels } else { downsample(&pixels, size, desired, format, || cancel.is_cancelled())? };
+    let pixels = if size == desired { pixels } else { downsample(&pixels, size, desired, format, cancelled)? };
     Ok(Decoded { source_size, discard, size: desired, format, pixels })
 }
 
@@ -240,13 +223,7 @@ fn downsample(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        assert_matches,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-    };
+    use std::{assert_matches, cell::Cell};
 
     use test_support::texture::RGBA_J2C;
 
@@ -275,18 +252,16 @@ mod tests {
 
     #[test]
     fn cancelled_decode_retains_work() {
-        let checks = Arc::new(AtomicUsize::new(0));
+        let checks = Cell::new(0);
         let budget = Budget::default();
         let reservation = budget.reserve(TEXTURE_WORK_BYTES).unwrap();
-        let seen = Arc::clone(&checks);
-        let budget_check = budget.clone();
-        let result = decode(RGBA_J2C, TextureSize::default(), move || {
-            let count = seen.fetch_add(1, Ordering::Relaxed) + 1;
-            assert_eq!(budget_check.stats().charged_bytes, TEXTURE_WORK_BYTES);
-            count >= 2
+        let result = decode(RGBA_J2C, TextureSize::default(), || {
+            checks.set(checks.get() + 1);
+            assert_eq!(budget.stats().charged_bytes, TEXTURE_WORK_BYTES);
+            checks.get() == 2
         });
         assert_matches!(result.err(), Some(Failure::Cancelled));
-        assert!(checks.load(Ordering::Relaxed) >= 2, "cancellation should trigger during decode");
+        assert_eq!(checks.get(), 2, "decode stops at the first cancelled check");
         assert_eq!(budget.stats().charged_bytes, TEXTURE_WORK_BYTES);
         drop(reservation);
         assert_eq!(budget.stats().charged_bytes, 0);

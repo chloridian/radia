@@ -383,8 +383,7 @@ pub fn init() -> (Option<WorkerGuard>, LogControl, RecentLogs) {
                     EnvFilter::new(
                         "info,viewer=debug,network=debug,assets=debug,storage=debug,inventory=debug,render=debug,world=info,protocol=info,llsd=info",
                     )
-                })
-                .add_directive("jpeg2k=warn".parse().expect("valid jpeg2k tracing directive"));
+                });
             let (file_filter, file_handle) = reload::Layer::new(file_filter);
             let json = fmt::layer()
                 .json()
@@ -403,9 +402,7 @@ pub fn init() -> (Option<WorkerGuard>, LogControl, RecentLogs) {
         Err(error) => (None, None, None, Some(error), None),
     };
 
-    let console_filter = EnvFilter::try_from_env("LOG")
-        .unwrap_or_else(|_| EnvFilter::new("warn,viewer=info,network=info"))
-        .add_directive("jpeg2k=warn".parse().expect("valid jpeg2k tracing directive"));
+    let console_filter = EnvFilter::try_from_env("LOG").unwrap_or_else(|_| EnvFilter::new("warn,viewer=info,network=info"));
     let (console_filter, console_handle) = reload::Layer::new(console_filter);
 
     let console = fmt::layer()
@@ -474,7 +471,7 @@ fn filter_spec(level: LogLevel, noisy_network: bool, overrides: &BTreeMap<String
         }
     };
     let mut spec = format!(
-        "{base},viewer={app},assets={app},storage={app},inventory={app},render={app},world={app},llsd={app},network={net},protocol={net},jpeg2k=warn"
+        "{base},viewer={app},assets={app},storage={app},inventory={app},render={app},world={app},llsd={app},network={net},protocol={net}"
     );
     for (target, target_level) in overrides {
         spec.push(',');
@@ -620,7 +617,6 @@ mod tests {
                 let spec = filter_spec(level, noisy, &overrides);
                 let parsed = build_filter(level, noisy, &overrides).to_string();
                 assert!(parsed.contains(&format!("viewer={}", level.directive())), "{spec} -> {parsed}");
-                assert!(parsed.contains("jpeg2k=warn"), "{spec} -> {parsed}");
                 let expected_net = if noisy {
                     "trace"
                 } else {

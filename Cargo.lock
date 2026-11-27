@@ -7295,7 +7295,7 @@ dependencies = [
 [[package]]
 name = "subband"
 version = "0.1.0"
-source = "git+https://github.com/hymenaei/subband#53380f08c9c41e6da1fe71330f4d418d4bb4e225"
+source = "git+https://github.com/hymenaei/subband#0f5f7b940e44a82e745c5cac52aa2ee58ff73239"
 dependencies = [
  "fearless_simd",
 ]

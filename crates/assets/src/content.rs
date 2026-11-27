@@ -321,9 +321,8 @@ pub(crate) fn prepare_cancellable(
     response: crate::FetchResponse,
     persist_prepared: bool,
     reservation: &mut Reservation,
-    cancelled: impl Fn() -> bool + Send + Sync + 'static,
+    cancelled: impl Fn() -> bool,
 ) -> Result<Prepared, Failure> {
-    let cancelled = Arc::new(cancelled);
     if cancelled() {
         return Err(Failure::Cancelled);
     }
@@ -332,7 +331,7 @@ pub(crate) fn prepare_cancellable(
         crate::FetchResponse::Full(bytes) if resource.kind == Kind::Mesh => {
             let capacity = bytes.capacity();
             let total_length = u64::try_from(bytes.len()).map_err(|_| Failure::TooLarge)?;
-            let data = decode_mesh(request, &bytes, Some(total_length), None, capacity, reservation, &*cancelled)?;
+            let data = decode_mesh(request, &bytes, Some(total_length), None, capacity, reservation, &cancelled)?;
             let source = match request {
                 Request::MeshHeader(_) => CacheSource::MeshHeader { bytes, total_length },
                 Request::MeshLod(block) => CacheSource::MeshLod { bytes, request: block, full: true },
@@ -343,7 +342,7 @@ pub(crate) fn prepare_cancellable(
         crate::FetchResponse::Partial { bytes, range, total_length } if resource.kind == Kind::Mesh => {
             let capacity = bytes.capacity();
             let total_length = total_length.ok_or(Failure::MalformedBlock)?;
-            let data = decode_mesh(request, &bytes, Some(total_length), Some(range), capacity, reservation, &*cancelled)?;
+            let data = decode_mesh(request, &bytes, Some(total_length), Some(range), capacity, reservation, &cancelled)?;
             let source = match request {
                 Request::MeshHeader(_) => CacheSource::MeshHeader { bytes, total_length },
                 Request::MeshLod(block) => CacheSource::MeshLod { bytes, request: block, full: false },
@@ -353,8 +352,7 @@ pub(crate) fn prepare_cancellable(
         }
         crate::FetchResponse::Full(bytes) => {
             let bytes = envelope::extract(resource, bytes)?;
-            let check = Arc::clone(&cancelled);
-            (decode_payload(resource, size, &bytes, move || check())?, Some(CacheSource::Payload(bytes)))
+            (decode_payload(resource, size, &bytes, &cancelled)?, Some(CacheSource::Payload(bytes)))
         }
         crate::FetchResponse::Partial { .. } => return Err(Failure::Malformed),
     };
@@ -379,11 +377,7 @@ pub(crate) fn prepare_cancellable(
     Ok(Prepared { kind: resource.kind, data, source, mesh_prefix, prepared_texture })
 }
 
-pub(crate) fn prepare_cached(
-    size: TextureSize,
-    source: &Blob,
-    cancelled: impl Fn() -> bool + Send + Sync + 'static,
-) -> Result<Prepared, Failure> {
+pub(crate) fn prepare_cached(size: TextureSize, source: &Blob, cancelled: impl Fn() -> bool) -> Result<Prepared, Failure> {
     let data = Data::Texture(texture::decode(source, size, cancelled)?);
     Ok(Prepared { kind: Kind::Texture, data, source: None, mesh_prefix: None, prepared_texture: None })
 }
@@ -395,9 +389,8 @@ pub(crate) fn prepare_disk(
     source_sha256: [u8; 32],
     cache: Option<&AssetCache>,
     reservation: &mut Reservation,
-    cancelled: impl Fn() -> bool + Send + Sync + 'static,
+    cancelled: impl Fn() -> bool,
 ) -> Result<Prepared, Failure> {
-    let cancelled = Arc::new(cancelled);
     if cancelled() {
         return Err(Failure::Cancelled);
     }
@@ -413,8 +406,7 @@ pub(crate) fn prepare_disk(
                 prepared_texture: None,
             });
         }
-        let check = Arc::clone(&cancelled);
-        let decoded = texture::decode(&bytes, size, move || check())?;
+        let decoded = texture::decode(&bytes, size, &cancelled)?;
         if cancelled() {
             return Err(Failure::Cancelled);
         }
@@ -431,7 +423,7 @@ pub(crate) fn prepare_disk(
         match request {
             Request::MeshHeader(_) => {
                 let (total_length, header_bytes) = cache::parse_mesh_header_frame(&bytes).ok_or(Failure::MalformedBlock)?;
-                let data = decode_mesh(request, header_bytes, Some(total_length), None, bytes.capacity(), reservation, &*cancelled)?;
+                let data = decode_mesh(request, header_bytes, Some(total_length), None, bytes.capacity(), reservation, &cancelled)?;
                 let Data::MeshHeader { header, .. } = &data else { return Err(Failure::MalformedBlock) };
                 let header_size = usize::try_from(header.header_size()).map_err(|_| Failure::MalformedBlock)?;
                 if header_size != header_bytes.len() {
@@ -442,21 +434,12 @@ pub(crate) fn prepare_disk(
             Request::MeshLod(block) => {
                 let block_bytes = cache::parse_mesh_lod_frame(block, &bytes).ok_or(Failure::MalformedBlock)?;
                 let input_capacity = bytes.capacity().min(mesh::MAX_MESH_BLOCK_BYTES);
-                decode_mesh(
-                    request,
-                    block_bytes,
-                    Some(block.asset_length()),
-                    Some(block.range()),
-                    input_capacity,
-                    reservation,
-                    &*cancelled,
-                )?
+                decode_mesh(request, block_bytes, Some(block.asset_length()), Some(block.range()), input_capacity, reservation, &cancelled)?
             }
             _ => return Err(Failure::Malformed),
         }
     } else {
-        let check = Arc::clone(&cancelled);
-        decode_payload(resource, size, &bytes, move || check())?
+        decode_payload(resource, size, &bytes, &cancelled)?
     };
     if cancelled() {
         return Err(Failure::Cancelled);
@@ -480,12 +463,7 @@ fn mesh_lod_prefix(id: utils::AssetId, header: mesh::MeshHeader, bytes: &[u8]) -
     Some(prefix_bytes)
 }
 
-fn decode_payload(
-    resource: Resource,
-    size: TextureSize,
-    bytes: &[u8],
-    cancelled: impl Fn() -> bool + Send + Sync + 'static,
-) -> Result<Data, Failure> {
+fn decode_payload(resource: Resource, size: TextureSize, bytes: &[u8], cancelled: &impl Fn() -> bool) -> Result<Data, Failure> {
     match resource.kind {
         Kind::Texture => texture::decode(bytes, size, cancelled).map(Data::Texture),
         Kind::PbrMaterial => pbr::decode(bytes).map(Data::Material),
