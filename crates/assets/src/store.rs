@@ -849,22 +849,22 @@ impl DecodeJob {
 
     pub fn run(self) -> LoadCompletion {
         let DecodeJob { input: DecodeInput { mut job, source, .. }, persist_prepared } = self;
-        let cancelled = &job.cancelled;
+        let cancelled = job.cancelled.clone();
         let started = Instant::now();
         let (result, origin) = match source {
             DecodeSource::Response(response) => (
-                content::prepare_cancellable(job.request, job.size, response, persist_prepared, &mut job.reservation, || {
+                content::prepare_cancellable(job.request, job.size, response, persist_prepared, &mut job.reservation, move || {
                     *cancelled.borrow()
                 }),
                 DecodeOrigin::Network,
             ),
             DecodeSource::Disk { bytes, source_sha256, cache } => (
-                content::prepare_disk(job.request, job.size, bytes, source_sha256, cache.as_deref(), &mut job.reservation, || {
+                content::prepare_disk(job.request, job.size, bytes, source_sha256, cache.as_deref(), &mut job.reservation, move || {
                     *cancelled.borrow()
                 }),
                 DecodeOrigin::Disk,
             ),
-            DecodeSource::Cached(source) => (content::prepare_cached(job.size, &source, || *cancelled.borrow()), DecodeOrigin::Memory),
+            DecodeSource::Cached(source) => (content::prepare_cached(job.size, &source, move || *cancelled.borrow()), DecodeOrigin::Memory),
         };
         LoadCompletion { job, result, origin, decode_duration: Some(started.elapsed()) }
     }

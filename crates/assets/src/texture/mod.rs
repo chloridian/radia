@@ -1,13 +1,18 @@
 mod handle;
-mod header;
 
-use jpeg2k::DecodeParameters;
+use std::cell::RefCell;
+
+use subband::{CancelHandle, DecodeError, DecodeSettings, DecoderContext};
 
 pub use self::handle::{ImageInfo, TextureDecodeJob, TextureEvents, TextureHandle, TextureId, TextureUsage, WeakTexture};
 use crate::{Blob, Failure, budget::Reservation};
 
 pub const MAX_TEXTURE_EDGE: u32 = 2048;
 pub const MAX_SOURCE_EDGE: u32 = 4096;
+
+thread_local! {
+    static DECODER_CONTEXT: RefCell<DecoderContext> = RefCell::new(DecoderContext::default());
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TextureSize(u16);
@@ -147,64 +152,50 @@ impl Decoded {
     }
 }
 
-pub(crate) fn decode(bytes: &[u8], target: TextureSize, cancelled: impl Fn() -> bool) -> Result<Decoded, Failure> {
-    if bytes.len() > 32 * 1024 * 1024 {
-        return Err(Failure::TooLarge);
+const fn map_error(error: DecodeError) -> Failure {
+    match error {
+        DecodeError::Unsupported => Failure::Unsupported,
+        DecodeError::TooLarge => Failure::TooLarge,
+        DecodeError::Malformed | DecodeError::BufferSize => Failure::Malformed,
+        DecodeError::Cancelled => Failure::Cancelled,
     }
+}
+
+pub(crate) fn decode(bytes: &[u8], target: TextureSize, cancelled: impl Fn() -> bool + Send + Sync + 'static) -> Result<Decoded, Failure> {
     if cancelled() {
         return Err(Failure::Cancelled);
     }
-    let (stream, header) = header::preflight(bytes, &cancelled)?;
-    let source_size = [header.width, header.height];
+    let cancel = CancelHandle::new(cancelled);
+    let mut settings = DecodeSettings { strict: true, cancel: Some(cancel.clone()), ..DecodeSettings::default() };
+    let probe = subband::Image::new(bytes, &settings).map_err(map_error)?;
+    let source_size = [probe.width(), probe.height()];
     let discard = target.discard_level(source_size);
-    let reduce = u32::from(discard.min(header.levels));
-    let settings = DecodeParameters::new().reduce(reduce).strict(true);
-    let image = jpeg2k::Image::from_bytes_with(stream, settings).map_err(|_| Failure::Malformed)?;
-    if cancelled() {
-        return Err(Failure::Cancelled);
-    }
-    let size = [image.width(), image.height()];
-    if size.contains(&0) || size[0] > MAX_SOURCE_EDGE || size[1] > MAX_SOURCE_EDGE {
-        return Err(Failure::TooLarge);
-    }
-    let format = match header.channels {
+    let image = if discard == 0 {
+        probe
+    } else {
+        settings.discard = discard;
+        subband::Image::new(bytes, &settings).map_err(map_error)?
+    };
+    let format = match image.components() {
         1 => PixelFormat::Gray8,
         2 => PixelFormat::GrayAlpha8,
         3 => PixelFormat::Rgb8,
         4 => PixelFormat::Rgba8,
-        _ => unreachable!("validated components"),
+        _ => return Err(Failure::Unsupported),
     };
-    let samples = usize::try_from(size[0]).ok().and_then(|width| width.checked_mul(size[1] as usize)).ok_or(Failure::TooLarge)?;
-    let length = samples.checked_mul(format.channels()).filter(|bytes| *bytes <= 64 * 1024 * 1024).ok_or(Failure::TooLarge)?;
-    if cancelled() {
-        return Err(Failure::Cancelled);
-    }
-    let components = image.components();
-    if components.len() != format.channels()
-        || components.iter().any(|c| c.precision() != 8 || c.is_signed() || [c.width(), c.height()] != size || c.data().len() != samples)
-    {
-        return Err(Failure::Malformed);
-    }
-    let mut pixels = vec![0; length];
-    for (channel, component) in components.iter().enumerate() {
-        for (row, dest) in
-            component.data().chunks_exact(size[0] as usize).zip(pixels.chunks_exact_mut(size[0] as usize * format.channels()))
-        {
-            if cancelled() {
-                return Err(Failure::Cancelled);
-            }
-            for (source, pixel) in row.iter().zip(dest.chunks_exact_mut(format.channels())) {
-                if let Some(target) = pixel.get_mut(channel) {
-                    *target = u8::try_from(*source).map_err(|_| Failure::Malformed)?;
-                }
-            }
-        }
-    }
+    let (size, pixels) = DECODER_CONTEXT.with(|cell| {
+        let mut ctx = cell.borrow_mut();
+        let decoded = image.decode(&mut ctx).map_err(map_error)?;
+        let size = [decoded.width(), decoded.height()];
+        let mut pixels = vec![0; decoded.buffer_len()];
+        decoded.write_to(&mut pixels).map_err(map_error)?;
+        Ok::<_, Failure>((size, pixels))
+    })?;
     let desired = source_size.map(|edge| edge.div_ceil(1 << discard));
     if desired[0] > size[0] || desired[1] > size[1] {
         return Err(Failure::Malformed);
     }
-    let pixels = if size == desired { pixels } else { downsample(&pixels, size, desired, format, &cancelled)? };
+    let pixels = if size == desired { pixels } else { downsample(&pixels, size, desired, format, || cancel.is_cancelled())? };
     Ok(Decoded { source_size, discard, size: desired, format, pixels })
 }
 
@@ -249,7 +240,13 @@ fn downsample(
 
 #[cfg(test)]
 mod tests {
-    use std::{assert_matches, cell::Cell};
+    use std::{
+        assert_matches,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use test_support::texture::RGBA_J2C;
 
@@ -278,24 +275,18 @@ mod tests {
 
     #[test]
     fn cancelled_decode_retains_work() {
-        let bytes = RGBA_J2C;
-        let checks = Cell::new(0);
-        header::preflight(bytes, &|| {
-            checks.set(checks.get() + 1);
-            false
-        })
-        .unwrap();
-        let after_codec = checks.get() + 3;
-        checks.set(0);
+        let checks = Arc::new(AtomicUsize::new(0));
         let budget = Budget::default();
         let reservation = budget.reserve(TEXTURE_WORK_BYTES).unwrap();
-        let result = decode(bytes, TextureSize::default(), || {
-            checks.set(checks.get() + 1);
-            assert_eq!(budget.stats().charged_bytes, TEXTURE_WORK_BYTES);
-            checks.get() == after_codec
+        let seen = Arc::clone(&checks);
+        let budget_check = budget.clone();
+        let result = decode(RGBA_J2C, TextureSize::default(), move || {
+            let count = seen.fetch_add(1, Ordering::Relaxed) + 1;
+            assert_eq!(budget_check.stats().charged_bytes, TEXTURE_WORK_BYTES);
+            count >= 2
         });
         assert_matches!(result.err(), Some(Failure::Cancelled));
-        assert_eq!(checks.get(), after_codec);
+        assert!(checks.load(Ordering::Relaxed) >= 2, "cancellation should trigger during decode");
         assert_eq!(budget.stats().charged_bytes, TEXTURE_WORK_BYTES);
         drop(reservation);
         assert_eq!(budget.stats().charged_bytes, 0);

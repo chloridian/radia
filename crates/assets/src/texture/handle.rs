@@ -207,7 +207,8 @@ pub struct TextureDecodeJob {
 
 impl TextureDecodeJob {
     pub fn run(self) -> Result<Image, Failure> {
-        let image = texture::decode(&self.source, TextureSize::new(self.info.size[0].max(self.info.size[1])), || !self.texture.is_alive())?
+        let texture = self.texture.clone();
+        let image = texture::decode(&self.source, TextureSize::new(self.info.size[0].max(self.info.size[1])), move || !texture.is_alive())?
             .finish(self.reservation)?;
         let Some(texture) = self.texture.upgrade() else { return Err(Failure::Cancelled) };
         let mut data = texture.0.data.lock().unwrap_or_else(PoisonError::into_inner);
