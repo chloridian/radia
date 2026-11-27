@@ -532,6 +532,7 @@ impl GeometryRenderer {
                 }
             }
         }
+        self.layout_counts.cancelled += u64::from(self.draw_list.layout_building());
         self.draw_list.clear();
         self.main_view.clear();
         self.visible_textures.clear();
