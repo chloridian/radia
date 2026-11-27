@@ -553,11 +553,11 @@ impl GeometryRenderer {
         {
             self.recovery_publication_pending = false;
         }
-        self.stats.rebuild_pending = update.rebuild_pending
-            || self.cache.rebuild.is_some()
-            || self.cache.rescan_pending
-            || self.draw_list.layout_pending()
-            || self.layout_required;
+        self.stats.rebuild_active = self.cache.rebuild.is_some();
+        self.stats.rescan_pending = self.cache.rescan_pending;
+        self.stats.layout_pending = self.draw_list.layout_pending() || self.layout_required;
+        self.stats.rebuild_pending =
+            update.rebuild_pending || self.stats.rebuild_active || self.stats.rescan_pending || self.stats.layout_pending;
         if self.stats.omitted_faces > 0 && self.budget_reports.record(Instant::now(), |_| {}).is_some() {
             tracing::warn!(
                 omitted_faces = self.stats.omitted_faces,

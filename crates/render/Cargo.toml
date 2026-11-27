@@ -22,6 +22,7 @@ tracing.workspace = true
 intel_tex_2.workspace = true
 
 [dev-dependencies]
+wgpu = { workspace = true, features = ["noop"] }
 test-support.workspace = true
 proptest.workspace = true
 futures.workspace = true

@@ -133,6 +133,9 @@ pub struct Stats {
     pub texture_binding_entries: usize,
     pub gpu_mesh_retirements: usize,
     pub gpu_mesh_retired_bytes: usize,
+    pub rebuild_active: bool,
+    pub rescan_pending: bool,
+    pub layout_pending: bool,
     pub rebuild_pending: bool,
 }
 

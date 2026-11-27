@@ -68,6 +68,7 @@ pub(super) struct CacheRebuild {
     observed_version: ViewVersion,
     observed_visibility: VisibilityVersion,
     visibility_restart: bool,
+    visibility_restarted: bool,
     candidate_camera: Option<Camera>,
     mesh_info_build: Option<MeshInfoBuild>,
     #[cfg(test)]
@@ -103,6 +104,7 @@ impl CacheRebuild {
             observed_version: view.version(),
             observed_visibility: view.visibility_version(),
             visibility_restart: false,
+            visibility_restarted: false,
             candidate_camera: None,
             mesh_info_build: None,
             #[cfg(test)]
@@ -580,26 +582,20 @@ impl GeometryRenderer {
                     rebuild.observed_visibility = visibility;
                     rebuild.sweep_needed = true;
                     match rebuild.phase {
-                        RebuildPhase::PruneMeshInfo => {
-                            rebuild.phase = RebuildPhase::Sweep;
-                            rebuild.sweep_cursor = 0;
-                            rebuild.sweep_limit = slot_count;
-                            rebuild.visibility_restart = true;
+                        RebuildPhase::PruneMeshInfo
+                        | RebuildPhase::VisibilityObjects
+                        | RebuildPhase::VisibilitySurfaces
+                        | RebuildPhase::Finalize => {
+                            if !rebuild.visibility_restarted {
+                                rebuild.phase = RebuildPhase::Sweep;
+                                rebuild.sweep_cursor = 0;
+                                rebuild.sweep_limit = slot_count;
+                                rebuild.visibility_restart = true;
+                                rebuild.visibility_restarted = true;
+                            }
                         }
                         RebuildPhase::Sweep => rebuild.sweep_limit = rebuild.sweep_limit.max(slot_count),
                         RebuildPhase::Objects | RebuildPhase::Surfaces => {}
-                        RebuildPhase::VisibilityObjects | RebuildPhase::VisibilitySurfaces => {
-                            rebuild.phase = RebuildPhase::Sweep;
-                            rebuild.sweep_cursor = 0;
-                            rebuild.sweep_limit = slot_count;
-                            rebuild.visibility_restart = true;
-                        }
-                        RebuildPhase::Finalize => {
-                            rebuild.phase = RebuildPhase::Sweep;
-                            rebuild.sweep_cursor = 0;
-                            rebuild.sweep_limit = slot_count;
-                            rebuild.visibility_restart = true;
-                        }
                     }
                 }
                 update.immediate_visibility_change = self.filter_inactive(view);

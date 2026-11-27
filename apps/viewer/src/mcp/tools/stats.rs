@@ -64,6 +64,9 @@ pub struct RenderStatsOutput {
     pub texture_count: usize,
     pub vram_bytes: usize,
     pub prepare_ms: f64,
+    pub rebuild_active: bool,
+    pub rescan_pending: bool,
+    pub layout_pending: bool,
     pub rebuild_pending: bool,
 }
 
@@ -212,6 +215,9 @@ pub(in crate::mcp) fn stats_data(handle: &ViewerInspectionHandle, limit: Option<
             texture_count: rs.texture_count,
             vram_bytes: rs.vram_bytes(),
             prepare_ms: rs.prepare_ms,
+            rebuild_active: rs.rebuild_active,
+            rescan_pending: rs.rescan_pending,
+            layout_pending: rs.layout_pending,
             rebuild_pending: rs.rebuild_pending,
         }),
         assets: Some(AssetsStatsOutput {
