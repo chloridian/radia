@@ -169,7 +169,7 @@ struct ObjectDemand {
     asset: Option<AssetId>,
     priority: Priority,
     distance: f64,
-    _lease: Lease,
+    lease: Lease,
 }
 
 struct Displaceable {
@@ -769,9 +769,14 @@ impl AssetDemand {
         let publication = mesh::publication(object, mesh_asset.is_some() || sculpt.is_some(), mesh_resolution);
         let slots = mesh::material_slots(object, mesh_asset.is_some(), publication.mesh.as_ref(), priority);
         let count = slots.len();
-        let reuse_lease = self.targets.get(&entity).is_some_and(|target| target.faces == count);
-        let lease = if reuse_lease {
-            None
+        let (old_keys, lease) = if self.targets.get(&entity).is_some_and(|target| target.faces >= count) {
+            let mut old = self.targets.remove(&entity).expect("target exists");
+            if let Some(surplus) = old.faces.checked_sub(count).and_then(|diff| diff.checked_mul(FACE_METADATA_BYTES))
+                && surplus > 0
+            {
+                drop(old.lease.split(surplus));
+            }
+            (Some(old.keys), old.lease)
         } else {
             let lease_bytes = count.checked_mul(FACE_METADATA_BYTES);
             let target = !self.targets.contains_key(&entity) && self.targets.len() == MAX_TARGETS;
@@ -783,7 +788,7 @@ impl AssetDemand {
                 }
                 None => None,
             };
-            if lease.is_none() {
+            let Some(lease) = lease else {
                 for key in keys.drain() {
                     self.release(AssetUser::Object(entity), key);
                 }
@@ -805,34 +810,21 @@ impl AssetDemand {
                     materials: None,
                     mesh: if mesh_asset.is_some() && !keep_mesh { MeshPublication::Clear } else { MeshPublication::Keep },
                 });
-            }
-            lease
+            };
+            (self.targets.remove(&entity).map(|old| old.keys), lease)
         };
         let mut faces = Vec::with_capacity(count);
         for slot in slots {
             faces.push(self.face(object, region, slot, size, &previous_texture_sizes, priority, &mut keys));
         }
-        let old = self.targets.remove(&entity);
         if count < previous_faces {
             self.mark_rejected_for_retry();
         }
-        let lease = match (lease, old) {
-            (Some(lease), old) => {
-                if let Some(old) = old {
-                    for key in old.keys.difference(&keys) {
-                        self.release(AssetUser::Object(entity), *key);
-                    }
-                }
-                lease
+        if let Some(old_keys) = old_keys {
+            for key in old_keys.difference(&keys) {
+                self.release(AssetUser::Object(entity), *key);
             }
-            (None, Some(old)) => {
-                for key in old.keys.difference(&keys) {
-                    self.release(AssetUser::Object(entity), *key);
-                }
-                old._lease
-            }
-            (None, None) => unreachable!("reused lease requires an existing target"),
-        };
+        }
         for key in &keys {
             self.refresh(*key);
         }
@@ -842,16 +834,7 @@ impl AssetDemand {
         };
         self.targets.insert(
             entity,
-            ObjectDemand {
-                id: object.detail().summary.id,
-                keys,
-                faces: count,
-                size,
-                asset: tracked_asset,
-                priority,
-                distance,
-                _lease: lease,
-            },
+            ObjectDemand { id: object.detail().summary.id, keys, faces: count, size, asset: tracked_asset, priority, distance, lease },
         );
         let mesh_changed = !matches!(&publication.publication, MeshPublication::Keep);
         let materials_unchanged = object.materials().is_some_and(|old| old == faces) || object.materials().is_none() && faces.is_empty();
