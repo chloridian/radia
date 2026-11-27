@@ -7,7 +7,7 @@ use std::{
 
 use math::{DVec3, Quat, Vec3};
 use uuid::Uuid;
-use wgpu::TextureFormat;
+use wgpu::{Device, DeviceDescriptor, TextureFormat};
 use world::{
     Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, Pose, PrimShape, Region, RegionInfo,
     Shape, SurfaceAppearance, UpdateSource, World, WorldLimits,
@@ -141,7 +141,7 @@ fn info_resumes_within_limit() {
 
 #[test]
 fn rebuild_finalizes_under_object_churn() {
-    let (device, queue) = fixtures::vulkan_device();
+    let (device, queue) = Device::noop(&DeviceDescriptor::default());
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     let (mut world, mut scene, mut view) = fixtures::object_scene(1_100);
     let region = world.region_page(None, 1).expect("fixture region page").regions[0].region;
@@ -230,7 +230,7 @@ fn rebuild_finalizes_under_object_churn() {
 
 #[test]
 fn rebuild_finalizes_under_visibility_churn() {
-    let (device, queue) = fixtures::vulkan_device();
+    let (device, queue) = Device::noop(&DeviceDescriptor::default());
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
     let count = 1_100_u32;
     let (mut world, region, mut scene, mut view) = removable_object_scene(count, 1_024);
