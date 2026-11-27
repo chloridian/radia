@@ -260,11 +260,16 @@ fn rebuild_finalizes_under_visibility_churn() {
         }
     }
 
-    assert!(
-        completed.is_some(),
-        "geometry rebuild never finalized while visibility kept changing: {:?}",
-        geometry.cache.rebuild.as_ref().map(CacheRebuild::progress)
-    );
+    let removed = completed.unwrap_or_else(|| {
+        panic!(
+            "geometry rebuild never finalized while visibility kept changing: {:?}",
+            geometry.cache.rebuild.as_ref().map(CacheRebuild::progress)
+        )
+    });
+    let settled = geometry.update_cache_for_frame(&view, false);
+    assert!(!settled.rebuild_pending, "a quiet frame after the rebuild starts no new work");
+    let live = usize::try_from(count - removed).expect("live count fits usize");
+    assert_eq!(geometry.cache.objects.len(), live, "every removed object leaves the cache once the scene settles");
 }
 
 fn removable_object_scene(count: u32, tombstones: usize) -> (World, Region, Reconciler, SceneView) {
