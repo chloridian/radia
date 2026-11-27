@@ -404,12 +404,6 @@ fn invalidation_scope(operation: &CacheWriteOperation) -> Option<&CacheScope> {
     }
 }
 
-struct CoalescedUpdate {
-    permit: OwnedPermit<ObjectCacheEvent>,
-    versions: CacheEntryVersions,
-    entries: Arc<[EncodedEntry]>,
-}
-
 fn process_write_job(
     db: Arc<SqliteDb>,
     runtime: Handle,
@@ -422,7 +416,7 @@ fn process_write_job(
     match operation {
         CacheWriteOperation::Update { simulator_id, scope, message, versions, mut last_used } => {
             if *invalidation_failed {
-                drop(permit.send(ObjectCacheEvent::WriteDropped { simulator_id, versions }));
+                drop(permit.send(ObjectCacheEvent::WriteDropped { simulator_id, updates: vec![versions], jobs: 1 }));
                 return None;
             }
             let first_entries: Arc<[EncodedEntry]> = encode_entries(&message).into();
@@ -432,7 +426,7 @@ fn process_write_job(
                 merged_bytes = merged_bytes.saturating_add(entry.payload.len());
                 merged_by_id.insert(entry.local_id, entry.clone());
             }
-            let mut coalesced = vec![CoalescedUpdate { permit, versions, entries: first_entries }];
+            let mut coalesced = vec![(versions, first_entries)];
             let mut deferred = None;
 
             while let Ok(candidate) = receiver.try_recv() {
@@ -477,6 +471,7 @@ fn process_write_job(
                     });
                     break;
                 }
+                drop(next_permit);
                 last_used = last_used.max(next_last_used);
                 for entry in next_entries.iter() {
                     if let Some(previous) = merged_by_id.insert(entry.local_id, entry.clone()) {
@@ -484,18 +479,12 @@ fn process_write_job(
                     }
                     merged_bytes = merged_bytes.saturating_add(entry.payload.len());
                 }
-                coalesced.push(CoalescedUpdate { permit: next_permit, versions: next_versions, entries: next_entries });
+                coalesced.push((next_versions, next_entries));
             }
 
+            let jobs = coalesced.len();
             if merged_by_id.is_empty() {
-                for update in coalesced {
-                    drop(update.permit.send(ObjectCacheEvent::WriteApplied {
-                        simulator_id,
-                        scope: scope.clone(),
-                        versions: update.versions,
-                        entries: update.entries,
-                    }));
-                }
+                drop(permit.send(ObjectCacheEvent::WriteApplied { simulator_id, scope, updates: coalesced, jobs }));
                 return deferred;
             }
 
@@ -505,28 +494,19 @@ fn process_write_job(
                     drop(runtime.spawn(async move {
                         match receipt.wait().await {
                             Ok(()) => {
-                                for update in coalesced {
-                                    drop(update.permit.send(ObjectCacheEvent::WriteApplied {
-                                        simulator_id,
-                                        scope: scope.clone(),
-                                        versions: update.versions,
-                                        entries: update.entries,
-                                    }));
-                                }
+                                drop(permit.send(ObjectCacheEvent::WriteApplied { simulator_id, scope, updates: coalesced, jobs }));
                             }
                             Err(_) => {
-                                for update in coalesced {
-                                    drop(update.permit.send(ObjectCacheEvent::WriteDropped { simulator_id, versions: update.versions }));
-                                }
+                                let updates = coalesced.into_iter().map(|(versions, _)| versions).collect();
+                                drop(permit.send(ObjectCacheEvent::WriteDropped { simulator_id, updates, jobs }));
                             }
                         }
                     }));
                 }
                 Err(error) => {
                     tracing::warn!(%error, "object cache write submission failed; some objects will be refetched");
-                    for update in coalesced {
-                        drop(update.permit.send(ObjectCacheEvent::WriteDropped { simulator_id, versions: update.versions }));
-                    }
+                    let updates = coalesced.into_iter().map(|(versions, _)| versions).collect();
+                    drop(permit.send(ObjectCacheEvent::WriteDropped { simulator_id, updates, jobs }));
                 }
             }
             deferred
@@ -595,21 +575,30 @@ fn submit_update_batches(
 }
 
 fn submit_invalidation(db: &SqliteDb, runtime: &Handle, mut batches: impl FnMut() -> Vec<SqliteBatch>) -> bool {
-    loop {
+    let mut attempts = 0;
+    while attempts < MAX_WRITE_SUBMIT_ATTEMPTS {
+        attempts += 1;
         let receipt = match db.submit_batches(batches()) {
             Ok(receipt) => receipt,
             Err(SqliteError::Busy | SqliteError::QueueFull) => {
-                thread::sleep(Duration::from_millis(10));
+                if attempts < MAX_WRITE_SUBMIT_ATTEMPTS {
+                    thread::sleep(WRITE_RETRY_BACKOFF);
+                }
                 continue;
             }
             Err(_) => return false,
         };
         match runtime.block_on(receipt.wait()) {
             Ok(()) => return true,
-            Err(SqliteError::Busy | SqliteError::QueueFull) => thread::sleep(Duration::from_millis(10)),
+            Err(SqliteError::Busy | SqliteError::QueueFull) => {
+                if attempts < MAX_WRITE_SUBMIT_ATTEMPTS {
+                    thread::sleep(WRITE_RETRY_BACKOFF);
+                }
+            }
             Err(_) => return false,
         }
     }
+    false
 }
 
 fn encode_entries(message: &Message) -> Vec<EncodedEntry> {
@@ -674,12 +663,13 @@ mod tests {
 
     use network::{Grid, SimulatorId};
     use protocol::lludp::Message;
+    use rusqlite::Connection;
     use storage::sqlite::MAX_QUEUED_BATCHES;
     use tokio::{runtime::Handle, time};
 
     use super::CacheWriteWorker;
     use crate::session::object_cache::{
-        CacheWriteJob, CacheWriteOperation, MAX_REGION_ENTRIES, ObjectCacheEvent, ObjectCacheSession,
+        CACHE_EVENT_CAPACITY, CacheWriteJob, CacheWriteOperation, MAX_REGION_ENTRIES, ObjectCacheEvent, ObjectCacheSession,
         store::open_at,
         test_support::{
             CACHE_ID, NEXT_CACHE_ID, SIMULATOR, cache_count, cache_scope_entry_count, fixture_message, flush, open_cache, region_handshake,
@@ -804,7 +794,7 @@ mod tests {
         let burst_count = MAX_QUEUED_BATCHES + 32;
 
         for local_id in 1..=u32::try_from(burst_count).expect("burst count fits u32") {
-            while cache.event_sender.capacity() == 0 {
+            while cache.pending_writes.len() >= super::MAX_PENDING_SUBMISSIONS || cache.event_sender.capacity() == 0 {
                 let event = cache.next_event().await.expect("cache emits completion event");
                 assert!(cache.handle_event(event).is_none());
             }
@@ -859,6 +849,8 @@ mod tests {
 
         assert!(cache.dropped_writes() > 0);
         let before_extra = cache.stats();
+        assert!(before_extra.full_drops > 0);
+        assert_eq!(before_extra.busy_drops, 0);
         assert_eq!(before_extra.busy_drops + before_extra.full_drops, before_extra.dropped_writes);
         for extra_id in 800_001..=800_003 {
             let mut message = fixture_message(vectors::OBJECT_UPDATE);
@@ -870,6 +862,8 @@ mod tests {
             cache.record_update(SIMULATOR, message);
         }
         let after_extra = cache.stats();
+        assert_eq!(after_extra.full_drops, before_extra.full_drops + 3);
+        assert_eq!(after_extra.busy_drops, 0);
         assert_eq!(after_extra.busy_drops + after_extra.full_drops, before_extra.dropped_writes + 3);
         assert_eq!(after_extra.dropped_writes, before_extra.dropped_writes + 3);
         assert!(cache.is_degraded());
@@ -893,5 +887,54 @@ mod tests {
         assert!(cache.is_degraded());
         assert!(!cache.is_disabled());
         cache.close().await;
+    }
+
+    #[tokio::test]
+    async fn burst_queues_without_drops() {
+        let directory = tempfile::tempdir().expect("create isolated cache directory");
+        let path = directory.path().join("objects.sqlite");
+        let mut cache = open_cache(&path);
+        let burst_count = CACHE_EVENT_CAPACITY + 5;
+        assert!(burst_count <= super::MAX_PENDING_SUBMISSIONS * 2);
+
+        for local_id in 1..=u32::try_from(burst_count).expect("burst count fits u32") {
+            let mut message = fixture_message(vectors::OBJECT_UPDATE);
+            let Message::ObjectUpdate(update) = &mut message else {
+                panic!("object update fixture should be a full update");
+            };
+            update.objects.truncate(1);
+            update.objects[0].local_id = local_id;
+            cache.record_update(SIMULATOR, message);
+        }
+
+        flush(&mut cache).await;
+        assert_eq!(cache.dropped_writes(), 0);
+        let db = Arc::clone(cache.db.as_ref().expect("cache database is open"));
+        assert_eq!(cache_count(&db).await, burst_count);
+        cache.close().await;
+    }
+
+    #[tokio::test]
+    async fn invalidation_gives_up_when_busy() {
+        let directory = tempfile::tempdir().expect("create isolated cache directory");
+        let path = directory.path().join("objects.sqlite");
+        let mut cache = open_cache(&path);
+        let locker = Connection::open(&path).expect("open locking SQLite connection");
+        locker.execute_batch("BEGIN EXCLUSIVE").expect("acquire exclusive SQLite lock");
+
+        cache.set_region_identity(SIMULATOR, &region_handshake(NEXT_CACHE_ID));
+        let event = time::timeout(Duration::from_secs(10), cache.next_event())
+            .await
+            .expect("invalidation finishes within retry budget")
+            .expect("cache emits invalidation dropped event");
+        match event {
+            ObjectCacheEvent::InvalidationDropped => assert!(cache.handle_event(event).is_none()),
+            _ => panic!("expected InvalidationDropped event"),
+        }
+        assert!(cache.is_disabled());
+
+        locker.execute_batch("ROLLBACK").expect("release exclusive SQLite lock");
+        drop(locker);
+        time::timeout(Duration::from_secs(5), cache.close()).await.expect("cache close completes after busy invalidation");
     }
 }
