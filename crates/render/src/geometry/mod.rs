@@ -57,6 +57,20 @@ const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MESH_UPLOADS: usize = 16;
 const TRANSFORM_BYTES: usize = 112;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LayoutCounts {
+    pub started: u64,
+    pub committed: u64,
+    pub stale: u64,
+    pub cancelled: u64,
+    pub entered: u64,
+    pub left: u64,
+    pub visibility_resets: u64,
+    pub invalidations: u64,
+    pub rebases: u64,
+    pub retries: u64,
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct Stats {
     pub instances: usize,
@@ -136,6 +150,7 @@ pub struct Stats {
     pub rebuild_active: bool,
     pub rescan_pending: bool,
     pub layout_pending: bool,
+    pub layout_counts: LayoutCounts,
     pub rebuild_pending: bool,
 }
 
@@ -357,6 +372,7 @@ pub(crate) struct GeometryRenderer {
     regions: Vec<RegionBounds>,
     motion_redraw: bool,
     layout_required: bool,
+    layout_counts: LayoutCounts,
     replacement_retry_pending: bool,
     mesh_omitted_faces: usize,
     epoch: u64,
@@ -434,6 +450,7 @@ impl GeometryRenderer {
             regions: Vec::new(),
             motion_redraw: false,
             layout_required: false,
+            layout_counts: LayoutCounts::default(),
             replacement_retry_pending: false,
             mesh_omitted_faces: 0,
             epoch: 0,

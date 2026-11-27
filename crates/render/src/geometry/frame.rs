@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::BTreeSet,
     mem,
     ops::Bound::{Excluded, Unbounded},
@@ -19,7 +20,7 @@ use crate::{
         cache::{CacheUpdate, MeshDemandOrder, item_is_live, range_moved},
         draw_list::LAYOUT_TIME_PER_FRAME,
         instance::{instance_base, parameter_part, scene_origin},
-        items::{CachedFace, CachedItem, ItemIndex},
+        items::{CachedFace, CachedItem, ItemIndex, ItemSlab},
         visibility::WorldSphere,
     },
     material::FaceParams,
@@ -73,6 +74,34 @@ fn next_mesh_demand(order: &BTreeSet<MeshDemandOrder>, after: Option<MeshDemandO
     match after {
         Some(after) => order.range((Excluded(after), Unbounded)).next().copied(),
         None => order.first().copied(),
+    }
+}
+
+fn membership_changes(visible: &[ItemIndex], next_visible: &[ItemIndex], items: &ItemSlab) -> (bool, bool) {
+    let id = |index: &ItemIndex| items.get(*index).map(|item| item.id);
+    let mut old = visible.iter().map(id).peekable();
+    let mut new = next_visible.iter().map(id).peekable();
+    let (mut entered, mut left) = (false, false);
+    loop {
+        match (old.peek(), new.peek()) {
+            (None, None) => return (entered, left),
+            (Some(_), None) => return (entered, true),
+            (None, Some(_)) => return (true, left),
+            (Some(a), Some(b)) => match a.cmp(b) {
+                Ordering::Less => {
+                    left = true;
+                    old.next();
+                }
+                Ordering::Greater => {
+                    entered = true;
+                    new.next();
+                }
+                Ordering::Equal => {
+                    old.next();
+                    new.next();
+                }
+            },
+        }
     }
 }
 
@@ -362,6 +391,11 @@ impl GeometryRenderer {
         }
         times.meshes = meshes_started.elapsed();
         let visible_changed = rebuild_visible && self.cache.visible != self.cache.next_visible;
+        if visible_changed {
+            let (entered, left) = membership_changes(&self.cache.visible, &self.cache.next_visible, &self.cache.items);
+            self.layout_counts.entered += u64::from(entered);
+            self.layout_counts.left += u64::from(left);
+        }
         let agent_id = agent_pose.map(AgentPose::agent_id);
         self.motion_redraw = update.rebuild_completed && !self.moving_entities.is_empty();
         if !rebuilding && !update.rebuild_completed {
@@ -401,8 +435,16 @@ impl GeometryRenderer {
             self.draw_list.mark_layout_stale();
         }
         if layout_requested {
+            self.layout_counts.visibility_resets += u64::from(update.immediate_visibility_change);
+            self.layout_counts.invalidations += u64::from(update.layout_invalidated);
+            self.layout_counts.rebases += u64::from(origin_rebased);
+            let retry = self.layout_required;
             let visible = if visible_changed { &self.cache.next_visible } else { &self.cache.visible };
             self.layout_required = !self.draw_list.request_layout(visible, camera);
+            if !self.layout_required {
+                self.layout_counts.started += 1;
+                self.layout_counts.retries += u64::from(retry);
+            }
         }
 
         let draw_list_started = Instant::now();
@@ -431,7 +473,9 @@ impl GeometryRenderer {
             self.stats.layout_faces_visited = progress.stats.faces_visited;
             self.stats.prepare_layout_commit_ms = progress.commit_ms;
             self.layout_required |= progress.stale;
+            self.layout_counts.stale += u64::from(progress.stale);
             if progress.complete {
+                self.layout_counts.committed += 1;
                 self.stats.layouts = 1;
                 self.omitted_faces = progress.stats.omitted_faces;
             }
@@ -556,6 +600,7 @@ impl GeometryRenderer {
         self.stats.rebuild_active = self.cache.rebuild.is_some();
         self.stats.rescan_pending = self.cache.rescan_pending;
         self.stats.layout_pending = self.draw_list.layout_pending() || self.layout_required;
+        self.stats.layout_counts = self.layout_counts;
         self.stats.rebuild_pending =
             update.rebuild_pending || self.stats.rebuild_active || self.stats.rescan_pending || self.stats.layout_pending;
         if self.stats.omitted_faces > 0 && self.budget_reports.record(Instant::now(), |_| {}).is_some() {
