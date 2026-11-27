@@ -6,7 +6,11 @@ use world::{OrderEvidence, RegionInfo, RegionSummary, TerrainSettings, World, Wo
 
 use super::*;
 use crate::{
-    scene::{RegionData, model::Change},
+    scene::{
+        RegionData,
+        budget::{Limits, UNBOUNDED_MEMORY_BYTES},
+        model::Change,
+    },
     test_support::{registered_region, registered_regions},
 };
 
@@ -613,22 +617,43 @@ fn object_terrain_share_ticket() {
 fn visible_demand_displaces_background() {
     const SLOTS: u8 = 32;
     const FILLER: u32 = 64;
-    const BACKGROUND: u32 = (MAX_FACES / SLOTS as usize) as u32;
+    const BACKGROUND: u32 = 8;
     let texture = AssetId::new(Uuid::from_u128(703));
+    let face = |color| FaceAppearance { texture: Some(texture), color: [color, 0, 0, 255], ..FaceAppearance::default() };
+    let appearance =
+        || world::SurfaceAppearance::new(face(0), (1..SLOTS).map(|slot| (slot - 1, face(slot))).collect()).expect("fixture faces");
+
+    let probe_budget = Budget::new(Limits { memory_bytes: UNBOUNDED_MEMORY_BYTES, worker_threads: 1 });
+    let (_, _, mut probe_mirror, probe_identities) = textured_scene(1, texture, |_, observation| {
+        observation.pose = Some(world::Pose { position: Some(Vec3::new(100.0, 128.0, 32.0)), rotation: Some(math::Quat::IDENTITY) });
+        observation.surface_appearance = Some(appearance());
+    });
+    let mut probe_demand = AssetDemand::new(probe_budget.clone());
+    probe_demand.set_camera(camera());
+    let _ = probe_demand.step(&Mirror::default(), &BTreeMap::new());
+    let base_bytes = probe_budget.charged_bytes();
+    probe_demand.invalidate_all();
+    for change in probe_demand.step(&probe_mirror, &probe_identities) {
+        probe_mirror.apply(Change::Material(change));
+    }
+    let after_apply = probe_budget.charged_bytes();
+    probe_mirror.objects.clear();
+    let after_clear = probe_budget.charged_bytes();
+    let per_object = after_apply - base_bytes;
+    let materials_bytes = after_apply - after_clear;
+    let memory_bytes = base_bytes + usize::try_from(BACKGROUND).expect("background count fits usize") * per_object + materials_bytes;
+
     let farthest = FILLER + BACKGROUND;
     let visible = farthest + 1;
     let late = farthest + 2;
-    let (budget, _, mut mirror, identities) = textured_scene(late, texture, |local_id, observation| {
+    let (_, _, mut mirror, identities) = textured_scene(late, texture, |local_id, observation| {
         let x = match local_id {
             id if id == visible => 140.0,
             id if id == late => 60.0,
             id => 100.0 - id as f32 * 0.001,
         };
         observation.pose = Some(world::Pose { position: Some(Vec3::new(x, 128.0, 32.0)), rotation: Some(math::Quat::IDENTITY) });
-        let face = |color| FaceAppearance { texture: Some(texture), color: [color, 0, 0, 255], ..FaceAppearance::default() };
-        observation.surface_appearance = (local_id > FILLER).then(|| {
-            world::SurfaceAppearance::new(face(0), (1..SLOTS).map(|slot| (slot - 1, face(slot))).collect()).expect("fixture faces")
-        });
+        observation.surface_appearance = (local_id > FILLER).then(&appearance);
     });
     let entity = |local_id: u32| identities[&Uuid::from_u128(u128::from(local_id))];
     let settle = |demand: &mut AssetDemand, mirror: &mut Mirror| {
@@ -646,12 +671,12 @@ fn visible_demand_displaces_background() {
         mirror.objects.iter().all(|(entity, object)| object.materials().is_none() || demand.targets.contains_key(entity))
     };
     let materials = |mirror: &Mirror, local_id: u32| mirror.objects[&entity(local_id)].materials().map(<[_]>::len);
-    let mut demand = AssetDemand::new(budget);
+    let demand_budget = Budget::new(Limits { memory_bytes, worker_threads: 1 });
+    let mut demand = AssetDemand::new(demand_budget);
     demand.set_camera(camera());
     settle(&mut demand, &mut mirror);
 
     assert_eq!(materials(&mirror, visible), Some(usize::from(SLOTS)));
-    assert_eq!(demand.faces, MAX_FACES);
     assert_eq!(materials(&mirror, farthest), None, "the farthest background object is displaced in the step that admitted it");
     assert!((FILLER + 1..farthest).all(|local_id| materials(&mirror, local_id).is_some()));
     assert_eq!(materials(&mirror, late), None, "background demand never displaces");
