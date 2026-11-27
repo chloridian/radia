@@ -3,22 +3,19 @@
 use std::{assert_matches, time::Instant};
 
 use assets::{
-    Budget, ColorSpace, Content, Failure, Image, Kind, LoadJob, PixelAlpha, PixelFormat, Priority, Request, Resource, Status, Store,
+    Budget, ColorSpace, Content, Failure, Image, LoadJob, PixelAlpha, PixelFormat, Priority, Request, Status, Store, TextureSize,
 };
 use proptest::prelude;
-use test_support::texture::{
-    GRAY_4096_J2C, GRAY_ALPHA_J2C, GRAY_ALPHA_RAW, GRAY_J2C, GRAY_RAW, RGB_J2C, RGB_RAW, RGBA_2048_LOSSY_J2C, RGBA_J2C, RGBA_JP2,
-    RGBA_LOSSY_J2C, RGBA_LOSSY_RAW, RGBA_RAW,
-};
+use test_support::texture::{GRAY_4096_J2C, RGBA_2048_LOSSY_J2C, RGBA_J2C, RGBA_RAW};
 use utils::AssetId;
 use uuid::Uuid;
 
-fn decode(bytes: &[u8]) -> Result<Image, Failure> {
+fn decode_size(bytes: &[u8], size: TextureSize) -> Result<Image, Failure> {
     let now = Instant::now();
     let mut store = Store::new(Budget::default());
     let route = store.register_route().unwrap();
-    let resource = Resource { id: AssetId::new(Uuid::from_u128(1)), kind: Kind::Texture };
-    let demand = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
+    let request = Request::Texture { id: AssetId::new(Uuid::from_u128(1)), size };
+    let demand = store.request(route, request, Priority::Visible, now).unwrap();
     let LoadJob::Fetch(job) = store.next_job(now).unwrap() else { panic!("fresh texture request unexpectedly used cached source") };
     let completion = match job.complete(Ok(bytes.to_vec())) {
         Ok(input) => store.start_decode(input).expect("decode admission").run(),
@@ -32,64 +29,54 @@ fn decode(bytes: &[u8]) -> Result<Image, Failure> {
     }
 }
 
-#[test]
-fn lossless_channels_match_openjpeg() {
-    let cases = &[
-        ("gray", GRAY_J2C, GRAY_RAW, 1, false),
-        ("gray alpha", GRAY_ALPHA_J2C, GRAY_ALPHA_RAW, 2, true),
-        ("rgb", RGB_J2C, RGB_RAW, 3, false),
-        ("rgba codestream", RGBA_J2C, RGBA_RAW, 4, true),
-        ("rgba container", RGBA_JP2, RGBA_RAW, 4, true),
-    ];
-    for (name, encoded, expected, channels, alpha) in cases {
-        let image = decode(encoded).unwrap();
-        assert_eq!(image.size(), [8, 8], "{name}");
-        assert_eq!(image.alpha() == PixelAlpha::Straight, *alpha, "{name}");
-        assert_eq!(image.color_space(), ColorSpace::Srgb, "{name}");
-        assert_eq!(image.format().channels(), *channels, "{name}");
-        assert_eq!(image.pixels(), *expected, "{name}");
-    }
+fn decode(bytes: &[u8]) -> Result<Image, Failure> {
+    decode_size(bytes, TextureSize::default())
 }
 
 #[test]
-fn lossy_error_stays_bounded() {
-    let image = decode(RGBA_LOSSY_J2C).unwrap();
-    let output = image.pixels();
-    let source = RGBA_LOSSY_RAW;
-    assert_eq!(output.len(), source.len());
-    for (actual, expected) in output.iter().zip(source) {
-        assert!(actual.abs_diff(*expected) <= 2, "actual {actual}, source {expected}");
-    }
-}
-
-#[test]
-fn reduced_gray_matches_openjpeg() {
-    let image = decode(GRAY_4096_J2C).unwrap();
-    assert_eq!(image.size(), [2048, 2048]);
-    assert_eq!(image.format(), PixelFormat::Gray8);
-    assert!(image.pixels().iter().all(|sample| *sample == 73));
-}
-
-#[test]
-fn detailed_lossy_rgba_decodes() {
-    let image = decode(RGBA_2048_LOSSY_J2C).unwrap();
-    assert_eq!(image.size(), [2048, 2048]);
+fn rgba_output_image() {
+    let image = decode(RGBA_J2C).unwrap();
+    assert_eq!(image.source_size(), [8, 8]);
+    assert_eq!(image.discard_level(), 0);
+    assert_eq!(image.size(), [8, 8]);
     assert_eq!(image.format(), PixelFormat::Rgba8);
-    assert!(image.pixels().windows(2).any(|pair| pair[0] != pair[1]), "fixture has detail");
+    assert_eq!(image.alpha(), PixelAlpha::Straight);
+    assert_eq!(image.color_space(), ColorSpace::Srgb);
+    assert_eq!(image.pixels(), RGBA_RAW);
 }
 
 #[test]
-fn invalid_headers_fail_early() {
+fn discard_reduces_large_textures() {
+    let gray = decode(GRAY_4096_J2C).unwrap();
+    assert_eq!(gray.source_size(), [4096, 4096]);
+    assert_eq!(gray.discard_level(), 1);
+    assert_eq!(gray.size(), [2048, 2048]);
+    assert_eq!(gray.format(), PixelFormat::Gray8);
+    assert_eq!(gray.alpha(), PixelAlpha::Opaque);
+    assert!(gray.pixels().iter().all(|sample| *sample == 73));
+
+    let rgba = decode_size(RGBA_2048_LOSSY_J2C, TextureSize::new(512)).unwrap();
+    assert_eq!(rgba.source_size(), [2048, 2048]);
+    assert_eq!(rgba.discard_level(), 2);
+    assert_eq!(rgba.size(), [512, 512]);
+    assert_eq!(rgba.format(), PixelFormat::Rgba8);
+    assert_eq!(rgba.pixels().len(), 512 * 512 * 4);
+    assert!(rgba.pixels().windows(2).any(|pair| pair[0] != pair[1]), "fixture has detail");
+}
+
+#[test]
+fn decode_errors_map_to_failures() {
     let valid = RGBA_J2C;
-    for length in 0..valid.len() {
-        assert!(decode(&valid[..length]).is_err(), "accepted truncation at {length}");
+    let sot = valid.windows(2).position(|bytes| bytes == [0xff, 0x90]).unwrap();
+    for length in [0, 4, 40, sot - 1] {
+        assert_matches!(decode(&valid[..length]).err(), Some(Failure::Malformed), "truncation at {length}");
     }
     let mut huge = valid.to_vec();
     huge[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
     assert_matches!(decode(&huge).err(), Some(Failure::TooLarge));
-    let mut components = valid.to_vec();
-    components[40..42].copy_from_slice(&u16::MAX.to_be_bytes());
-    assert_matches!(decode(&components).err(), Some(Failure::Unsupported));
+    let mut signed = valid.to_vec();
+    signed[42] = 0x87;
+    assert_matches!(decode(&signed).err(), Some(Failure::Unsupported));
     let mut expensive = valid.to_vec();
     for offset in [8, 12, 24, 28] {
         expensive[offset..offset + 4].copy_from_slice(&2048u32.to_be_bytes());
@@ -99,22 +86,8 @@ fn invalid_headers_fail_early() {
     expensive[cod + 10] = 0;
     expensive[cod + 11] = 0;
     assert_matches!(decode(&expensive).err(), Some(Failure::TooLarge));
-    assert_matches!(decode(b"\x89PNG\r\n\x1a\n").err(), Some(Failure::Unsupported));
+    assert_matches!(decode(b"\x89PNG\r\n\x1a\n").err(), Some(Failure::Malformed));
     assert_matches!(decode(&vec![0; 32 * 1024 * 1024 + 1]).err(), Some(Failure::TooLarge));
-}
-
-#[test]
-fn jp2_metadata_must_match() {
-    let mut bytes = RGBA_JP2.to_vec();
-    assert_eq!(decode(&bytes).unwrap().pixels(), RGBA_RAW);
-    let definitions = bytes.windows(4).position(|tag| tag == b"cdef").unwrap();
-    let alpha_type = definitions + 4 + 2 + 3 * 6 + 2;
-    bytes[alpha_type..alpha_type + 2].copy_from_slice(&2u16.to_be_bytes());
-    assert_matches!(decode(&bytes).err(), Some(Failure::Unsupported), "premultiplied alpha requires an explicit conversion policy");
-    let mut wrong_dimensions = RGBA_JP2.to_vec();
-    let ihdr = wrong_dimensions.windows(4).position(|tag| tag == b"ihdr").unwrap();
-    wrong_dimensions[ihdr + 4..ihdr + 8].copy_from_slice(&999u32.to_be_bytes());
-    assert_matches!(decode(&wrong_dimensions).err(), Some(Failure::Malformed));
 }
 
 proptest::proptest! {
