@@ -67,7 +67,22 @@ pub struct RenderStatsOutput {
     pub rebuild_active: bool,
     pub rescan_pending: bool,
     pub layout_pending: bool,
+    pub layout_counts: LayoutCountsOutput,
     pub rebuild_pending: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct LayoutCountsOutput {
+    pub started: u64,
+    pub committed: u64,
+    pub stale: u64,
+    pub cancelled: u64,
+    pub entered: u64,
+    pub left: u64,
+    pub visibility_resets: u64,
+    pub invalidations: u64,
+    pub rebases: u64,
+    pub retries: u64,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -218,6 +233,18 @@ pub(in crate::mcp) fn stats_data(handle: &ViewerInspectionHandle, limit: Option<
             rebuild_active: rs.rebuild_active,
             rescan_pending: rs.rescan_pending,
             layout_pending: rs.layout_pending,
+            layout_counts: LayoutCountsOutput {
+                started: rs.layout_counts.started,
+                committed: rs.layout_counts.committed,
+                stale: rs.layout_counts.stale,
+                cancelled: rs.layout_counts.cancelled,
+                entered: rs.layout_counts.entered,
+                left: rs.layout_counts.left,
+                visibility_resets: rs.layout_counts.visibility_resets,
+                invalidations: rs.layout_counts.invalidations,
+                rebases: rs.layout_counts.rebases,
+                retries: rs.layout_counts.retries,
+            },
             rebuild_pending: rs.rebuild_pending,
         }),
         assets: Some(AssetsStatsOutput {

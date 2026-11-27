@@ -718,6 +718,7 @@ impl GeometryRenderer {
         self.cache.filtered_visibility_version = Some(visibility);
         if self.draw_list.layout_pending() {
             self.draw_list.cancel_layout();
+            self.layout_counts.cancelled += 1;
             self.layout_required = true;
             self.layout_pose_items.clear();
         }
