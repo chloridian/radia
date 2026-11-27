@@ -30,7 +30,7 @@ changelog:
     perf: Performance Improvements
     merge: Merges
     breakingChange: BREAKING CHANGES
-  commitUrl: https://github.com/hymenaei/Radia/commit/%commit%
-  commitRangeUrl: https://github.com/hymenaei/Radia/compare/%from%...%to%?diff=split
+  commitUrl: https://github.com/chloridian/radia/commit/%commit%
+  commitRangeUrl: https://github.com/chloridian/radia/compare/%from%...%to%?diff=split
   issueRegexPattern: "#[0-9]+"
-  issueUrl: https://github.com/hymenaei/Radia/issues/%issue%
+  issueUrl: https://github.com/chloridian/radia/issues/%issue%
