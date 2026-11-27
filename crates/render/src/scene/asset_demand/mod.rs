@@ -38,7 +38,7 @@ use crate::{
 };
 
 const MAX_TARGETS: usize = MAX_OBJECTS;
-const MAX_FACES: usize = 32_768;
+const FACE_METADATA_BYTES: usize = 512;
 const METADATA_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -169,6 +169,7 @@ struct ObjectDemand {
     asset: Option<AssetId>,
     priority: Priority,
     distance: f64,
+    _lease: Lease,
 }
 
 struct Displaceable {
@@ -233,7 +234,6 @@ pub(in crate::scene) struct AssetDemand {
     terrain_changes: BTreeSet<Region>,
     terrain_rescan: bool,
     events: VecDeque<AssetChange>,
-    faces: usize,
 }
 
 impl AssetDemand {
@@ -263,7 +263,6 @@ impl AssetDemand {
             terrain_changes: BTreeSet::new(),
             terrain_rescan: false,
             events: VecDeque::new(),
-            faces: 0,
         }
     }
 
@@ -409,7 +408,6 @@ impl AssetDemand {
         self.sculpts.remove_entity(entity);
         if let Some(target) = self.targets.remove(&entity) {
             self.rescan = true;
-            self.faces -= target.faces;
             self.mark_rejected_for_retry();
             if let Some(asset) = target.asset {
                 self.meshes.remove_user(asset, entity);
@@ -460,7 +458,12 @@ impl AssetDemand {
     }
 
     fn can_admit_rejected(&self, rejected: &RejectedObject) -> bool {
-        self.targets.len() < MAX_TARGETS && self.faces.saturating_add(rejected.faces) <= MAX_FACES
+        self.targets.len() < MAX_TARGETS
+            && rejected
+                .faces
+                .checked_mul(FACE_METADATA_BYTES)
+                .and_then(|bytes| self.budget.charged_bytes().checked_add(bytes))
+                .is_some_and(|total| total <= self.budget.memory_bytes())
     }
 
     fn mark_rejected_for_retry(&mut self) {
@@ -596,7 +599,6 @@ impl AssetDemand {
         self.terrain_changes.clear();
         self.terrain_rescan = false;
         self.dirty.clear();
-        self.faces = 0;
         self.scan = self.camera.is_some();
         self.rescan = false;
         self.deferred = false;
@@ -767,45 +769,70 @@ impl AssetDemand {
         let publication = mesh::publication(object, mesh_asset.is_some() || sculpt.is_some(), mesh_resolution);
         let slots = mesh::material_slots(object, mesh_asset.is_some(), publication.mesh.as_ref(), priority);
         let count = slots.len();
-        let excess = self.faces.saturating_sub(previous_faces).saturating_add(count).saturating_sub(MAX_FACES);
-        let target = previous_faces == 0 && !self.targets.contains_key(&entity) && self.targets.len() == MAX_TARGETS;
-        if (excess > 0 || target) && (priority == Priority::Background || !self.displace(entity, excess, target)) {
-            for key in keys.drain() {
-                self.release(AssetUser::Object(entity), key);
+        let reuse_lease = self.targets.get(&entity).is_some_and(|target| target.faces == count);
+        let lease = if reuse_lease {
+            None
+        } else {
+            let lease_bytes = count.checked_mul(FACE_METADATA_BYTES);
+            let target = !self.targets.contains_key(&entity) && self.targets.len() == MAX_TARGETS;
+            let lease = if target { None } else { lease_bytes.and_then(|bytes| self.budget.reserve(bytes)) };
+            let lease = match lease {
+                Some(lease) => Some(lease),
+                None if priority == Priority::Visible => {
+                    lease_bytes.and_then(|bytes| self.displace(entity, count, target).then(|| self.budget.reserve(bytes)).flatten())
+                }
+                None => None,
+            };
+            if lease.is_none() {
+                for key in keys.drain() {
+                    self.release(AssetUser::Object(entity), key);
+                }
+                if tracked_asset != previous_asset
+                    && let Some(asset) = tracked_asset
+                {
+                    self.meshes.remove_user(asset, entity);
+                }
+                self.remove(entity);
+                self.queue_rejected(object.detail().summary.id, entity, count);
+                let keep_mesh = priority == Priority::Visible && mesh_asset.is_some() && object.mesh_matches_geometry();
+                if mesh_asset.is_some() && !keep_mesh {
+                    self.mesh_budget_omitted.insert(entity);
+                } else {
+                    self.mesh_budget_omitted.remove(&entity);
+                }
+                return (object.materials().is_some() || (object.mesh().is_some() && !keep_mesh)).then(|| MaterialChange {
+                    source: object.clone(),
+                    materials: None,
+                    mesh: if mesh_asset.is_some() && !keep_mesh { MeshPublication::Clear } else { MeshPublication::Keep },
+                });
             }
-            if tracked_asset != previous_asset
-                && let Some(asset) = tracked_asset
-            {
-                self.meshes.remove_user(asset, entity);
-            }
-            self.remove(entity);
-            self.queue_rejected(object.detail().summary.id, entity, count);
-            let keep_mesh = priority == Priority::Visible && mesh_asset.is_some() && object.mesh_matches_geometry();
-            if mesh_asset.is_some() && !keep_mesh {
-                self.mesh_budget_omitted.insert(entity);
-            } else {
-                self.mesh_budget_omitted.remove(&entity);
-            }
-            return (object.materials().is_some() || (object.mesh().is_some() && !keep_mesh)).then(|| MaterialChange {
-                source: object.clone(),
-                materials: None,
-                mesh: if mesh_asset.is_some() && !keep_mesh { MeshPublication::Clear } else { MeshPublication::Keep },
-            });
-        }
+            lease
+        };
         let mut faces = Vec::with_capacity(count);
         for slot in slots {
             faces.push(self.face(object, region, slot, size, &previous_texture_sizes, priority, &mut keys));
         }
         let old = self.targets.remove(&entity);
-        self.faces = self.faces.saturating_sub(previous_faces).saturating_add(count);
         if count < previous_faces {
             self.mark_rejected_for_retry();
         }
-        if let Some(old) = old {
-            for key in old.keys.difference(&keys) {
-                self.release(AssetUser::Object(entity), *key);
+        let lease = match (lease, old) {
+            (Some(lease), old) => {
+                if let Some(old) = old {
+                    for key in old.keys.difference(&keys) {
+                        self.release(AssetUser::Object(entity), *key);
+                    }
+                }
+                lease
             }
-        }
+            (None, Some(old)) => {
+                for key in old.keys.difference(&keys) {
+                    self.release(AssetUser::Object(entity), *key);
+                }
+                old._lease
+            }
+            (None, None) => unreachable!("reused lease requires an existing target"),
+        };
         for key in &keys {
             self.refresh(*key);
         }
@@ -815,7 +842,16 @@ impl AssetDemand {
         };
         self.targets.insert(
             entity,
-            ObjectDemand { id: object.detail().summary.id, keys, faces: count, size, asset: tracked_asset, priority, distance },
+            ObjectDemand {
+                id: object.detail().summary.id,
+                keys,
+                faces: count,
+                size,
+                asset: tracked_asset,
+                priority,
+                distance,
+                _lease: lease,
+            },
         );
         let mesh_changed = !matches!(&publication.publication, MeshPublication::Keep);
         let materials_unchanged = object.materials().is_some_and(|old| old == faces) || object.materials().is_none() && faces.is_empty();
