@@ -322,6 +322,9 @@ impl AssetDemand {
             self.deferred = false;
             self.rescan = true;
             true
+        } else if self.rejected_scan_remaining == 0 && self.rejected.iter().any(|rejected| self.can_admit_rejected(rejected)) {
+            self.mark_rejected_for_retry();
+            true
         } else {
             false
         }
@@ -769,7 +772,8 @@ impl AssetDemand {
         let publication = mesh::publication(object, mesh_asset.is_some() || sculpt.is_some(), mesh_resolution);
         let slots = mesh::material_slots(object, mesh_asset.is_some(), publication.mesh.as_ref(), priority);
         let count = slots.len();
-        let (old_keys, lease) = if self.targets.get(&entity).is_some_and(|target| target.faces >= count) {
+        let previous_target_faces = self.targets.get(&entity).map(|target| target.faces);
+        let (old_keys, lease) = if previous_target_faces.is_some_and(|faces| faces >= count) {
             let mut old = self.targets.remove(&entity).expect("target exists");
             if let Some(surplus) = old.faces.checked_sub(count).and_then(|diff| diff.checked_mul(FACE_METADATA_BYTES))
                 && surplus > 0
@@ -778,14 +782,17 @@ impl AssetDemand {
             }
             (Some(old.keys), old.lease)
         } else {
-            let lease_bytes = count.checked_mul(FACE_METADATA_BYTES);
-            let target = !self.targets.contains_key(&entity) && self.targets.len() == MAX_TARGETS;
+            let added = count.saturating_sub(previous_target_faces.unwrap_or(0));
+            let lease_bytes = added.checked_mul(FACE_METADATA_BYTES);
+            let target = previous_target_faces.is_none() && self.targets.len() == MAX_TARGETS;
             let lease = if target { None } else { lease_bytes.and_then(|bytes| self.budget.reserve(bytes)) };
             let lease = match lease {
                 Some(lease) => Some(lease),
-                None if priority == Priority::Visible => {
-                    lease_bytes.and_then(|bytes| self.displace(entity, count, target).then(|| self.budget.reserve(bytes)).flatten())
-                }
+                None if priority == Priority::Visible => lease_bytes.and_then(|bytes| {
+                    let free = self.budget.memory_bytes().saturating_sub(self.budget.charged_bytes());
+                    let missing = bytes.saturating_sub(free).div_ceil(FACE_METADATA_BYTES);
+                    self.displace(entity, missing, target).then(|| self.budget.reserve(bytes)).flatten()
+                }),
                 None => None,
             };
             let Some(lease) = lease else {
@@ -811,7 +818,13 @@ impl AssetDemand {
                     mesh: if mesh_asset.is_some() && !keep_mesh { MeshPublication::Clear } else { MeshPublication::Keep },
                 });
             };
-            (self.targets.remove(&entity).map(|old| old.keys), lease)
+            match self.targets.remove(&entity) {
+                Some(mut old) => {
+                    old.lease.merge(lease);
+                    (Some(old.keys), old.lease)
+                }
+                None => (None, lease),
+            }
         };
         let mut faces = Vec::with_capacity(count);
         for slot in slots {

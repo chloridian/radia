@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    mem,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use utils::hardware::{AtomicPressure, Hardware, Pressure};
@@ -134,6 +137,11 @@ impl Lease {
     pub(in crate::scene) fn split(&mut self, bytes: usize) -> Option<Self> {
         self.bytes = self.bytes.checked_sub(bytes)?;
         Some(Self { budget: self.budget.clone(), bytes })
+    }
+
+    pub(in crate::scene) fn merge(&mut self, mut other: Self) {
+        debug_assert!(Arc::ptr_eq(&self.budget.0, &other.budget.0));
+        self.bytes += mem::take(&mut other.bytes);
     }
 }
 
