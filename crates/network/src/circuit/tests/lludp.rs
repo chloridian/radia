@@ -199,7 +199,7 @@ async fn late_retry_skips_acked_packet() {
     simulator.recv_from(&mut bytes).await.expect("receive original packet");
 
     let retry_at = sent_at + Duration::from_secs(6);
-    let retry = circuit.prepare_retransmission(retry_at).expect("prepare due retry").expect("retry is due");
+    let retry = circuit.prepare_retransmission(retry_at, KEEPALIVE_TIMEOUT).expect("prepare due retry").expect("retry is due");
     transport.try_send(retry.bytes()).expect("send prepared retry");
     let (size, _) = simulator.recv_from(&mut bytes).await.expect("receive sent retry");
     assert!(Packet::decode(&bytes[..size]).expect("decode resent packet").is_resent());

@@ -127,7 +127,8 @@ fn deferred_reliable_retry_expires() {
     let mut circuit = Circuit::new();
     let original = circuit.prepare_message(queued_for_test(TrafficClass::Fair).message, Delivery::Reliable).expect("prepare reliable send");
     circuit.commit_sent(original, Instant::now() - Duration::from_secs(6)).expect("record original local send");
-    let prepared = circuit.prepare_retransmission(Instant::now()).expect("prepare due retry").expect("retry should be due");
+    let prepared =
+        circuit.prepare_retransmission(Instant::now(), KEEPALIVE_TIMEOUT).expect("prepare due retry").expect("retry should be due");
     assert!(prepared.is_retransmission());
 
     let started_at = Instant::now();
@@ -178,6 +179,32 @@ async fn control_keeps_retry_deadline() {
         "repeated priority sends cannot extend a due retry's deadline"
     );
 
+    drop(pacer);
+    budget.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_retries_within_logout_wait() {
+    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
+    let socket = Arc::new(UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect transport"));
+    let budget = OutboundBudget::new(8_000);
+    let pacer = budget.handle().register(1, false).await.expect("register simulator pacer");
+    let mut circuit = Circuit::new();
+    let pinged_at = Instant::now() - Duration::from_secs(10);
+    let ping = circuit.prepare_ping(pinged_at).expect("prepare ping").expect("ping id available");
+    circuit.commit_sent(ping, pinged_at).expect("record ping");
+    assert!(circuit.record_ping_response(0, pinged_at + Duration::from_secs(2)), "slow ping response recorded");
+    let logout = circuit.prepare_message(queued_for_test(TrafficClass::Control).message, Delivery::Reliable).expect("prepare logout");
+    circuit.commit_sent(logout, Instant::now() - LOGOUT_REPLY_TIMEOUT / 2).expect("record logout send");
+    let mut queue = OutboundQueue::new();
+    let mut deferred_retries = HashMap::new();
+
+    let retry = prepare_shutdown_send(&socket, &pacer, &mut circuit, &mut queue, &mut deferred_retries, false)
+        .map_err(|(_, error)| error)
+        .expect("prepare shutdown retransmission")
+        .expect("a slow link still retries before the logout reply wait ends");
+    let packet = send_pending(retry, &mut circuit, &simulator).await;
+    assert!(packet.is_resent());
     drop(pacer);
     budget.shutdown().await;
 }
@@ -323,8 +350,10 @@ async fn retry_loss_reports_once() {
     let sequence = second.meta.sequence;
     drop(second);
     let sent_at = Instant::now();
-    let prepared =
-        circuit.prepare_retransmission(sent_at).expect("prepare retransmission after pacer preemption").expect("the retry remains due");
+    let prepared = circuit
+        .prepare_retransmission(sent_at, KEEPALIVE_TIMEOUT)
+        .expect("prepare retransmission after pacer preemption")
+        .expect("the retry remains due");
     circuit.commit_sent(prepared, sent_at).expect("commit the locally sent retry");
     deferred_retries.remove(&sequence);
 
@@ -376,7 +405,7 @@ async fn primary_sends_during_retry_storm() {
                 .prepare_message(queued_for_test(TrafficClass::Fair).message, Delivery::Reliable)
                 .expect("prepare overdue reliable packet");
             circuit.commit_sent(original, original_sent_at).expect("track overdue reliable packet");
-            let retry = circuit.prepare_retransmission(now).expect("prepare due retransmission").expect("retry is due");
+            let retry = circuit.prepare_retransmission(now, KEEPALIVE_TIMEOUT).expect("prepare due retransmission").expect("retry is due");
             let packet = Packet::decode(retry.bytes()).expect("decode prepared retransmission");
             assert!(packet.is_reliable() && packet.is_resent(), "the storm consists of actual Circuit retry datagrams");
             retries.push((circuit, retry));

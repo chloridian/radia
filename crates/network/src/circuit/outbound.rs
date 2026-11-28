@@ -3,6 +3,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::Arc,
+    time::Duration,
 };
 
 use protocol::{
@@ -21,19 +22,21 @@ use tokio::{
 };
 
 use super::{
-    ConnectionError, LOGOUT_TIMEOUT, MAX_NONCONTROL_SENDS, MAX_PENDING_SEND_BYTES, MAX_PENDING_SEND_NOTIFICATIONS, MAX_PENDING_SENDS,
-    MAX_SEND_AGE, MAX_SEND_ERROR_BYTES, OUTBOUND_SEND_CHARGE_BYTES, SimulatorEvent,
+    ConnectionError, LOGOUT_REPLY_TIMEOUT, LOGOUT_TIMEOUT, MAX_NONCONTROL_SENDS, MAX_PENDING_SEND_BYTES, MAX_PENDING_SEND_NOTIFICATIONS,
+    MAX_PENDING_SENDS, MAX_SEND_AGE, MAX_SEND_ERROR_BYTES, OUTBOUND_SEND_CHARGE_BYTES, SimulatorEvent,
 };
 use crate::{
     AgentSession,
     circuit::{
         UdpTransport,
-        lludp::{Circuit, Delivery, PreparedDatagram},
+        lludp::{Circuit, Delivery, KEEPALIVE_TIMEOUT, PreparedDatagram},
         pacing::{ConnectionPacer, PacerHandle, TrafficClass},
     },
     error::Error,
     event::SimulatorId,
 };
+
+const SHUTDOWN_RETRY_INTERVAL: Duration = Duration::from_secs(LOGOUT_REPLY_TIMEOUT.as_secs() / 3);
 
 pub(super) type PendingSendFuture = Pin<Box<dyn Future<Output = Result<(Instant, PreparedDatagram), ConnectionError>> + Send>>;
 
@@ -499,7 +502,7 @@ pub(super) fn prepare_next_send(
     }
 
     let now = Instant::now();
-    let prepared = circuit.prepare_retransmission(now).map_err(|error| (None, error.into()))?;
+    let prepared = circuit.prepare_retransmission(now, KEEPALIVE_TIMEOUT).map_err(|error| (None, error.into()))?;
     if let Some(prepared) = prepared {
         let retry_started_at = match deferred_retries.entry(prepared.sequence()) {
             Entry::Occupied(entry) => *entry.get(),
@@ -564,7 +567,7 @@ pub(super) fn prepare_shutdown_send(
     }
 
     let now = Instant::now();
-    if let Some(prepared) = circuit.prepare_retransmission(now).map_err(|error| (None, error.into()))? {
+    if let Some(prepared) = circuit.prepare_retransmission(now, SHUTDOWN_RETRY_INTERVAL).map_err(|error| (None, error.into()))? {
         let retry_started_at = match deferred_retries.entry(prepared.sequence()) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {

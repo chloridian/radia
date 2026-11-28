@@ -301,11 +301,11 @@ impl Circuit {
         Ok(Some(PreparedDatagram { bytes, commit: DatagramCommit::Acknowledgements { sequence, acknowledgements } }))
     }
 
-    pub(crate) fn prepare_retransmission(&self, now: Instant) -> Result<Option<PreparedDatagram>, CircuitError> {
+    pub(crate) fn prepare_retransmission(&self, now: Instant, max_interval: Duration) -> Result<Option<PreparedDatagram>, CircuitError> {
         let due = self
             .pending
             .iter()
-            .filter(|(_, packet)| now.saturating_duration_since(packet.sent_at) >= self.retry_timeout_for(packet.retries))
+            .filter(|(_, packet)| now.saturating_duration_since(packet.sent_at) >= self.retry_timeout_for(packet.retries).min(max_interval))
             .min_by_key(|(_, packet)| packet.sent_at);
         let Some((&sequence, packet)) = due else {
             return Ok(None);

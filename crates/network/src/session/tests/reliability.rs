@@ -410,7 +410,8 @@ async fn retry_resends_until_limit() {
     let mut now = sent_at + Duration::from_secs(30);
 
     for _ in 1..=MAX_RETRIES {
-        let prepared = circuit.prepare_retransmission(now).expect("prepare retry").expect("packet should retry before limit");
+        let prepared =
+            circuit.prepare_retransmission(now, KEEPALIVE_TIMEOUT).expect("prepare retry").expect("packet should retry before limit");
         circuit::send_prepared_at(&mut circuit, &client, prepared, now).await.expect("send retry");
         let (resent, _) = receive(&simulator).await;
         let mut expected = original.clone();
@@ -419,7 +420,7 @@ async fn retry_resends_until_limit() {
         now += Duration::from_secs(30);
     }
 
-    assert_matches!(circuit.prepare_retransmission(now).map(|_| ()), Err(CircuitError::RetryLimit));
+    assert_matches!(circuit.prepare_retransmission(now, KEEPALIVE_TIMEOUT).map(|_| ()), Err(CircuitError::RetryLimit));
 }
 
 #[tokio::test]
