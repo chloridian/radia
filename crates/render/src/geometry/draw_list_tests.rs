@@ -185,7 +185,7 @@ fn canceled_build_keeps_committed_patches() {
         }
     }
     assert_matches!(list.staged_progress(), Some(("fill", cursor, ..)) if cursor > 500, "the build staged the target face");
-    list.hide_item(items.items.get_mut(target).expect("target item"));
+    list.hide_item(target, items.items.get_mut(target).expect("target item"));
     assert!(instance_bytes(&list, next).iter().all(|byte| *byte == 0), "removing a staged item clears its committed instance");
     let progress = list.advance_layout(&mut items.items, Duration::ZERO).expect("the stale build is observed");
     assert!(progress.stale, "removing a staged item invalidates the build");
@@ -728,6 +728,7 @@ fn staged_entry_count(build: &super::LayoutBuild) -> usize {
     let state = &build.state;
     build.uploads.len()
         + build.visible.len()
+        + build.removed.len()
         + build.evicted.len()
         + build.layout_items.len()
         + build.selected_items.len()
@@ -768,6 +769,7 @@ fn staged_allocation_bytes(build: &super::LayoutBuild) -> usize {
     [
         set_bytes(&build.uploads),
         vec_bytes(&build.visible),
+        set_bytes(&build.removed),
         set_bytes(&build.evicted),
         vec_bytes(&build.layout_items),
         set_bytes(&build.selected_items),
