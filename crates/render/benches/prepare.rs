@@ -15,7 +15,7 @@ use render::{
 use test_support::texture::GRAY_4096_J2C;
 use utils::AssetId;
 use wgpu::{Device, DeviceDescriptor, PowerPreference, Queue, RequestAdapterOptions, TextureFormat};
-use world::World;
+use world::{LinearMotion, ObjectPatch, OrderEvidence, Parent, UpdateSource, World};
 
 use crate::support;
 
@@ -440,6 +440,36 @@ mod benches {
     fn cull_edge_sweep_10k(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         camera_edge_sweep(bencher, &device, &queue, 10_000, "camera_culling_edge_sweep_10000");
+    }
+
+    #[divan::bench]
+    fn moving_avatar(bencher: divan::Bencher) {
+        let (device, queue) = gpu();
+        let mut fixture = Fixture::settled(&device, &queue, 1, 50, 0, 50.0, 512.0);
+        let camera = camera_at(50.0, 0.0, 512.0);
+        let (region, local_id) = fixture
+            .view
+            .objects()
+            .find(|object| object.detail().summary.parent == Parent::Root)
+            .map(|object| (object.detail().summary.address.region(), object.detail().summary.address.local_id()))
+            .expect("root benchmark object");
+        let mut generation = 0u64;
+        let mut order = 20_000_000u64;
+        bencher.bench_local(|| {
+            generation += 1;
+            order += 1;
+            let velocity = if generation.is_multiple_of(2) { 1.0 } else { 2.0 };
+            let mut patch = ObjectPatch::new(UpdateSource::new(region, order as u32, OrderEvidence::Ordered(order), 0), local_id);
+            patch.linear_motion = LinearMotion { velocity: Some(Vec3::new(velocity, 0.0, 0.0)), acceleration: None };
+            let _applied = fixture.world.patch_object(patch).expect("benchmark motion update");
+            support::first_publish(&mut fixture.reconciler, &mut fixture.view, &fixture.world, &mut fixture.now);
+            fixture.sample(&device, &queue, camera);
+            let stats = fixture.prepare.stats();
+            assert!(stats.motion_entities_evaluated > 0);
+            assert_eq!(stats.omitted_faces, 0);
+            black_box(stats);
+        });
+        report("moving_avatar", fixture.prepare.stats());
     }
 
     #[divan::bench]
