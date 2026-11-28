@@ -1565,7 +1565,7 @@ impl DrawList {
         self.forget_item(index);
         let mut hidden = false;
         for face in &mut item.faces {
-            hidden |= self.hide_face(face);
+            hidden |= self.clear_face_slot(face);
         }
         if hidden {
             debug_assert!(self.committed.visible_items > 0);
@@ -1578,6 +1578,26 @@ impl DrawList {
             && face.layout == build.layout
         {
             build.stale = true;
+        }
+        self.clear_face_slot(face)
+    }
+
+    fn clear_face_slot(&mut self, face: &mut CachedFace) -> bool {
+        if let Some(build) = self.pending.as_mut()
+            && !build.stale
+            && face.layout == build.layout
+            && let Some(slot) = face.slot
+        {
+            let start = slot as usize * INSTANCE_BYTES;
+            if let Some(instance) = build.state.instance_bytes.get_mut(start..start + INSTANCE_BYTES) {
+                instance.fill(0);
+                build.upload(slot);
+            }
+            if let Some(blended_index) = face.blended_index
+                && let Some(draw) = build.state.draws.get_mut(build.state.opaque_draws.saturating_add(blended_index))
+            {
+                draw.live = false;
+            }
         }
         let committed = self.committed_address(face);
         face.slot = None;

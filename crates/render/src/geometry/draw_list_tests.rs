@@ -185,10 +185,21 @@ fn canceled_build_keeps_committed_patches() {
         }
     }
     assert_matches!(list.staged_progress(), Some(("fill", cursor, ..)) if cursor > 500, "the build staged the target face");
+    let staged = target_slot(&items);
     list.hide_item(target, items.items.get_mut(target).expect("target item"));
     assert!(instance_bytes(&list, next).iter().all(|byte| *byte == 0), "removing a staged item clears its committed instance");
-    let progress = list.advance_layout(&mut items.items, Duration::ZERO).expect("the stale build is observed");
-    assert!(progress.stale, "removing a staged item invalidates the build");
+    let mut completed = false;
+    for _ in 0..10_000 {
+        if let Some(progress) = list.advance_layout(&mut items.items, Duration::ZERO) {
+            assert!(!progress.stale, "hiding a staged item must not stale the pending build");
+            if progress.complete {
+                completed = true;
+                break;
+            }
+        }
+    }
+    assert!(completed, "the pending build commits after hiding a staged item");
+    assert!(instance_bytes(&list, staged).iter().all(|byte| *byte == 0), "hiding a staged item keeps its staged slot zeroed after commit");
 }
 
 #[test]
