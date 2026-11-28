@@ -1,4 +1,11 @@
-use std::{assert_matches, time::Instant};
+use std::{
+    assert_matches,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Instant,
+};
 
 use protocol::{
     lludp::{
@@ -11,11 +18,18 @@ use protocol::{
     },
 };
 use tokio::sync::oneshot::error::TryRecvError;
+use tracing::{
+    Event as TracingEvent, Metadata, Subscriber,
+    field::{Field, Visit},
+    span::{Attributes, Id, Record},
+    subscriber,
+};
 
 use super::*;
 use crate::{
     circuit::test_values,
     event::Event::{Failed, SimulatorDisconnected, SimulatorMessage, SimulatorPromoted},
+    fixtures::http::{EventQueueTestServer, EventServerResponse, response},
 };
 
 struct TeleportFinishScenario {
@@ -736,4 +750,218 @@ fn teleport_finish_awaits_movement() {
 #[test]
 fn repeated_promotions() {
     run_large_stack_test(run_repeated_promotions);
+}
+
+struct HandoffFailureCounter {
+    count: Arc<AtomicUsize>,
+}
+
+struct MessageVisitor {
+    matched: bool,
+}
+
+impl Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" && format!("{value:?}").contains("simulator handoff failed") {
+            self.matched = true;
+        }
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" && value == "simulator handoff failed" {
+            self.matched = true;
+        }
+    }
+}
+
+impl Subscriber for HandoffFailureCounter {
+    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _span: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+    fn event(&self, event: &TracingEvent<'_>) {
+        let mut visitor = MessageVisitor { matched: false };
+        event.record(&mut visitor);
+        if visitor.matched {
+            self.count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn enter(&self, _span: &Id) {}
+
+    fn exit(&self, _span: &Id) {}
+}
+
+async fn run_former_login_region_rejoins() {
+    let mut scenario = TeleportFinishScenario::new().await;
+    scenario.prepare_destination().await;
+    scenario.promote().await;
+    scenario.harness.pause_sends.send_replace(false);
+    if let Some(held_send) = scenario.held_send.take() {
+        let _ = timeout(WAIT, held_send).await;
+    }
+
+    let primary_endpoint = scenario.harness.primary.local_addr().expect("login region endpoint");
+    let primary_region_handle = scenario.harness.primary_region_handle;
+    let mut disable = test_fixture("disable_simulator.hex");
+    set_sequence(&mut disable, 40);
+    scenario.harness.primary.send_to(&disable, scenario.harness.primary_peer).await.expect("close former login region");
+    timeout(WAIT, async {
+        loop {
+            if matches!(
+                next_raw_event(&mut scenario.harness.events).await,
+                SimulatorDisconnected { simulator_id, .. } if simulator_id == scenario.harness.primary_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("observe former login region disconnect");
+
+    announce_neighbor(&scenario.harness.neighbor, scenario.harness.neighbor_peer, primary_endpoint, primary_region_handle, 50).await;
+    let (use_circuit, rejoined_peer) = timeout(WAIT, async {
+        tokio::select! {
+            received = receive_message_with_peer(&scenario.harness.primary, |message| matches!(message, Message::UseCircuitCode(_))) => received,
+            event = async {
+                loop {
+                    if let Event::SimulatorFailed { endpoint, reason, .. } = next_raw_event(&mut scenario.harness.events).await
+                        && endpoint == primary_endpoint
+                    {
+                        break reason;
+                    }
+                }
+            } => {
+                panic!("former login region should rejoin as a neighbor, failed with: {event}");
+            }
+        }
+    })
+    .await
+    .expect("former login region should receive UseCircuitCode");
+    scenario.harness.primary.send_to(&ack(41, use_circuit.sequence()), rejoined_peer).await.expect("ack rejoined login region circuit");
+    let rejoined_id = timeout(WAIT, async {
+        loop {
+            match next_raw_event(&mut scenario.harness.events).await {
+                Event::SimulatorConnected { simulator_id, region_handle: Some(handle), endpoint }
+                    if handle == primary_region_handle && endpoint == primary_endpoint =>
+                {
+                    break simulator_id;
+                }
+                Event::SimulatorFailed { endpoint, reason, .. } if endpoint == primary_endpoint => {
+                    panic!("former login region should rejoin as a neighbor, failed with: {reason}");
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("former login region should connect as a neighbor");
+    assert_ne!(rejoined_id, scenario.harness.primary_id);
+
+    scenario.harness.disconnect.send_replace(true);
+    let logout = receive_message(&scenario.harness.neighbor, |message| matches!(message, Message::LogoutRequest(_))).await;
+    send_logout_reply(&scenario.harness.neighbor, scenario.harness.neighbor_peer, &logout, 60).await;
+    assert!(timeout(WAIT, scenario.harness.client).await.expect("shutdown finishes").expect("runtime task").is_ok());
+}
+
+async fn run_finished_queue_not_promoted() {
+    let failure_count = Arc::new(AtomicUsize::new(0));
+    let _guard = subscriber::set_default(HandoffFailureCounter { count: failure_count.clone() });
+
+    let destination_server = EventQueueTestServer::start(|base| {
+        let seed = format!("<llsd><map><key>EventQueueGet</key><uri>{base}events</uri></map></llsd>");
+        vec![
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed)),
+            EventServerResponse::Response(response(401, "Unauthorized", "text/plain", None, "denied")),
+        ]
+    });
+    let mut harness = Box::pin(connected_neighbor()).await;
+    let target_region = 0x1000_0000_0000_1000;
+    let target_endpoint = harness.neighbor.local_addr().expect("destination simulator address");
+    let session = login_session(harness.primary.local_addr().expect("primary simulator address"));
+
+    let teleport_finish =
+        Packet::new(30, teleport_finish_to(session.agent_id, target_endpoint, target_region, destination_server.url("/seed").as_str()))
+            .with_reliable()
+            .encode()
+            .expect("encode TeleportFinish");
+    harness.primary.send_to(&teleport_finish, harness.primary_peer).await.expect("send TeleportFinish");
+    timeout(WAIT, async {
+        loop {
+            match next_raw_event(&mut harness.events).await {
+                SimulatorMessage { simulator_id, message: Message::TeleportFinish(_), .. } if simulator_id == harness.primary_id => {
+                    break;
+                }
+                Failed(reason) => panic!("session failed before destination handshake: {reason}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("manager should process TeleportFinish");
+
+    let requests = timeout(WAIT, task::spawn_blocking(move || destination_server.finish()))
+        .await
+        .expect("destination HTTP server should finish")
+        .expect("destination HTTP server thread");
+    assert_eq!(requests.len(), 2, "destination seed and EventQueueGet should both complete");
+
+    let mut handshake = test_fixture("region_handshake.hex");
+    handshake[0] |= 0x40;
+    set_sequence(&mut handshake, 41);
+    harness.neighbor.send_to(&handshake, harness.neighbor_peer).await.expect("send destination handshake");
+    let reply = receive_message(&harness.neighbor, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
+    let movement_request = receive_message(&harness.neighbor, |message| matches!(message, Message::CompleteAgentMovement(_))).await;
+    harness.neighbor.send_to(&ack(42, reply.sequence()), harness.neighbor_peer).await.expect("ack destination handshake reply");
+    harness.neighbor.send_to(&ack(43, movement_request.sequence()), harness.neighbor_peer).await.expect("ack destination movement request");
+    harness
+        .neighbor
+        .send_to(&movement_complete_packet(44, session.agent_id, session.session_id, target_region), harness.neighbor_peer)
+        .await
+        .expect("send matching movement completion");
+    receive_ack(&harness.neighbor, 44).await;
+    let mut barrier = test_fixture("chat_from_simulator.hex");
+    barrier[0] |= 0x40;
+    set_sequence(&mut barrier, 45);
+    harness.neighbor.send_to(&barrier, harness.neighbor_peer).await.expect("send post-movement barrier");
+    receive_ack(&harness.neighbor, 45).await;
+
+    timeout(WAIT, async {
+        loop {
+            match next_raw_event(&mut harness.events).await {
+                SimulatorMessage { simulator_id, sequence: 45, message: ChatFromSimulator(_), .. }
+                    if simulator_id == harness.neighbor_id =>
+                {
+                    break;
+                }
+                SimulatorPromoted { .. } => panic!("destination with finished EventQueueGet must not be promoted"),
+                Failed(reason) => panic!("session failed before post-movement barrier: {reason}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("manager should process post-movement barrier");
+
+    assert_eq!(failure_count.load(Ordering::SeqCst), 1, "handoff failure should be logged once");
+
+    harness.shutdown().await;
+}
+
+#[test]
+fn former_login_region_rejoins() {
+    run_large_stack_test(run_former_login_region_rejoins);
+}
+
+#[test]
+fn finished_queue_not_promoted() {
+    run_large_stack_test(run_finished_queue_not_promoted);
 }

@@ -67,7 +67,7 @@ impl SessionState {
         if let Some(simulator_id) = Self::reuse_neighbor(region_handle, endpoint, handoff.as_ref(), &mut self.simulators) {
             return Ok(Some(simulator_id));
         }
-        if self.simulators.get(&self.simulator_id).is_some_and(|current| current.region_handle == Some(region_handle)) {
+        if self.simulators.get(&self.primary_id).is_some_and(|current| current.region_handle == Some(region_handle)) {
             return self
                 .reject_neighbor_start(
                     simulator_id,
@@ -78,12 +78,13 @@ impl SessionState {
                 )
                 .await;
         }
-        if (endpoint == self.session.simulator_address && handoff.is_none())
+        let primary_endpoint = self.simulators.get(&self.primary_id).map_or(self.session.simulator_address, |primary| primary.endpoint);
+        if (endpoint == primary_endpoint && handoff.is_none())
             || self.simulators.iter().any(|(active_id, active)| {
                 active.is_current()
                     && active.region_handle != Some(region_handle)
                     && active.endpoint == endpoint
-                    && (active_id != &self.simulator_id || handoff.is_none())
+                    && (active_id != &self.primary_id || handoff.is_none())
             })
         {
             return self

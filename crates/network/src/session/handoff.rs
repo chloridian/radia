@@ -454,6 +454,7 @@ impl SessionDispatcher<'_> {
             .get(&promotion.target)
             .and_then(|simulator| simulator.capabilities.as_ref())
             .filter(|capabilities| capabilities.seed_capability == promotion.handoff.seed_capability)
+            .filter(|capabilities| capabilities.event_queue.is_running())
             .and_then(|capabilities| capabilities.event_queue.role().cloned().map(|role| (capabilities.client.clone(), role)))
         else {
             tracing::warn!(
@@ -476,9 +477,9 @@ impl SessionDispatcher<'_> {
         if self.state.logout.deadline().is_some() {
             return Ok(());
         }
-        let mut session = self.state.session.clone();
-        session.simulator_address = promotion.handoff.endpoint;
-        session.seed_capability = promotion.handoff.seed_capability;
+        self.state.session.simulator_address = promotion.handoff.endpoint;
+        self.state.session.seed_capability = promotion.handoff.seed_capability;
+        let session = self.state.session.clone();
         let role_generation = promotion.generation.get();
         self.state.promote_primary(promotion.target, role_generation);
         tracing::info!(simulator = promotion.target.get(), region = promotion.handoff.region_handle, "simulator promoted");
