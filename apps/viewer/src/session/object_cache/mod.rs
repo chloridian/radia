@@ -199,6 +199,7 @@ pub(super) struct ObjectCacheSession {
     outstanding_writes: usize,
     started: bool,
     disabled: bool,
+    discard_on_close: bool,
     warned: bool,
     degraded_warned: bool,
     busy_drops: u64,
@@ -233,6 +234,7 @@ impl ObjectCacheSession {
             outstanding_writes: 0,
             started: false,
             disabled: false,
+            discard_on_close: false,
             warned: false,
             degraded_warned: false,
             busy_drops: 0,
@@ -598,6 +600,15 @@ impl ObjectCacheSession {
         if db.had_write_failure() {
             self.warn("SQLite worker reported a failed object-cache write");
         }
+        if self.discard_on_close {
+            let discarded = match db.discard() {
+                Ok(receipt) => receipt.wait().await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = discarded {
+                tracing::warn!(%error, "object cache could not be discarded after a failed invalidation");
+            }
+        }
         let shutdown = task::spawn_blocking(move || {
             Arc::try_unwrap(db)
                 .map_err(|_| "object cache writer still owns the SQLite worker".to_owned())?
@@ -761,6 +772,7 @@ impl ObjectCacheSession {
     fn disable_after_invalidation_failure(&mut self) {
         self.warn("object cache invalidation failed; cached objects will be refetched");
         self.disabled = true;
+        self.discard_on_close = true;
         self.cache_generations.clear();
         let simulators: Vec<_> = self.loaded_regions.keys().copied().collect();
         for simulator_id in simulators {

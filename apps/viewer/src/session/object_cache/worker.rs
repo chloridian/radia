@@ -429,7 +429,9 @@ fn process_write_job(
             let mut coalesced = vec![(versions, first_entries)];
             let mut deferred = None;
 
-            while let Ok(candidate) = receiver.try_recv() {
+            while coalesced.len() < MAX_PENDING_SUBMISSIONS
+                && let Ok(candidate) = receiver.try_recv()
+            {
                 let can_coalesce = matches!(
                     &candidate.operation,
                     CacheWriteOperation::Update {
@@ -915,10 +917,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalidation_gives_up_when_busy() {
+    async fn busy_invalidation_discards_cache() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
         let path = directory.path().join("objects.sqlite");
         let mut cache = open_cache(&path);
+        cache.record_update(SIMULATOR, fixture_message(vectors::OBJECT_UPDATE));
+        flush(&mut cache).await;
+        let db = Arc::clone(cache.db.as_ref().expect("cache database is open"));
+        assert!(cache_count(&db).await > 0, "seeded entries persist before the invalidation");
+        drop(db);
         let locker = Connection::open(&path).expect("open locking SQLite connection");
         locker.execute_batch("BEGIN EXCLUSIVE").expect("acquire exclusive SQLite lock");
 
@@ -936,5 +943,8 @@ mod tests {
         locker.execute_batch("ROLLBACK").expect("release exclusive SQLite lock");
         drop(locker);
         time::timeout(Duration::from_secs(5), cache.close()).await.expect("cache close completes after busy invalidation");
+
+        let (db, _) = open_at(&path).expect("reopen cache after failed invalidation");
+        assert_eq!(cache_count(&db).await, 0, "entries the failed invalidation kept must not survive to the next session");
     }
 }
