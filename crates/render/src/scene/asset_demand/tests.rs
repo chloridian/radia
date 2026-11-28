@@ -6,7 +6,11 @@ use world::{OrderEvidence, RegionInfo, RegionSummary, TerrainSettings, World, Wo
 
 use super::*;
 use crate::{
-    scene::{RegionData, model::Change},
+    scene::{
+        RegionData,
+        budget::{Limits, UNBOUNDED_MEMORY_BYTES},
+        model::Change,
+    },
     test_support::{registered_region, registered_regions},
 };
 
@@ -39,16 +43,30 @@ fn process(demand: &mut AssetDemand, mirror: &Mirror) {
     let _ = demand.step(mirror, &BTreeMap::new());
 }
 
-fn ready_header_status(asset: AssetId) -> Status {
+fn ready_mesh_status(request: Request, bytes: Vec<u8>) -> Status {
     let now = Instant::now();
     let mut store = assets::Store::new(assets::Budget::default());
     let route = store.register_route().expect("fixture route registers");
-    let demand = store.request(route, Request::MeshHeader(asset), Priority::Visible, now).expect("fixture header request registers");
-    let Some(assets::LoadJob::Fetch(job)) = store.next_job(now) else { panic!("fixture header fetch starts") };
-    let input = job.complete(Ok(mesh::asset(&[0, 1, 2, 3], 1))).expect("fixture header response fits");
-    let completion = store.start_decode(input).expect("fixture header decode starts").run();
+    let demand = store.request(route, request, Priority::Visible, now).expect("fixture mesh request registers");
+    let Some(assets::LoadJob::Fetch(job)) = store.next_job(now) else { panic!("fixture mesh fetch starts") };
+    let input = match request {
+        Request::MeshLod(block) => {
+            let range = block.range();
+            let start = usize::try_from(range.start).expect("mesh range start fits usize");
+            let end = usize::try_from(range.end).expect("mesh range end fits usize");
+            let partial = bytes.get(start..end).expect("mesh fixture contains requested LOD block").to_vec();
+            job.complete_response(Ok(assets::FetchResponse::Partial { bytes: partial, range, total_length: Some(block.asset_length()) }))
+        }
+        _ => job.complete(Ok(bytes)),
+    }
+    .expect("fixture mesh response fits");
+    let completion = store.start_decode(input).expect("fixture mesh decode starts").run();
     assert!(store.complete(completion, now).is_empty());
     demand.status()
+}
+
+fn ready_header_status(asset: AssetId) -> Status {
+    ready_mesh_status(Request::MeshHeader(asset), mesh::asset(&[0, 1, 2, 3], 1))
 }
 
 fn invalidate_completed(demand: &mut AssetDemand, mirror: &Mirror, ticket: AssetTicket, status: Status) -> usize {
@@ -62,6 +80,10 @@ fn invalidate_completed(demand: &mut AssetDemand, mirror: &Mirror, ticket: Asset
 }
 
 fn mesh_scene(count: u32) -> (Budget, Mirror, BTreeMap<Uuid, Entity>) {
+    mesh_scene_with(count, |_, _| {})
+}
+
+fn mesh_scene_with(count: u32, customize: impl Fn(u32, &mut world::ObjectObservation)) -> (Budget, Mirror, BTreeMap<Uuid, Entity>) {
     let budget = Budget::default();
     let object_count = usize::try_from(count).expect("fixture object count fits usize");
     let tombstone_bytes = WorldLimits::tombstone_bytes_for_count(object_count);
@@ -94,6 +116,7 @@ fn mesh_scene(count: u32) -> (Budget, Mirror, BTreeMap<Uuid, Entity>) {
         observation.pose = Some(world::Pose { position: Some(Vec3::new(10.0, 0.0, 0.0)), rotation: Some(math::Quat::IDENTITY) });
         observation.scale = Some(Vec3::ONE);
         observation.shape = world::FieldUpdate::Set(world::Shape::Mesh { asset_id: asset, flags: SculptFlags::default() });
+        customize(local_id, &mut observation);
         let _applied = world.observe_object(observation).expect("fixture mesh applies");
     }
 
@@ -125,6 +148,12 @@ fn textured_scene(
     customize: impl Fn(u32, &mut world::ObjectObservation),
 ) -> (Budget, Region, Mirror, BTreeMap<Uuid, Entity>) {
     let budget = Budget::default();
+    let (world, region) = textured_world(count, texture, customize);
+    let (mirror, identities) = world_mirror(&world, &budget);
+    (budget, region, mirror, identities)
+}
+
+fn textured_world(count: u32, texture: AssetId, customize: impl Fn(u32, &mut world::ObjectObservation)) -> (World, Region) {
     let object_count = usize::try_from(count).expect("fixture object count fits usize");
     let tombstone_bytes = WorldLimits::tombstone_bytes_for_count(object_count);
     let mut world = World::new(WorldLimits {
@@ -162,7 +191,10 @@ fn textured_scene(
         customize(local_id, &mut observation);
         let _applied = world.observe_object(observation).expect("fixture textured object applies");
     }
+    (world, region)
+}
 
+fn world_mirror(world: &World, budget: &Budget) -> (Mirror, BTreeMap<Uuid, Entity>) {
     let mut mirror = Mirror::default();
     let mut identities = BTreeMap::new();
     let mut cursor = None;
@@ -178,7 +210,7 @@ fn textured_scene(
         let Some(next) = next else { break };
         cursor = Some(next);
     }
-    (budget, region, mirror, identities)
+    (mirror, identities)
 }
 
 fn process_all(demand: &mut AssetDemand, mirror: &Mirror, identities: &BTreeMap<Uuid, Entity>) {
@@ -613,22 +645,43 @@ fn object_terrain_share_ticket() {
 fn visible_demand_displaces_background() {
     const SLOTS: u8 = 32;
     const FILLER: u32 = 64;
-    const BACKGROUND: u32 = (MAX_FACES / SLOTS as usize) as u32;
+    const BACKGROUND: u32 = 8;
     let texture = AssetId::new(Uuid::from_u128(703));
+    let face = |color| FaceAppearance { texture: Some(texture), color: [color, 0, 0, 255], ..FaceAppearance::default() };
+    let appearance =
+        || world::SurfaceAppearance::new(face(0), (1..SLOTS).map(|slot| (slot - 1, face(slot))).collect()).expect("fixture faces");
+
+    let probe_budget = Budget::new(Limits { memory_bytes: UNBOUNDED_MEMORY_BYTES, worker_threads: 1 });
+    let (_, _, mut probe_mirror, probe_identities) = textured_scene(1, texture, |_, observation| {
+        observation.pose = Some(world::Pose { position: Some(Vec3::new(100.0, 128.0, 32.0)), rotation: Some(math::Quat::IDENTITY) });
+        observation.surface_appearance = Some(appearance());
+    });
+    let mut probe_demand = AssetDemand::new(probe_budget.clone());
+    probe_demand.set_camera(camera());
+    let _ = probe_demand.step(&Mirror::default(), &BTreeMap::new());
+    let base_bytes = probe_budget.charged_bytes();
+    probe_demand.invalidate_all();
+    for change in probe_demand.step(&probe_mirror, &probe_identities) {
+        probe_mirror.apply(Change::Material(change));
+    }
+    let after_apply = probe_budget.charged_bytes();
+    probe_mirror.objects.clear();
+    let after_clear = probe_budget.charged_bytes();
+    let per_object = after_apply - base_bytes;
+    let materials_bytes = after_apply - after_clear;
+    let memory_bytes = base_bytes + usize::try_from(BACKGROUND).expect("background count fits usize") * per_object + materials_bytes;
+
     let farthest = FILLER + BACKGROUND;
     let visible = farthest + 1;
     let late = farthest + 2;
-    let (budget, _, mut mirror, identities) = textured_scene(late, texture, |local_id, observation| {
+    let (_, _, mut mirror, identities) = textured_scene(late, texture, |local_id, observation| {
         let x = match local_id {
             id if id == visible => 140.0,
             id if id == late => 60.0,
             id => 100.0 - id as f32 * 0.001,
         };
         observation.pose = Some(world::Pose { position: Some(Vec3::new(x, 128.0, 32.0)), rotation: Some(math::Quat::IDENTITY) });
-        let face = |color| FaceAppearance { texture: Some(texture), color: [color, 0, 0, 255], ..FaceAppearance::default() };
-        observation.surface_appearance = (local_id > FILLER).then(|| {
-            world::SurfaceAppearance::new(face(0), (1..SLOTS).map(|slot| (slot - 1, face(slot))).collect()).expect("fixture faces")
-        });
+        observation.surface_appearance = (local_id > FILLER).then(&appearance);
     });
     let entity = |local_id: u32| identities[&Uuid::from_u128(u128::from(local_id))];
     let settle = |demand: &mut AssetDemand, mirror: &mut Mirror| {
@@ -646,12 +699,12 @@ fn visible_demand_displaces_background() {
         mirror.objects.iter().all(|(entity, object)| object.materials().is_none() || demand.targets.contains_key(entity))
     };
     let materials = |mirror: &Mirror, local_id: u32| mirror.objects[&entity(local_id)].materials().map(<[_]>::len);
-    let mut demand = AssetDemand::new(budget);
+    let demand_budget = Budget::new(Limits { memory_bytes, worker_threads: 1 });
+    let mut demand = AssetDemand::new(demand_budget);
     demand.set_camera(camera());
     settle(&mut demand, &mut mirror);
 
     assert_eq!(materials(&mirror, visible), Some(usize::from(SLOTS)));
-    assert_eq!(demand.faces, MAX_FACES);
     assert_eq!(materials(&mirror, farthest), None, "the farthest background object is displaced in the step that admitted it");
     assert!((FILLER + 1..farthest).all(|local_id| materials(&mirror, local_id).is_some()));
     assert_eq!(materials(&mirror, late), None, "background demand never displaces");
@@ -962,4 +1015,270 @@ fn camera_scan_reaches_target() {
     }
 
     assert!(requested_high_lod, "a high UUID target receives its High LOD request under sustained low UUID updates");
+}
+
+#[test]
+fn turning_keeps_materials() {
+    const OBJECTS: u32 = 1_200;
+    const SLOTS: u8 = 32;
+    let texture = AssetId::new(Uuid::from_u128(704));
+    let (budget, _, mut mirror, identities) = textured_scene(OBJECTS, texture, |local_id, observation| {
+        let x = if local_id <= 600 { 140.0 } else { 100.0 };
+        observation.pose = Some(world::Pose { position: Some(Vec3::new(x, 128.0, 32.0)), rotation: Some(math::Quat::IDENTITY) });
+        let face = |color| FaceAppearance { texture: Some(texture), color: [color, 0, 0, 255], ..FaceAppearance::default() };
+        observation.surface_appearance =
+            Some(world::SurfaceAppearance::new(face(0), (1..SLOTS).map(|slot| (slot - 1, face(slot))).collect()).expect("fixture faces"));
+    });
+    let entity = |local_id: u32| identities[&Uuid::from_u128(u128::from(local_id))];
+    let settle = |demand: &mut AssetDemand, mirror: &mut Mirror| {
+        for _ in 0..64 {
+            if !demand.has_work() {
+                return;
+            }
+            for change in demand.step(mirror, &identities) {
+                mirror.apply(Change::Material(change));
+            }
+        }
+        panic!("bounded fixture scan finishes");
+    };
+    let assert_all_materials = |demand: &AssetDemand, mirror: &Mirror| {
+        let missing =
+            (1..=OBJECTS).find(|&local_id| mirror.objects[&entity(local_id)].materials().map(<[_]>::len) != Some(usize::from(SLOTS)));
+        assert_eq!(missing, None, "object {missing:?} missing materials");
+        assert!(demand.rejected_entities.is_empty(), "rejected entities: {}", demand.rejected_entities.len());
+    };
+
+    let mut demand = AssetDemand::new(budget);
+    demand.set_camera(camera());
+    settle(&mut demand, &mut mirror);
+    assert_all_materials(&demand, &mirror);
+
+    demand.set_camera(Camera::new(DVec3::new(128.0, 128.0, 32.0), Vec3::NEG_X, 1.0, [1280, 720]).expect("camera"));
+    settle(&mut demand, &mut mirror);
+    assert_all_materials(&demand, &mirror);
+}
+
+#[test]
+fn shrunk_slots_readmit_rejected() {
+    const ADMITTED: u32 = 8;
+    let shared_asset = AssetId::new(Uuid::from_u128(50_000));
+    let rejected_asset = AssetId::new(Uuid::from_u128(50_001));
+    let eight_faces = || {
+        let overrides = (1..8).map(|slot| (slot, FaceAppearance { color: [slot, 30, 60, 255], ..FaceAppearance::default() })).collect();
+        world::SurfaceAppearance::new(FaceAppearance::default(), overrides).expect("fixture faces")
+    };
+    let view_camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1280, 720]).expect("camera");
+
+    let probe_budget = Budget::new(Limits { memory_bytes: UNBOUNDED_MEMORY_BYTES, worker_threads: 1 });
+    let (_, mut probe_mirror, probe_identities) = mesh_scene_with(1, |_, observation| {
+        observation.shape = world::FieldUpdate::Set(world::Shape::Mesh { asset_id: shared_asset, flags: SculptFlags::default() });
+        observation.surface_appearance = Some(eight_faces());
+    });
+    let mut probe_demand = AssetDemand::new(probe_budget.clone());
+    probe_demand.set_camera(view_camera);
+    let _ = probe_demand.step(&Mirror::default(), &BTreeMap::new());
+    let base_bytes = probe_budget.charged_bytes();
+    probe_demand.invalidate_all();
+    for change in probe_demand.step(&probe_mirror, &probe_identities) {
+        probe_mirror.apply(Change::Material(change));
+    }
+    let per_object = probe_budget.charged_bytes() - base_bytes;
+    let memory_bytes = base_bytes + usize::try_from(ADMITTED).expect("admitted count fits usize") * per_object + per_object / 2;
+
+    let rejected_id = ADMITTED + 1;
+    let (_, mut mirror, identities) = mesh_scene_with(rejected_id, |local_id, observation| {
+        let asset = if local_id == rejected_id { rejected_asset } else { shared_asset };
+        observation.shape = world::FieldUpdate::Set(world::Shape::Mesh { asset_id: asset, flags: SculptFlags::default() });
+        observation.surface_appearance = Some(eight_faces());
+    });
+    let rejected_entity = identities[&Uuid::from_u128(u128::from(rejected_id))];
+    let settle = |demand: &mut AssetDemand, mirror: &mut Mirror| {
+        for _ in 0..64 {
+            if !demand.has_work() {
+                return;
+            }
+            for change in demand.step(mirror, &identities) {
+                mirror.apply(Change::Material(change));
+            }
+        }
+        panic!("bounded fixture scan finishes");
+    };
+
+    let demand_budget = Budget::new(Limits { memory_bytes, worker_threads: 1 });
+    let mut demand = AssetDemand::new(demand_budget);
+    demand.set_camera(view_camera);
+    settle(&mut demand, &mut mirror);
+
+    let initial_events: Vec<_> = iter::from_fn(|| demand.event()).collect();
+    let shared_header = initial_events
+        .iter()
+        .find_map(|change| match change {
+            AssetChange::Request(request) if matches!(request.request, Request::MeshHeader(id) if id == shared_asset) => {
+                Some(request.ticket)
+            }
+            _ => None,
+        })
+        .expect("shared mesh header requested");
+    let rejected_header = initial_events
+        .iter()
+        .find_map(|change| match change {
+            AssetChange::Request(request) if matches!(request.request, Request::MeshHeader(id) if id == rejected_asset) => {
+                Some(request.ticket)
+            }
+            _ => None,
+        })
+        .expect("rejected mesh starts provisional header demand");
+    assert!(
+        initial_events.iter().any(|change| matches!(change, AssetChange::Release(ticket) if *ticket == rejected_header)),
+        "provisional mesh header ticket is released on rejection"
+    );
+    assert!(demand.rejected_entities.contains(&rejected_entity));
+
+    let shared_bytes = mesh::asset_with_lod_faces(&[(2, 1)]);
+    assert_eq!(
+        invalidate_completed(
+            &mut demand,
+            &mirror,
+            shared_header,
+            ready_mesh_status(Request::MeshHeader(shared_asset), shared_bytes.clone())
+        ),
+        usize::try_from(ADMITTED).expect("admitted count fits usize")
+    );
+    settle(&mut demand, &mut mirror);
+
+    let lod_request = iter::from_fn(|| demand.event())
+        .find_map(|change| match change {
+            AssetChange::Request(request) if matches!(request.request, Request::MeshLod(block) if block.asset_id() == shared_asset) => {
+                Some(request)
+            }
+            _ => None,
+        })
+        .expect("shared mesh LOD requested");
+    assert_eq!(
+        invalidate_completed(&mut demand, &mirror, lod_request.ticket, ready_mesh_status(lod_request.request, shared_bytes)),
+        usize::try_from(ADMITTED).expect("admitted count fits usize")
+    );
+    settle(&mut demand, &mut mirror);
+
+    let readmitted_events: Vec<_> = iter::from_fn(|| demand.event()).collect();
+    let requeued_header = readmitted_events
+        .iter()
+        .find_map(|change| match change {
+            AssetChange::Request(request) if matches!(request.request, Request::MeshHeader(id) if id == rejected_asset) => {
+                Some(request.ticket)
+            }
+            _ => None,
+        })
+        .expect("rejected mesh requests its header again after admitted slots shrink");
+    assert!(!readmitted_events.iter().any(|change| matches!(change, AssetChange::Release(ticket) if *ticket == requeued_header)));
+    assert!(!demand.rejected_entities.contains(&rejected_entity));
+    assert!(demand.targets.contains_key(&rejected_entity));
+}
+
+#[test]
+fn freed_budget_readmits_rejected() {
+    let (_, _, mut mirror, identities) = textured_scene(1, AssetId::new(Uuid::from_u128(704)), |_, observation| {
+        posed_faces(observation, 140.0, 4);
+    });
+    let entity = identities[&Uuid::from_u128(1)];
+    let budget = Budget::new(Limits { memory_bytes: 64 << 20, worker_threads: 1 });
+    let mut demand = AssetDemand::new(budget.clone());
+    demand.set_camera(camera());
+    let _ = demand.step(&Mirror::default(), &BTreeMap::new());
+    let blocker = budget.reserve(budget.memory_bytes() - budget.charged_bytes()).expect("blocker fills the budget");
+    demand.invalidate_all();
+    settle_changes(&mut demand, &mut mirror, &identities);
+    assert!(demand.rejected_entities.contains(&entity), "a full budget rejects the object");
+
+    drop(blocker);
+    assert!(demand.retry_admission(), "freed memory schedules a rejected retry");
+    settle_changes(&mut demand, &mut mirror, &identities);
+    assert!(demand.targets.contains_key(&entity), "the rejected object is admitted once memory frees");
+}
+
+#[test]
+fn displacement_frees_missing_faces() {
+    let (_, _, mut mirror, identities) = textured_scene(2, AssetId::new(Uuid::from_u128(705)), |local_id, observation| match local_id {
+        1 => posed_faces(observation, 100.0, 2),
+        _ => posed_faces(observation, 140.0, 8),
+    });
+    let background = identities[&Uuid::from_u128(1)];
+    let visible = identities[&Uuid::from_u128(2)];
+    let budget = Budget::new(Limits { memory_bytes: 64 << 20, worker_threads: 1 });
+    let mut demand = AssetDemand::new(budget.clone());
+    demand.set_camera(camera());
+    settle_changes(&mut demand, &mut mirror, &identities);
+    let background_faces = demand.targets[&background].faces;
+    let visible_faces = demand.targets[&visible].faces;
+    assert!(background_faces > 0 && background_faces < visible_faces, "background {background_faces}, visible {visible_faces}");
+
+    demand.remove(visible);
+    let room = (visible_faces - 1) * FACE_METADATA_BYTES;
+    let _blocker = budget.reserve(budget.memory_bytes() - budget.charged_bytes() - room).expect("blocker leaves one face short");
+    demand.invalidate_all();
+    settle_changes(&mut demand, &mut mirror, &identities);
+    assert!(demand.targets.contains_key(&visible), "displacing one background object covers the missing face");
+}
+
+#[test]
+fn growth_charges_added_faces() {
+    let budget = Budget::new(Limits { memory_bytes: 64 << 20, worker_threads: 1 });
+    let (mut world, region) = textured_world(1, AssetId::new(Uuid::from_u128(706)), |_, observation| posed_faces(observation, 100.0, 2));
+    let (mut mirror, identities) = world_mirror(&world, &budget);
+    let entity = identities[&Uuid::from_u128(1)];
+    let mut demand = AssetDemand::new(budget.clone());
+    demand.set_camera(camera());
+    settle_changes(&mut demand, &mut mirror, &identities);
+    let small_faces = demand.targets[&entity].faces;
+
+    let mut observation = world::ObjectObservation::new(
+        world::UpdateSource::new(region, 1, OrderEvidence::Ordered(2), 0),
+        Uuid::from_u128(1),
+        NonZeroU32::MIN,
+        world::Kind::Object,
+        world::ParentUpdate::Root,
+    );
+    posed_faces(&mut observation, 100.0, 8);
+    let _applied = world.observe_object(observation).expect("grown appearance applies");
+    let (mut grown, grown_identities) = world_mirror(&world, &budget);
+    assert_eq!(grown_identities, identities);
+    let probe = Budget::new(Limits { memory_bytes: UNBOUNDED_MEMORY_BYTES, worker_threads: 1 });
+    let mut probe_demand = AssetDemand::new(probe);
+    probe_demand.set_camera(camera());
+    let (mut probe_mirror, _) = world_mirror(&world, &budget);
+    settle_changes(&mut probe_demand, &mut probe_mirror, &identities);
+    let large_faces = probe_demand.targets[&entity].faces;
+    assert!(small_faces < large_faces, "small {small_faces}, large {large_faces}");
+
+    let room = (large_faces - small_faces) * FACE_METADATA_BYTES;
+    let _blocker = budget.reserve(budget.memory_bytes() - budget.charged_bytes() - room).expect("blocker leaves the added faces");
+    demand.invalidate_all();
+    for _ in 0..64 {
+        if !demand.has_work() {
+            break;
+        }
+        for change in demand.step(&grown, &identities) {
+            grown.apply(Change::Material(change));
+        }
+        assert!(demand.targets.contains_key(&entity), "growth reserves only the added faces and is never rejected");
+    }
+    assert_eq!(demand.targets.get(&entity).map(|target| target.faces), Some(large_faces));
+}
+
+fn posed_faces(observation: &mut world::ObjectObservation, x: f32, faces: u8) {
+    observation.pose = Some(world::Pose { position: Some(Vec3::new(x, 128.0, 32.0)), rotation: Some(math::Quat::IDENTITY) });
+    let overrides = (1..faces).map(|slot| (slot, FaceAppearance { color: [slot, 30, 60, 255], ..FaceAppearance::default() })).collect();
+    observation.surface_appearance = Some(world::SurfaceAppearance::new(FaceAppearance::default(), overrides).expect("fixture faces"));
+}
+
+fn settle_changes(demand: &mut AssetDemand, mirror: &mut Mirror, identities: &BTreeMap<Uuid, Entity>) {
+    for _ in 0..64 {
+        if !demand.has_work() {
+            return;
+        }
+        for change in demand.step(mirror, identities) {
+            mirror.apply(Change::Material(change));
+        }
+    }
+    panic!("bounded fixture scan finishes");
 }
