@@ -273,8 +273,7 @@ impl SceneView {
                         .flatten()
                         .filter(|previous| *previous != entity);
                     if let Some(previous) = reused_entity {
-                        self.mirror.objects.remove(&previous);
-                        self.mirror.invalidations.remove(&previous);
+                        let _ = self.mirror.remove_object(previous);
                         self.remove_object_order(incoming_id, previous);
                         changes.reconcile_all = true;
                         visibility_changed = true;
@@ -507,6 +506,9 @@ impl SceneView {
     }
     pub(crate) fn object_is_live(&self, entity: Entity) -> bool {
         self.object(entity).is_some()
+    }
+    pub(crate) fn children(&self, entity: Entity) -> impl Iterator<Item = Entity> + '_ {
+        self.session.is_active().then(|| self.mirror.children.get(&entity)).flatten().into_iter().flatten().copied()
     }
     pub(crate) fn visibility_version(&self) -> VisibilityVersion {
         VisibilityVersion { sequence: self.visibility_sequence, active: self.session.is_active() }

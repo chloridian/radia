@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     f64::consts::TAU,
     time::{Duration, Instant},
 };
@@ -9,7 +9,7 @@ use world::{Entity, MotionUpdateKind, Parent, Region, WorldPose, WorldTransform}
 
 use super::SceneView;
 
-const MAX_PARENT_EDGES: usize = 16;
+pub(crate) const MAX_PARENT_EDGES: usize = 16;
 const MAX_REGION_HEIGHT: f64 = 4096.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,24 +140,6 @@ pub(in crate::scene) fn motion_changed(previous: MotionSample, next: MotionSampl
 
 pub(crate) fn needs_evaluation(view: &SceneView, entity: Entity) -> bool {
     motion_in_chain(view, entity, 0)
-}
-
-pub(crate) fn has_changed_ancestor(view: &SceneView, entity: Entity, changed: &HashSet<Entity>) -> bool {
-    let mut ancestor = view.object(entity).and_then(|object| match object.detail().summary.parent {
-        Parent::Resolved(parent) => Some(parent),
-        Parent::Root | Parent::Unknown | Parent::Pending { .. } => None,
-    });
-    for _ in 0..MAX_PARENT_EDGES {
-        let Some(entity) = ancestor else { return false };
-        if changed.contains(&entity) {
-            return true;
-        }
-        ancestor = view.object(entity).and_then(|object| match object.detail().summary.parent {
-            Parent::Resolved(parent) => Some(parent),
-            Parent::Root | Parent::Unknown | Parent::Pending { .. } => None,
-        });
-    }
-    false
 }
 
 fn motion_in_chain(view: &SceneView, entity: Entity, depth: usize) -> bool {
@@ -820,7 +802,6 @@ mod tests {
 
         let parent = view.object(parent_entity).expect("updated parent");
         assert!(parent.motion_changed_from(&previous));
-        assert!(has_changed_ancestor(&view, child_entity, &HashSet::from([parent_entity])));
         assert!(view.changes_since(&version).unwrap().any(|change| change.motion_changed.contains(&parent_entity)));
         let now = parent.motion_state().sampled_at + Duration::from_millis(16);
         fill_placement_pair(&view, now, now, &[child_entity], &mut placements, &mut future_placements, &mut regions);
