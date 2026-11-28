@@ -367,15 +367,15 @@ mod benches {
         }
         assert!(!fixture.prepare.stats().rebuild_pending, "retired fixture must settle before timing");
         assert!(fixture.prepare.stats().instances > 0);
+        let cameras = [camera_at(50.0, 0.0, 511.0), camera];
+        let mut generation = 0usize;
         bencher.bench_local(|| {
-            fixture.sample(&device, &queue, camera);
+            generation = generation.wrapping_add(1);
+            fixture.sample(&device, &queue, cameras[generation % 2]);
             let stats = fixture.prepare.stats();
             assert_eq!(stats.pending_meshes, 0);
             assert_eq!(stats.pending_textures, 0);
             assert_eq!(stats.omitted_faces, 0);
-            assert_eq!(stats.layouts, 0);
-            assert_eq!(stats.items_updated, 0);
-            assert_eq!(stats.faces_patched, 0);
             black_box(stats);
         });
         report("settled_retired", fixture.prepare.stats());
