@@ -1151,7 +1151,10 @@ impl DrawList {
         let complete = matches!(build.phase, LayoutPhase::Commit);
         if complete {
             let commit_started = Instant::now();
-            for pending in build.commands.values() {
+            for ((group, _), pending) in &build.commands {
+                if self.groups.key(*group).is_none_or(|key| key.blended()) {
+                    continue;
+                }
                 for offset in pending.first.saturating_add(pending.cursor)..pending.first.saturating_add(pending.count) {
                     if let Ok(slot) = u32::try_from(offset) {
                         mark_unfilled_slot(&self.committed.instance_bytes, &build.state.instance_bytes, &mut build.state.dirty_slots, slot);
@@ -1743,7 +1746,7 @@ fn mark_unfilled_slot(active: &[u8], staging: &[u8], dirty_slots: &mut Vec<u32>,
     let start = slot as usize * INSTANCE_BYTES;
     let previous = active.get(start..start + INSTANCE_BYTES);
     let current = staging.get(start..start + INSTANCE_BYTES);
-    if previous.is_some_and(|previous| current != Some(previous)) {
+    if previous.zip(current).is_some_and(|(previous, current)| previous != current) {
         dirty_slots.push(slot);
     }
 }
