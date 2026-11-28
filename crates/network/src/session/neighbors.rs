@@ -78,8 +78,7 @@ impl SessionState {
                 )
                 .await;
         }
-        let primary_endpoint = self.simulators.get(&self.primary_id).map_or(self.session.simulator_address, |primary| primary.endpoint);
-        if (endpoint == primary_endpoint && handoff.is_none())
+        if (endpoint == self.session.simulator_address && handoff.is_none())
             || self.simulators.iter().any(|(active_id, active)| {
                 active.is_current()
                     && active.region_handle != Some(region_handle)
