@@ -185,10 +185,21 @@ fn canceled_build_keeps_committed_patches() {
         }
     }
     assert_matches!(list.staged_progress(), Some(("fill", cursor, ..)) if cursor > 500, "the build staged the target face");
-    list.hide_item(items.items.get_mut(target).expect("target item"));
+    let staged = target_slot(&items);
+    list.hide_item(target, items.items.get_mut(target).expect("target item"));
     assert!(instance_bytes(&list, next).iter().all(|byte| *byte == 0), "removing a staged item clears its committed instance");
-    let progress = list.advance_layout(&mut items.items, Duration::ZERO).expect("the stale build is observed");
-    assert!(progress.stale, "removing a staged item invalidates the build");
+    let mut completed = false;
+    for _ in 0..10_000 {
+        if let Some(progress) = list.advance_layout(&mut items.items, Duration::ZERO) {
+            assert!(!progress.stale, "hiding a staged item must not stale the pending build");
+            if progress.complete {
+                completed = true;
+                break;
+            }
+        }
+    }
+    assert!(completed, "the pending build commits after hiding a staged item");
+    assert!(instance_bytes(&list, staged).iter().all(|byte| *byte == 0), "hiding a staged item keeps its staged slot zeroed after commit");
 }
 
 #[test]
@@ -441,6 +452,147 @@ fn evicted_mesh_never_draws() {
         if !building {
             break;
         }
+    }
+}
+
+#[test]
+fn forgotten_index_reuse_skipped() {
+    let (_region_world, region) = registered_region();
+    let meshes = scene::distinct_meshes_for_test(2);
+    let (kept_mesh, reused_mesh) = (&meshes[0], &meshes[1]);
+    let textures = [loaded_texture(9_200_001), loaded_texture(9_200_002)];
+    let camera = camera(0.0);
+    let origin = scene_origin(camera.position());
+    let multi_face_item = |id: ItemId, mesh: &SharedMesh, list: &mut DrawList| {
+        let mut item = new_item(id, 0, 0.0, origin, mesh, region, &textures, list);
+        let center = item.info.centers[0];
+        let scale = item.scale;
+        for _ in 1..24 {
+            item.faces.push(new_face(id, 0, mesh, center, scale, &textures, list));
+        }
+        item
+    };
+
+    for (distinct, replacement_mesh) in [(false, kept_mesh), (true, reused_mesh)] {
+        let mut saw_fill = false;
+        for step in 0.. {
+            let mut items = FrameCache::default();
+            let mut list = DrawList::new(usize::MAX);
+            let visible = (1..=3u8)
+                .map(|id| items.insert_item(multi_face_item(item_id(id), kept_mesh, &mut list)).expect("test item index"))
+                .collect::<Vec<_>>();
+            let target = visible[1];
+
+            assert!(list.request_layout(&visible, camera));
+            let mut building = true;
+            for _ in 0..step {
+                let _ = list.advance_layout(&mut items.items, Duration::ZERO);
+                building = list.layout_building();
+                if !building {
+                    break;
+                }
+            }
+            if list.staged_progress().is_some_and(|(phase, ..)| phase == "fill") {
+                saw_fill = true;
+            }
+            list.forget_item(target);
+            let (removed, _) = items.remove_item(target).expect("removed target item");
+            list.release_faces(&removed.faces);
+            let reused = items.insert_item(multi_face_item(item_id(9), replacement_mesh, &mut list)).expect("reused item index");
+            assert_eq!(reused, target, "slab reuses the removed index immediately");
+
+            settle(&mut list, &mut items.items);
+            let replacement = items.items.get(reused).expect("reused item exists");
+            assert!(
+                replacement.faces.iter().all(|face| face.slot.is_none()),
+                "reused item must not receive a slot from the pending build (distinct={distinct}, step={step})"
+            );
+            if distinct {
+                assert!(!list.committed_pins_mesh(reused_mesh.id()), "no committed mesh reference for reused item (step={step})");
+                assert!(
+                    list.draws().iter().all(|draw| draw.mesh != reused_mesh.id()),
+                    "no committed draw references reused item's mesh (step={step})"
+                );
+            }
+            for survivor in [visible[0], visible[2]] {
+                let item = items.items.get(survivor).expect("surviving item exists");
+                assert!(item.faces.iter().all(|face| face.slot.is_some()), "surviving items still receive slots (step={step})");
+            }
+            if !building {
+                break;
+            }
+        }
+        assert!(saw_fill, "test exercised index reuse during the fill phase (distinct={distinct})");
+    }
+}
+
+#[test]
+fn removed_item_slots_upload() {
+    let (_region_world, region) = registered_region();
+    let meshes = scene::distinct_meshes_for_test(1);
+    let mesh = &meshes[0];
+    let textures = [loaded_texture(9_300_001), loaded_texture(9_300_002)];
+    let camera = camera(0.0);
+    let origin = scene_origin(camera.position());
+    for style in [0u8, 3] {
+        let multi_face_item = |id: ItemId, list: &mut DrawList| {
+            let mut item = new_item(id, style, 0.0, origin, mesh, region, &textures, list);
+            let center = item.info.centers[0];
+            let scale = item.scale;
+            for _ in 1..24 {
+                item.faces.push(new_face(id, style, mesh, center, scale, &textures, list));
+            }
+            item
+        };
+        let mut saw_fill = false;
+        for step in 0.. {
+            let mut items = FrameCache::default();
+            let mut list = DrawList::new(usize::MAX);
+            let visible =
+                [1u8, 2, 4].map(|id| items.insert_item(multi_face_item(item_id(id), &mut list)).expect("test item index")).to_vec();
+            assert!(list.request_layout(&visible, camera));
+            settle(&mut list, &mut items.items);
+            let mut gpu = list.committed.instance_bytes.clone();
+            list.committed.dirty_slots.clear();
+
+            assert!(list.request_layout(&visible, camera));
+            let mut building = true;
+            for _ in 0..step {
+                let _ = list.advance_layout(&mut items.items, Duration::ZERO);
+                building = list.layout_building();
+                if !building {
+                    break;
+                }
+            }
+            saw_fill |= list.staged_progress().is_some_and(|(phase, ..)| phase == "fill");
+            let target = visible[1];
+            list.forget_item(target);
+            let (removed, _) = items.remove_item(target).expect("removed target item");
+            list.release_faces(&removed.faces);
+            settle(&mut list, &mut items.items);
+
+            let slots = list.committed.instance_bytes.len() / INSTANCE_BYTES;
+            gpu.resize(list.committed.instance_bytes.len(), 0);
+            for slot in list.committed.dirty_slots.iter().copied() {
+                assert!((slot as usize) < slots, "dirty slot {slot} lies outside the committed buffer (style={style}, step={step})");
+                let start = slot as usize * INSTANCE_BYTES;
+                gpu[start..start + INSTANCE_BYTES].copy_from_slice(&list.committed.instance_bytes[start..start + INSTANCE_BYTES]);
+            }
+            for draw in list.draws() {
+                for slot in draw.first..draw.first + draw.count {
+                    let start = slot as usize * INSTANCE_BYTES;
+                    assert_eq!(
+                        gpu.get(start..start + INSTANCE_BYTES),
+                        list.committed.instance_bytes.get(start..start + INSTANCE_BYTES),
+                        "a partial upload leaves stale bytes at drawn slot {slot} (style={style}, step={step})"
+                    );
+                }
+            }
+            if !building {
+                break;
+            }
+        }
+        assert!(saw_fill, "test removed an item during the fill phase (style={style})");
     }
 }
 
@@ -728,6 +880,7 @@ fn staged_entry_count(build: &super::LayoutBuild) -> usize {
     let state = &build.state;
     build.uploads.len()
         + build.visible.len()
+        + build.removed.len()
         + build.evicted.len()
         + build.layout_items.len()
         + build.selected_items.len()
@@ -768,6 +921,7 @@ fn staged_allocation_bytes(build: &super::LayoutBuild) -> usize {
     [
         set_bytes(&build.uploads),
         vec_bytes(&build.visible),
+        set_bytes(&build.removed),
         set_bytes(&build.evicted),
         vec_bytes(&build.layout_items),
         set_bytes(&build.selected_items),
