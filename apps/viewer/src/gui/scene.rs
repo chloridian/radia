@@ -38,6 +38,13 @@ pub(super) struct State {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WindowClose {
+    Ignored,
+    Auxiliary,
+    SceneClosed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MainWindow {
     Login,
     Starting(u64),
@@ -59,17 +66,18 @@ impl State {
         Self { main: MainWindow::Login, scene_window: None, scene_view: None, chat_window: None }
     }
 
-    pub(super) fn window_closed(&mut self, closed_window_id: WindowId) -> bool {
+    pub(super) fn window_closed(&mut self, closed_window_id: WindowId) -> WindowClose {
+        let session_active = matches!(self.main, MainWindow::Starting(_) | MainWindow::Scene(_));
         if self.chat_window.is_some_and(|window| window.window_id() == closed_window_id) {
             self.chat_window = None;
-            return matches!(self.main, MainWindow::Starting(_) | MainWindow::Scene(_));
+            return if session_active { WindowClose::Auxiliary } else { WindowClose::Ignored };
         }
         if self.scene_window.is_some_and(|window| window.window_id() == closed_window_id) {
             self.scene_window = None;
             self.scene_view = None;
-            return !matches!(self.main, MainWindow::Starting(_) | MainWindow::Scene(_));
+            return if session_active { WindowClose::SceneClosed } else { WindowClose::Auxiliary };
         }
-        matches!(self.main, MainWindow::Starting(_) | MainWindow::Scene(_))
+        if session_active { WindowClose::Auxiliary } else { WindowClose::Ignored }
     }
 }
 

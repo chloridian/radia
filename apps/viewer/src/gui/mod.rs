@@ -207,8 +207,13 @@ fn install_lifecycle(session_lifecycle: Arc<SessionLifecycle>, cx: &mut App) {
         if closing_main {
             lifecycle.login_window = None;
         }
-        if lifecycle.scene.window_closed(closed_window_id) {
-            return;
+        match lifecycle.scene.window_closed(closed_window_id) {
+            scene::WindowClose::Auxiliary => return,
+            scene::WindowClose::SceneClosed => {
+                shutdown(cx);
+                return;
+            }
+            scene::WindowClose::Ignored => {}
         }
         if closing_main || cx.windows().is_empty() {
             shutdown(cx);
