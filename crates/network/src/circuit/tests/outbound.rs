@@ -193,10 +193,18 @@ async fn shutdown_sends_only_control_acks() {
         circuit.prepare_message(queued_for_test(TrafficClass::Fair).message, Delivery::Reliable).expect("prepare original reliable send");
     circuit.commit_sent(original, Instant::now() - Duration::from_secs(6)).expect("record original send");
     let mut queue = OutboundQueue::new();
+    let mut deferred_retries = HashMap::new();
     assert!(queue.push(queued_for_test(TrafficClass::Fair), None).is_ok());
     assert!(queue.push(queued_for_test(TrafficClass::Control), None).is_ok());
 
-    let control = prepare_shutdown_send(&socket, &pacer, &mut circuit, &mut queue, false)
+    let retry = prepare_shutdown_send(&socket, &pacer, &mut circuit, &mut queue, &mut deferred_retries, false)
+        .map_err(|(_, error)| error)
+        .expect("prepare shutdown retransmission")
+        .expect("overdue reliable send should be retransmitted");
+    let packet = send_pending(retry, &mut circuit, &simulator).await;
+    assert!(packet.is_resent());
+
+    let control = prepare_shutdown_send(&socket, &pacer, &mut circuit, &mut queue, &mut deferred_retries, false)
         .map_err(|(_, error)| error)
         .expect("prepare shutdown control")
         .expect("queued control should be sent");
@@ -205,15 +213,15 @@ async fn shutdown_sends_only_control_acks() {
     assert_eq!(packet.message(), &Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 1 } }));
     assert_eq!(queue.messages.len(), 1, "shutdown leaves Fair work queued");
     assert!(
-        prepare_shutdown_send(&socket, &pacer, &mut circuit, &mut queue, false)
+        prepare_shutdown_send(&socket, &pacer, &mut circuit, &mut queue, &mut deferred_retries, false)
             .map_err(|(_, error)| error)
-            .expect("do not retry or send Fair work")
+            .expect("do not send Fair work")
             .is_none()
     );
 
     let admission = circuit.prepare_receive(42, true, [], Instant::now()).expect("prepare inbound ACK requirement");
     circuit.commit_receive(admission);
-    let ack = prepare_shutdown_send(&socket, &pacer, &mut circuit, &mut queue, true)
+    let ack = prepare_shutdown_send(&socket, &pacer, &mut circuit, &mut queue, &mut deferred_retries, true)
         .map_err(|(_, error)| error)
         .expect("prepare shutdown ACK")
         .expect("pending acknowledgement should be sent");

@@ -553,6 +553,7 @@ pub(super) fn prepare_shutdown_send(
     pacer: &ConnectionPacer,
     circuit: &mut Circuit,
     queue: &mut OutboundQueue,
+    deferred_retries: &mut HashMap<u32, Instant>,
     send_ack_now: bool,
 ) -> Result<Option<PendingSend>, (Option<Box<QueuedMessage>>, ConnectionError)> {
     if send_ack_now && circuit.has_pending_acks() {
@@ -560,6 +561,18 @@ pub(super) fn prepare_shutdown_send(
         if let Some(prepared) = prepared {
             return Ok(Some(begin_send(Arc::clone(socket), pacer.handle(), prepared, TrafficClass::Control, None)));
         }
+    }
+
+    let now = Instant::now();
+    if let Some(prepared) = circuit.prepare_retransmission(now).map_err(|error| (None, error.into()))? {
+        let retry_started_at = match deferred_retries.entry(prepared.sequence()) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                pacer.handle().report_loss();
+                *entry.insert(now)
+            }
+        };
+        return Ok(Some(begin_retry_send(Arc::clone(socket), pacer.handle(), prepared, retry_started_at + MAX_SEND_AGE)));
     }
 
     if let Some(queued) = queue.pop_control_matching(|queued| can_prepare_queued(circuit, queued)) {

@@ -251,6 +251,10 @@ impl Circuit {
         self.pending.len() < MAX_PENDING_PACKETS
     }
 
+    pub(crate) fn clear_pending_reliable(&mut self) {
+        self.pending.clear();
+    }
+
     pub(crate) fn prepare_message(&self, message: Message, delivery: Delivery) -> Result<PreparedDatagram, CircuitError> {
         self.prepare_message_with_ping(message, delivery, None)
     }
@@ -600,12 +604,11 @@ impl fmt::Display for ReceiveError {
 pub enum Delivery {
     Unreliable,
     Reliable,
-    ReliableNoRetry,
 }
 
 impl Delivery {
     fn is_reliable(self) -> bool {
-        !matches!(self, Self::Unreliable)
+        matches!(self, Self::Reliable)
     }
 
     pub(crate) fn tracks_reliable(self) -> bool {
