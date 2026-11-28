@@ -1,6 +1,6 @@
 use std::{
     assert_matches,
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     num::NonZeroU32,
     time::{Duration, Instant},
 };
@@ -10,8 +10,8 @@ use proptest::prelude::*;
 use uuid::Uuid;
 use wgpu::{CommandEncoderDescriptor, Device, DeviceDescriptor, TextureFormat};
 use world::{
-    Appearance, Entity, FaceAppearance, FieldUpdate, Kind, LinearMotion, ObjectObservation, ObjectPatch, OrderEvidence, ParentUpdate, Pose,
-    PrimShape, Region, RegionInfo, Shape, SurfaceAppearance, UpdateSource, World, WorldLimits,
+    Appearance, Entity, FaceAppearance, FieldUpdate, Kind, LinearMotion, ObjectObservation, ObjectPatch, OrderEvidence, Parent,
+    ParentUpdate, Pose, PrimShape, Region, RegionInfo, Shape, SurfaceAppearance, UpdateSource, World, WorldLimits,
 };
 
 use super::{CacheRebuild, CacheUpdate, FrameCache, ItemId, MeshInfoBuild};
@@ -20,7 +20,7 @@ use crate::{
     geometry::{
         GeometryRenderer, ShadingMode, fixtures,
         instance::instance_base,
-        items::{CachedItem, CachedReplacement, ItemIndex, mesh_info},
+        items::{CachedItem, CachedReplacement, mesh_info},
     },
     scene::{Budget, Camera, RANGE_MARGIN, Reconciler, SceneView, SharedMesh, motion},
     test_support,
@@ -427,7 +427,6 @@ fn item(id: ItemId, mesh: &SharedMesh, region: Region) -> CachedItem {
     CachedItem {
         id,
         entity: None,
-        parent: None,
         region,
         mesh: mesh.clone(),
         info: mesh_info(mesh),
@@ -454,7 +453,7 @@ const MOTION_SLOTS: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
 enum MotionOp {
-    Add { slot: usize, parent: Option<usize>, moving: bool },
+    Add { slot: usize, parent: Option<usize>, moving: bool, cached: bool },
     Remove { slot: usize },
     Reparent { slot: usize, parent: Option<usize> },
     SetMotion { slot: usize, velocity_x: i8, omega_z: i8 },
@@ -465,7 +464,8 @@ fn motion_op_strategy() -> impl Strategy<Value = MotionOp> {
     let slot = 0..MOTION_SLOTS;
     let parent = prop::option::of(0..MOTION_SLOTS);
     prop_oneof![
-        3 => (slot.clone(), parent.clone(), any::<bool>()).prop_map(|(slot, parent, moving)| MotionOp::Add { slot, parent, moving }),
+        3 => (slot.clone(), parent.clone(), any::<bool>(), any::<bool>())
+            .prop_map(|(slot, parent, moving, cached)| MotionOp::Add { slot, parent, moving, cached }),
         2 => slot.clone().prop_map(|slot| MotionOp::Remove { slot }),
         3 => (slot.clone(), parent).prop_map(|(slot, parent)| MotionOp::Reparent { slot, parent }),
         4 => (slot, -1i8..=1i8, -1i8..=1i8).prop_map(|(slot, velocity_x, omega_z)| MotionOp::SetMotion { slot, velocity_x, omega_z }),
@@ -485,61 +485,6 @@ fn creates_cycle(parents: &[Option<usize>; MOTION_SLOTS], child: usize, candidat
     true
 }
 
-fn expected_children(cache: &FrameCache) -> HashMap<Entity, HashSet<ItemIndex>> {
-    let mut expected: HashMap<Entity, HashSet<ItemIndex>> = HashMap::new();
-    for (index, item) in cache.items.iter() {
-        if let Some(parent) = item.parent {
-            expected.entry(parent).or_default().insert(index);
-        }
-    }
-    expected
-}
-
-#[test]
-fn children_index_tracks_lifecycle() {
-    let (world, region, _scene, view) = removable_object_scene(3, 8);
-    let mesh = view.objects().next().expect("fixture object").mesh().expect("fixture mesh").1.clone();
-    let parent_a = world.entity(Uuid::from_u128(1)).expect("parent a");
-    let parent_b = world.entity(Uuid::from_u128(2)).expect("parent b");
-    let mut cache = FrameCache::default();
-
-    let mut first = item((2, 10, 0), &mesh, region);
-    first.parent = Some(parent_a);
-    let first_index = cache.insert_item(first).expect("first item");
-    assert_eq!(cache.children, expected_children(&cache));
-
-    cache.set_item_parent(first_index, Some(parent_b));
-    assert_eq!(cache.children, expected_children(&cache));
-    assert!(!cache.children.contains_key(&parent_a));
-
-    let mut overwritten = item((2, 10, 0), &mesh, region);
-    overwritten.parent = Some(parent_a);
-    assert_eq!(cache.insert_item(overwritten), Some(first_index));
-    assert_eq!(cache.children, expected_children(&cache));
-    assert!(!cache.children.contains_key(&parent_b));
-
-    let mut replacement = item((2, 10, 0), &mesh, region);
-    replacement.parent = Some(parent_b);
-    cache.items.get_mut(first_index).expect("first item").replacement = Some(Box::new(CachedReplacement { item: replacement }));
-    cache.replacements.insert(first_index);
-    assert!(cache.promote_replacement(first_index).is_some());
-    assert_eq!(cache.children, expected_children(&cache));
-    assert!(!cache.children.contains_key(&parent_a));
-
-    assert!(cache.remove_item(first_index).is_some());
-    assert!(cache.children.is_empty());
-
-    let mut reused = item((2, 11, 0), &mesh, region);
-    reused.parent = Some(parent_a);
-    let reused_index = cache.insert_item(reused).expect("reused slot");
-    assert_eq!(reused_index, first_index);
-    assert_eq!(cache.children, expected_children(&cache));
-    assert!(!cache.children.contains_key(&parent_b));
-
-    cache.clear_items();
-    assert!(cache.children.is_empty());
-}
-
 fn expected_moving_entities(geometry: &GeometryRenderer, view: &SceneView) -> HashSet<Entity> {
     geometry
         .cache
@@ -548,6 +493,150 @@ fn expected_moving_entities(geometry: &GeometryRenderer, view: &SceneView) -> Ha
         .filter_map(|(_, item)| item.entity.filter(|entity| view.object_is_live(*entity)))
         .filter(|entity| motion::needs_evaluation(view, *entity))
         .collect()
+}
+
+fn has_changed_ancestor(view: &SceneView, entity: Entity, changed: &HashSet<Entity>) -> bool {
+    let mut ancestor = view.object(entity).and_then(|object| match object.detail().summary.parent {
+        Parent::Resolved(parent) => Some(parent),
+        Parent::Root | Parent::Unknown | Parent::Pending { .. } => None,
+    });
+    for _ in 0..motion::MAX_PARENT_EDGES {
+        let Some(current) = ancestor else { return false };
+        if changed.contains(&current) {
+            return true;
+        }
+        ancestor = view.object(current).and_then(|object| match object.detail().summary.parent {
+            Parent::Resolved(parent) => Some(parent),
+            Parent::Root | Parent::Unknown | Parent::Pending { .. } => None,
+        });
+    }
+    false
+}
+
+fn expected_motion_entities(
+    geometry: &GeometryRenderer,
+    view: &SceneView,
+    previous_moving: &HashSet<Entity>,
+    background: &HashSet<Entity>,
+    motion_changed: &HashSet<Entity>,
+) -> HashSet<Entity> {
+    let mut stopped_background = Vec::new();
+    let mut newly_moving = false;
+    for &entity in background {
+        let was_moving = previous_moving.contains(&entity);
+        let is_moving =
+            geometry.cache.objects.contains_key(&entity) && view.object_is_live(entity) && motion::needs_evaluation(view, entity);
+        if is_moving {
+            newly_moving |= !was_moving;
+        } else if was_moving {
+            stopped_background.push(entity);
+        }
+    }
+    if !motion_changed.is_empty() || newly_moving {
+        geometry
+            .cache
+            .items
+            .iter()
+            .filter_map(|(_, item)| item.entity.filter(|entity| view.object_is_live(*entity)))
+            .filter(|entity| motion::needs_evaluation(view, *entity) || has_changed_ancestor(view, *entity, motion_changed))
+            .collect()
+    } else {
+        let mut entities = expected_moving_entities(geometry, view);
+        entities.extend(stopped_background);
+        entities
+    }
+}
+
+#[test]
+fn uncached_intermediate_propagates_motion() {
+    let (device, queue) = Device::noop(&DeviceDescriptor::default());
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb, Limits::default());
+    let mut world = World::new(WorldLimits {
+        max_regions: 1,
+        max_entities: 16,
+        max_entities_per_region: 16,
+        max_tombstones_per_region: 16,
+        max_tombstones: 16,
+        max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(16),
+        max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(16),
+        max_journal_entries: 32,
+        max_journal_changes: 64,
+        max_region_name_bytes: 64,
+        max_recovery_targets: 16,
+    });
+    let region = world.register_region().expect("fixture region registers");
+    let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..Default::default() }).expect("fixture origin applies");
+    let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).expect("fixture camera");
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    scene.set_camera(camera);
+
+    let mut order = 1u64;
+    let mut next_source = || {
+        let current = order;
+        order += 1;
+        UpdateSource::new(region, current as u32, OrderEvidence::Ordered(current), 0)
+    };
+    let root_local = NonZeroU32::new(1).expect("root local id");
+    let mid_local = NonZeroU32::new(2).expect("intermediate local id");
+    let child_local = NonZeroU32::new(3).expect("child local id");
+
+    let mut root = ObjectObservation::new(next_source(), Uuid::from_u128(1), root_local, Kind::Object, ParentUpdate::Root);
+    root.pose = Some(Pose { position: Some(Vec3::new(10.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+    root.scale = Some(Vec3::ONE);
+    let _ = world.observe_object(root).expect("root adds");
+
+    let mut mid = ObjectObservation::new(next_source(), Uuid::from_u128(2), mid_local, Kind::Object, ParentUpdate::Local(root_local));
+    mid.pose = Some(Pose { position: Some(Vec3::new(1.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+    mid.scale = Some(Vec3::ONE);
+    let _ = world.observe_object(mid).expect("intermediate adds");
+
+    let mut child = ObjectObservation::new(next_source(), Uuid::from_u128(3), child_local, Kind::Object, ParentUpdate::Local(mid_local));
+    child.pose = Some(Pose { position: Some(Vec3::new(1.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+    child.scale = Some(Vec3::ONE);
+    child.shape = FieldUpdate::Set(Shape::Prim(PrimShape::default()));
+    child.appearance = FieldUpdate::Set(Appearance::Surface);
+    child.surface_appearance = Some(SurfaceAppearance::new(FaceAppearance::default(), Vec::new()).expect("fixture appearance"));
+    let _ = world.observe_object(child).expect("child adds");
+
+    fixtures::settle(&world, &mut scene, &mut view);
+    let root_entity = world.entity(Uuid::from_u128(1)).expect("root entity");
+    let mid_entity = world.entity(Uuid::from_u128(2)).expect("intermediate entity");
+    let child_entity = world.entity(Uuid::from_u128(3)).expect("child entity");
+
+    let step_frame = |geometry: &mut GeometryRenderer, view: &SceneView| {
+        for _ in 0..64 {
+            let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+            geometry.prepare(&device, &mut encoder, view, None, camera, [128, 128], None);
+            if !geometry.stats.rebuild_pending {
+                break;
+            }
+        }
+        assert!(!geometry.stats.rebuild_pending);
+    };
+
+    step_frame(&mut geometry, &view);
+    assert!(!geometry.cache.objects.contains_key(&root_entity), "root has no cached item");
+    assert!(!geometry.cache.objects.contains_key(&mid_entity), "intermediate has no cached item");
+    assert!(geometry.cache.objects.contains_key(&child_entity), "child is cached");
+    assert!(geometry.moving_entities.is_empty());
+
+    let mut start = ObjectPatch::new(next_source(), root_local);
+    start.linear_motion = LinearMotion { velocity: Some(Vec3::X), acceleration: None };
+    let _ = world.patch_object(start).expect("root starts moving");
+    scene.notify_world_change();
+    fixtures::settle(&world, &mut scene, &mut view);
+    step_frame(&mut geometry, &view);
+    assert_eq!(geometry.moving_entities, HashSet::from([child_entity]), "cached child follows moving root through uncached intermediate");
+    assert_eq!(geometry.motion_entities, vec![child_entity]);
+
+    let mut stop = ObjectPatch::new(next_source(), root_local);
+    stop.linear_motion = LinearMotion { velocity: Some(Vec3::ZERO), acceleration: None };
+    let _ = world.patch_object(stop).expect("root stops moving");
+    scene.notify_world_change();
+    fixtures::settle(&world, &mut scene, &mut view);
+    step_frame(&mut geometry, &view);
+    assert!(geometry.moving_entities.is_empty(), "cached child stops when root stops");
+    assert_eq!(geometry.motion_entities, vec![child_entity], "stopped root still repositions cached child");
 }
 
 proptest! {
@@ -601,8 +690,10 @@ proptest! {
         prepare_until_settled(&mut geometry, &view);
 
         for (step, op) in ops.into_iter().enumerate() {
+            let version_before = view.version();
+            let previous_moving = geometry.moving_entities.clone();
             match op {
-                MotionOp::Add { slot, parent, moving } => {
+                MotionOp::Add { slot, parent, moving, cached } => {
                     if live_ids[slot].is_some() {
                         continue;
                     }
@@ -626,10 +717,12 @@ proptest! {
                         rotation: Some(Quat::IDENTITY),
                     });
                     observation.scale = Some(Vec3::ONE);
-                    observation.shape = FieldUpdate::Set(Shape::Prim(PrimShape::default()));
-                    observation.appearance = FieldUpdate::Set(Appearance::Surface);
-                    observation.surface_appearance =
-                        Some(SurfaceAppearance::new(FaceAppearance::default(), Vec::new()).expect("fixture appearance"));
+                    if cached {
+                        observation.shape = FieldUpdate::Set(Shape::Prim(PrimShape::default()));
+                        observation.appearance = FieldUpdate::Set(Appearance::Surface);
+                        observation.surface_appearance =
+                            Some(SurfaceAppearance::new(FaceAppearance::default(), Vec::new()).expect("fixture appearance"));
+                    }
                     if moving {
                         observation.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X), acceleration: None });
                     }
@@ -674,7 +767,32 @@ proptest! {
 
             scene.notify_world_change();
             fixtures::settle(&world, &mut scene, &mut view);
-            prepare_until_settled(&mut geometry, &view);
+
+            let mut incremental = false;
+            let mut background = HashSet::new();
+            let mut motion_changed = HashSet::new();
+            if let Some(changes) = view.changes_since(&version_before) {
+                incremental = true;
+                for change in changes {
+                    if change.full || change.reconcile_all || !change.retired.is_empty() {
+                        incremental = false;
+                        break;
+                    }
+                    background.extend(change.objects.iter().copied());
+                    motion_changed.extend(change.motion_changed.iter().copied());
+                }
+            }
+            let same_frame = geometry.cache.version.as_ref() == Some(&view.version());
+            let mut rebuild_ran = false;
+            for _ in 0..64 {
+                let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+                geometry.prepare(&device, &mut encoder, &view, None, camera, [128, 128], None);
+                if !geometry.stats.rebuild_pending {
+                    break;
+                }
+                rebuild_ran = true;
+            }
+            assert!(!geometry.stats.rebuild_pending, "motion test frame must settle");
 
             let expected = expected_moving_entities(&geometry, &view);
             prop_assert_eq!(
@@ -684,13 +802,17 @@ proptest! {
                 step,
                 op
             );
-            prop_assert_eq!(
-                &geometry.cache.children,
-                &expected_children(&geometry.cache),
-                "children index mismatch at step {} ({:?})",
-                step,
-                op
-            );
+            if incremental && !rebuild_ran && !same_frame {
+                let actual_motion: HashSet<Entity> = geometry.motion_entities.iter().copied().collect();
+                let expected_motion = expected_motion_entities(&geometry, &view, &previous_moving, &background, &motion_changed);
+                prop_assert_eq!(
+                    actual_motion,
+                    expected_motion,
+                    "motion_entities mismatch at step {} ({:?})",
+                    step,
+                    op
+                );
+            }
         }
     }
 }

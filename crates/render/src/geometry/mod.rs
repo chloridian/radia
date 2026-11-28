@@ -370,7 +370,7 @@ pub(crate) struct GeometryRenderer {
     moving_entities: HashSet<Entity>,
     motion_entities: Vec<Entity>,
     motion_visited: HashSet<Entity>,
-    motion_stack: Vec<(Entity, usize, bool)>,
+    motion_stack: Vec<(Entity, usize)>,
     regions: Vec<RegionBounds>,
     motion_redraw: bool,
     layout_required: bool,

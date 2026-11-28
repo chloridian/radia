@@ -9,7 +9,7 @@ use std::{
 
 use math::{Frustum, Quat, Vec3};
 use uuid::Uuid;
-use world::{Entity, Parent, Region};
+use world::{Entity, Region};
 
 use super::{
     GeometryRenderer, MeshState, ShadingMode,
@@ -317,7 +317,6 @@ pub(super) struct FrameCache {
     pub(super) items: ItemSlab,
     item_indices: HashMap<ItemId, ItemIndex>,
     pub(super) objects: HashMap<Entity, ItemIndex>,
-    pub(super) children: HashMap<Entity, HashSet<ItemIndex>>,
     pub(super) replacements: BTreeSet<ItemIndex>,
     pub(super) mesh_info: HashMap<MeshId, Arc<MeshInfo>>,
     mesh_info_order: Vec<MeshId>,
@@ -379,16 +378,10 @@ impl FrameCache {
 
     pub(super) fn insert_item(&mut self, item: CachedItem) -> Option<ItemIndex> {
         let id = item.id;
-        let parent = item.parent;
         if let Some(index) = self.index(id) {
             if let Some(slot) = self.items.get_mut(index) {
-                let previous_parent = slot.parent;
                 let water = (item.surface_kind == Some(SurfaceKind::RegionWater)).then_some(item.region);
                 *slot = item;
-                if previous_parent != parent {
-                    self.unlink_child(previous_parent, index);
-                    self.link_child(parent, index);
-                }
                 self.note_region_water(index, water);
                 return Some(index);
             }
@@ -397,35 +390,9 @@ impl FrameCache {
         let water = (item.surface_kind == Some(SurfaceKind::RegionWater)).then_some(item.region);
         let index = self.items.insert(item)?;
         self.item_indices.insert(id, index);
-        self.link_child(parent, index);
         self.item_order_dirty = true;
         self.note_region_water(index, water);
         Some(index)
-    }
-
-    pub(super) fn set_item_parent(&mut self, index: ItemIndex, parent: Option<Entity>) {
-        let Some(item) = self.items.get_mut(index) else { return };
-        let previous = mem::replace(&mut item.parent, parent);
-        if previous != parent {
-            self.unlink_child(previous, index);
-            self.link_child(parent, index);
-        }
-    }
-
-    fn link_child(&mut self, parent: Option<Entity>, index: ItemIndex) {
-        if let Some(parent) = parent {
-            self.children.entry(parent).or_default().insert(index);
-        }
-    }
-
-    fn unlink_child(&mut self, parent: Option<Entity>, index: ItemIndex) {
-        let Some(parent) = parent else { return };
-        if let Some(children) = self.children.get_mut(&parent) {
-            children.remove(&index);
-            if children.is_empty() {
-                self.children.remove(&parent);
-            }
-        }
     }
 
     fn note_region_water(&mut self, index: ItemIndex, region: Option<Region>) {
@@ -450,7 +417,6 @@ impl FrameCache {
         update_membership(&mut self.visible, &self.items, id, index, false);
         update_membership(&mut self.next_visible, &self.items, id, index, false);
         let item = self.items.remove(index)?;
-        self.unlink_child(item.parent, index);
         self.item_indices.remove(&item.id);
         self.replacements.remove(&index);
         if self.region_water.get(&item.region) == Some(&index) {
@@ -464,13 +430,7 @@ impl FrameCache {
     pub(super) fn promote_replacement(&mut self, index: ItemIndex) -> Option<CachedItem> {
         let item = self.items.get_mut(index)?;
         let replacement = item.replacement.take()?;
-        let previous_parent = item.parent;
-        let next_parent = replacement.item.parent;
         let previous = mem::replace(item, replacement.item);
-        if previous_parent != next_parent {
-            self.unlink_child(previous_parent, index);
-            self.link_child(next_parent, index);
-        }
         self.replacements.remove(&index);
         Some(previous)
     }
@@ -479,7 +439,6 @@ impl FrameCache {
     pub(super) fn clear_items(&mut self) {
         self.items.clear();
         self.item_indices.clear();
-        self.children.clear();
         self.item_order.clear();
         self.item_order_dirty = true;
         self.replacements.clear();
@@ -1395,7 +1354,6 @@ impl GeometryRenderer {
         if !object.mesh_matches_geometry() {
             if let Some(index) = old_index {
                 self.discard_replacement(index);
-                self.cache.set_item_parent(index, resolved_parent(object));
                 self.update_held_object_pose(index, transform, update);
             }
             return;
@@ -1410,7 +1368,6 @@ impl GeometryRenderer {
         });
         if unchanged && let Some(index) = old_index {
             self.discard_replacement(index);
-            self.cache.set_item_parent(index, resolved_parent(object));
             let Some(cached) = self.cache.items.get_mut(index) else { return };
             let flags = object.mesh_flags().unwrap_or_default();
             let scale = object_draw_scale(object, transform.scale);
@@ -1484,7 +1441,6 @@ impl GeometryRenderer {
                 || self.draw_list.layout_pending())
         {
             self.discard_replacement(index);
-            self.cache.set_item_parent(index, item.parent);
             if let Some(cached) = self.cache.items.get_mut(index) {
                 cached.replacement = Some(Box::new(CachedReplacement { item }));
                 self.cache.replacements.insert(index);
@@ -1654,7 +1610,6 @@ impl GeometryRenderer {
         Some(CachedItem {
             id,
             entity: Some(object.detail().summary.entity),
-            parent: resolved_parent(object),
             region,
             mesh: mesh.clone(),
             info,
@@ -1706,7 +1661,6 @@ impl GeometryRenderer {
         Some(CachedItem {
             id,
             entity: None,
-            parent: None,
             region: surface.region,
             mesh: mesh.clone(),
             info,
@@ -1946,13 +1900,6 @@ pub(super) struct CacheUpdate {
 
 pub(super) fn object_item_id(object: &Object) -> ItemId {
     (2, object.detail().summary.id.as_u128(), 0)
-}
-
-fn resolved_parent(object: &Object) -> Option<Entity> {
-    match object.detail().summary.parent {
-        Parent::Resolved(parent) => Some(parent),
-        Parent::Root | Parent::Unknown | Parent::Pending { .. } => None,
-    }
 }
 
 fn object_rebuild_bytes(object: &Object, cached: &HashMap<MeshId, Arc<MeshInfo>>) -> usize {

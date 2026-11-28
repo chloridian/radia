@@ -13,7 +13,7 @@ use std::{
 
 use assets::TextureHandle;
 use utils::{AssetId, FastHashMap};
-use world::{Entity, Region, RegionSummary, RemovalFence, TerrainPatch, TerrainPatchId, WorldRevision};
+use world::{Entity, Parent, Region, RegionSummary, RemovalFence, TerrainPatch, TerrainPatchId, WorldRevision};
 
 pub(in crate::scene) use self::delivery::{Delivery, DeliveryState, Receipt};
 pub(crate) use self::view::VisibilityVersion;
@@ -186,6 +186,7 @@ impl RetiredRegions {
 pub(in crate::scene) struct Mirror {
     pub(in crate::scene) viewer_environment: Option<ViewerEnvironment>,
     pub(in crate::scene) objects: FastHashMap<Entity, Object>,
+    pub(in crate::scene) children: FastHashMap<Entity, HashSet<Entity>>,
     pub(in crate::scene) invalidations: HashMap<Entity, RemovalFence>,
     pub(in crate::scene) retired_regions: RetiredRegions,
     pub(in crate::scene) regions: BTreeMap<Region, RegionData>,
@@ -199,6 +200,36 @@ pub(in crate::scene) struct Mirror {
 impl Mirror {
     pub(in crate::scene) fn is_retired(&self, region: Region) -> bool {
         self.retired_regions.contains(region)
+    }
+
+    fn resolved_parent(object: &Object) -> Option<Entity> {
+        match object.detail().summary.parent {
+            Parent::Resolved(parent) => Some(parent),
+            Parent::Root | Parent::Unknown | Parent::Pending { .. } => None,
+        }
+    }
+
+    fn link_child(&mut self, parent: Option<Entity>, child: Entity) {
+        if let Some(parent) = parent {
+            self.children.entry(parent).or_default().insert(child);
+        }
+    }
+
+    fn unlink_child(&mut self, parent: Option<Entity>, child: Entity) {
+        let Some(parent) = parent else { return };
+        if let Some(children) = self.children.get_mut(&parent) {
+            children.remove(&child);
+            if children.is_empty() {
+                self.children.remove(&parent);
+            }
+        }
+    }
+
+    pub(in crate::scene) fn remove_object(&mut self, entity: Entity) -> Option<Object> {
+        self.invalidations.remove(&entity);
+        let removed = self.objects.remove(&entity)?;
+        self.unlink_child(Self::resolved_parent(&removed), entity);
+        Some(removed)
     }
 
     pub(in crate::scene) fn object_visible(&self, entity: Entity) -> bool {
@@ -249,11 +280,11 @@ impl Mirror {
                 break missing;
             };
             match object.detail().summary.parent {
-                world::Parent::Resolved(parent) => {
+                Parent::Resolved(parent) => {
                     path.push(current);
                     current = parent;
                 }
-                world::Parent::Root | world::Parent::Pending { .. } | world::Parent::Unknown => {
+                Parent::Root | Parent::Pending { .. } | Parent::Unknown => {
                     let root = SceneVisibility { visible: true, cause: None };
                     cache.insert(current, root);
                     break root;
@@ -325,7 +356,10 @@ impl Mirror {
                 if self.retired_regions.contains(object.detail().summary.address.region()) {
                     return;
                 }
-                if let Some(old) = self.objects.get(&object.detail().summary.entity) {
+                let entity = object.detail().summary.entity;
+                let next_parent = Self::resolved_parent(&object);
+                let previous_parent = if let Some(old) = self.objects.get(&entity) {
+                    let previous_parent = Self::resolved_parent(old);
                     object.inherit_animation_timing(old, now);
                     object.update_motion_from(old, now);
                     if old.geometry() == object.geometry() {
@@ -337,11 +371,17 @@ impl Mirror {
                             object.materials = old.materials.clone();
                         }
                     }
+                    previous_parent
                 } else {
                     object.motion =
                         MotionState::new(object.detail().motion_source.and_then(world::UpdateSource::motion_received_at).unwrap_or(now));
+                    None
+                };
+                self.objects.insert(entity, object);
+                if previous_parent != next_parent {
+                    self.unlink_child(previous_parent, entity);
+                    self.link_child(next_parent, entity);
                 }
-                self.objects.insert(object.detail().summary.entity, object);
             }
             Change::Mesh(change) => self.apply_mesh(&change),
             Change::Material(change) => {
@@ -369,8 +409,7 @@ impl Mirror {
                 }
             }
             Change::Remove(entity) => {
-                self.objects.remove(&entity);
-                self.invalidations.remove(&entity);
+                let _ = self.remove_object(entity);
             }
             Change::InvalidateSubtree(entity, fence) => {
                 self.invalidations.insert(entity, fence);
@@ -488,6 +527,69 @@ mod tests {
         retired.insert(*fourth);
         retired.insert(*second);
         assert!(regions.iter().all(|region| retired.contains(*region)));
+    }
+
+    #[test]
+    fn children_index_tracks_lifecycle() {
+        let mut world = World::new(WorldLimits {
+            max_regions: 1,
+            max_entities: 8,
+            max_entities_per_region: 8,
+            max_tombstones_per_region: 8,
+            max_tombstones: 8,
+            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(8),
+            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(8),
+            max_journal_entries: 16,
+            max_journal_changes: 16,
+            max_region_name_bytes: 64,
+            max_recovery_targets: 4,
+        });
+        let region = world.register_region().expect("region registers");
+        let mut entities = Vec::new();
+        for id in 1u32..=4 {
+            let obs = ObjectObservation::new(
+                UpdateSource::new(region, id, OrderEvidence::Ordered(u64::from(id)), 0),
+                Uuid::from_u128(u128::from(id)),
+                NonZeroU32::new(id).expect("local id"),
+                Kind::Object,
+                ParentUpdate::Root,
+            );
+            let ApplyOutcome::Introduced(entity) = world.observe_object(obs).expect("entity applies").outcome else {
+                panic!("entity must be new");
+            };
+            entities.push(entity);
+        }
+        let [parent_a, parent_b, child, reused] = entities.as_slice() else { panic!("four entities") };
+        let budget = Budget::default();
+        let make_object = |entity, parent| {
+            let mut detail = world.object_detail(entity).expect("entity detail");
+            detail.summary.parent = parent;
+            let lease = budget.reserve(detail.owned_bytes() + 32).expect("object lease");
+            Object::new(detail, lease)
+        };
+
+        let mut mirror = Mirror::default();
+        mirror.apply(Change::Object(make_object(*parent_a, Parent::Root)));
+        mirror.apply(Change::Object(make_object(*parent_b, Parent::Root)));
+        mirror.apply(Change::Object(make_object(*child, Parent::Resolved(*parent_a))));
+        assert_eq!(mirror.children.get(parent_a).map(|set| set.contains(child)), Some(true));
+        assert!(!mirror.children.contains_key(parent_b));
+
+        mirror.apply(Change::Object(make_object(*child, Parent::Resolved(*parent_b))));
+        assert!(!mirror.children.contains_key(parent_a));
+        assert_eq!(mirror.children.get(parent_b).map(|set| set.contains(child)), Some(true));
+
+        mirror.apply(Change::Object(make_object(*child, Parent::Root)));
+        assert!(mirror.children.is_empty());
+
+        mirror.apply(Change::Object(make_object(*child, Parent::Resolved(*parent_a))));
+        mirror.apply(Change::Remove(*child));
+        assert!(mirror.children.is_empty());
+
+        mirror.apply(Change::Object(make_object(*reused, Parent::Resolved(*parent_b))));
+        assert_eq!(mirror.children.get(parent_b).map(|set| set.contains(reused)), Some(true));
+        assert!(mirror.remove_object(*reused).is_some());
+        assert!(mirror.children.is_empty());
     }
 
     proptest! {

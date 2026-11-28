@@ -353,9 +353,8 @@ impl Reconciler {
     fn remove(&mut self, entity: Entity) {
         self.preparation.meshes.remove(entity);
         self.preparation.assets.remove(entity);
-        self.state.mirror.invalidations.remove(&entity);
         self.publication.dirty.invalidated.remove(&entity);
-        if let Some(old) = self.state.mirror.objects.remove(&entity) {
+        if let Some(old) = self.state.mirror.remove_object(entity) {
             self.state.identities.remove(&old.detail().summary.id);
             self.state.bindings.remove(&old.detail().summary.address);
             self.state.bytes -= object_bytes(&old);

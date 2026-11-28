@@ -970,7 +970,6 @@ fn new_item(
     CachedItem {
         id,
         entity: None,
-        parent: None,
         region,
         mesh: mesh.clone(),
         info,

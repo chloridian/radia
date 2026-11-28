@@ -47,7 +47,6 @@ pub(super) struct CachedFace {
 pub(super) struct CachedItem {
     pub(super) id: ItemId,
     pub(super) entity: Option<Entity>,
-    pub(super) parent: Option<Entity>,
     pub(super) region: Region,
     pub(super) mesh: SharedMesh,
     pub(super) info: Arc<MeshInfo>,
