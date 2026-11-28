@@ -162,8 +162,8 @@ pub(super) enum ObjectCacheEvent {
     Ready { db: Arc<SqliteDb>, status: OpenStatus, writer: CacheWriteWorker },
     OpenFailed(String),
     RegionLoaded { simulator_id: SimulatorId, scope: CacheScope, result: RegionLoadResult, _permit: OwnedSemaphorePermit },
-    WriteApplied { simulator_id: SimulatorId, scope: CacheScope, versions: CacheEntryVersions, entries: Arc<[EncodedEntry]> },
-    WriteDropped { simulator_id: SimulatorId, versions: CacheEntryVersions },
+    WriteApplied { simulator_id: SimulatorId, scope: CacheScope, updates: Vec<(CacheEntryVersions, Arc<[EncodedEntry]>)>, jobs: usize },
+    WriteDropped { simulator_id: SimulatorId, updates: Vec<CacheEntryVersions>, jobs: usize },
     InvalidationApplied,
     EntriesInvalidated { versions: InvalidatedEntryVersions },
     ScopeInvalidated { scope: CacheScope, invalidation: ScopeInvalidation },
@@ -199,6 +199,7 @@ pub(super) struct ObjectCacheSession {
     outstanding_writes: usize,
     started: bool,
     disabled: bool,
+    discard_on_close: bool,
     warned: bool,
     degraded_warned: bool,
     busy_drops: u64,
@@ -233,6 +234,7 @@ impl ObjectCacheSession {
             outstanding_writes: 0,
             started: false,
             disabled: false,
+            discard_on_close: false,
             warned: false,
             degraded_warned: false,
             busy_drops: 0,
@@ -361,27 +363,31 @@ impl ObjectCacheSession {
                 self.flush_pending_writes();
                 Some((simulator_id, flags))
             }
-            ObjectCacheEvent::WriteApplied { simulator_id, scope, versions, entries } => {
-                self.outstanding_writes = self.outstanding_writes.saturating_sub(1);
-                let latest_local_ids = versions
-                    .iter()
-                    .filter_map(|(local_id, generation)| {
-                        (self.cache_generations.get(&(simulator_id, *local_id)) == Some(generation)).then_some(*local_id)
-                    })
-                    .collect::<HashSet<_>>();
-                if !self.disabled && self.identities.get(&simulator_id) == Some(&scope) {
-                    let latest_entries =
-                        entries.iter().filter(|entry| latest_local_ids.contains(&entry.local_id)).cloned().collect::<Vec<_>>();
-                    self.remember_entries(simulator_id, scope, &latest_entries);
+            ObjectCacheEvent::WriteApplied { simulator_id, scope, updates, jobs } => {
+                self.outstanding_writes = self.outstanding_writes.saturating_sub(jobs);
+                for (versions, entries) in updates {
+                    let latest_local_ids = versions
+                        .iter()
+                        .filter_map(|(local_id, generation)| {
+                            (self.cache_generations.get(&(simulator_id, *local_id)) == Some(generation)).then_some(*local_id)
+                        })
+                        .collect::<HashSet<_>>();
+                    if !self.disabled && self.identities.get(&simulator_id) == Some(&scope) {
+                        let latest_entries =
+                            entries.iter().filter(|entry| latest_local_ids.contains(&entry.local_id)).cloned().collect::<Vec<_>>();
+                        self.remember_entries(simulator_id, scope.clone(), &latest_entries);
+                    }
+                    self.clear_cache_versions(simulator_id, &versions);
                 }
-                self.clear_cache_versions(simulator_id, &versions);
                 self.flush_pending_writes();
                 None
             }
-            ObjectCacheEvent::WriteDropped { simulator_id, versions } => {
-                self.outstanding_writes = self.outstanding_writes.saturating_sub(1);
-                self.clear_cache_versions(simulator_id, &versions);
-                self.count_busy_drop();
+            ObjectCacheEvent::WriteDropped { simulator_id, updates, jobs } => {
+                self.outstanding_writes = self.outstanding_writes.saturating_sub(jobs);
+                for versions in updates {
+                    self.clear_cache_versions(simulator_id, &versions);
+                    self.count_busy_drop();
+                }
                 self.flush_pending_writes();
                 None
             }
@@ -496,13 +502,6 @@ impl ObjectCacheSession {
         if row_count == 0 {
             return;
         }
-        let permit = match self.event_sender.clone().try_reserve_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                self.count_busy_drop();
-                return;
-            }
-        };
         let mut local_ids = match &message {
             Message::ObjectUpdate(update) => update.objects.iter().map(|object| object.local_id).collect::<Vec<_>>(),
             Message::ObjectUpdateCompressed(update) => update.objects.iter().map(|object| object.local_id).collect::<Vec<_>>(),
@@ -515,7 +514,7 @@ impl ObjectCacheSession {
         let versions: CacheEntryVersions = local_ids.iter().map(|local_id| (*local_id, generation)).collect::<Vec<_>>().into();
         let job = CacheWriteJob {
             operation: CacheWriteOperation::Update { simulator_id, scope, message, versions: versions.clone(), last_used: now_millis() },
-            permit: Some(permit),
+            permit: None,
         };
         if self.queue_cache_write(job) {
             self.remember_cache_versions(simulator_id, &versions);
@@ -600,6 +599,15 @@ impl ObjectCacheSession {
         }
         if db.had_write_failure() {
             self.warn("SQLite worker reported a failed object-cache write");
+        }
+        if self.discard_on_close {
+            let discarded = match db.discard() {
+                Ok(receipt) => receipt.wait().await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = discarded {
+                tracing::warn!(%error, "object cache could not be discarded after a failed invalidation");
+            }
         }
         let shutdown = task::spawn_blocking(move || {
             Arc::try_unwrap(db)
@@ -764,6 +772,7 @@ impl ObjectCacheSession {
     fn disable_after_invalidation_failure(&mut self) {
         self.warn("object cache invalidation failed; cached objects will be refetched");
         self.disabled = true;
+        self.discard_on_close = true;
         self.cache_generations.clear();
         let simulators: Vec<_> = self.loaded_regions.keys().copied().collect();
         for simulator_id in simulators {
