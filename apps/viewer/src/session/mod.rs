@@ -30,4 +30,5 @@ pub(crate) use self::{
 pub(crate) use self::{
     coordinator::{FolderFetchApply, apply_inventory_fetch, apply_udp, confirm_pending_moves},
     experience_environment::EnvironmentCommand,
+    region_lookup::{RegionLookupRequest, SendFuture},
 };

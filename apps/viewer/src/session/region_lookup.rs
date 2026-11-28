@@ -31,8 +31,9 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(15);
 const SEND_RETRY_LIMIT: usize = 4;
 const INITIAL_SEND_RETRY_DELAY: Duration = Duration::from_millis(20);
 const METERS_PER_CELL: f64 = 256.0;
+const SIM_ACCESS_NONEXISTENT: u8 = 255;
 
-type SendFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+pub(crate) type SendFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 type SendMessage = dyn Fn(RegionLookupRequest, Delivery) -> SendFuture + Send + Sync;
 
 #[derive(Clone, Debug)]
@@ -41,6 +42,7 @@ pub enum RegionLookupError {
     Canceled,
     OutOfRange,
     InvalidHandle,
+    NotFound,
     GenerationExhausted,
     Send(Arc<Error>),
 }
@@ -52,6 +54,7 @@ impl Display for RegionLookupError {
             Self::Canceled => formatter.write_str("The region lookup was canceled."),
             Self::OutOfRange => formatter.write_str("The region grid cell is outside the map request range."),
             Self::InvalidHandle => formatter.write_str("Second Life returned an invalid region handle."),
+            Self::NotFound => formatter.write_str("The requested region does not exist."),
             Self::GenerationExhausted => formatter.write_str("The region lookup generation space is exhausted."),
             Self::Send(error) => Display::fmt(error, formatter),
         }
@@ -182,6 +185,10 @@ impl RegionLookup {
     }
 
     fn handle_region_id_reply(&self, region_id: Uuid, region_handle: u64) {
+        if region_handle == 0 {
+            self.complete(LookupKey::RegionId(region_id), Err(RegionLookupError::InvalidHandle));
+            return;
+        }
         let origin = RegionHandle::new(region_handle).origin();
         let Some(cell) = RegionGridCell::containing(origin.x, origin.y) else {
             self.complete(LookupKey::RegionId(region_id), Err(RegionLookupError::InvalidHandle));
@@ -219,15 +226,16 @@ impl RegionLookup {
                 .iter()
                 .filter_map(|block| {
                     state.by_map_cell.remove(&RegionGridCell::new(u32::from(block.x), u32::from(block.y))).map(|pending| {
-                        let name = block.name.clone();
-                        (pending, name)
+                        let result =
+                            if block.access == SIM_ACCESS_NONEXISTENT { Err(RegionLookupError::NotFound) } else { Ok(block.name.clone()) };
+                        (pending, result)
                     })
                 })
                 .collect::<Vec<_>>()
         };
 
-        for (pending, name) in completed {
-            finish(pending, Ok(name));
+        for (pending, result) in completed {
+            finish(pending, result);
         }
     }
 
@@ -308,7 +316,7 @@ impl RegionLookup {
     }
 
     #[cfg(test)]
-    fn with_sender(
+    pub(crate) fn with_sender(
         agent_id: Uuid,
         session_id: Uuid,
         simulator_address: SocketAddr,
@@ -401,7 +409,7 @@ enum LookupKey {
 }
 
 #[derive(Clone, Debug)]
-enum RegionLookupRequest {
+pub(crate) enum RegionLookupRequest {
     RegionHandle(RegionHandleRequest),
     MapBlock(MapBlockRequest),
 }
@@ -841,5 +849,51 @@ mod tests {
         lookup.lock_state().next_generation = u64::MAX;
         assert_matches!(lookup.lookup_region_by_id(REGION_ID).await, Err(RegionLookupError::GenerationExhausted));
         assert_matches!(sent.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn zero_handle_and_nonexistent_block_fail_immediately() {
+        let (lookup, mut sent) = lookup();
+
+        let id_request = lookup.lookup_region_by_id(REGION_ID);
+        tokio::pin!(id_request);
+        poll_fn(|context| {
+            poll_pending(id_request.as_mut(), context);
+            Poll::Ready(())
+        })
+        .await;
+        assert_matches!(sent.recv().await, Some(RegionLookupRequest::RegionHandle(_)));
+        lookup.handle_message(
+            SIMULATOR,
+            &Message::RegionIdAndHandleReply(RegionIdAndHandleReply { reply_block: ReplyBlock { region_id: REGION_ID, region_handle: 0 } }),
+        );
+        assert_matches!(id_request.await, Err(RegionLookupError::InvalidHandle));
+        assert_matches!(sent.try_recv(), Err(TryRecvError::Empty));
+
+        let cell_request = lookup.lookup_region_at(RegionGridCell::new(12, 34));
+        tokio::pin!(cell_request);
+        poll_fn(|context| {
+            poll_pending(cell_request.as_mut(), context);
+            Poll::Ready(())
+        })
+        .await;
+        assert_matches!(sent.recv().await, Some(RegionLookupRequest::MapBlock(_)));
+        lookup.handle_message(
+            SIMULATOR,
+            &MapBlockReply(map_block_reply::MapBlockReply {
+                agent_data: map_block_reply::AgentData { agent_id: AGENT_ID, flags: 0 },
+                data: vec![map_block_reply::Data {
+                    x: 12,
+                    y: 34,
+                    name: String::new(),
+                    access: 255,
+                    region_flags: 0,
+                    water_height: 0,
+                    agents: 0,
+                    map_image_id: Uuid::nil(),
+                }],
+            }),
+        );
+        assert_matches!(cell_request.await, Err(RegionLookupError::NotFound));
     }
 }

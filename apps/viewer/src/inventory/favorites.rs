@@ -108,6 +108,13 @@ pub(crate) async fn load_favorites(
 ) -> Result<Vec<FavoriteLocation>, FavoritesError> {
     let folder_id = favorite_folder_id(inventory.ok_or(FavoritesError::MissingFavoritesFolder)?)?;
     let landmarks = fetch_favorite_landmarks(capabilities, session.agent_id, folder_id).await?;
+    resolve_favorite_locations(landmarks, region_lookup).await
+}
+
+async fn resolve_favorite_locations(
+    landmarks: Vec<FavoriteLandmark>,
+    region_lookup: &RegionLookup,
+) -> Result<Vec<FavoriteLocation>, FavoritesError> {
     let resolved = stream::iter(landmarks.into_iter().map(|landmark| async move {
         let (region_name, position) = match landmark.destination {
             LandmarkDestination::Global(position) => {
@@ -134,7 +141,30 @@ pub(crate) async fn load_favorites(
     .buffer_unordered(REGION_LOOKUP_CONCURRENCY)
     .collect::<Vec<Result<Option<FavoriteLocation>, FavoritesError>>>()
     .await;
-    let mut locations = resolved.into_iter().collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect::<Vec<_>>();
+    let mut locations = Vec::new();
+    let mut skipped_lookups = 0usize;
+    let mut first_lookup_error = None;
+    for result in resolved {
+        match result {
+            Ok(Some(location)) => locations.push(location),
+            Ok(None) => {}
+            Err(FavoritesError::RegionLookup(error)) => {
+                skipped_lookups += 1;
+                if first_lookup_error.is_none() {
+                    first_lookup_error = Some(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if locations.is_empty()
+        && let Some(error) = first_lookup_error
+    {
+        return Err(FavoritesError::RegionLookup(error));
+    }
+    if skipped_lookups > 0 {
+        tracing::warn!(skipped = skipped_lookups, "skipped favorite landmarks whose region lookup failed");
+    }
     locations.sort_by_key(|location| location.name.to_lowercase());
     Ok(locations)
 }
@@ -364,7 +394,12 @@ fn parse_region_handle(value: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::{assert_matches, sync::Arc, time::Duration};
+    use std::{
+        assert_matches,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use inventory::{
         AssetType, CategoryKey, InventoryChild, InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo,
@@ -372,9 +407,11 @@ mod tests {
     };
     use llsd::{Map, Value, xml};
     use network::capabilities::{CapabilityUrl, Client};
+    use protocol::{lludp::Message::MapBlockReply, messages::map::map_block_reply};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
+        runtime::Handle,
         task::JoinHandle,
         time::timeout,
     };
@@ -384,10 +421,13 @@ mod tests {
     use world::RegionHandle;
 
     use super::{
-        FavoritesError, LandmarkDestination, RegionGridCell, favorite_folder_items, global_position, is_link, parse_landmark_asset,
-        parse_position, resolve_favorite_items,
+        FavoriteLandmark, FavoriteLocation, FavoritesError, LandmarkDestination, RegionGridCell, favorite_folder_items, global_position,
+        is_link, parse_landmark_asset, parse_position, resolve_favorite_items, resolve_favorite_locations,
     };
-    use crate::inventory::{favorite_store::MAX_FAVORITES_PER_AGENT, fetch::InventoryFetchError};
+    use crate::{
+        inventory::{favorite_store::MAX_FAVORITES_PER_AGENT, fetch::InventoryFetchError},
+        session::{RegionLookup, RegionLookupRequest, SendFuture},
+    };
 
     fn inventory_item(inventory_type: InventoryType, asset_type: AssetType) -> Item {
         let owner = InventoryOwner::new(Uuid::from_u128(1));
@@ -586,6 +626,64 @@ mod tests {
             timeout(Duration::from_secs(5), peer).await.expect("favorites peer completion").expect("favorites peer task");
             assert_eq!(candidates, vec![("Valid".to_owned(), landmark_asset)]);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_lookup_is_skipped() {
+        let agent_id = Uuid::from_u128(31);
+        let session_id = Uuid::from_u128(32);
+        let simulator = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 13000);
+        let lookup_slot = Arc::new(Mutex::new(None::<RegionLookup>));
+        let slot = lookup_slot.clone();
+        let lookup = RegionLookup::with_sender(agent_id, session_id, simulator, Handle::current(), move |request, _| {
+            let lookup = slot.lock().unwrap().as_ref().cloned();
+            Box::pin(async move {
+                if let (Some(lookup), RegionLookupRequest::MapBlock(request)) = (lookup, request)
+                    && request.position_data.min_x == 12
+                    && request.position_data.min_y == 34
+                {
+                    lookup.handle_message(
+                        simulator,
+                        &MapBlockReply(map_block_reply::MapBlockReply {
+                            agent_data: map_block_reply::AgentData { agent_id, flags: 0 },
+                            data: vec![map_block_reply::Data {
+                                x: 12,
+                                y: 34,
+                                name: "Known Region".into(),
+                                access: 0,
+                                region_flags: 0,
+                                water_height: 0,
+                                agents: 0,
+                                map_image_id: Uuid::nil(),
+                            }],
+                        }),
+                    );
+                }
+                Ok(())
+            }) as SendFuture
+        });
+        *lookup_slot.lock().unwrap() = Some(lookup.clone());
+
+        let landmarks = vec![
+            FavoriteLandmark {
+                name: "Known".into(),
+                destination: LandmarkDestination::RegionHandle {
+                    handle: RegionHandle::new(((12_u64 * 256) << 32) | (34 * 256)),
+                    position: [128.0, 64.0, 30.0],
+                },
+            },
+            FavoriteLandmark {
+                name: "Timed Out".into(),
+                destination: LandmarkDestination::RegionHandle {
+                    handle: RegionHandle::new(((56_u64 * 256) << 32) | (78 * 256)),
+                    position: [10.0, 20.0, 30.0],
+                },
+            },
+        ];
+
+        let locations = resolve_favorite_locations(landmarks, &lookup).await.expect("failed lookup is skipped");
+
+        assert_eq!(locations, vec![FavoriteLocation { name: "Known".into(), region_name: "Known Region".into(), x: 128, y: 64, z: 30 }]);
     }
 
     #[tokio::test]
