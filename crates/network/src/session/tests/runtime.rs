@@ -462,6 +462,16 @@ async fn queue_panic_names_simulator() {
 }
 
 #[tokio::test]
+async fn exited_queue_not_running() {
+    let task = tokio::spawn(async {});
+    let abort = task.abort_handle();
+    task.await.expect("queue task exits");
+    let (role, _) = EventQueueRoleHandle::channel(true);
+    let event_queue = EventQueueLifecycle::Running { role, task: abort };
+    assert!(!event_queue.is_running(), "a queue whose task exited before it was joined must not count as running");
+}
+
+#[tokio::test]
 async fn stale_completion_keeps_replacement() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let mut connection = connect_runtime(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default())

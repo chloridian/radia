@@ -706,7 +706,7 @@ pub(super) enum EventQueueLifecycle {
 
 impl EventQueueLifecycle {
     pub(super) fn is_running(&self) -> bool {
-        matches!(self, Self::Running { .. })
+        matches!(self, Self::Running { task, .. } if !task.is_finished())
     }
 
     pub(super) fn role(&self) -> Option<&EventQueueRoleHandle> {
