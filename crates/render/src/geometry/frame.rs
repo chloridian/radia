@@ -851,38 +851,13 @@ impl GeometryRenderer {
         if !update.motion_changed.is_empty() || !update.background.is_empty() {
             self.motion_visited.clear();
             self.motion_stack.clear();
-            let mut newly_moving = false;
-            for &entity in &update.motion_changed {
-                let (was_moving, is_moving) = self.evaluate_motion_entity(view, entity);
-                newly_moving |= is_moving && !was_moving;
-                for child in view.children(entity) {
-                    if self.motion_visited.insert(child) {
-                        self.motion_stack.push((child, 1));
-                    }
-                }
-            }
-            self.refresh_motion_descendants(view, true, &mut newly_moving);
-            let track_stopped = update.motion_changed.is_empty();
-            let mut stopped_background = Vec::new();
-            for &entity in &update.background {
-                if update.motion_changed.contains(&entity) || !self.motion_visited.insert(entity) {
-                    continue;
-                }
-                let (was_moving, is_moving) = self.evaluate_motion_entity(view, entity);
-                newly_moving |= is_moving && !was_moving;
-                if track_stopped && was_moving && !is_moving {
-                    stopped_background.push(entity);
-                }
-                for child in view.children(entity) {
-                    if self.motion_visited.insert(child) {
-                        self.motion_stack.push((child, 1));
-                    }
-                }
-            }
-            self.refresh_motion_descendants(view, false, &mut newly_moving);
-            if track_stopped && !newly_moving {
-                self.motion_entities.extend(stopped_background);
-            }
+            self.motion_stack.extend(
+                update.motion_changed.iter().filter(|entity| self.motion_visited.insert(**entity)).map(|entity| (*entity, 0, false)),
+            );
+            self.refresh_motion_descendants(view, true);
+            self.motion_stack
+                .extend(update.background.iter().filter(|entity| self.motion_visited.insert(**entity)).map(|entity| (*entity, 0, false)));
+            self.refresh_motion_descendants(view, false);
         }
         self.motion_entities.extend(self.moving_entities.iter().copied());
         motion::fill_placement_pair(
@@ -908,33 +883,24 @@ impl GeometryRenderer {
         self.motion_entities = motion_entities;
     }
 
-    fn evaluate_motion_entity(&mut self, view: &SceneView, entity: world::Entity) -> (bool, bool) {
-        let was_moving = self.moving_entities.contains(&entity);
-        let is_moving = if self.cache.objects.contains_key(&entity) {
-            self.stats.motion_cache_items_scanned += 1;
-            view.object_is_live(entity) && motion::needs_evaluation(view, entity)
-        } else {
-            false
-        };
-        if is_moving {
-            self.moving_entities.insert(entity);
-        } else {
-            self.moving_entities.remove(&entity);
-        }
-        (was_moving, is_moving)
-    }
-
-    fn refresh_motion_descendants(&mut self, view: &SceneView, changed_ancestor: bool, newly_moving: &mut bool) {
-        while let Some((entity, depth)) = self.motion_stack.pop() {
-            let (was_moving, is_moving) = self.evaluate_motion_entity(view, entity);
-            *newly_moving |= is_moving && !was_moving;
-            if !is_moving && changed_ancestor && self.cache.objects.contains_key(&entity) && view.object_is_live(entity) {
-                self.motion_entities.push(entity);
+    fn refresh_motion_descendants(&mut self, view: &SceneView, changed_root: bool) {
+        while let Some((entity, depth, changed_ancestor)) = self.motion_stack.pop() {
+            let was_moving = self.moving_entities.contains(&entity);
+            let cached = self.cache.objects.contains_key(&entity) && view.object_is_live(entity);
+            self.stats.motion_cache_items_scanned += usize::from(cached);
+            if cached && motion::needs_evaluation(view, entity) {
+                self.moving_entities.insert(entity);
+            } else {
+                self.moving_entities.remove(&entity);
+                if cached && (was_moving || changed_ancestor) {
+                    self.motion_entities.push(entity);
+                }
             }
             if depth < motion::MAX_PARENT_EDGES {
+                let changed_ancestor = changed_ancestor || changed_root;
                 for child in view.children(entity) {
                     if self.motion_visited.insert(child) {
-                        self.motion_stack.push((child, depth + 1));
+                        self.motion_stack.push((child, depth + 1, changed_ancestor));
                     }
                 }
             }

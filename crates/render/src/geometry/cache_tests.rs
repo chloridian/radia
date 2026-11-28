@@ -517,34 +517,19 @@ fn expected_motion_entities(
     geometry: &GeometryRenderer,
     view: &SceneView,
     previous_moving: &HashSet<Entity>,
-    background: &HashSet<Entity>,
     motion_changed: &HashSet<Entity>,
 ) -> HashSet<Entity> {
-    let mut stopped_background = Vec::new();
-    let mut newly_moving = false;
-    for &entity in background {
-        let was_moving = previous_moving.contains(&entity);
-        let is_moving =
-            geometry.cache.objects.contains_key(&entity) && view.object_is_live(entity) && motion::needs_evaluation(view, entity);
-        if is_moving {
-            newly_moving |= !was_moving;
-        } else if was_moving {
-            stopped_background.push(entity);
-        }
-    }
-    if !motion_changed.is_empty() || newly_moving {
-        geometry
-            .cache
-            .items
-            .iter()
-            .filter_map(|(_, item)| item.entity.filter(|entity| view.object_is_live(*entity)))
-            .filter(|entity| motion::needs_evaluation(view, *entity) || has_changed_ancestor(view, *entity, motion_changed))
-            .collect()
-    } else {
-        let mut entities = expected_moving_entities(geometry, view);
-        entities.extend(stopped_background);
-        entities
-    }
+    geometry
+        .cache
+        .items
+        .iter()
+        .filter_map(|(_, item)| item.entity.filter(|entity| view.object_is_live(*entity)))
+        .filter(|entity| {
+            motion::needs_evaluation(view, *entity)
+                || previous_moving.contains(entity)
+                || has_changed_ancestor(view, *entity, motion_changed)
+        })
+        .collect()
 }
 
 #[test]
@@ -769,7 +754,6 @@ proptest! {
             fixtures::settle(&world, &mut scene, &mut view);
 
             let mut incremental = false;
-            let mut background = HashSet::new();
             let mut motion_changed = HashSet::new();
             if let Some(changes) = view.changes_since(&version_before) {
                 incremental = true;
@@ -778,7 +762,6 @@ proptest! {
                         incremental = false;
                         break;
                     }
-                    background.extend(change.objects.iter().copied());
                     motion_changed.extend(change.motion_changed.iter().copied());
                 }
             }
@@ -804,7 +787,7 @@ proptest! {
             );
             if incremental && !rebuild_ran && !same_frame {
                 let actual_motion: HashSet<Entity> = geometry.motion_entities.iter().copied().collect();
-                let expected_motion = expected_motion_entities(&geometry, &view, &previous_moving, &background, &motion_changed);
+                let expected_motion = expected_motion_entities(&geometry, &view, &previous_moving, &motion_changed);
                 prop_assert_eq!(
                     actual_motion,
                     expected_motion,
