@@ -4,6 +4,7 @@ mod summary;
 
 use std::{
     io::{self, Write},
+    panic::{self, AssertUnwindSafe},
     path::Path,
     thread,
     time::Duration,
@@ -112,6 +113,10 @@ pub fn hex_lower(bytes: &[u8]) -> String {
 
 fn hex_nibble(nibble: u8) -> char {
     char::from(if nibble < 10 { b'0' + nibble } else { b'a' + (nibble - 10) })
+}
+
+pub fn isolate<T>(work: impl FnOnce() -> T) -> Option<T> {
+    panic::catch_unwind(AssertUnwindSafe(work)).ok()
 }
 
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -225,5 +230,11 @@ mod tests {
         drop(held);
         assert_eq!(fs::read(&second).expect("read second original"), b"original");
         assert_eq!(fs::read_dir(directory.path()).expect("read directory").count(), 2);
+    }
+
+    #[test]
+    fn isolate_catches_panic() {
+        assert_eq!(isolate(|| 42), Some(42));
+        assert_eq!(isolate(|| -> i32 { panic!("boom") }), None);
     }
 }

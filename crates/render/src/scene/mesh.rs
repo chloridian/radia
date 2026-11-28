@@ -52,6 +52,7 @@ pub enum MeshBuildError {
     TooComplex,
     Cancelled,
     Degenerate,
+    Panicked,
 }
 
 impl From<MeshError> for MeshBuildError {
@@ -72,6 +73,7 @@ impl Display for MeshBuildError {
             Self::TooComplex => "generated geometry exceeds limits",
             Self::Cancelled => "mesh generation was cancelled",
             Self::Degenerate => "generated mesh contains no usable triangles",
+            Self::Panicked => "mesh generation panicked",
         })
     }
 }

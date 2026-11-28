@@ -762,8 +762,11 @@ impl CacheReadJob {
         let result = if self.job.is_cancelled() {
             Err(Failure::Cancelled)
         } else {
-            let lookup = lookup(&self.cache, self.job.request);
-            if self.job.is_cancelled() { Err(Failure::Cancelled) } else { Ok(lookup) }
+            match utils::isolate(|| lookup(&self.cache, self.job.request)) {
+                Some(_) if self.job.is_cancelled() => Err(Failure::Cancelled),
+                Some(lookup) => Ok(lookup),
+                None => Err(Failure::Malformed),
+            }
         };
         CacheReadCompletion { job: self.job, result }
     }
@@ -853,18 +856,27 @@ impl DecodeJob {
         let started = Instant::now();
         let (result, origin) = match source {
             DecodeSource::Response(response) => (
-                content::prepare_cancellable(job.request, job.size, response, persist_prepared, &mut job.reservation, || {
-                    *cancelled.borrow()
-                }),
+                utils::isolate(|| {
+                    content::prepare_cancellable(job.request, job.size, response, persist_prepared, &mut job.reservation, || {
+                        *cancelled.borrow()
+                    })
+                })
+                .unwrap_or(Err(Failure::Malformed)),
                 DecodeOrigin::Network,
             ),
             DecodeSource::Disk { bytes, source_sha256, cache } => (
-                content::prepare_disk(job.request, job.size, bytes, source_sha256, cache.as_deref(), &mut job.reservation, || {
-                    *cancelled.borrow()
-                }),
+                utils::isolate(|| {
+                    content::prepare_disk(job.request, job.size, bytes, source_sha256, cache.as_deref(), &mut job.reservation, || {
+                        *cancelled.borrow()
+                    })
+                })
+                .unwrap_or(Err(Failure::Malformed)),
                 DecodeOrigin::Disk,
             ),
-            DecodeSource::Cached(source) => (content::prepare_cached(job.size, &source, || *cancelled.borrow()), DecodeOrigin::Memory),
+            DecodeSource::Cached(source) => (
+                utils::isolate(|| content::prepare_cached(job.size, &source, || *cancelled.borrow())).unwrap_or(Err(Failure::Malformed)),
+                DecodeOrigin::Memory,
+            ),
         };
         LoadCompletion { job, result, origin, decode_duration: Some(started.elapsed()) }
     }

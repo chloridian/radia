@@ -103,7 +103,7 @@ pub(in crate::scene) struct EnvironmentDecodeJob {
 
 impl EnvironmentDecodeJob {
     pub(in crate::scene) fn run(self) -> EnvironmentDecodeCompletion {
-        let result = EnvironmentDescription::decode(&self.source);
+        let result = utils::isolate(|| EnvironmentDescription::decode(&self.source)).unwrap_or(Err(assets::Failure::Malformed));
         EnvironmentDecodeCompletion {
             region: self.region,
             generation: self.generation,

@@ -58,7 +58,8 @@ impl PrimJob {
     }
 
     pub fn run(self) -> PrimCompletion {
-        let result = tessellate(self.key.shape, self.key.detail, &self.cancelled);
+        let result =
+            utils::isolate(|| tessellate(self.key.shape, self.key.detail, &self.cancelled)).unwrap_or(Err(MeshBuildError::Panicked));
         PrimCompletion { key: self.key, result, work: self.work, cancelled: self.cancelled }
     }
 }

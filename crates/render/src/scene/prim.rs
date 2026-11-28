@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::{
     f32::consts::{FRAC_1_SQRT_2, PI, TAU},
     sync::atomic::{AtomicBool, Ordering},
@@ -237,7 +239,21 @@ impl Params {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static FORCE_PANIC: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn force_panic_once() {
+    FORCE_PANIC.set(true);
+}
+
 pub(super) fn tessellate(shape: PrimShape, detail: Detail, cancelled: &AtomicBool) -> Result<Mesh, MeshBuildError> {
+    #[cfg(test)]
+    if FORCE_PANIC.replace(false) {
+        panic!("injected prim tessellation panic");
+    }
     check(cancelled)?;
     let params = Params::new(shape)?;
     let profile = profile(&params, detail);

@@ -2606,3 +2606,20 @@ fn pressure_blocks_background_jobs() {
     };
     assert_eq!(bg_job.request(), bg_req);
 }
+
+#[test]
+fn panicking_decode_fails_entry() {
+    let StoreHarness { now, mut store, route } = StoreHarness::new();
+    let req = Request::PbrMaterial(AssetId::new(Uuid::from_u128(5_003)));
+    let demand = store.request(route, req, Priority::Visible, now).expect("queue material");
+    let input = fetch(&mut store, now, PBR_JSON.as_bytes().to_vec());
+    let job = store.start_decode(input).expect("admit decode");
+
+    content::force_prepare_panic_once();
+    let completion = job.run();
+    assert_eq!(completion.failure(), Some(Failure::Malformed));
+
+    store.complete(completion, now);
+    assert_matches!(demand.status(), Status::Failed { failure: Failure::Malformed, .. });
+    assert!(store.next_job(now).is_none());
+}

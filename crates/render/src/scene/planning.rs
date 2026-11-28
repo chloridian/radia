@@ -426,7 +426,7 @@ mod tests {
         mesh::retained_bytes,
         mesh_cache::{ENTRY_BYTES, MeshKey},
         model::{Change, MeshChange, Mirror, Object},
-        prim::tessellate,
+        prim::{force_panic_once, tessellate},
     };
 
     #[derive(Debug, PartialEq, Eq)]
@@ -773,5 +773,27 @@ mod tests {
 
         planner.step(&mirror, &identities);
         assert_eq!(planner.targets[&target].key.detail, Detail::Medium);
+    }
+
+    #[test]
+    fn panicking_job_fails_target() {
+        let budget = Budget::default();
+        let (mut mirror, identities) = fixture(&[(1, Vec3::new(0.0, 100.0, 0.0), Vec3::splat(13.0))], &budget);
+        let target = identities[&Uuid::from_u128(1)];
+        let mut planner = MeshPlanner::new(budget);
+        planner.set_camera(camera(0.0, 1024.0));
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        assert_matches!(mesh_state(&mirror.objects[&target]), Some((_, MeshStatus::Pending)));
+
+        force_panic_once();
+        let MeshCompletion(completion) = planner.start().expect("admitted mesh starts").run();
+        let Completion::Prim(completion) = completion else {
+            panic!("planner only starts prim work");
+        };
+        planner.complete(completion);
+        let changes = planner.step(&mirror, &identities);
+        apply_changes(&mut mirror, &changes);
+        assert_matches!(mesh_state(&mirror.objects[&target]), Some((_, MeshStatus::Failed(MeshBuildError::Panicked))));
     }
 }
