@@ -407,6 +407,7 @@ struct BlendedFace {
     face: usize,
     group: u32,
     cell: u32,
+    center: Vec3,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1031,7 +1032,14 @@ impl DrawList {
                     };
                     if face.blended {
                         build.item_has_slot = true;
-                        build.blended.push(BlendedFace { order: face.order, item: index, face: face_index, group: face.group, cell });
+                        build.blended.push(BlendedFace {
+                            order: face.order,
+                            item: index,
+                            face: face_index,
+                            group: face.group,
+                            cell,
+                            center: face.center,
+                        });
                     } else {
                         let placement = build.commands.get_mut(&(face.group, cell)).and_then(|pending| {
                             (pending.cursor < pending.count).then(|| {
@@ -1287,9 +1295,9 @@ impl DrawList {
             if !draw.visible(&view.cells, eye, draw_distance, frustum) {
                 continue;
             }
-            let Some((item, face)) = blended_face(items, blended) else { continue };
+            let Some(item) = items.get(blended.item) else { continue };
             *mark_slot = mark;
-            *dist_slot = blend_distance(item.position, item.rotation, item.scale, face.center, camera);
+            *dist_slot = blend_distance(item.position, item.rotation, item.scale, blended.center, camera);
         }
         view.blended_keys.clear();
         let push = |view: &mut ViewDraws, record: u32| {
@@ -1691,12 +1699,6 @@ fn write_layout_instance(
 fn blend_distance(position: DVec3, rotation: Quat, scale: Vec3, center: Vec3, camera: Camera) -> f64 {
     let relative = position - camera.position() + (rotation * (center * scale)).as_dvec3();
     relative.length_squared()
-}
-
-fn blended_face<'a>(items: &'a ItemSlab, blended: &BlendedFace) -> Option<(&'a CachedItem, &'a CachedFace)> {
-    let item = items.get(blended.item)?;
-    let face = item.faces.get(blended.face)?;
-    (face.group == blended.group && face.order == blended.order && face.blended).then_some((item, face))
 }
 
 fn ensure_batch(groups: &mut DrawInterner, draw: &DrawCommand, meshes: &HashMap<MeshId, GpuMesh>) -> (BatchBinding, DrawIndexedArgs) {

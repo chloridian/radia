@@ -22,7 +22,7 @@ use crate::{
         cache::FrameCache,
         fixtures,
         instance::{PARAMETER_BYTES, instance_base, parameter_part, scene_origin},
-        items::{CachedFace, CachedItem, ItemId, ItemIndex, ItemSlab, MeshInfo},
+        items::{CachedFace, CachedItem, CachedReplacement, ItemId, ItemIndex, ItemSlab, MeshInfo},
         texture_bindings::MaterialImages,
         visibility::WorldSphere,
     },
@@ -362,6 +362,35 @@ fn moved_faces_cull_by_pose() {
     assert!(list.cull_dirty(), "a committed pose patch requests a cull");
     let above = Camera::new(DVec3::new(0.0, 0.0, 100.0), Vec3::Z, 1.0, [128, 128]).expect("test camera");
     assert!(target_emitted(&items, &list, above), "a pose patched into the committed list moves its command bounds");
+}
+
+#[test]
+fn promoted_blended_keeps_drawing() {
+    let (_region_world, region) = registered_region();
+    let (_scene, view, _) = fixtures::scene(255);
+    let object = view.objects().next().expect("fixture object");
+    let (_, mesh) = object.mesh().expect("fixture mesh");
+    let mesh = mesh.clone();
+    let textures = [loaded_texture(9_300_001), loaded_texture(9_300_002)];
+    let camera = camera(-5.0);
+    let origin = scene_origin(camera.position());
+    let frustum = Frustum::from_clip_matrix(pipeline::projection(camera, [128, 128]));
+    let mut items = FrameCache::default();
+    let mut list = DrawList::new(usize::MAX);
+    let index = items.insert_item(new_item(item_id(2), 3, 0.0, origin, &mesh, region, &textures, &mut list)).expect("item index");
+    layout(&mut list, &[index], &mut items.items, camera);
+    let mut view = ViewDraws::default();
+    list.select(&items.items, camera, &frustum, &mut view);
+    assert_eq!(view.blended.len(), 1, "the blended face draws after its layout commits");
+
+    let replacement = new_item(item_id(2), 4, 0.0, origin, &mesh, region, &textures, &mut list);
+    items.items.get_mut(index).expect("item").replacement = Some(Box::new(CachedReplacement { item: replacement }));
+    items.replacements.insert(index);
+    let previous = items.promote_replacement(index).expect("promoted item");
+    list.release_faces(&previous.faces);
+
+    list.select(&items.items, camera, &frustum, &mut view);
+    assert_eq!(view.blended.len(), 1, "the committed blended face keeps drawing until the next layout commits");
 }
 
 #[test]
