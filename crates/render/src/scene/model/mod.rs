@@ -202,8 +202,8 @@ impl Mirror {
     }
 
     pub(in crate::scene) fn object_visible(&self, entity: Entity) -> bool {
-        if self.invalidations.is_empty() && self.retired_regions.is_empty() {
-            return self.objects.contains_key(&entity);
+        if self.invalidations.is_empty() {
+            return self.objects.get(&entity).is_some_and(|object| !self.is_retired(object.detail().summary.address.region()));
         }
         self.visibility(entity, &mut HashMap::new()).visible
     }
@@ -432,8 +432,44 @@ enum SceneCause {
 
 #[cfg(test)]
 mod tests {
-    use super::RetiredRegions;
-    use crate::test_support;
+    use std::{collections::HashMap, num::NonZeroU32};
+
+    use proptest::prelude::*;
+    use uuid::Uuid;
+    use world::{ApplyOutcome, Kind, ObjectObservation, OrderEvidence, Parent, ParentUpdate, UpdateSource, World, WorldLimits};
+
+    use super::{Change, Mirror, Object, RetiredRegions};
+    use crate::{scene::Budget, test_support};
+
+    #[derive(Clone, Copy, Debug)]
+    enum ParentSpec {
+        Root,
+        Unknown,
+        Missing,
+        Existing(usize),
+    }
+
+    fn parent_spec_for(index: usize) -> impl Strategy<Value = ParentSpec> {
+        if index == 0 {
+            prop_oneof![Just(ParentSpec::Root), Just(ParentSpec::Unknown), Just(ParentSpec::Missing)].boxed()
+        } else {
+            prop_oneof![
+                Just(ParentSpec::Root),
+                Just(ParentSpec::Unknown),
+                Just(ParentSpec::Missing),
+                (0..index).prop_map(ParentSpec::Existing),
+            ]
+            .boxed()
+        }
+    }
+
+    fn mirror_case() -> impl Strategy<Value = (usize, Vec<(usize, ParentSpec)>, Vec<bool>)> {
+        (1usize..=3, 1usize..=12).prop_flat_map(|(region_count, object_count)| {
+            let objects = (0..object_count).map(|index| (0..region_count, parent_spec_for(index))).collect::<Vec<_>>();
+            let retired = prop::collection::vec(any::<bool>(), region_count);
+            (Just(region_count), objects, retired)
+        })
+    }
 
     #[test]
     fn retired_ranges_spare_active_generations() {
@@ -452,5 +488,79 @@ mod tests {
         retired.insert(*fourth);
         retired.insert(*second);
         assert!(regions.iter().all(|region| retired.contains(*region)));
+    }
+
+    proptest! {
+        #[test]
+        fn object_visible_matches_walk((region_count, object_specs, retired_flags) in mirror_case()) {
+            let entity_count = object_specs.len() + 1;
+            let mut world = World::new(WorldLimits {
+                max_regions: region_count,
+                max_entities: entity_count,
+                max_entities_per_region: entity_count,
+                max_tombstones_per_region: entity_count,
+                max_tombstones: entity_count,
+                max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(entity_count),
+                max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(entity_count),
+                max_journal_entries: entity_count + region_count + 4,
+                max_journal_changes: entity_count + region_count + 4,
+                max_region_name_bytes: 64,
+                max_recovery_targets: 4,
+            });
+            let regions = (0..region_count).map(|_| world.register_region().expect("region registers")).collect::<Vec<_>>();
+            let missing_obs = ObjectObservation::new(
+                UpdateSource::new(regions[0], 1, OrderEvidence::Ordered(1), 0),
+                Uuid::from_u128(1),
+                NonZeroU32::new(1).expect("local id"),
+                Kind::Object,
+                ParentUpdate::Root,
+            );
+            let ApplyOutcome::Introduced(missing_entity) = world.observe_object(missing_obs).expect("missing entity applies").outcome else {
+                panic!("missing entity must be new");
+            };
+
+            let mut entities = Vec::with_capacity(object_specs.len());
+            for (index, &(region_index, _)) in object_specs.iter().enumerate() {
+                let id_num = (index + 2) as u32;
+                let obs = ObjectObservation::new(
+                    UpdateSource::new(regions[region_index], id_num, OrderEvidence::Ordered(u64::from(id_num)), 0),
+                    Uuid::from_u128(u128::from(id_num)),
+                    NonZeroU32::new(id_num).expect("local id"),
+                    Kind::Object,
+                    ParentUpdate::Root,
+                );
+                let ApplyOutcome::Introduced(entity) = world.observe_object(obs).expect("entity applies").outcome else {
+                    panic!("entity must be new");
+                };
+                entities.push(entity);
+            }
+
+            let budget = Budget::default();
+            let mut mirror = Mirror::default();
+            for (index, &(_, parent_spec)) in object_specs.iter().enumerate() {
+                let entity = entities[index];
+                let mut detail = world.object_detail(entity).expect("entity detail");
+                detail.summary.parent = match parent_spec {
+                    ParentSpec::Root => Parent::Root,
+                    ParentSpec::Unknown => Parent::Unknown,
+                    ParentSpec::Missing => Parent::Resolved(missing_entity),
+                    ParentSpec::Existing(parent_index) => Parent::Resolved(entities[parent_index]),
+                };
+                let lease = budget.reserve(detail.owned_bytes() + 32).expect("object lease");
+                mirror.apply(Change::Object(Object::new(detail, lease)));
+            }
+            for (&region, &retired) in regions.iter().zip(retired_flags.iter()) {
+                if retired {
+                    mirror.apply(Change::Retire(region));
+                }
+            }
+
+            for &entity in &entities {
+                let walk = mirror.visibility(entity, &mut HashMap::new()).visible;
+                let expected = !mirror.is_retired(mirror.objects[&entity].detail().summary.address.region());
+                prop_assert_eq!(walk, expected, "walk must match own-region retirement for acyclic graph");
+                prop_assert_eq!(mirror.object_visible(entity), walk, "object_visible must match walk");
+            }
+        }
     }
 }

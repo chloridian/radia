@@ -352,6 +352,36 @@ mod benches {
     }
 
     #[divan::bench]
+    fn settled_retired(bencher: divan::Bencher) {
+        let (device, queue) = gpu();
+        let mut fixture = Fixture::settled(&device, &queue, 2, 50, 0, 50.0, 512.0);
+        let neighbor = fixture.world.regions().map(|(region, _)| region).nth(1).expect("neighbor region");
+        let _retired = fixture.world.retire_region(neighbor).expect("neighbor region retires");
+        support::first_publish(&mut fixture.reconciler, &mut fixture.view, &fixture.world, &mut fixture.now);
+        let camera = camera_at(50.0, 0.0, 512.0);
+        for _ in 0..SETTLE_FRAMES {
+            fixture.sample(&device, &queue, camera);
+            if !fixture.prepare.stats().rebuild_pending {
+                break;
+            }
+        }
+        assert!(!fixture.prepare.stats().rebuild_pending, "retired fixture must settle before timing");
+        assert!(fixture.prepare.stats().instances > 0);
+        let cameras = [camera_at(50.0, 0.0, 511.0), camera];
+        let mut generation = 0usize;
+        bencher.bench_local(|| {
+            generation = generation.wrapping_add(1);
+            fixture.sample(&device, &queue, cameras[generation % 2]);
+            let stats = fixture.prepare.stats();
+            assert_eq!(stats.pending_meshes, 0);
+            assert_eq!(stats.pending_textures, 0);
+            assert_eq!(stats.omitted_faces, 0);
+            black_box(stats);
+        });
+        report("settled_retired", fixture.prepare.stats());
+    }
+
+    #[divan::bench]
     fn camera_walk_multi_region(bencher: divan::Bencher) {
         let (device, queue) = gpu();
         let mut fixture = Fixture::settled(&device, &queue, 7, 50, 0, 896.0, 1024.0);
