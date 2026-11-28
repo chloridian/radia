@@ -367,8 +367,11 @@ impl SceneView {
         if !self.session.is_active() {
             return 0;
         }
-        if self.mirror.invalidations.is_empty() && self.mirror.retired_regions.is_empty() {
-            return self.object_order.len();
+        if self.mirror.invalidations.is_empty() {
+            if self.mirror.retired_regions.is_empty() {
+                return self.object_order.len();
+            }
+            return self.object_order.values().filter(|entity| self.mirror.object_visible(**entity)).count();
         }
         let mut visibility = HashMap::new();
         self.object_order.values().filter(|entity| self.mirror.visibility(**entity, &mut visibility).visible).count()
@@ -395,7 +398,8 @@ impl SceneView {
     }
     pub fn objects(&self) -> impl Iterator<Item = &Object> {
         let active = self.session.is_active();
-        let needs_filter = !self.mirror.invalidations.is_empty() || !self.mirror.retired_regions.is_empty();
+        let has_invalidations = !self.mirror.invalidations.is_empty();
+        let has_retired = !self.mirror.retired_regions.is_empty();
         let mirror = &self.mirror;
         let object_order = &self.object_order;
         let mut visibility = HashMap::new();
@@ -403,7 +407,11 @@ impl SceneView {
             let summary = &object.detail().summary;
             active
                 && object_order.get(&summary.id) == Some(&summary.entity)
-                && (!needs_filter || mirror.visibility(summary.entity, &mut visibility).visible)
+                && if has_invalidations {
+                    mirror.visibility(summary.entity, &mut visibility).visible
+                } else {
+                    !has_retired || !mirror.is_retired(summary.address.region())
+                }
         })
     }
 
