@@ -183,7 +183,7 @@ async fn control_keeps_retry_deadline() {
 }
 
 #[tokio::test]
-async fn shutdown_sends_only_control_acks() {
+async fn shutdown_skips_fair_work() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let socket = Arc::new(UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect transport"));
     let budget = OutboundBudget::new(8_000);
