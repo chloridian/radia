@@ -526,6 +526,72 @@ fn forgotten_index_reuse_skipped() {
     }
 }
 
+#[test]
+fn removed_item_slots_upload() {
+    let (_region_world, region) = registered_region();
+    let meshes = scene::distinct_meshes_for_test(1);
+    let mesh = &meshes[0];
+    let textures = [loaded_texture(9_300_001), loaded_texture(9_300_002)];
+    let camera = camera(0.0);
+    let origin = scene_origin(camera.position());
+    let multi_face_item = |id: ItemId, list: &mut DrawList| {
+        let mut item = new_item(id, 0, 0.0, origin, mesh, region, &textures, list);
+        let center = item.info.centers[0];
+        let scale = item.scale;
+        for _ in 1..24 {
+            item.faces.push(new_face(id, 0, mesh, center, scale, &textures, list));
+        }
+        item
+    };
+    let mut saw_fill = false;
+    for step in 0.. {
+        let mut items = FrameCache::default();
+        let mut list = DrawList::new(usize::MAX);
+        let visible =
+            (1..=3u8).map(|id| items.insert_item(multi_face_item(item_id(id), &mut list)).expect("test item index")).collect::<Vec<_>>();
+        assert!(list.request_layout(&visible, camera));
+        settle(&mut list, &mut items.items);
+        let mut gpu = list.committed.instance_bytes.clone();
+        list.committed.dirty_slots.clear();
+
+        assert!(list.request_layout(&visible, camera));
+        let mut building = true;
+        for _ in 0..step {
+            let _ = list.advance_layout(&mut items.items, Duration::ZERO);
+            building = list.layout_building();
+            if !building {
+                break;
+            }
+        }
+        saw_fill |= list.staged_progress().is_some_and(|(phase, ..)| phase == "fill");
+        let target = visible[1];
+        list.forget_item(target);
+        let (removed, _) = items.remove_item(target).expect("removed target item");
+        list.release_faces(&removed.faces);
+        settle(&mut list, &mut items.items);
+
+        gpu.resize(list.committed.instance_bytes.len(), 0);
+        for slot in list.committed.dirty_slots.iter().copied() {
+            let start = slot as usize * INSTANCE_BYTES;
+            gpu[start..start + INSTANCE_BYTES].copy_from_slice(&list.committed.instance_bytes[start..start + INSTANCE_BYTES]);
+        }
+        for draw in list.draws() {
+            for slot in draw.first..draw.first + draw.count {
+                let start = slot as usize * INSTANCE_BYTES;
+                assert_eq!(
+                    gpu.get(start..start + INSTANCE_BYTES),
+                    list.committed.instance_bytes.get(start..start + INSTANCE_BYTES),
+                    "a partial upload leaves stale bytes at drawn slot {slot} (step={step})"
+                );
+            }
+        }
+        if !building {
+            break;
+        }
+    }
+    assert!(saw_fill, "test removed an item during the fill phase");
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 64,
