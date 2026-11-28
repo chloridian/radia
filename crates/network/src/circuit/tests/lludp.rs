@@ -4,8 +4,7 @@ use protocol::{
     ChatType,
     lludp::{Message, MessageId, Packet},
     messages::{
-        CachedObjectReference, ChatFromViewer, LogoutRequest, ObjectUpdateCached, RegionData, RequestMultipleObjects,
-        agent::logout_request,
+        CachedObjectReference, ChatFromViewer, ObjectUpdateCached, RegionData, RequestMultipleObjects,
         chat::chat_from_viewer,
         object::request_multiple_objects::{CacheMissType, ObjectRequest, RequestAgentData},
     },
@@ -20,8 +19,8 @@ use crate::{
         UdpTransport,
         lludp::{
             CircuitError, DUPLICATE_ACK_HEADROOM, Delivery, KEEPALIVE_TIMEOUT, MAX_NORMAL_DATAGRAM_BYTES, MAX_ORDERED_SEQUENCE_DISTANCE,
-            MAX_PENDING_ACKS, MAX_PENDING_PACKETS, MAX_RECEIVED_RELIABLE_PACKETS, PendingPacket, ReceiveAdmission, ReceiveError,
-            advance_sequence, remove_sent_acks, sequence_age,
+            MAX_PENDING_ACKS, MAX_RECEIVED_RELIABLE_PACKETS, PendingPacket, ReceiveAdmission, ReceiveError, advance_sequence,
+            remove_sent_acks, sequence_age,
         },
     },
     event::PacketOrder::{Ambiguous, Degraded, Ordered},
@@ -200,7 +199,7 @@ async fn late_retry_skips_acked_packet() {
     simulator.recv_from(&mut bytes).await.expect("receive original packet");
 
     let retry_at = sent_at + Duration::from_secs(6);
-    let retry = circuit.prepare_retransmission(retry_at).expect("prepare due retry").expect("retry is due");
+    let retry = circuit.prepare_retransmission(retry_at, KEEPALIVE_TIMEOUT).expect("prepare due retry").expect("retry is due");
     transport.try_send(retry.bytes()).expect("send prepared retry");
     let (size, _) = simulator.recv_from(&mut bytes).await.expect("receive sent retry");
     assert!(Packet::decode(&bytes[..size]).expect("decode resent packet").is_resent());
@@ -258,35 +257,6 @@ async fn refuses_unknown_direction() {
         assert_matches!(error, CircuitError::UnknownDirection);
     }
     assert_no_datagram(&server);
-}
-
-#[tokio::test]
-async fn logout_bypasses_window() {
-    let server = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
-    let transport = UdpTransport::connect(server.local_addr().expect("simulator address")).await.expect("connect fake simulator");
-    let mut circuit = Circuit::new();
-    let mut buffer = [0; 1024];
-
-    for sequence in 1..=MAX_PENDING_PACKETS {
-        circuit::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Reliable).await.expect("fill reliable window");
-        let (_, packet) = receive_packet(&server, &mut buffer).await;
-        assert_eq!(packet.sequence(), sequence as u32);
-    }
-
-    let logout_sequence = circuit::send_message(
-        &mut circuit,
-        &transport,
-        Message::LogoutRequest(LogoutRequest { agent_data: logout_request::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() } }),
-        Delivery::ReliableNoRetry,
-    )
-    .await
-    .expect("send one final logout packet");
-    let (_, logout) = receive_packet(&server, &mut buffer).await;
-
-    assert_eq!(logout.sequence(), logout_sequence);
-    assert!(logout.is_reliable());
-    assert_matches!(logout.message(), Message::LogoutRequest(_));
-    assert!(!circuit.has_pending(logout_sequence));
 }
 
 #[test]

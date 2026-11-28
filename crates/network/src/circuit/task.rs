@@ -265,6 +265,7 @@ impl ConnectionTask {
                 &self.connection.pacer,
                 &mut self.connection.circuit,
                 &mut self.outbound,
+                &mut self.deferred_retries,
                 self.ack_timer_due,
             )
         } else {
@@ -405,9 +406,11 @@ impl ConnectionTask {
                     fail_queued_on_close(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued, &mut dropped);
                 }
                 dropped.report(self.connection.simulator_id);
+                self.connection.circuit.clear_pending_reliable();
+                self.deferred_retries.clear();
                 self.priority_logout = Some(QueuedMessage {
                     message: logout_message(&self.connection.session),
-                    delivery: Delivery::ReliableNoRetry,
+                    delivery: Delivery::Reliable,
                     class: TrafficClass::Control,
                     queued_at: Instant::now(),
                     completion: Some(completed),

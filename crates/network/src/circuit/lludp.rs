@@ -251,6 +251,10 @@ impl Circuit {
         self.pending.len() < MAX_PENDING_PACKETS
     }
 
+    pub(crate) fn clear_pending_reliable(&mut self) {
+        self.pending.clear();
+    }
+
     pub(crate) fn prepare_message(&self, message: Message, delivery: Delivery) -> Result<PreparedDatagram, CircuitError> {
         self.prepare_message_with_ping(message, delivery, None)
     }
@@ -297,11 +301,11 @@ impl Circuit {
         Ok(Some(PreparedDatagram { bytes, commit: DatagramCommit::Acknowledgements { sequence, acknowledgements } }))
     }
 
-    pub(crate) fn prepare_retransmission(&self, now: Instant) -> Result<Option<PreparedDatagram>, CircuitError> {
+    pub(crate) fn prepare_retransmission(&self, now: Instant, max_interval: Duration) -> Result<Option<PreparedDatagram>, CircuitError> {
         let due = self
             .pending
             .iter()
-            .filter(|(_, packet)| now.saturating_duration_since(packet.sent_at) >= self.retry_timeout_for(packet.retries))
+            .filter(|(_, packet)| now.saturating_duration_since(packet.sent_at) >= self.retry_timeout_for(packet.retries).min(max_interval))
             .min_by_key(|(_, packet)| packet.sent_at);
         let Some((&sequence, packet)) = due else {
             return Ok(None);
@@ -600,12 +604,11 @@ impl fmt::Display for ReceiveError {
 pub enum Delivery {
     Unreliable,
     Reliable,
-    ReliableNoRetry,
 }
 
 impl Delivery {
     fn is_reliable(self) -> bool {
-        !matches!(self, Self::Unreliable)
+        matches!(self, Self::Reliable)
     }
 
     pub(crate) fn tracks_reliable(self) -> bool {

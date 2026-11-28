@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::{
+    circuit::LOGOUT_REPLY_TIMEOUT,
     event::Event::SimulatorMessage,
     fixtures::{
         event_queue::EventReceiver,
@@ -765,6 +766,37 @@ async fn shutdown_cancels_held_poll() {
         .expect("clean shutdown");
 
     assert_eq!(server.finish().len(), 2, "shutdown must close the held poll without starting another request");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logout_retransmits_after_drop() {
+    let harness = Box::pin(connected_neighbor()).await;
+
+    harness.disconnect.send_replace(true);
+    let first = timeout(TEST_TIMEOUT, receive_message(&harness.primary, |message| matches!(message, Message::LogoutRequest(_))))
+        .await
+        .expect("initial logout request");
+    let retry = timeout(LOGOUT_REPLY_TIMEOUT, async {
+        let mut buffer = [0u8; 65_535];
+        loop {
+            let (len, _) = harness.primary.recv_from(&mut buffer).await.expect("receive retransmitted logout");
+            let packet = Packet::decode(&buffer[..len]).expect("decode retransmitted packet");
+            if matches!(packet.message(), Message::LogoutRequest(_)) {
+                break packet;
+            }
+        }
+    })
+    .await
+    .expect("retransmitted logout request before logout reply timeout");
+    assert_eq!(retry.sequence(), first.sequence(), "retransmitted logout keeps the original sequence");
+    assert!(retry.is_reliable(), "retransmitted logout stays reliable");
+    assert!(retry.is_resent(), "retransmitted logout sets the resent flag");
+    send_logout_reply(&harness.primary, harness.primary_peer, &retry, 24).await;
+    timeout(TEST_TIMEOUT, harness.client)
+        .await
+        .expect("session waits for shutdown workers")
+        .expect("session task")
+        .expect("clean shutdown");
 }
 
 #[test]
