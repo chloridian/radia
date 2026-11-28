@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::{
     fmt::{self, Debug, Formatter},
     ops::{Deref, Range},
@@ -315,6 +317,16 @@ fn reserve_cache_payload(reservation: &mut Reservation, capacity: usize) -> Opti
     reservation.resize(bytes).then_some(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static FORCE_PREPARE_PANIC: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn force_prepare_panic_once() {
+    FORCE_PREPARE_PANIC.set(true);
+}
+
 pub(crate) fn prepare_cancellable(
     request: Request,
     size: TextureSize,
@@ -323,6 +335,10 @@ pub(crate) fn prepare_cancellable(
     reservation: &mut Reservation,
     cancelled: impl Fn() -> bool,
 ) -> Result<Prepared, Failure> {
+    #[cfg(test)]
+    if FORCE_PREPARE_PANIC.replace(false) {
+        panic!("injected asset prepare panic");
+    }
     if cancelled() {
         return Err(Failure::Cancelled);
     }

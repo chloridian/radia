@@ -33,17 +33,27 @@ impl SculptJob {
         let result = if self.cancelled.load(Ordering::Acquire) {
             Err(MeshBuildError::Cancelled)
         } else {
-            let image = match self.input {
-                SculptInput::Image(image) => Ok(image),
-                SculptInput::Decode(job) => job.run().map_err(|failure| match failure {
-                    Failure::Cancelled => MeshBuildError::Cancelled,
-                    _ => MeshBuildError::InvalidParameters,
-                }),
-            };
-            image.and_then(|image| {
-                let rgba = image_to_rgba(&image, &self.cancelled)?;
-                tessellate_sculpt_cancellable(image.size(), &rgba, self.key.sculpt_type, self.key.flags, self.key.detail, &self.cancelled)
+            utils::isolate(|| {
+                let image = match self.input {
+                    SculptInput::Image(image) => Ok(image),
+                    SculptInput::Decode(job) => job.run().map_err(|failure| match failure {
+                        Failure::Cancelled => MeshBuildError::Cancelled,
+                        _ => MeshBuildError::InvalidParameters,
+                    }),
+                };
+                image.and_then(|image| {
+                    let rgba = image_to_rgba(&image, &self.cancelled)?;
+                    tessellate_sculpt_cancellable(
+                        image.size(),
+                        &rgba,
+                        self.key.sculpt_type,
+                        self.key.flags,
+                        self.key.detail,
+                        &self.cancelled,
+                    )
+                })
             })
+            .unwrap_or(Err(MeshBuildError::Panicked))
         };
         SculptCompletion { key: self.key, result, work: self.work, cancelled: self.cancelled }
     }
