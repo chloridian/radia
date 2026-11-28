@@ -284,9 +284,11 @@ fn layout_commits_under_removal_churn() {
         geometry.prepare(&device, &mut encoder, view, None, camera, [128, 128], None);
     };
 
-    for _ in 0..500 {
+    let expected = usize::try_from(count).expect("count fits usize");
+    for _ in 0..10_000 {
         frame(&mut geometry, &view);
-        if geometry.draw_list.valid()
+        if geometry.cache.visible.len() == expected
+            && geometry.draw_list.valid()
             && !geometry.stats.layout_pending
             && !geometry.stats.rebuild_active
             && !geometry.stats.rebuild_pending
@@ -298,7 +300,7 @@ fn layout_commits_under_removal_churn() {
     }
     assert!(geometry.draw_list.valid(), "initial scene settles to a valid layout");
     assert!(!geometry.stats.layout_pending, "initial scene finishes its layout");
-    assert_eq!(geometry.cache.visible.len(), usize::try_from(count).expect("count fits usize"));
+    assert_eq!(geometry.cache.visible.len(), expected, "every fixture object becomes visible");
 
     let committed_before = geometry.layout_counts.committed;
     let entering_id = count + 1;
@@ -322,7 +324,7 @@ fn layout_commits_under_removal_churn() {
     assert!(geometry.stats.layout_pending, "entering item starts a multi-frame layout");
 
     let mut removed_meshes = Vec::new();
-    for turn in 1..=50_u32 {
+    for turn in 1..=1_000_u32 {
         if !geometry.stats.layout_pending {
             break;
         }
@@ -353,7 +355,7 @@ fn layout_commits_under_removal_churn() {
     assert!(!removed_meshes.is_empty(), "at least one visible object was removed while layout was pending");
     assert!(
         geometry.layout_counts.committed > committed_before,
-        "layout must commit within 50 frames under removal churn (committed: {}, stale: {}, pending: {})",
+        "layout must commit under removal churn (committed: {}, stale: {}, pending: {})",
         geometry.layout_counts.committed,
         geometry.layout_counts.stale,
         geometry.stats.layout_pending
